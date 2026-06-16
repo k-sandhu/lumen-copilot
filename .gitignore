@@ -1,0 +1,22 @@
+# Secrets / env (real env files never committed; .env.example is the placeholder)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Common build / dependency dirs (pre-stack defaults; expands when the stack lands)
+node_modules/
+dist/
+build/
+.venv/
+__pycache__/
+*.pyc
