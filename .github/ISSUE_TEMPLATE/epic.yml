@@ -1,0 +1,25 @@
+name: Epic
+description: A grouping of related user stories (maps to an EPIC in the user stories).
+title: "[EPIC ?] <epic title>"
+labels: ["type:epic"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What this epic covers and the value it delivers.
+    validations:
+      required: true
+  - type: textarea
+    id: stories
+    attributes:
+      label: Stories
+      description: Checklist of child story issues (link them as they're created).
+      placeholder: |
+        - [ ] #
+        - [ ] #
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      placeholder: "EPIC 1 — …"
