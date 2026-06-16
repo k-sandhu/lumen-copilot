@@ -14,6 +14,7 @@ These two files are the **consolidated, comprehensive** product-discovery docs. 
 - [user-stories.md](user-stories.md) — comprehensive candidate user stories grouped by 16 epics, persona, and acceptance criteria. **Vendor/product names are deliberately removed** (capability-level, product-agnostic). Written in the `scripts/stories-to-issues.ps1`-parseable format (`# EPIC <n> — …`, `**E<n>-<m>.** As a **TAG**, …`, bolded persona legend) so it can seed issues via `-StoriesFile docs/product/user-stories.md`.
 
 - [feature-build-plan.md](feature-build-plan.md) - dry-run plan for structuring epics, story issues, cross-cutting contract issues, labels, and workstreams for high-parallelism feature delivery.
+- [consolidated-structure.md](consolidated-structure.md) — **multi-model reconciliation** (Claude Opus 4.8 + gpt-5.5 + minimax-m3): the unified Epic→Feature→Story→Cross-cutting→Spike structure, reconciled labels/milestones/board, workstreams, and build sequencing.
 
 ## Inputs Used
 
