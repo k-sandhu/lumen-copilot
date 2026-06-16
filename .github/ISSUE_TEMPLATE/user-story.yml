@@ -1,0 +1,51 @@
+name: User Story
+description: A unit of user-facing value (persona → capability → benefit), traceable to the user stories.
+title: "[E?-?] <short capability>"
+labels: ["type:user-story"]
+body:
+  - type: input
+    id: story-id
+    attributes:
+      label: Story ID
+      description: e.g. E1-1 (matches the user-stories source). Leave blank for net-new stories.
+      placeholder: E1-1
+  - type: textarea
+    id: story
+    attributes:
+      label: Story
+      description: "As a <persona>, I want to <capability>, so that <benefit>."
+      placeholder: |
+        As a Knowledge Worker, I want to …, so that …
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable, testable conditions. These should generate tests once a test runner exists.
+    validations:
+      required: true
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature / notes
+      description: The capability this maps to, plus any constraints, dependencies, or links.
+  - type: input
+    id: epic
+    attributes:
+      label: Epic
+      placeholder: "EPIC 1 — …"
+  - type: input
+    id: persona
+    attributes:
+      label: Persona(s)
+      placeholder: "KW, ENG"
+  - type: checkboxes
+    id: dod
+    attributes:
+      label: Definition of Done
+      options:
+        - label: Traces to this issue; board item updated
+        - label: Branch + PR with `Closes #<N>`; branch pushed
+        - label: Docs/ADR updated in the same change (if behavior changed)
+        - label: (once stack exists) test-first; `/verify` green; scoped `/verify-live` with round-trip + teardown
