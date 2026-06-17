@@ -7,9 +7,9 @@ What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells y
 ---
 
 ## Where work is tracked
-- **Source of truth: the GitHub Projects board "Lumen Copilot"** — *not* a markdown table (tables drift). Status field: **Todo / In Progress / Done**.
+- **Source of truth: the GitHub Projects board "Lumen Copilot"** — *not* a markdown table (tables drift). Status field: **Backlog / Ready / In Progress / In Review / Blocked / Done**.
 - Issues live in the `k-sandhu/lumen-copilot` repo; each traces to a user story (or is a `type:chore` / `type:bug` / `type:adr` / `type:docs` item).
-- Board: **[#7 — Lumen Copilot](https://github.com/users/k-sandhu/projects/7)** (Status: Todo / In Progress / Done).
+- Board: **[#7 — Lumen Copilot](https://github.com/users/k-sandhu/projects/7)** (Status: Backlog / Ready / In Progress / In Review / Blocked / Done).
 
 ## Branch model
 - `main` advances **only** by merging a PR with `Closes #<N>` — no direct commits to `main`.
@@ -17,7 +17,7 @@ What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells y
 - Board item → **Done** when the PR merges.
 
 ## The numbered workflow
-1. Pick an issue from **Todo**; assign yourself; move it to **In Progress** (*claim before editing*).
+1. Pick an issue from **Ready**; assign yourself; move it to **In Progress** (*claim before editing*).
 2. Read `AGENTS.md` + the issue + any linked spec/ADR.
 3. If behavior is unspecified → write a spec / open an ADR and **confirm** (precedence §4) before implementing.
 4. *(once a test runner exists)* write the failing test first.
@@ -28,12 +28,14 @@ What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells y
 9. On merge, board item → **Done**.
 
 ## Status definitions
-| Status | Meaning |
-|---|---|
-| Todo | Ready, unclaimed. |
-| In Progress | Claimed (assignee set). |
-| Done | Merged. |
-| `blocked` (label) | Waiting on an open decision or dependency — comment why. |
+| Status | Meaning | Claimable? |
+|---|---|---|
+| Backlog | Exists, not yet Ready (missing AC, scope fences, or deps). | no |
+| Ready | Passes the Definition of Ready. | **yes** |
+| In Progress | Claimed (assignee set), branch open. | (claimed) |
+| In Review | PR open, awaiting the Reviewer. | (claimed) |
+| Blocked | Waiting on an open decision / dependency — comment why. | no |
+| Done | Merged. | n/a |
 
 ---
 
