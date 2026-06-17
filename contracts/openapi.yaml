@@ -1,0 +1,129 @@
+openapi: 3.1.0
+info:
+  title: Lumen Copilot API
+  version: 0.0.1
+  description: >
+    Source-of-truth contract for the Lumen Copilot REST surface. The backend
+    implements to match this; the frontend client is generated from it.
+    Feature endpoints (chat, ingestion, connectors, citations) are added here,
+    contract-first (ADR-0006), as their cross-cuttings land. This bootstrap
+    revision defines only health + the shared error model.
+servers:
+  - url: http://localhost:47181
+    description: Local compose (default host port; see ADR-0005 / .env.example)
+  - url: /
+    description: Same-origin (behind a reverse proxy / in dev via Vite proxy)
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness — the process is up.
+      tags: [health]
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Readiness — the process and its dependencies are reachable.
+      tags: [health]
+      responses:
+        "200":
+          description: Service and all dependencies are ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadinessStatus" }
+        "503":
+          description: One or more dependencies are not ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadinessStatus" }
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      additionalProperties: false
+      required: [status, service, version]
+      properties:
+        status: { type: string, enum: [ok] }
+        service: { type: string, example: lumen-copilot-backend }
+        version: { type: string, example: 0.0.1 }
+
+    ReadinessStatus:
+      type: object
+      additionalProperties: false
+      required: [status, dependencies]
+      properties:
+        status:
+          type: string
+          enum: [ready, degraded]
+        dependencies:
+          type: array
+          items: { $ref: "#/components/schemas/DependencyStatus" }
+
+    DependencyStatus:
+      type: object
+      additionalProperties: false
+      required: [name, ok]
+      properties:
+        name:
+          type: string
+          description: Dependency identifier (e.g. postgres, redis, minio).
+        ok: { type: boolean }
+        detail:
+          type: string
+          description: Optional human-readable detail when not ok.
+
+    # Single problem model for ALL errors (RFC-9457 application/problem+json).
+    # Every endpoint's error responses reference this; both tiers depend on it.
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          default: "about:blank"
+          description: A URI identifying the problem type.
+        title: { type: string, description: Short, human-readable summary. }
+        status: { type: integer, description: HTTP status code. }
+        detail: { type: string, description: Human-readable explanation for this occurrence. }
+        instance: { type: string, format: uri-reference }
+        code:
+          type: string
+          description: Stable, machine-readable error code for clients to branch on.
+        errors:
+          type: array
+          description: Field-level validation errors, when applicable.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+  responses:
+    Problem:
+      description: Error (problem+json).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  securitySchemes:
+    # Identity/tenant is resolved in backend/app/auth (CC-3). The concrete IdP
+    # is deferred (ADR-0003); the scheme is reserved here so feature endpoints
+    # can require it once CC-3 lands.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+tags:
+  - name: health
+    description: Liveness & readiness probes.

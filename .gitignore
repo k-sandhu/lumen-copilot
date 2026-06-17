@@ -13,10 +13,26 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
-# Common build / dependency dirs (pre-stack defaults; expands when the stack lands)
+# Common build / dependency dirs
 node_modules/
 dist/
 build/
 .venv/
 __pycache__/
 *.pyc
+
+# Python tooling caches (ADR-0003 stack)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Frontend tooling (Vite / Playwright)
+.vite/
+*.tsbuildinfo
+test-results/
+playwright-report/
+
+# Generated contract artifacts (regenerated from contracts/; never committed)
+frontend/src/api/generated/
