@@ -5,14 +5,33 @@ object-store I/O is async and never blocks the event loop. A fresh client is
 created per operation via the session's async context manager (the documented
 ``aioboto3`` pattern); the session itself is cheap and reused.
 
+The adapter addresses every object by a **tenant-prefixed, content-addressed**
+key (:mod:`app.storage.keys`) and refuses any read whose key is outside the
+caller's tenant prefix — the isolation **seam** for issue #22, ahead of the full
+ACL in CC-1. Declared content-type and size are validated against the config
+allowlist/limit (:mod:`app.storage.validation`) before any bytes are stored.
+
+Callers see only domain types (``str`` keys, :class:`StoredObject`, ``bytes``),
+never a ``botocore`` object (ADR-0004 adapter rule 1).
+
 Exposes:
+* :meth:`put` — validate, content-address, and store bytes; returns a
+  :class:`StoredObject`.
+* :meth:`get` — tenant-checked read-back of stored bytes.
+* :meth:`delete` — tenant-checked removal of an object.
+* :meth:`presign_put` / :meth:`presign_get` — short-TTL presigned URLs so large
+  files transfer directly to/from storage, not through the API process.
 * :meth:`ensure_bucket` — create ``S3_BUCKET`` if missing; called at startup so
   the bucket exists from day one.
 * :meth:`ping` — a cheap reachability check used by the readiness probe.
+
+Scope note: retention/lifecycle, DLP/malware scanning, KMS/SSE, and the parsing
+sandbox are fenced **OUT** of #22 (OD-4 data invariants / CC-5 #21).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import aioboto3
@@ -20,6 +39,26 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from app.core.config import Settings
+from app.core.errors import NotFoundError
+from app.storage.keys import assert_key_owned_by, build_key, sha256_hex
+from app.storage.validation import validate_upload
+
+
+@dataclass(frozen=True, slots=True)
+class StoredObject:
+    """The result of a :meth:`ObjectStore.put` — a domain value, no vendor type.
+
+    Attributes:
+        key: the tenant-prefixed, content-addressed object key.
+        sha256: hex content address of the stored bytes.
+        size_bytes: number of bytes stored.
+        content_type: the (allowlisted) declared content-type.
+    """
+
+    key: str
+    sha256: str
+    size_bytes: int
+    content_type: str
 
 
 class ObjectStore:
@@ -46,6 +85,8 @@ class ObjectStore:
             config=self._client_config,
         )
 
+    # --- Bootstrap / health ---------------------------------------------------
+
     async def ensure_bucket(self) -> None:
         """Create the configured bucket if it does not already exist.
 
@@ -66,3 +107,124 @@ class ObjectStore:
         """Lightweight reachability check for readiness (lists buckets)."""
         async with self._client() as client:
             await client.list_buckets()
+
+    # --- Object lifecycle -----------------------------------------------------
+
+    async def put(
+        self,
+        tenant_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+    ) -> StoredObject:
+        """Validate, content-address, and store ``data``; return its descriptor.
+
+        The declared ``content_type`` and the byte length are validated against
+        the config allowlist/limit **before** any write (AC-4/AC-6); a rejection
+        is a typed ``ValidationError`` (→ 4xx). The key is
+        ``{tenant_id}/{sha256(data)}/{safe_filename}`` (AC-2), so identical bytes
+        dedupe and every object is tenant-scoped.
+        """
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.upload_allowed_content_types,
+            max_bytes=self._settings.max_upload_bytes,
+        )
+        key = build_key(tenant_id, data, filename)
+        async with self._client() as client:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+        return StoredObject(
+            key=key,
+            sha256=sha256_hex(data),
+            size_bytes=len(data),
+            content_type=content_type,
+        )
+
+    async def get(self, tenant_id: str, key: str) -> bytes:
+        """Read back the bytes at ``key`` for ``tenant_id``.
+
+        Enforces the tenant-prefix seam first (AC-5): a key outside the caller's
+        ``{tenant_id}/`` prefix is refused with ``ForbiddenError`` before any I/O,
+        so cross-tenant reads are impossible. A missing object maps to a typed
+        ``NotFoundError`` (never a leaked vendor error).
+        """
+        assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            try:
+                response = await client.get_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in {"NoSuchKey", "404", "NotFound"}:
+                    raise NotFoundError("object not found", code="object_not_found") from exc
+                raise
+            async with response["Body"] as stream:
+                body: bytes = await stream.read()
+        return body
+
+    async def delete(self, tenant_id: str, key: str) -> None:
+        """Remove the object at ``key`` (AC-4).
+
+        Tenant-prefix checked like :meth:`get`. Idempotent: deleting an absent
+        key is a no-op on S3/MinIO.
+        """
+        assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            await client.delete_object(Bucket=self._bucket, Key=key)
+
+    # --- Presigned direct transfer (AC-3) ------------------------------------
+
+    async def presign_put(
+        self,
+        tenant_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+    ) -> tuple[str, str]:
+        """Return ``(key, url)`` for a short-TTL presigned ``PUT`` upload.
+
+        The caller validates + content-addresses up front (so the key is fixed
+        and the allowlist/limit still apply), then the client transfers the bytes
+        **directly** to storage — the large payload never passes through the API
+        process (AC-3). ``data`` is used only to compute the content address and
+        run validation; it is not uploaded here.
+        """
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.upload_allowed_content_types,
+            max_bytes=self._settings.max_upload_bytes,
+        )
+        key = build_key(tenant_id, data, filename)
+        async with self._client() as client:
+            url: str = await client.generate_presigned_url(
+                "put_object",
+                Params={
+                    "Bucket": self._bucket,
+                    "Key": key,
+                    "ContentType": content_type,
+                },
+                ExpiresIn=self._settings.s3_presign_ttl_seconds,
+            )
+        return key, url
+
+    async def presign_get(self, tenant_id: str, key: str) -> str:
+        """Return a short-TTL presigned ``GET`` URL for ``key`` (AC-3).
+
+        Tenant-prefix checked first (AC-5): a cross-prefix key is refused with
+        ``ForbiddenError`` before any URL is minted, so a presigned URL can never
+        be issued for another tenant's object.
+        """
+        assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            url: str = await client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": key},
+                ExpiresIn=self._settings.s3_presign_ttl_seconds,
+            )
+        return url

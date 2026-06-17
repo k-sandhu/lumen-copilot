@@ -30,11 +30,27 @@ _TEST_ENV = {
 }
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _test_environment() -> None:
-    """Populate the env and reset the cached settings singleton once."""
+def _seed_test_environment() -> None:
+    """Set the minimum env for ``Settings`` to construct.
+
+    Runs at **import** time (conftest is imported before any test module is
+    collected) because some test modules build the app — and therefore read
+    ``Settings`` — at module import. Seeding here, not only in a fixture,
+    guarantees the env exists before that collection-time import. ``setdefault``
+    keeps any value already supplied by the caller's shell / CI.
+    """
     for key, value in _TEST_ENV.items():
         os.environ.setdefault(key, value)
+
+
+# Seed immediately on conftest import, before collection imports any app module.
+_seed_test_environment()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _test_environment() -> None:
+    """Re-assert the env and reset the cached settings singleton once."""
+    _seed_test_environment()
 
     from app.core.config import get_settings
 

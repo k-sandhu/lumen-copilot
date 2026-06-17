@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +53,41 @@ class Settings(BaseSettings):
     s3_access_key: str = Field(alias="S3_ACCESS_KEY")
     s3_secret_key: str = Field(alias="S3_SECRET_KEY")
     s3_bucket: str = Field(alias="S3_BUCKET")
+
+    # --- Upload sandbox (CC-12 / issue #22) ---
+    # TTL for presigned PUT/GET URLs. Short by design: a leaked URL expires fast,
+    # and the actual transfer still goes directly to/from storage, not through
+    # the API process (AC-3).
+    s3_presign_ttl_seconds: int = Field(default=900, alias="S3_PRESIGN_TTL_SECONDS")
+    # Hard upper bound on a single uploaded object (bytes). Default 50 MiB.
+    # Validated before storing so an over-limit upload is a typed 4xx, never a
+    # silent drop or a 500 (AC-4 / AC-6).
+    max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+    # Allowlisted upload content-types (AC-4). The declared type is checked
+    # against this set before storing. NOTE: a client-declared content-type is
+    # not a security guarantee — sniffing/parsing-sandbox hardening is CC-5/OD-4,
+    # fenced OUT of #22. Comma-separated override via UPLOAD_ALLOWED_CONTENT_TYPES.
+    upload_allowed_content_types: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
+                "text/plain",
+                "text/markdown",
+            }
+        ),
+        alias="UPLOAD_ALLOWED_CONTENT_TYPES",
+    )
+
+    @field_validator("upload_allowed_content_types", mode="before")
+    @classmethod
+    def _split_content_types(cls, value: object) -> object:
+        """Accept a comma-separated env string as the content-type allowlist."""
+        if isinstance(value, str):
+            return frozenset(item.strip() for item in value.split(",") if item.strip())
+        return value
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
