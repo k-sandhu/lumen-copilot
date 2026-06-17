@@ -1,0 +1,33 @@
+name: Bug
+description: A defect found in merged main (filed by QA, or anyone).
+title: "[Bug] <summary>"
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: input
+    id: affects
+    attributes:
+      label: Affects (feature / issue) + area
+      placeholder: "affects: #42   area:search"
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - critical
+        - high
+        - medium
+        - low
+    validations:
+      required: true

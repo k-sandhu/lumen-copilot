@@ -1,0 +1,37 @@
+name: Cross-cutting
+description: A foundation many features depend on - claimed before the features that block on it.
+title: "[CC] <foundation>"
+labels: ["type:cross-cutting"]
+body:
+  - type: textarea
+    id: component
+    attributes:
+      label: Platform component
+      description: The foundation being built (e.g. ACL enforcement, ingestion skeleton, agent runtime).
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Governing contract (spec/ADR)
+      description: The spec or ADR this implements.
+  - type: textarea
+    id: unblocks
+    attributes:
+      label: Unblocks
+      description: Which epics / features depend on this.
+      placeholder: |
+        affects: epic-1, epic-2
+        blocks: #
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable and testable; include a negative case.
+    validations:
+      required: true
+  - type: input
+    id: classification
+    attributes:
+      label: area / size / iteration
+      placeholder: "area:permissions  size:L  iteration:M0"
