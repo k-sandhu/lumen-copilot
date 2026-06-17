@@ -1,0 +1,65 @@
+name: Feature
+description: A deployable, demoable capability that satisfies 3-7 stories (the unit of claim).
+title: "[Feature] <capability>"
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: capability
+    attributes:
+      label: Capability
+      description: 'One paragraph: "As a [persona], I want [X], so that [Y]."'
+    validations:
+      required: true
+  - type: textarea
+    id: stories
+    attributes:
+      label: Stories satisfied
+      description: Traceability - the E?-? stories (and their issues) this feature delivers.
+      placeholder: |
+        - [ ] E1-1
+        - [ ] E1-2
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable and testable. Include at least one negative case (unauthorized -> denied, malformed input, illegal transition).
+      placeholder: |
+        - [ ] AC-1:
+        - [ ] AC-2:
+        - [ ] AC-N (negative):
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope fences
+      description: What is IN and explicitly OUT. Grow OUT into a sibling feature; never widen silently.
+      placeholder: |
+        IN:
+        OUT:
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Dependency edges (write "none" if none).
+      placeholder: |
+        blocked-by: #
+        blocks: #
+  - type: input
+    id: classification
+    attributes:
+      label: area / size / iteration
+      placeholder: "area:search  size:M  iteration:M2"
+  - type: checkboxes
+    id: ready
+    attributes:
+      label: Definition of Ready (all must hold before this is claimable)
+      options:
+        - label: Capability paragraph present
+        - label: At least one testable AC, including a negative case
+        - label: Scope fences set (IN and OUT)
+        - label: Dependencies listed (even "none")
+        - label: area + size set; iteration set or "unassigned"
+        - label: No needs-spec / needs-adr; no open blocked-by

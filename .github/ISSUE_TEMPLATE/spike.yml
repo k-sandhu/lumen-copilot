@@ -1,0 +1,32 @@
+name: Spike
+description: A timeboxed investigation whose only deliverable is an ADR.
+title: "[Spike] <question>"
+labels: ["type:spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question / open decision
+      description: What must be decided. Link the OD-* row in docs/specs/0001-open-decisions.md if applicable.
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Timebox
+      placeholder: "1-2 days (S) or 3-5 days (M) - hard cap"
+    validations:
+      required: true
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Deliverable
+      description: The ADR (docs/architecture/) and any issues it unblocks.
+      placeholder: |
+        - ADR: docs/architecture/NNNN-...
+        - Unblocks: #
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of Done
+      description: ADR merged, or an explicit "decision deferred" ADR with the reasons.
