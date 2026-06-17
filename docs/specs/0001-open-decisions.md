@@ -2,11 +2,11 @@
 
 > Playbook rule: *any "not sure" is recorded as an open decision — never silently defaulted.* This is that registry. Each row is **blocking** for the scaffolding that depends on it; an agent must not invent an answer (see `AGENTS.md` §4 precedence).
 
-**Status:** open. **Last reviewed:** 2026-06-17.
+**Status:** open (OD-1 closed 2026-06-17). **Last reviewed:** 2026-06-17.
 
 | # | Decision | Depends on | Blocks | Notes |
 |---|---|---|---|---|
-| **OD-1** | **Product scope & mission adjectives** | finalized user stories | `AGENTS.md` §2 & §16; OD-4 | Intentionally not discussed yet. |
+| ~~**OD-1**~~ | ~~**Product scope & mission adjectives**~~ | — | — | ✅ **Closed 2026-06-17** by [spec 0003](0003-product-scope-and-mission.md) + `AGENTS.md` §2. MVP = grounded chat over connected + uploaded docs; multi-tenant SaaS; filters: permissioned / cited / read-before-write / auditable. |
 | **OD-2** | **Tech stack** (languages, frameworks, datastore, vector/search store) | OD-1 | `docker-compose.yml`, test tiers, smoke code-greps | Record via ADR when chosen. |
 | **OD-3** | **Architecture boundaries & adapters** | OD-2 | `AGENTS.md` §6 table + adapter rules | "The only place that talks to X" per external system. |
 | **OD-4** | **Security & domain invariants** | OD-1 | `AGENTS.md` §8 negative-test categories; smoke domain checks | Derive from real failure modes; each generates a negative test. |
