@@ -2,7 +2,7 @@
 
 > Playbook rule: *any "not sure" is recorded as an open decision — never silently defaulted.* This is that registry. Each row is **blocking** for the scaffolding that depends on it; an agent must not invent an answer (see `AGENTS.md` §4 precedence).
 
-**Status:** open. **Last reviewed:** 2026-06-16.
+**Status:** open. **Last reviewed:** 2026-06-17.
 
 | # | Decision | Depends on | Blocks | Notes |
 |---|---|---|---|---|
@@ -11,7 +11,7 @@
 | **OD-3** | **Architecture boundaries & adapters** | OD-2 | `AGENTS.md` §6 table + adapter rules | "The only place that talks to X" per external system. |
 | **OD-4** | **Security & domain invariants** | OD-1 | `AGENTS.md` §8 negative-test categories; smoke domain checks | Derive from real failure modes; each generates a negative test. |
 | **OD-5** | **Local-run path** (compose + dev runner) | OD-2 | `AGENTS.md` §10 `/verify` & `/verify-live` mechanisms | Target: one `docker compose up`. |
-| **OD-6** | **`.claude/` harness** (permission tiers, hooks, slash commands, review subagents) | OD-2 + smoke existing | smoke-on-change, auto-push, `/verify`, `/verify-live` | Deferred to the post-stack phase. |
+| **OD-6** | **`.claude/` harness** (permission tiers, hooks, slash commands, review subagents) | OD-2 + smoke existing | smoke-on-change, auto-push, `/verify`, `/verify-live` | **Partially addressed:** slash-commands, role subagents, the Orchestrator (parallel fan-out), and loop-mode invocation landed cross-harness via [ADR-0002](../architecture/0002-multi-harness-agent-roles.md) (2026-06-17). Permission tiers, hooks, auto-push, `/verify`, and the external multi-process launcher still deferred to the post-stack phase. |
 | **OD-7** | **CI** | smoke + tests exist | local/CI parity | Mirror the fast-gate chain exactly. |
 
 ## How to close a decision
