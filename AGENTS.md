@@ -5,7 +5,7 @@
 >
 > **One principle governs everything: _prose ↔ mechanism._** Every rule here should be backed by an executable mechanism that survives a cold agent session — a smoke check, a hook, a test, a CI gate. A rule with nothing that fails when it's violated is not yet real. As the stack lands, every rule below earns its mechanism; until then, the rules are enforced by review and the Definition of Done.
 
-**Repo status (2026-06-16): bootstrap.** The product scope, stack, and architecture are being defined from user stories (a parallel effort). Sections marked **🔓 OPEN DECISION** are deliberately unfilled and tracked in [docs/specs/0001-open-decisions.md](docs/specs/0001-open-decisions.md) — *do not invent answers for them; ask instead.*
+**Repo status (2026-06-17): bootstrap.** Product **scope & mission are now defined** ([spec 0003](docs/specs/0003-product-scope-and-mission.md); §2 below) — OD-1 closed. **Stack and architecture remain open** (OD-2/OD-3), as do security invariants, local-run, and CI. Sections still marked **🔓 OPEN DECISION** are deliberately unfilled and tracked in [docs/specs/0001-open-decisions.md](docs/specs/0001-open-decisions.md) — *do not invent answers for them; ask instead.*
 
 ---
 
@@ -17,7 +17,15 @@
 5. The spec/ADR for the area you're touching.
 
 ## 2. Mission — decision filters
-🔓 **OPEN DECISION.** The mission adjectives — the short list that lets an agent make *novel* decisions aligned with intent — will be set once the product scope is defined from the user stories. Until then, when explicit rules don't cover a decision, **stop and ask** rather than invent product behavior. (See precedence, §4.)
+**Mission.** Lumen Copilot is a **multi-tenant enterprise Work-AI assistant**: a *grounded chat assistant* that answers, summarizes, and drafts over each user's connected enterprise sources and uploaded documents — with every answer **permissioned, cited, and auditable**. Full scope, personas, and non-goals: [docs/specs/0003-product-scope-and-mission.md](docs/specs/0003-product-scope-and-mission.md) (closed OD-1, 2026-06-17).
+
+**Decision filters.** When explicit rules don't cover a *novel* decision, choose the option that best satisfies these — in precedence order:
+1. **Permissioned by default** — never surface or act on data the requesting user can't already access; enforce at retrieval and action time.
+2. **Citation-backed** — every answer traces to a verifiable source passage; prefer "I don't know" over a confident unsourced claim.
+3. **Read before write** — ship read-only value first; gate any consequential/write action behind explicit human approval and a stated risk tier.
+4. **Auditable** — every retrieval, answer, and action emits an audit event; trust is provable after the fact, not assumed.
+
+When these still don't resolve it, **stop and ask** rather than invent product behavior. (See precedence, §4.)
 
 ## 3. Stack / architecture context
 🔓 **OPEN DECISION.** No application stack has been chosen. Do **not** introduce frameworks, services, datastores, or a `docker-compose.yml` until the choice is recorded in an ADR. See [open decisions](docs/specs/0001-open-decisions.md) (OD-2).
@@ -142,4 +150,4 @@ A change is done only when:
 | Tool-specific automation | `.claude/` *(pending — OD-6)* |
 
 ---
-*Last reviewed: 2026-06-16. This contract is product-agnostic by design while the product scope is defined from the user stories.*
+*Last reviewed: 2026-06-17. Product scope & mission are defined (§2, [spec 0003](docs/specs/0003-product-scope-and-mission.md)); stack and architecture remain open by design until their ADRs land.*
