@@ -1,0 +1,554 @@
+"""Unit tests for the LLM gateway (``app.llm.gateway``).
+
+LiteLLM is monkeypatched throughout (no network) to assert the gateway's
+contract from issue #25:
+
+* AC-1 chat -> ``Completion`` domain object; model id defaults from config.
+* AC-2 stream yields ``CompletionChunk``s and stops cleanly on consumer break.
+* AC-3 embed returns one ``Embedding`` per input, dimension from the model.
+* AC-4 model ids / timeout / creds come from config only (no literals).
+* AC-5 ``Completion`` carries token usage.
+* AC-6 blank key -> ``DependencyError`` (-> 503), never a hang or raw traceback.
+* AC-7 provider error/timeout/unknown-model -> typed ``AppError``; vendor
+  exception never escapes.
+* AC-8 callers receive only domain types; ``litellm`` is imported only under
+  ``app/llm/``.
+
+A key-gated live smoke (``OPENROUTER_API_KEY``) does one tiny real call; it is
+skipped when no key is present (the default in dev).
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import aclosing
+from pathlib import Path
+from typing import Any
+
+import litellm
+import litellm.exceptions as le
+import pytest
+
+from app.core.config import Settings
+from app.core.errors import AppError, DependencyError, ValidationError
+from app.domain.llm import (
+    ChatMessage,
+    Completion,
+    CompletionChunk,
+    Embedding,
+    Role,
+    TokenUsage,
+)
+from app.llm.gateway import LLMGateway
+
+# --- Test settings ---------------------------------------------------------
+
+_BASE_ENV = {
+    "DATABASE_URL": "postgresql+asyncpg://test:test@localhost:5432/test",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "CELERY_BROKER_URL": "redis://localhost:6379/1",
+    "CELERY_RESULT_BACKEND": "redis://localhost:6379/2",
+    "S3_ENDPOINT_URL": "http://localhost:9000",
+    "S3_ACCESS_KEY": "test",
+    "S3_SECRET_KEY": "test_secret",
+    "S3_BUCKET": "test-bucket",
+}
+
+
+def _settings(**overrides: str) -> Settings:
+    """Build a Settings instance from explicit values (no .env / environment)."""
+    values: dict[str, Any] = {
+        **_BASE_ENV,
+        "OPENROUTER_API_KEY": "sk-test-key",
+        "LLM_MODEL": "openrouter/openai/gpt-4o-mini",
+        "LLM_EMBEDDING_MODEL": "openrouter/openai/text-embedding-3-small",
+        "LLM_TIMEOUT_SECONDS": "60",
+        **overrides,
+    }
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+# --- Fakes mirroring the LiteLLM response shape the gateway reads ----------
+
+
+class _Msg:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _Choice:
+    def __init__(self, content: str | None, finish_reason: str | None) -> None:
+        self.message = _Msg(content)
+        self.finish_reason = finish_reason
+
+
+class _Usage:
+    def __init__(self, prompt: int, completion: int, total: int | None) -> None:
+        self.prompt_tokens = prompt
+        self.completion_tokens = completion
+        self.total_tokens = total
+
+
+class _Response:
+    """A vendor-shaped completion response (NOT a domain type)."""
+
+    def __init__(
+        self,
+        content: str,
+        *,
+        finish_reason: str | None = "stop",
+        usage: _Usage | None = None,
+    ) -> None:
+        self.choices = [_Choice(content, finish_reason)]
+        self.usage = usage
+
+
+class _Delta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _StreamChoice:
+    def __init__(self, content: str | None) -> None:
+        self.delta = _Delta(content)
+
+
+class _StreamPart:
+    def __init__(self, content: str | None) -> None:
+        self.choices = [_StreamChoice(content)]
+
+
+class _FakeStream:
+    """Async-iterable vendor stream that records consumption and close."""
+
+    def __init__(self, contents: list[str | None]) -> None:
+        self._contents = contents
+        self.closed = False
+        self.consumed: list[str | None] = []
+
+    def __aiter__(self) -> _FakeStream:
+        self._it = iter(self._contents)
+        return self
+
+    async def __anext__(self) -> _StreamPart:
+        try:
+            item = next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+        self.consumed.append(item)
+        return _StreamPart(item)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _EmbeddingResponse:
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.data = [{"embedding": v} for v in vectors]
+
+
+# --- AC-1 / AC-5: chat returns a Completion with usage; model from config --
+
+
+async def test_chat_returns_completion_domain_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response("hello there", usage=_Usage(3, 5, 8))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+
+    assert isinstance(result, Completion)
+    assert result.content == "hello there"
+    assert result.finish_reason == "stop"
+    # AC-1: model id defaulted from config, not a literal in the gateway.
+    assert result.model == "openrouter/openai/gpt-4o-mini"
+    assert captured["model"] == "openrouter/openai/gpt-4o-mini"
+    # AC-4: timeout + creds sourced from config.
+    assert captured["timeout"] == 60.0
+    assert captured["api_key"] == "sk-test-key"
+    assert captured["stream"] is False
+    # Messages rendered as role/content dicts.
+    assert captured["messages"] == [{"role": "user", "content": "hi"}]
+    # AC-5: token usage carried through.
+    assert result.usage == TokenUsage(prompt_tokens=3, completion_tokens=5, total_tokens=8)
+
+
+async def test_chat_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response("ok")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat(
+        [ChatMessage(role=Role.USER, content="hi")],
+        model="openrouter/anthropic/claude-3.5-sonnet",
+    )
+
+    assert captured["model"] == "openrouter/anthropic/claude-3.5-sonnet"
+    assert result.model == "openrouter/anthropic/claude-3.5-sonnet"
+
+
+async def test_chat_usage_absent_yields_zeroed_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("no usage", usage=None)
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage == TokenUsage(0, 0, 0)
+
+
+async def test_chat_usage_total_falls_back_to_sum(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_Usage(4, 6, None))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.total_tokens == 10
+
+
+# --- AC-2: streaming yields chunks; consumer break stops generation cleanly -
+
+
+async def test_stream_yields_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeStream(["Hel", "lo", None, "!"])
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        assert kwargs["stream"] is True
+        return fake
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    chunks: list[CompletionChunk] = []
+    async for chunk in gw.stream([ChatMessage(role=Role.USER, content="hi")]):
+        assert isinstance(chunk, CompletionChunk)
+        chunks.append(chunk)
+
+    # Empty-content deltas are skipped; indices are contiguous.
+    assert [c.delta for c in chunks] == ["Hel", "lo", "!"]
+    assert [c.index for c in chunks] == [0, 1, 2]
+    # Stream closed at the end of consumption.
+    assert fake.closed is True
+
+
+async def test_stream_break_closes_provider_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-2: breaking out of the consumer loop stops generation cleanly.
+
+    A correct consumer wraps the async generator in ``aclosing`` (or relies on
+    the event loop's async-generator finalizer); either way ``aclose`` is
+    invoked on early exit, which fires the gateway's ``finally`` and closes the
+    underlying provider stream — no leaked task or HTTP connection.
+    """
+    fake = _FakeStream(["a", "b", "c", "d"])
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        return fake
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    seen: list[str] = []
+    async with aclosing(gw.stream([ChatMessage(role=Role.USER, content="hi")])) as stream:
+        async for chunk in stream:
+            seen.append(chunk.delta)
+            if len(seen) == 2:
+                break  # cancel mid-stream
+
+    assert seen == ["a", "b"]
+    # The finally block closed the underlying provider stream on early exit.
+    assert fake.closed is True
+    # The provider was not drained past the break point.
+    assert fake.consumed == ["a", "b"]
+
+
+# --- AC-3: embed returns one Embedding per input; dimension from the model --
+
+
+async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        captured.update(kwargs)
+        return _EmbeddingResponse([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    result = await gw.embed(["alpha", "beta"])
+
+    assert len(result) == 2
+    assert all(isinstance(e, Embedding) for e in result)
+    # Dimension matches the (fake) model output for each input.
+    assert [len(e.vector) for e in result] == [3, 3]
+    assert result[0].vector == [0.1, 0.2, 0.3]
+    # AC-3 + AC-4: batched single call, model + creds from config.
+    assert captured["input"] == ["alpha", "beta"]
+    assert captured["model"] == "openrouter/openai/text-embedding-3-small"
+    assert captured["api_key"] == "sk-test-key"
+    assert captured["timeout"] == 60.0
+    assert result[0].model == "openrouter/openai/text-embedding-3-small"
+
+
+async def test_embed_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        captured.update(kwargs)
+        return _EmbeddingResponse([[1.0]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    await gw.embed(["x"], model="openrouter/voyage/voyage-3")
+    assert captured["model"] == "openrouter/voyage/voyage-3"
+
+
+# --- AC-6: blank key -> DependencyError, no network, no hang ----------------
+
+
+async def test_blank_key_chat_raises_dependency_error() -> None:
+    gw = LLMGateway(_settings(OPENROUTER_API_KEY=""))
+    assert gw.enabled is False
+    with pytest.raises(DependencyError) as exc_info:
+        await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert exc_info.value.status == 503
+    assert exc_info.value.code == "llm_unconfigured"
+
+
+async def test_blank_key_embed_raises_dependency_error() -> None:
+    gw = LLMGateway(_settings(OPENROUTER_API_KEY=""))
+    with pytest.raises(DependencyError):
+        await gw.embed(["hi"])
+
+
+async def test_blank_key_stream_raises_dependency_error() -> None:
+    gw = LLMGateway(_settings(OPENROUTER_API_KEY=""))
+    with pytest.raises(DependencyError):
+        async for _ in gw.stream([ChatMessage(role=Role.USER, content="hi")]):
+            pass
+
+
+# --- AC-7: provider faults map to typed AppErrors; vendor error never leaks -
+
+
+@pytest.mark.parametrize(
+    ("vendor_exc", "expected"),
+    [
+        (le.AuthenticationError("bad key", "openrouter", "gpt"), DependencyError),
+        (le.RateLimitError("slow down", "openrouter", "gpt"), DependencyError),
+        (le.Timeout("timed out", "gpt", "openrouter"), DependencyError),
+        (
+            le.APIConnectionError(message="conn", llm_provider="openrouter", model="gpt"),
+            DependencyError,
+        ),
+        (le.ServiceUnavailableError("503", "openrouter", "gpt"), DependencyError),
+        (le.InternalServerError("500", "openrouter", "gpt"), DependencyError),
+        (le.BadRequestError("bad", "gpt", "openrouter"), ValidationError),
+        (le.NotFoundError("unknown model", "gpt", "openrouter"), ValidationError),
+        (le.ContextWindowExceededError("too big", "gpt", "openrouter"), ValidationError),
+    ],
+)
+async def test_chat_maps_vendor_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    vendor_exc: Exception,
+    expected: type[AppError],
+) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        raise vendor_exc
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    with pytest.raises(AppError) as exc_info:
+        await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+
+    # Mapped to the expected typed error...
+    assert isinstance(exc_info.value, expected)
+    # ...and no litellm type leaks across the boundary as the raised exception.
+    assert not isinstance(exc_info.value, le.APIError)
+    # The key-bearing vendor exception is NOT chained (`from None`), so the raw
+    # vendor message can't reach logs/tracebacks (no secrets logged, AC-7).
+    assert exc_info.value.__cause__ is None
+    # Only the vendor *class name* is surfaced — never the vendor message.
+    detail = exc_info.value.detail or ""
+    assert type(vendor_exc).__name__ in detail
+    assert str(vendor_exc) not in detail
+
+
+async def test_embed_maps_vendor_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        raise le.RateLimitError("slow down", "openrouter", "embed")
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    with pytest.raises(DependencyError):
+        await gw.embed(["x"])
+
+
+async def test_vendor_error_never_leaks_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-7 + no-secrets: the api_key never appears in the mapped error or chain.
+
+    LiteLLM is known to embed the ``api_key`` in its exception message. The
+    mapped :class:`AppError` must carry none of it — not in its message, and not
+    via a chained ``__cause__`` that a logger could render.
+    """
+    secret = "sk-test-key"  # matches _settings() default OPENROUTER_API_KEY
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        raise le.AuthenticationError(f"invalid api_key: {secret}", "openrouter", "gpt")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    with pytest.raises(AppError) as exc_info:
+        await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+
+    err = exc_info.value
+    assert secret not in str(err)
+    assert secret not in (err.detail or "")
+    # No explicit cause, and implicit context is suppressed (`from None`), so a
+    # printed traceback won't render the key-bearing vendor message.
+    assert err.__cause__ is None
+    assert err.__suppress_context__ is True
+
+
+async def test_stream_setup_error_maps_to_app_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        raise le.AuthenticationError("bad key", "openrouter", "gpt")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    with pytest.raises(DependencyError):
+        async for _ in gw.stream([ChatMessage(role=Role.USER, content="hi")]):
+            pass
+
+
+async def test_stream_midstream_error_maps_and_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FailingStream(_FakeStream):
+        async def __anext__(self) -> _StreamPart:
+            if not self.closed and self._contents:
+                first = self._contents.pop(0)
+                if first is not None:
+                    return _StreamPart(first)
+            raise le.APIConnectionError(message="dropped", llm_provider="openrouter", model="gpt")
+
+    fake = _FailingStream(["a"])
+
+    async def fake_acompletion(**kwargs: Any) -> _FailingStream:
+        fake.__aiter__()
+        return fake
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    with pytest.raises(DependencyError):
+        async for _ in gw.stream([ChatMessage(role=Role.USER, content="hi")]):
+            pass
+    assert fake.closed is True
+
+
+# --- AC-8: boundary — only domain types cross; litellm only under app/llm/ --
+
+
+async def test_no_vendor_type_crosses_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returned objects are domain dataclasses, never litellm/openai objects."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("hi", usage=_Usage(1, 1, 2))
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.0, 1.0]])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    completion = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert type(completion).__module__ == "app.domain.llm"
+    assert type(completion.usage).__module__ == "app.domain.llm"
+
+    embeddings = await gw.embed(["a"])
+    assert type(embeddings[0]).__module__ == "app.domain.llm"
+
+
+def test_litellm_imported_only_under_app_llm() -> None:
+    """Static boundary check: no module outside app/llm/ imports litellm.
+
+    Mirrors the ADR-0004 rule that ``backend/app/llm/`` is the sole importer of
+    the LiteLLM client. Scans the app source tree for ``litellm`` imports.
+    """
+    app_root = Path(__file__).resolve().parent.parent / "app"
+    offenders: list[str] = []
+    for py in app_root.rglob("*.py"):
+        rel = py.relative_to(app_root)
+        if rel.parts and rel.parts[0] == "llm":
+            continue  # the gateway is allowed to import litellm
+        text = py.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import litellm") or stripped.startswith("from litellm"):
+                offenders.append(f"{rel}: {stripped}")
+    assert offenders == [], f"litellm imported outside app/llm/: {offenders}"
+
+
+# --- Key-gated live smoke ---------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OPENROUTER_API_KEY", "").strip(),
+    reason="no OPENROUTER_API_KEY set (blank in dev) — live smoke skipped",
+)
+async def test_live_openrouter_chat_smoke() -> None:
+    """One tiny real OpenRouter call end-to-end (skipped without a key)."""
+    settings = Settings()  # type: ignore[call-arg]  # reads real env / .env
+    gw = LLMGateway(settings)
+
+    result = await gw.chat(
+        [ChatMessage(role=Role.USER, content="Reply with the single word: pong")]
+    )
+    assert isinstance(result, Completion)
+    assert result.content.strip() != ""
+    assert result.usage.total_tokens >= 0
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OPENROUTER_API_KEY", "").strip(),
+    reason="no OPENROUTER_API_KEY set (blank in dev) — live smoke skipped",
+)
+async def test_live_embed_smoke() -> None:
+    """One tiny real embedding call (skipped without a key).
+
+    NOTE: OpenRouter has **no embeddings API** — LiteLLM raises
+    "No valid embedding model args passed in" for an ``openrouter/...`` embedding
+    model. So this smoke runs only when ``LLM_EMBEDDING_MODEL`` is a non-OpenRouter
+    model id that LiteLLM can route directly (e.g. ``openai/...`` /
+    ``voyage/...`` with the matching key). Picking the embedding provider/model
+    and its credential is deferred to a follow-up (see PR notes); the gateway
+    itself is provider-agnostic and config-driven.
+    """
+    settings = Settings()  # type: ignore[call-arg]
+    if settings.llm_embedding_model.startswith("openrouter/"):
+        pytest.skip(
+            "LLM_EMBEDDING_MODEL is OpenRouter-routed, which has no embeddings "
+            "API — set a direct embedding model + key to run this smoke."
+        )
+    gw = LLMGateway(settings)
+
+    embeddings = await gw.embed(["lumen copilot smoke test"])
+    assert len(embeddings) == 1
+    assert len(embeddings[0].vector) > 0

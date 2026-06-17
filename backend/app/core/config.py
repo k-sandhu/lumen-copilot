@@ -96,6 +96,9 @@ class Settings(BaseSettings):
         default="openrouter/openai/text-embedding-3-small",
         alias="LLM_EMBEDDING_MODEL",
     )
+    # Per-request wall-clock budget handed to LiteLLM so a stalled provider
+    # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
+    llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
 
     @property
     def llm_enabled(self) -> bool:

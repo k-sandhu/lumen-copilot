@@ -30,12 +30,27 @@ class ChatMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Token accounting for a completion (cost & observability, CC-8).
+
+    Providers do not always report usage; fields default to ``0`` so callers can
+    sum without ``None`` checks. ``total`` falls back to ``prompt + completion``
+    when the provider omits it.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class Completion:
     """A non-streamed chat completion result."""
 
     content: str
     model: str
     finish_reason: str | None = None
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 @dataclass(frozen=True, slots=True)
