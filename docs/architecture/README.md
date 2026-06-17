@@ -11,5 +11,9 @@ We record decisions that are **costly to reverse and not self-evident from the c
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0002](0002-multi-harness-agent-roles.md) | Multi-harness agent role model | Accepted |
+| [0003](0003-application-stack.md) | Application stack (closes OD-2) | Accepted |
+| [0004](0004-architecture-boundaries-and-adapters.md) | Architecture boundaries & adapters (closes OD-3) | Accepted |
+| [0005](0005-local-run-and-developer-workflow.md) | Local-run path & developer workflow (closes OD-5) | Accepted |
+| [0006](0006-contract-first-parallel-implementation.md) | Contract-first, parallel front/back implementation | Accepted |
 
-> The first product-shaping ADRs (stack, boundaries, local-run path) are still open — see [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Each gets its own ADR before code lands.
+> The remaining open decisions — security & domain invariants (OD-4), CI (OD-7), and the rest of the `.claude/` harness (OD-6) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Each costly, non-obvious choice gets its own ADR before code lands.

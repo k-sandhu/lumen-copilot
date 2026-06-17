@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
+  "title": "Lumen Copilot WebSocket envelope",
+  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads (chat tokens, citations, tool calls) are defined by their cross-cuttings (CC-6, CC-11) and slotted into `data` per `type` — do not pre-invent them here. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error).",
+  "$defs": {
+    "BaseEnvelope": {
+      "type": "object",
+      "required": ["type", "streamId", "seq"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["start", "delta", "event", "done", "error"],
+          "description": "Discriminator for the envelope kind."
+        },
+        "streamId": {
+          "type": "string",
+          "description": "Correlates all messages of one logical stream."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonically increasing per streamId; defines ordering."
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server send time (optional)."
+        }
+      }
+    },
+    "Start": {
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
+      "properties": {
+        "type": { "const": "start" },
+        "data": {
+          "type": "object",
+          "description": "Stream-open metadata; shape defined per feature."
+        }
+      },
+      "required": ["type", "streamId", "seq"]
+    },
+    "Delta": {
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
+      "properties": {
+        "type": { "const": "delta" },
+        "data": {
+          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature."
+        }
+      },
+      "required": ["type", "streamId", "seq", "data"]
+    },
+    "Event": {
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
+      "properties": {
+        "type": { "const": "event" },
+        "name": {
+          "type": "string",
+          "description": "Structured side-band event name (e.g. citation, tool_call). Vocabulary defined per feature."
+        },
+        "data": {}
+      },
+      "required": ["type", "streamId", "seq", "name"]
+    },
+    "Done": {
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
+      "properties": {
+        "type": { "const": "done" },
+        "data": {
+          "type": "object",
+          "description": "Terminal success summary; shape defined per feature."
+        }
+      },
+      "required": ["type", "streamId", "seq"]
+    },
+    "Error": {
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
+      "properties": {
+        "type": { "const": "error" },
+        "problem": {
+          "type": "object",
+          "description": "Same problem model as the REST error shape (openapi.yaml #/components/schemas/Problem).",
+          "required": ["title", "status"],
+          "properties": {
+            "title": { "type": "string" },
+            "status": { "type": "integer" },
+            "detail": { "type": "string" },
+            "code": { "type": "string" }
+          }
+        }
+      },
+      "required": ["type", "streamId", "seq", "problem"]
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/Start" },
+    { "$ref": "#/$defs/Delta" },
+    { "$ref": "#/$defs/Event" },
+    { "$ref": "#/$defs/Done" },
+    { "$ref": "#/$defs/Error" }
+  ]
+}

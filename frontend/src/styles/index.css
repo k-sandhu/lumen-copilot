@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens as RGB triples so Tailwind's <alpha-value> works.
+ * Light is the default; .dark on <html> swaps the palette. */
+@layer base {
+  :root {
+    --surface: 255 255 255;
+    --surface-muted: 244 245 247;
+    --border: 226 228 232;
+    --foreground: 17 24 39;
+    --foreground-muted: 90 99 112;
+    --accent: 79 70 229;
+    --ok: 22 163 74;
+    --warn: 202 138 4;
+    --danger: 220 38 38;
+  }
+
+  .dark {
+    --surface: 17 19 24;
+    --surface-muted: 26 29 36;
+    --border: 42 46 54;
+    --foreground: 237 239 243;
+    --foreground-muted: 156 163 175;
+    --accent: 129 140 248;
+    --ok: 74 222 128;
+    --warn: 250 204 21;
+    --danger: 248 113 113;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-surface text-foreground antialiased;
+  }
+
+  /* Visible focus everywhere (a11y quality bar). */
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-surface;
+  }
+}
+
+/* Honor reduced-motion globally (quality bar). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Markdown prose surface — minimal, readable defaults without @tailwindcss/typography
+ * to keep the dependency set small for the skeleton. */
+@layer components {
+  .prose-md {
+    @apply text-sm leading-relaxed text-foreground;
+  }
+  .prose-md h1,
+  .prose-md h2,
+  .prose-md h3 {
+    @apply mb-2 mt-4 font-semibold;
+  }
+  .prose-md p {
+    @apply my-2;
+  }
+  .prose-md ul {
+    @apply my-2 list-disc pl-5;
+  }
+  .prose-md ol {
+    @apply my-2 list-decimal pl-5;
+  }
+  .prose-md a {
+    @apply text-accent underline underline-offset-2;
+  }
+  .prose-md code {
+    @apply rounded bg-surface-muted px-1 py-0.5 font-mono text-[0.85em];
+  }
+  /* Code blocks scroll horizontally — long lines never break the pane layout. */
+  .prose-md pre {
+    @apply my-3 overflow-x-auto rounded-md border border-border bg-surface-muted p-3;
+  }
+  .prose-md pre code {
+    @apply bg-transparent p-0;
+  }
+  .prose-md table {
+    @apply my-3 w-full border-collapse text-left;
+  }
+  .prose-md th,
+  .prose-md td {
+    @apply border border-border px-2 py-1;
+  }
+}
