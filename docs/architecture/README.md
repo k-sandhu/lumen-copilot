@@ -10,5 +10,6 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0002](0002-multi-harness-agent-roles.md) | Multi-harness agent role model | Accepted |
 
 > The first product-shaping ADRs (stack, boundaries, local-run path) are still open — see [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Each gets its own ADR before code lands.

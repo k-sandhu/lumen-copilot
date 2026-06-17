@@ -2,9 +2,12 @@
 
 What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells you where work lives, how to claim it, and how to turn user stories into issues.
 
-*Last reviewed: 2026-06-16.*
+*Last reviewed: 2026-06-17.*
 
 ---
+
+## Roles & the operating model
+Work is executed by a small fleet of single-purpose agents that hand off through the board: a **Planner** creates Ready issues, **Implementers** build them in parallel (one branch + worktree each), a single **Reviewer** merges, and **QA** tests merged `main` and files bugs. Each role has a harness-agnostic contract in **[`docs/roles/`](roles/README.md)**, invokable as `/planner`, `/implementer`, `/reviewer`, `/qa` in Claude Code, OpenCode, and Codex. The numbered workflow below is the **Implementer's** path; the other roles' protocols live in their contracts. Decision recorded in [ADR-0002](architecture/0002-multi-harness-agent-roles.md).
 
 ## Where work is tracked
 - **Source of truth: the GitHub Projects board "Lumen Copilot"** — *not* a markdown table (tables drift). Status field: **Todo / In Progress / Done**.
