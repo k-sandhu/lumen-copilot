@@ -1,0 +1,18 @@
+# Normalize line endings: store LF in the repo and check out LF on every
+# platform. The stack runs in Linux containers, so shell scripts and Dockerfiles
+# MUST stay LF — a CRLF docker-entrypoint.sh breaks `/bin/bash` in the container.
+* text=auto eol=lf
+
+# Belt-and-braces for things executed inside containers.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.mako      text eol=lf
+
+# Binary assets — never normalize.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary

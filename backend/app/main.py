@@ -1,0 +1,167 @@
+"""FastAPI application factory.
+
+Wires the whole backend together: structured logging, request/tenant
+correlation middleware, a lifespan that initialises and tears down shared
+resources (object-store bucket, DB engine), the typed-error -> problem+json
+exception handlers, and the router + WebSocket mounts. This module composes; it
+holds no business logic or I/O of its own (that lives in adapters/services).
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response
+
+from app.api.deps import get_object_store
+from app.api.health import router as health_router
+from app.api.v1 import router as v1_router
+from app.core.config import Settings, get_settings
+from app.core.errors import (
+    PROBLEM_CONTENT_TYPE,
+    AppError,
+    FieldError,
+    Problem,
+    problem_from_exception,
+)
+from app.core.logging import configure_logging, get_logger
+from app.db.session import dispose_engine
+from app.realtime.health_ws import router as health_ws_router
+
+log = get_logger(__name__)
+
+# Header names for inbound correlation. If absent, we mint a request id.
+_REQUEST_ID_HEADER = "x-request-id"
+_TENANT_ID_HEADER = "x-tenant-id"
+
+
+class CorrelationMiddleware(BaseHTTPMiddleware):
+    """Bind request/tenant correlation ids into the structlog context.
+
+    Every log line emitted while handling the request inherits these ids via
+    ``structlog.contextvars``. The request id is echoed back on the response so
+    a client/log can be traced end-to-end. Tenant resolution proper is CC-3;
+    here we only propagate an inbound header if present.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        structlog.contextvars.clear_contextvars()
+        request_id = request.headers.get(_REQUEST_ID_HEADER) or uuid.uuid4().hex
+        tenant_id = request.headers.get(_TENANT_ID_HEADER)
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            path=request.url.path,
+            method=request.method,
+        )
+        try:
+            response = await call_next(request)
+        finally:
+            structlog.contextvars.clear_contextvars()
+        response.headers[_REQUEST_ID_HEADER] = request_id
+        return response
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Initialise shared resources on startup; tear them down on shutdown.
+
+    Startup best-effort ensures the object-store bucket exists so uploads have a
+    target from first boot; a transient failure here is logged but does not
+    block the process from coming up (readiness will report the real state).
+    Shutdown disposes the DB engine cleanly.
+    """
+    settings: Settings = app.state.settings
+    log.info("startup.begin", environment=settings.environment, version=settings.version)
+    try:
+        await get_object_store().ensure_bucket()
+        log.info("startup.bucket_ready", bucket=settings.s3_bucket)
+    except Exception as exc:  # noqa: BLE001 — non-fatal; readiness surfaces it
+        log.warning("startup.bucket_unavailable", error=str(exc))
+
+    yield
+
+    await dispose_engine()
+    log.info("shutdown.complete")
+
+
+def _register_exception_handlers(app: FastAPI) -> None:
+    """Map the typed error hierarchy + framework errors to problem+json."""
+
+    @app.exception_handler(AppError)
+    async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+        status_code, body = problem_from_exception(exc, instance=request.url.path)
+        if status_code >= 500:
+            log.error("app_error", code=exc.code, status=status_code, detail=exc.detail)
+        return JSONResponse(status_code=status_code, content=body, media_type=PROBLEM_CONTENT_TYPE)
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
+        problem = Problem(
+            title="Unprocessable Entity",
+            status=422,
+            code="validation_error",
+            instance=request.url.path,
+            errors=[
+                FieldError(
+                    field=".".join(str(p) for p in err.get("loc", [])),
+                    message=err.get("msg", "invalid"),
+                )
+                for err in exc.errors()
+            ],
+        )
+        return JSONResponse(
+            status_code=422,
+            content=problem.model_dump(exclude_none=True),
+            media_type=PROBLEM_CONTENT_TYPE,
+        )
+
+    @app.exception_handler(Exception)
+    async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        # Never leak the original error/stack to the client.
+        log.exception("unhandled_exception", path=request.url.path)
+        status_code, body = problem_from_exception(exc, instance=request.url.path)
+        return JSONResponse(status_code=status_code, content=body, media_type=PROBLEM_CONTENT_TYPE)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build and return the FastAPI application.
+
+    A factory (not a module-level singleton with side effects) so tests can
+    construct an app with injected settings.
+    """
+    settings = settings or get_settings()
+    configure_logging(
+        log_level=settings.log_level,
+        json_logs=settings.environment != "local",
+    )
+
+    app = FastAPI(
+        title="Lumen Copilot API",
+        version=settings.version,
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+
+    app.add_middleware(CorrelationMiddleware)
+    _register_exception_handlers(app)
+
+    # Unversioned health probes (contracts/openapi.yaml).
+    app.include_router(health_router)
+    # Versioned feature routes mount under /api/v1 (empty in the skeleton).
+    app.include_router(v1_router, prefix="/api/v1")
+    # WebSocket transport: the health heartbeat (proves the WS path + envelope).
+    app.include_router(health_ws_router)
+
+    return app
+
+
+# ASGI entrypoint used by uvicorn / the compose CMD: ``app.main:app``.
+app = create_app()

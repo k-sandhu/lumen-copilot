@@ -1,0 +1,14 @@
+# Keep the build context (and the bind-mounted /app) lean and reproducible.
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+.gitignore
+*.egg-info/
+.env
+.env.*
