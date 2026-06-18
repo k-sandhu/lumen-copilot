@@ -8,9 +8,19 @@ Redis, or MinIO is required to import the app or hit ``/health``.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 
 import pytest
+
+# Windows defaults to the Proactor event loop, whose socket self-pipe transports
+# are GC-finalized late and emit a spurious "unclosed transport" ResourceWarning
+# that ``filterwarnings = error`` (pyproject) escalates and mis-attributes to an
+# unrelated async test. The Selector loop has no such transport. This is a
+# test-runtime concern only — uvicorn manages its own loop in production.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Minimal valid environment for Settings. Values are syntactically valid URLs
 # but point nowhere — readiness checks (which DO reach out) are not exercised by

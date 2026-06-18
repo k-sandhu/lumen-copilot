@@ -9,6 +9,17 @@ a session via the dependency in ``app.api.deps``; repositories never leak a
 """
 
 from app.db.base import Base
+from app.db.repositories import (
+    AuditEventRepository,
+    ChatSessionRepository,
+    ChunkRepository,
+    CitationRepository,
+    CollectionRepository,
+    DocumentRepository,
+    MessageRepository,
+    TenantRepository,
+    UserRepository,
+)
 from app.db.session import (
     dispose_engine,
     get_engine,
@@ -17,7 +28,16 @@ from app.db.session import (
 )
 
 __all__ = [
+    "AuditEventRepository",
     "Base",
+    "ChatSessionRepository",
+    "ChunkRepository",
+    "CitationRepository",
+    "CollectionRepository",
+    "DocumentRepository",
+    "MessageRepository",
+    "TenantRepository",
+    "UserRepository",
     "dispose_engine",
     "get_engine",
     "get_sessionmaker",
