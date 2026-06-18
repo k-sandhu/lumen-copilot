@@ -13,6 +13,7 @@
 import { MarkdownView } from '@/lib/markdown';
 import { ScrollArea } from '@/components/ScrollArea';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { NavOverlay } from '@/components/NavOverlay';
 import { SystemStatusPanel } from '@/features/system-status';
 import { useUiStore } from '@/stores/ui';
 import { cn } from '@/lib/cn';
@@ -103,6 +104,14 @@ export function App() {
           </div>
         </main>
       </div>
+
+      {/* Floating links to the standalone developer pages (docs + features). */}
+      <NavOverlay
+        items={[
+          { to: '/docs', label: 'Documentation', icon: '📖' },
+          { to: '/features', label: 'Features built', icon: '✨' },
+        ]}
+      />
     </div>
   );
 }

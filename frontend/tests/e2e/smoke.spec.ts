@@ -9,8 +9,9 @@ import { test, expect } from '@playwright/test';
 test('app shell and system-status panel render', async ({ page }) => {
   await page.goto('/');
 
-  // Header / shell.
-  await expect(page.getByRole('heading', { name: 'Lumen Copilot' })).toBeVisible();
+  // Header / shell. `exact` disambiguates the <h1> title from the welcome
+  // note's "Lumen Copilot — skeleton" <h2>.
+  await expect(page.getByRole('heading', { name: 'Lumen Copilot', exact: true })).toBeVisible();
   await expect(page.getByText('Backend status')).toBeVisible();
 
   // The rail welcome note rendered through the markdown pipeline.
@@ -26,6 +27,27 @@ test('app shell and system-status panel render', async ({ page }) => {
       .or(page.getByText(/checking backend readiness/i)),
   ).toBeVisible();
 
-  // The realtime indicator is present.
-  await expect(page.getByText('Realtime')).toBeVisible();
+  // The realtime indicator is present (`exact` avoids the welcome note's
+  // "…the realtime badge" prose).
+  await expect(page.getByText('Realtime', { exact: true })).toBeVisible();
+});
+
+/**
+ * The developer pages: the floating overlay reveals links to the standalone docs
+ * viewer and features catalog, and both render real content.
+ */
+test('overlay links reach the docs viewer and features catalog', async ({ page }) => {
+  await page.goto('/');
+
+  const trigger = page.getByRole('button', { name: /developer pages/i });
+  await expect(trigger).toBeVisible();
+  await trigger.hover();
+
+  await page.getByRole('link', { name: /documentation/i }).click();
+  await expect(page).toHaveURL(/\/docs\//); // index redirects to a default doc
+  await expect(page.getByRole('navigation', { name: /documentation/i })).toBeVisible();
+
+  await page.goto('/features');
+  await expect(page.getByRole('heading', { name: 'Features built', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /LLM model gateway/i })).toBeVisible();
 });

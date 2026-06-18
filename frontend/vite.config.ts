@@ -12,6 +12,12 @@ import { fileURLToPath, URL } from 'node:url';
 // when running the dev server outside compose (e.g. against localhost:47181).
 const proxyTarget = process.env.VITE_PROXY_TARGET ?? 'http://backend:8000';
 
+// Repo root (parent of frontend/). The docs viewer bundles markdown from `docs/`
+// and the top-level AGENTS/README contracts via `import.meta.glob('?raw')`; those
+// live above the Vite root, so the dev server must be allowed to read them.
+// (Production `vite build` inlines them regardless of this allow-list.)
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -22,6 +28,8 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    // Allow reading the bundled docs that live above the Vite root (see repoRoot).
+    fs: { allow: [repoRoot] },
     // Polling makes file watching reliable across the Docker bind-mount on
     // Windows/macOS hosts.
     watch: { usePolling: true },
