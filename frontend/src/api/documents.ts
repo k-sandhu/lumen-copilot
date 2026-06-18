@@ -257,3 +257,16 @@ export async function resolveDocumentContentUrl(id: string, signal?: AbortSignal
   }
   throw new ApiError(`Content request for ${id} failed with ${response.status}`, response.status, problem);
 }
+
+// --- Document content (chat citation viewer, #50) --------------------------
+
+/**
+ * Same-origin URL for a document's original bytes (`GET /documents/{id}/content`).
+ * The server may 200 the bytes or 302 to a short-TTL presigned URL; either way
+ * this is the URL the viewer points an <iframe>/<a> at. It rides the httpOnly
+ * session cookie (credentials are same-origin); a not-permitted id yields 404.
+ */
+export function documentContentUrl(documentId: string): string {
+  const base = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  return `${base}/documents/${documentId}/content`;
+}
