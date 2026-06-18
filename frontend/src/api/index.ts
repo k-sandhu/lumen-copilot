@@ -7,6 +7,18 @@ export type { RequestOptions } from './client';
 export { getHealth, getReadiness } from './health';
 export { login, refresh, getCurrentUser, logout, installAuthRefresh } from './auth';
 export {
+  listCollections,
+  createCollection,
+  updateCollection,
+  deleteCollection,
+  listDocuments,
+  getDocument,
+  deleteDocument,
+  uploadDocument,
+  resolveDocumentContentUrl,
+} from './documents';
+export type { PageQuery, UploadDocumentArgs } from './documents';
+export {
   getAccessToken,
   hasAccessToken,
   setAccessToken,
