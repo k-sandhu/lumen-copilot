@@ -1,4 +1,4 @@
-# Lumen Copilot backend image (ADR-0003 / ADR-0005).
+# Beacon backend image (ADR-0003 / ADR-0005).
 # Pinned base (no :latest per AGENTS.md §3). Deps installed into the SYSTEM
 # environment so the compose `./backend:/app` bind-mount does not shadow them.
 FROM python:3.12-slim-bookworm

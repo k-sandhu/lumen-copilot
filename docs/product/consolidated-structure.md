@@ -1,8 +1,8 @@
-# Lumen Copilot — Consolidated Feature / Epic / Story Structure (multi-model reconciliation)
+# Beacon — Consolidated Feature / Epic / Story Structure (multi-model reconciliation)
 
 Status: candidate product-scope input (reconciliation of parallel planning artifacts).
 Last updated: 2026-06-16.
-Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/3.
+Tracking issue: https://github.com/k-sandhu/beacon/issues/3.
 
 This document **reconciles the product-discovery planning artifacts authored in parallel by three different models** into one coherent structure for building the product. It is discovery input only and **does not close OD-1** (product scope) in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Adopting any board/label/milestone change here still requires a tracked `type:chore`/`type:docs` issue + PR per [AGENTS.md](../../AGENTS.md) §7.
 

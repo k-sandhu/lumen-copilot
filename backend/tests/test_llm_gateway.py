@@ -564,6 +564,6 @@ async def test_live_embed_smoke() -> None:
     settings = Settings()  # type: ignore[call-arg]
     gw = LLMGateway(settings)
 
-    embeddings = await gw.embed(["lumen copilot smoke test"])
+    embeddings = await gw.embed(["beacon smoke test"])
     assert len(embeddings) == 1
     assert len(embeddings[0].vector) == settings.llm_embedding_dimensions

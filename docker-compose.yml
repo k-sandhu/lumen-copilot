@@ -1,10 +1,10 @@
-# Lumen Copilot — one-command local stack (ADR-0005).
+# Beacon — one-command local stack (ADR-0005).
 #   cp .env.example .env  &&  docker compose up --build
 # Brings up: Postgres+pgvector, Redis, MinIO, backend (web), Celery worker, frontend.
 # Host ports come from .env (471xx block); container-to-container traffic uses service names.
 # Images are version-pinned (no :latest) per AGENTS.md.
 
-name: lumen-copilot
+name: beacon
 
 services:
   postgres:

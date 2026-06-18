@@ -1,4 +1,4 @@
-# AGENTS.md — Lumen Copilot agent contract
+# AGENTS.md — Beacon agent contract
 
 > **Read this top to bottom before running or changing anything in this repo.**
 > This is the single canonical contract for *any* coding agent (Claude Code, Codex, Cursor, …). Tool-specific mechanism (Claude Code hooks, permissions, slash commands) lives under `.claude/` and must never add a rule that isn't reflected here.
@@ -17,7 +17,7 @@
 5. The spec/ADR for the area you're touching.
 
 ## 2. Mission — decision filters
-**Mission.** Lumen Copilot is a **multi-tenant enterprise Work-AI assistant**: a *grounded chat assistant* that answers, summarizes, and drafts over each user's connected enterprise sources and uploaded documents — with every answer **permissioned, cited, and auditable**. Full scope, personas, and non-goals: [docs/specs/0003-product-scope-and-mission.md](docs/specs/0003-product-scope-and-mission.md) (closed OD-1, 2026-06-17).
+**Mission.** Beacon is a **multi-tenant enterprise Work-AI assistant**: a *grounded chat assistant* that answers, summarizes, and drafts over each user's connected enterprise sources and uploaded documents — with every answer **permissioned, cited, and auditable**. Full scope, personas, and non-goals: [docs/specs/0003-product-scope-and-mission.md](docs/specs/0003-product-scope-and-mission.md) (closed OD-1, 2026-06-17).
 
 **Decision filters.** When explicit rules don't cover a *novel* decision, choose the option that best satisfies these — in precedence order:
 1. **Permissioned by default** — never surface or act on data the requesting user can't already access; enforce at retrieval and action time.

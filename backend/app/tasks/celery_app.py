@@ -18,7 +18,7 @@ from app.core.config import get_settings
 _settings = get_settings()
 
 celery_app = Celery(
-    "lumen_copilot",
+    "beacon",
     broker=_settings.celery_broker_url,
     backend=_settings.celery_result_backend,
 )
@@ -36,7 +36,7 @@ celery_app.conf.update(
 )
 
 
-@celery_app.task(name="lumen.ping")  # type: ignore[misc]  # celery's task decorator is untyped
+@celery_app.task(name="beacon.ping")  # type: ignore[misc]  # celery's task decorator is untyped
 def ping() -> str:
     """Trivial liveness task — returns ``"pong"``. Proves the worker round-trips."""
     return "pong"

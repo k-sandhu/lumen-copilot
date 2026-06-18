@@ -39,7 +39,7 @@ export function App() {
           >
             {railCollapsed ? '☰' : '⟨'}
           </button>
-          <h1 className="text-sm font-semibold">Lumen Copilot</h1>
+          <h1 className="text-sm font-semibold">Beacon</h1>
           <span className="rounded bg-surface-muted px-1.5 py-0.5 text-xs text-foreground-muted">
             skeleton
           </span>

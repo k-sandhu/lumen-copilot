@@ -31,7 +31,7 @@ export interface AreaGroup {
   entries: CatalogEntry[];
 }
 
-const GH = 'https://github.com/k-sandhu/lumen-copilot';
+const GH = 'https://github.com/k-sandhu/beacon';
 
 /** Display order for areas; unlisted areas sort after, alphabetically. */
 export const AREA_ORDER: readonly string[] = [

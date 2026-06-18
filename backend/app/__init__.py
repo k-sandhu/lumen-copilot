@@ -1,4 +1,4 @@
-"""Lumen Copilot backend application package.
+"""Beacon backend application package.
 
 A multi-tenant, grounded chat assistant backend (FastAPI, async). Layering is
 one-directional — ``api/ -> services/ -> domain/`` with adapters hung off

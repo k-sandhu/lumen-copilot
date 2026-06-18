@@ -144,7 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app = FastAPI(
-        title="Lumen Copilot API",
+        title="Beacon API",
         version=settings.version,
         lifespan=lifespan,
     )

@@ -1,4 +1,4 @@
-# Lumen Copilot frontend — Vite dev server (ADR-0005 local run).
+# Beacon frontend — Vite dev server (ADR-0005 local run).
 # Static SPA in production; in compose we run the Vite dev server with the source
 # bind-mounted at /app and a named volume keeping /app/node_modules off the host.
 FROM node:20-alpine

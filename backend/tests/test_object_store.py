@@ -380,9 +380,9 @@ def _integration_settings() -> Settings:
         CELERY_BROKER_URL="redis://localhost:6379/1",
         CELERY_RESULT_BACKEND="redis://localhost:6379/2",
         S3_ENDPOINT_URL=_INTEGRATION_ENDPOINT,
-        S3_ACCESS_KEY=os.environ.get("S3_ACCESS_KEY", "lumen"),
-        S3_SECRET_KEY=os.environ.get("S3_SECRET_KEY", "lumen_local_dev_secret"),
-        S3_BUCKET=os.environ.get("S3_BUCKET", "lumen-uploads"),
+        S3_ACCESS_KEY=os.environ.get("S3_ACCESS_KEY", "beacon"),
+        S3_SECRET_KEY=os.environ.get("S3_SECRET_KEY", "beacon_local_dev_secret"),
+        S3_BUCKET=os.environ.get("S3_BUCKET", "beacon-uploads"),
     )  # type: ignore[call-arg]
 
 

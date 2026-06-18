@@ -1,8 +1,8 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Idempotent setup of the GitHub issue-tracking infrastructure for lumen-copilot:
-  the base label set + the "Lumen Copilot" GitHub Projects (v2) board.
+  Idempotent setup of the GitHub issue-tracking infrastructure for beacon:
+  the base label set + the "Beacon" GitHub Projects (v2) board.
 
 .DESCRIPTION
   Part of the issue pipeline (see docs/WORK_TRACKING.md). Safe to re-run.
@@ -12,7 +12,7 @@
   stay correct as the stories evolve.
 
 .PARAMETER ProjectTitle
-  Title of the Projects board. Default: "Lumen Copilot".
+  Title of the Projects board. Default: "Beacon".
 
 .NOTES
   Requires the gh CLI authenticated with 'repo' and 'project' scopes.
@@ -22,7 +22,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$ProjectTitle = "Lumen Copilot"
+  [string]$ProjectTitle = "Beacon"
 )
 
 $ErrorActionPreference = "Stop"

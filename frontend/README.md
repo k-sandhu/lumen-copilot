@@ -1,4 +1,4 @@
-# frontend — Lumen Copilot SPA
+# frontend — Beacon SPA
 
 React + Vite + TypeScript (strict) SPA. Static build; the only backend is FastAPI,
 reached **same-origin** through the Vite dev proxy and the `src/api/` boundary.

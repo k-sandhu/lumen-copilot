@@ -10,9 +10,9 @@ What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells y
 Work is executed by a small fleet of single-purpose agents that hand off through the board: a **Planner** creates Ready issues, **Implementers** build them in parallel (one branch + worktree each), a single **Reviewer** merges, and **QA** tests merged `main` and files bugs. Each role has a harness-agnostic contract in **[`docs/roles/`](roles/README.md)**, invokable as `/planner`, `/implementer`, `/reviewer`, `/qa` in Claude Code, OpenCode, and Codex. The numbered workflow below is the **Implementer's** path; the other roles' protocols live in their contracts. Decision recorded in [ADR-0002](architecture/0002-multi-harness-agent-roles.md).
 
 ## Where work is tracked
-- **Source of truth: the GitHub Projects board "Lumen Copilot"** — *not* a markdown table (tables drift). Status field: **Backlog / Ready / In Progress / In Review / Blocked / Done**.
-- Issues live in the `k-sandhu/lumen-copilot` repo; each traces to a user story (or is a `type:chore` / `type:bug` / `type:adr` / `type:docs` item).
-- Board: **[#7 — Lumen Copilot](https://github.com/users/k-sandhu/projects/7)** (Status: Backlog / Ready / In Progress / In Review / Blocked / Done).
+- **Source of truth: the GitHub Projects board "Beacon"** — *not* a markdown table (tables drift). Status field: **Backlog / Ready / In Progress / In Review / Blocked / Done**.
+- Issues live in the `k-sandhu/beacon` repo; each traces to a user story (or is a `type:chore` / `type:bug` / `type:adr` / `type:docs` item).
+- Board: **[#7 — Beacon](https://github.com/users/k-sandhu/projects/7)** (Status: Backlog / Ready / In Progress / In Review / Blocked / Done).
 
 ## Branch model
 - `main` advances **only** by merging a PR with `Closes #<N>` — no direct commits to `main`.

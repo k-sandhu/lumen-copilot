@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-17
 - **Closes:** OD-5 ([../specs/0001-open-decisions.md](../specs/0001-open-decisions.md)) · informs [`AGENTS.md`](../../AGENTS.md) §10
-- **Tracking:** [#16](https://github.com/k-sandhu/lumen-copilot/issues/16) · builds on [ADR-0003](0003-application-stack.md)
+- **Tracking:** [#16](https://github.com/k-sandhu/beacon/issues/16) · builds on [ADR-0003](0003-application-stack.md)
 
 ## Context
 

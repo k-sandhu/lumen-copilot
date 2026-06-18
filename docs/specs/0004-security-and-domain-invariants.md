@@ -2,7 +2,7 @@
 
 > Closes **OD-4** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-18**. Derives the concrete security/domain invariants from the decided scope ([spec 0003](0003-product-scope-and-mission.md)) and the landed stack/boundaries ([ADR-0003](../architecture/0003-application-stack.md), [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md)), and turns each invariant into a **negative-test category** (fills [AGENTS.md](../../AGENTS.md) §9).
 
-**Status:** adopted. **Last reviewed:** 2026-06-18. **Tracking issue:** [#14](https://github.com/k-sandhu/lumen-copilot/issues/14).
+**Status:** adopted. **Last reviewed:** 2026-06-18. **Tracking issue:** [#14](https://github.com/k-sandhu/beacon/issues/14).
 
 ---
 
@@ -95,5 +95,5 @@ Non-binding shapes that satisfy the invariants; the migration issue refines them
 ## Provenance
 
 - **Decided by:** human sponsor + Claude Opus 4.8, in session, 2026-06-18.
-- **Inputs:** [spec 0003](0003-product-scope-and-mission.md) (scope & mission filters), [ADR-0003](../architecture/0003-application-stack.md) (stack), [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) (boundaries & chokepoints), the seed invariants in issue [#14](https://github.com/k-sandhu/lumen-copilot/issues/14).
-- **Traceability:** issue [#14](https://github.com/k-sandhu/lumen-copilot/issues/14); strikes OD-4 in [0001-open-decisions.md](0001-open-decisions.md); fills [AGENTS.md](../../AGENTS.md) §9. Unblocks CC-2 [#17], CC-1 [#18], CC-3 [#19], CC-8 [#23], CC-4 [#20].
+- **Inputs:** [spec 0003](0003-product-scope-and-mission.md) (scope & mission filters), [ADR-0003](../architecture/0003-application-stack.md) (stack), [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) (boundaries & chokepoints), the seed invariants in issue [#14](https://github.com/k-sandhu/beacon/issues/14).
+- **Traceability:** issue [#14](https://github.com/k-sandhu/beacon/issues/14); strikes OD-4 in [0001-open-decisions.md](0001-open-decisions.md); fills [AGENTS.md](../../AGENTS.md) §9. Unblocks CC-2 [#17], CC-1 [#18], CC-3 [#19], CC-8 [#23], CC-4 [#20].

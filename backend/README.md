@@ -1,4 +1,4 @@
-# Lumen Copilot — backend
+# Beacon — backend
 
 FastAPI service (Python 3.12, async). This is the **boot skeleton**: it boots,
 health is real, the seams are cut. No product features yet. The binding coding

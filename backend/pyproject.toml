@@ -1,7 +1,7 @@
 [project]
-name = "lumen-copilot-backend"
+name = "beacon-backend"
 version = "0.0.1"
-description = "Lumen Copilot backend — FastAPI service (grounded, permissioned, cited, auditable chat)."
+description = "Beacon backend — FastAPI service (grounded, permissioned, cited, auditable chat)."
 readme = "README.md"
 requires-python = "==3.12.*"
 

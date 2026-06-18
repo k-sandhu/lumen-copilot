@@ -7,7 +7,7 @@ import { create } from 'zustand';
 
 export type Theme = 'light' | 'dark';
 
-const THEME_KEY = 'lumen.theme';
+const THEME_KEY = 'beacon.theme';
 
 function prefersDark(): boolean {
   return (

@@ -1,4 +1,4 @@
-# Lumen Copilot
+# Beacon
 
 Agent-driven repository. **If you are an agent, read [AGENTS.md](AGENTS.md) first** — it is the single source of truth for how work happens here.
 

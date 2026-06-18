@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
-  "title": "Lumen Copilot WebSocket envelope",
+  "$id": "https://beacon/contracts/websocket-envelopes.schema.json",
+  "title": "Beacon WebSocket envelope",
   "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
   "$defs": {
     "BaseEnvelope": {

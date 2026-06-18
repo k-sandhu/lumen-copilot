@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     )
 
     # --- Service identity (surfaced by /health) ---
-    service_name: str = "lumen-copilot-backend"
+    service_name: str = "beacon-backend"
     version: str = "0.0.1"
 
     # --- Environment / observability ---

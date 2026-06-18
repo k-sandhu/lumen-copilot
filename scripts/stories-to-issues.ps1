@@ -24,7 +24,7 @@
   Omit (default) => dry run: print the plan and write nothing.
   Provide -Execute => create issues / milestones / labels and add to the board.
 .PARAMETER ProjectTitle
-  Projects board to add issues to. Default: "Lumen Copilot". Pass '' to skip.
+  Projects board to add issues to. Default: "Beacon". Pass '' to skip.
 
 .NOTES
   Requires the gh CLI authenticated with 'repo' and 'project' scopes.
@@ -38,7 +38,7 @@
 param(
   [string]$StoriesFile = "glean-user-stories.md",
   [switch]$Execute,
-  [string]$ProjectTitle = "Lumen Copilot"
+  [string]$ProjectTitle = "Beacon"
 )
 
 $ErrorActionPreference = "Stop"
@@ -200,7 +200,7 @@ foreach ($s in $stories) {
   $body.Add("- **Epic:** $milestone")
   if ($s.Personas) { $body.Add("- **Persona(s):** $($s.Personas -join ', ')") }
   $body.Add("")
-  $body.Add("<!-- lumen-story-id: $($s.Id) -->")
+  $body.Add("<!-- beacon-story-id: $($s.Id) -->")
   $bodyText = ($body -join "`n")
 
   # ensure labels + milestone exist

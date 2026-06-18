@@ -1,8 +1,8 @@
-# Lumen Copilot — User Stories
+# Beacon — User Stories
 
 Status: candidate product-scope input.
 Last updated: 2026-06-16.
-Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
+Tracking issue: https://github.com/k-sandhu/beacon/issues/1.
 
 Comprehensive, **product-agnostic** user stories for a knowledge-work-automation product, consolidated from the research in [knowledge-work-automation-research.md](knowledge-work-automation-research.md). Vendor and product names are deliberately **removed here** (they live in the research doc); these stories describe capabilities, not any one competitor.
 

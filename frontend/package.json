@@ -1,9 +1,9 @@
 {
-  "name": "@lumen-copilot/frontend",
+  "name": "@beacon/frontend",
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "Lumen Copilot — React + Vite SPA (static). The only backend is FastAPI, reached through contracts/.",
+  "description": "Beacon — React + Vite SPA (static). The only backend is FastAPI, reached through contracts/.",
   "packageManager": "pnpm@9.12.3",
   "engines": {
     "node": ">=20 <23"

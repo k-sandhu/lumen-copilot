@@ -39,7 +39,7 @@ def test_health_returns_ok_and_contract_shape(client: TestClient) -> None:
     # Exactly the HealthStatus contract shape (additionalProperties: false).
     assert set(body.keys()) == {"status", "service", "version"}
     assert body["status"] == "ok"
-    assert body["service"] == "lumen-copilot-backend"
+    assert body["service"] == "beacon-backend"
     assert isinstance(body["version"], str) and body["version"]
 
 

@@ -4,7 +4,7 @@
  * (with a language for highlighting) so the renderer pattern is proven on the
  * skeleton — and long code lines demonstrate horizontal scroll inside a pane.
  */
-export const WELCOME_NOTE = `## Lumen Copilot — skeleton
+export const WELCOME_NOTE = `## Beacon — skeleton
 
 This is the **boots-and-is-alive** SPA shell. It proves the patterns the product
 UI will reuse — it is *not* the product yet.

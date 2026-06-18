@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Lumen Copilot API
+  title: Beacon API
   version: 0.1.0
   description: >
-    Source-of-truth contract for the Lumen Copilot REST surface. The backend
+    Source-of-truth contract for the Beacon REST surface. The backend
     implements to match this; the frontend client is generated from it.
 
 
@@ -489,7 +489,7 @@ components:
       required: [status, service, version]
       properties:
         status: { type: string, enum: [ok] }
-        service: { type: string, example: lumen-copilot-backend }
+        service: { type: string, example: beacon-backend }
         version: { type: string, example: 0.0.1 }
 
     ReadinessStatus:

@@ -2,7 +2,7 @@
 
 Status: candidate product-scope input.
 Last updated: 2026-06-16.
-Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
+Tracking issue: https://github.com/k-sandhu/beacon/issues/1.
 
 Comprehensive research synthesis on Glean and the broader enterprise-AI / knowledge-work-automation market, with emphasis on automation: finding knowledge, reasoning over it, creating deliverables, and safely executing work across business systems. Vendor and product names are retained here intentionally (the companion [user-stories.md](user-stories.md) is vendor-neutral).
 
@@ -31,13 +31,13 @@ Glean is one of the clearest examples of this shift, positioning as a "Work AI p
 - **Single agent → governed fleet.** Control planes, per-agent identity, runtime guardrails, evaluations, and observability became table stakes.
 - **Standalone → platform consolidation.** ServiceNow acquired Moveworks (~$2.85B), Workday acquired Sana (~$1.1B), and Automation Anywhere acquired Aisera — agentic AI is being folded into larger platform plays.
 
-**Implication for Lumen Copilot.** The opportunity is not "another chatbot." It is a **governed knowledge-work automation layer** that helps a worker find the right context, understand and verify it, create a useful artifact, route or execute the next action, then remember, monitor, and follow up — all through auditable, permission-aware automation.
+**Implication for Beacon.** The opportunity is not "another chatbot." It is a **governed knowledge-work automation layer** that helps a worker find the right context, understand and verify it, create a useful artifact, route or execute the next action, then remember, monitor, and follow up — all through auditable, permission-aware automation.
 
 ---
 
 ## 2. The Seven-Layer Pattern (what the leading products do)
 
-The category can be read as a seven-layer stack. Each layer carries a product implication for Lumen Copilot.
+The category can be read as a seven-layer stack. Each layer carries a product implication for Beacon.
 
 ### 2.1 Enterprise context layer
 Connect enterprise systems and build a structured understanding of people, teams, projects, content, activity, and permissions (Glean calls this the Enterprise Graph + Personal Graph + "system of context"; Atlassian the Teamwork Graph; Microsoft the Microsoft Graph; Writer a graph-based knowledge graph).
@@ -135,35 +135,35 @@ The products below cluster around the same problem — automate knowledge work u
 
 ---
 
-## 4. Category-Wide Shifts (and the Lumen opportunity in each)
+## 4. Category-Wide Shifts (and the Beacon opportunity in each)
 
 ### 4.1 From search to work completion
 Search is the first step of a larger workflow — decide, prep a meeting, resolve a ticket, update a record, answer a customer. Products that stop at retrieval leave the work unfinished.
-*Lumen opportunity:* always ask what the next step is; offer one-click follow-on actions after a cited answer; preserve traceability from answer → source → action.
+*Beacon opportunity:* always ask what the next step is; offer one-click follow-on actions after a cited answer; preserve traceability from answer → source → action.
 
 ### 4.2 From chat to artifacts
 Users need durable deliverables: memos, briefs, tickets, CRM updates, PRDs, RFP responses, contracts, dashboards, spreadsheets, slides, project updates, KB articles — increasingly produced *inside* the document or system of record (Office Agent Mode, Notion Agents).
-*Lumen opportunity:* treat generated work as editable artifacts; track citations and assumptions inside the artifact; export or write back to working tools.
+*Beacon opportunity:* treat generated work as editable artifacts; track citations and assumptions inside the artifact; export or write back to working tools.
 
 ### 4.3 From reactive assistant to proactive coworker
 The newest movement is proactive work management: watch projects, commitments, meetings, blockers, changes, and requests, then prepare suggested work.
-*Lumen opportunity:* daily work brief; detect open loops across meetings/chat/email/tickets/docs; draft updates and follow-ups before the user asks; let users tune monitored signals.
+*Beacon opportunity:* daily work brief; detect open loops across meetings/chat/email/tickets/docs; draft updates and follow-ups before the user asks; let users tune monitored signals.
 
 ### 4.4 From prompt chains to governed agents
 Reusable agents are replacing repeated prompt patterns. The difference is durability: configuration, tools, memory, triggers, sharing rules, version history, logs — plus reusable **Skills** and schedulable **Playbooks/Routines**.
-*Lumen opportunity:* agent templates for common loops; NL creation with deterministic controls; require observability and approval policies before agents run unattended.
+*Beacon opportunity:* agent templates for common loops; NL creation with deterministic controls; require observability and approval policies before agents run unattended.
 
 ### 4.5 From single assistant to agent fleet
 As organizations create many agents, they need an **AgentOps control plane**: inventory, ownership, status, permissions, costs, evaluations, incidents, audit logs, per-agent identity, runtime monitoring, deprecation.
-*Lumen opportunity:* design for agent lifecycle from the start; every agent owned, scoped, versioned, observable, and disable-able; "who can run/build/share this agent" is a first-class setting.
+*Beacon opportunity:* design for agent lifecycle from the start; every agent owned, scoped, versioned, observable, and disable-able; "who can run/build/share this agent" is a first-class setting.
 
 ### 4.6 From retrieval quality to knowledge trust
 Good retrieval over bad knowledge still produces bad outcomes. Verification, Trust Scores, and knowledge maintenance are becoming part of AI operations.
-*Lumen opportunity:* show verification state, owner, freshness, and conflict warnings; route stale/low-confidence answers to owners; let agents draft knowledge updates but require owner approval.
+*Beacon opportunity:* show verification state, owner, freshness, and conflict warnings; route stale/low-confidence answers to owners; let agents draft knowledge updates but require owner approval.
 
 ### 4.7 From standalone tools to consolidated platforms
 ServiceNow→Moveworks, Workday→Sana, Automation Anywhere→Aisera signal that buyers increasingly want agentic AI inside platforms they already own. Independent products differentiate on **horizontal breadth, openness/interoperability, governance depth, or vertical depth**.
-*Lumen consideration:* be deliberately horizontal and interoperable (open protocols, MCP-style access), or pick a defensible vertical wedge — but plan for a world where suite vendors bundle "good enough" agents.
+*Beacon consideration:* be deliberately horizontal and interoperable (open protocols, MCP-style access), or pick a defensible vertical wedge — but plan for a world where suite vendors bundle "good enough" agents.
 
 ---
 
@@ -233,11 +233,11 @@ Vendor-reported; treat as directional marketing, not audited fact.
 
 ---
 
-## 8. Candidate Product Shape For Lumen Copilot
+## 8. Candidate Product Shape For Beacon
 
 Research-derived candidate, **not** a final decision (OD-1 stays open).
 
-**Core promise.** Lumen Copilot helps knowledge workers turn scattered company context into verified answers, finished work artifacts, and governed automations.
+**Core promise.** Beacon helps knowledge workers turn scattered company context into verified answers, finished work artifacts, and governed automations.
 
 **Core users.** Knowledge workers losing time finding context, drafting updates, and chasing follow-ups; managers/executives needing briefs and decision support; operations owners running repeatable processes; knowledge managers needing trusted/fresh knowledge; admins/security governing AI access and agents; builders/developers extending the system.
 

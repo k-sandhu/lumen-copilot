@@ -10,13 +10,13 @@ test('app shell and system-status panel render', async ({ page }) => {
   await page.goto('/');
 
   // Header / shell. `exact` disambiguates the <h1> title from the welcome
-  // note's "Lumen Copilot — skeleton" <h2>.
-  await expect(page.getByRole('heading', { name: 'Lumen Copilot', exact: true })).toBeVisible();
+  // note's "Beacon — skeleton" <h2>.
+  await expect(page.getByRole('heading', { name: 'Beacon', exact: true })).toBeVisible();
   await expect(page.getByText('Backend status')).toBeVisible();
 
   // The rail welcome note rendered through the markdown pipeline.
   await expect(
-    page.getByRole('heading', { name: /Lumen Copilot — skeleton/i }),
+    page.getByRole('heading', { name: /Beacon — skeleton/i }),
   ).toBeVisible();
 
   // The status panel resolves to one of its real states — never stays blank.

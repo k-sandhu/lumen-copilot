@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Agent contract (AGENTS.md)
-    url: https://github.com/k-sandhu/lumen-copilot/blob/main/AGENTS.md
+    url: https://github.com/k-sandhu/beacon/blob/main/AGENTS.md
     about: Read the contract before filing or working an issue.
   - name: How work is tracked
-    url: https://github.com/k-sandhu/lumen-copilot/blob/main/docs/WORK_TRACKING.md
+    url: https://github.com/k-sandhu/beacon/blob/main/docs/WORK_TRACKING.md
     about: Branch model, the numbered workflow, and the story→issue pipeline.

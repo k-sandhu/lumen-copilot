@@ -26,7 +26,7 @@ This spec leaves OD-1 (product scope) and OD-2 (tech stack) explicitly open and 
 - Be adoptable **incrementally** — features, cross-cuttings, and spikes can be created under the new model while legacy `type:user-story` issues are gradually closed or re-parented.
 
 **Non-goals**
-- Choosing the product mission, scope, or "what is Lumen Copilot" (still OD-1, [docs/specs/0001-open-decisions.md](docs/specs/0001-open-decisions.md)).
+- Choosing the product mission, scope, or "what is Beacon" (still OD-1, [docs/specs/0001-open-decisions.md](docs/specs/0001-open-decisions.md)).
 - Choosing the tech stack (still OD-2).
 - Drawing architecture boundaries (still OD-3) — the spec only *invokes* the adapter principle; it does not draw the lines.
 - Replacing `AGENTS.md` or any contract file. This spec defers to [AGENTS.md](../AGENTS.md) on all process rules.
@@ -193,7 +193,7 @@ Backlog  →  Ready  →  In Progress  →  In Review  →  Blocked  →  Done
 | **Blocked** | assignee set, waiting on a `blocked-by`; comment explains why | no |
 | **Done** | PR merged, ACs checked | n/a |
 
-The current board (#7 "Lumen Copilot") ships with `Todo / In Progress / Done`; widening the field is a one-time admin action.
+The current board (#7 "Beacon") ships with `Todo / In Progress / Done`; widening the field is a one-time admin action.
 
 ## 8. WIP rules (so parallelism doesn't degrade into thrash)
 

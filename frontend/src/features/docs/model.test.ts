@@ -14,7 +14,7 @@ const RAW: Record<string, string> = {
   'docs/WORK_TRACKING.md': '# Work tracking\n',
   'AGENTS.md': '# AGENTS — contract\n\nlinks docs/specs/0001-open-decisions.md',
   'backend/AGENTS.md': '# backend contract\n',
-  'README.md': '# Lumen Copilot\n',
+  'README.md': '# Beacon\n',
 };
 
 function getBySlug(docs: ReturnType<typeof parseDocs>, slug: string) {

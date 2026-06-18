@@ -3,9 +3,9 @@
 Status: dry-run planning document.
 Prepared by: gpt-5.5.
 Date: 2026-06-16.
-Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
+Tracking issue: https://github.com/k-sandhu/beacon/issues/1.
 
-This document captures a dry-run plan for structuring the Lumen Copilot feature backlog so many people and AI agents can work in parallel without colliding. It is based on the current product discovery docs and issue-generation script. It does not create issues, assign work, close product-scope decisions, or approve implementation.
+This document captures a dry-run plan for structuring the Beacon feature backlog so many people and AI agents can work in parallel without colliding. It is based on the current product discovery docs and issue-generation script. It does not create issues, assign work, close product-scope decisions, or approve implementation.
 
 ## Current State
 

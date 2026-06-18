@@ -1,14 +1,14 @@
 # Spec 0003 — Product Scope & Mission (closes OD-1)
 
-> Closes **OD-1** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-17**. This spec defines *what Lumen Copilot is*, the *first buildable scope*, and the *decision-filters* that let an agent make novel calls aligned with intent (it fills [AGENTS.md](../../AGENTS.md) §2).
+> Closes **OD-1** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-17**. This spec defines *what Beacon is*, the *first buildable scope*, and the *decision-filters* that let an agent make novel calls aligned with intent (it fills [AGENTS.md](../../AGENTS.md) §2).
 
-**Status:** adopted. **Last reviewed:** 2026-06-17. **Tracking issue:** [#11](https://github.com/k-sandhu/lumen-copilot/issues/11).
+**Status:** adopted. **Last reviewed:** 2026-06-17. **Tracking issue:** [#11](https://github.com/k-sandhu/beacon/issues/11).
 
 ---
 
 ## 1. Mission
 
-**Lumen Copilot is a multi-tenant enterprise Work-AI assistant** — a *grounded chat assistant* that answers, summarizes, and drafts over each user's **connected enterprise sources** and **uploaded documents**, where every answer is **permissioned, cited, and auditable**.
+**Beacon is a multi-tenant enterprise Work-AI assistant** — a *grounded chat assistant* that answers, summarizes, and drafts over each user's **connected enterprise sources** and **uploaded documents**, where every answer is **permissioned, cited, and auditable**.
 
 It does not replace the systems where work lives; it sits across them, retrieves only what the asking user is already allowed to see, and grounds every response in verifiable sources.
 
@@ -67,7 +67,7 @@ Primary (MVP — the people who use or operate the assistant):
 
 Full persona legend (23 tags) lives in [user-stories.md](../product/user-stories.md); the rest are roadmap personas attached to out-of-scope epics.
 
-## 6. Non-goals (what Lumen Copilot is *not*)
+## 6. Non-goals (what Beacon is *not*)
 
 - **Not a system of record.** It reads across sources; it does not own the canonical copy of anything.
 - **Not an autonomous actor in the MVP.** It answers and drafts; it does not take consequential action without approval.
@@ -89,4 +89,4 @@ This scope maps onto the existing M0–M5 ladder ([consolidated-structure.md](..
 
 - **Decided by:** human sponsor + Claude Opus 4.8, in session, 2026-06-17.
 - **Inputs:** the discovery corpus in `docs/product/` (16 epics / 136 stories, competitive research, consolidated structure).
-- **Traceability:** issue [#11](https://github.com/k-sandhu/lumen-copilot/issues/11); strikes OD-1 in [0001-open-decisions.md](0001-open-decisions.md); fills [AGENTS.md](../../AGENTS.md) §2.
+- **Traceability:** issue [#11](https://github.com/k-sandhu/beacon/issues/11); strikes OD-1 in [0001-open-decisions.md](0001-open-decisions.md); fills [AGENTS.md](../../AGENTS.md) §2.

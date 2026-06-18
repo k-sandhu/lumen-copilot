@@ -2,9 +2,9 @@
 
 Status: candidate product-scope input.
 Last updated: 2026-06-16.
-Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
+Tracking issue: https://github.com/k-sandhu/beacon/issues/1.
 
-These docs collect research and candidate user stories for Lumen Copilot. They are intentionally written as product discovery input, not as final product scope. They do not close OD-1 in `docs/specs/0001-open-decisions.md`; that still requires human confirmation and a dedicated scope/spec decision.
+These docs collect research and candidate user stories for Beacon. They are intentionally written as product discovery input, not as final product scope. They do not close OD-1 in `docs/specs/0001-open-decisions.md`; that still requires human confirmation and a dedicated scope/spec decision.
 
 ## Files
 
