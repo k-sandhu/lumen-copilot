@@ -88,6 +88,20 @@ def get_object_store() -> ObjectStore:
     return ObjectStore(get_settings())
 
 
+def get_object_store_dep() -> ObjectStore:
+    """Object-store dependency (delegates to the cached singleton).
+
+    A thin injectable wrapper over :func:`get_object_store` so a router obtains
+    the #22 adapter by injection (and tests can override it with an in-memory
+    fake via ``app.dependency_overrides``, keeping object-store-dependent API
+    tests offline-safe). The adapter remains the single object-store caller.
+    """
+    return get_object_store()
+
+
+ObjectStoreDep = Annotated[ObjectStore, Depends(get_object_store_dep)]
+
+
 # --- Identity seam (CC-3 / spec 0004 §2.3) ---------------------------------
 #
 # ``auto_error=False`` so a missing Authorization header reaches our handler and
