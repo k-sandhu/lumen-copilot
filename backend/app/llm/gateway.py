@@ -212,11 +212,17 @@ class LLMGateway:
         import litellm  # lazy
 
         model_id = model or self._settings.llm_embedding_model
+        # OpenRouter embeddings ride its OpenAI-compatible endpoint (#32): send
+        # api_base when configured. Chat does not — it uses the native route.
+        extra: dict[str, Any] = {}
+        if self._settings.llm_embedding_api_base:
+            extra["api_base"] = self._settings.llm_embedding_api_base
         try:
             response = await litellm.aembedding(
                 model=model_id,
                 input=list(inputs),
                 timeout=self._settings.llm_timeout_seconds,
+                **extra,
                 **self._credentials(),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError

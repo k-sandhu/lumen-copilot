@@ -61,7 +61,8 @@ def _settings(**overrides: str) -> Settings:
         **_BASE_ENV,
         "OPENROUTER_API_KEY": "sk-test-key",
         "LLM_MODEL": "openrouter/openai/gpt-4o-mini",
-        "LLM_EMBEDDING_MODEL": "openrouter/openai/text-embedding-3-small",
+        "LLM_EMBEDDING_MODEL": "openai/baai/bge-m3",
+        "LLM_EMBEDDING_API_BASE": "https://openrouter.ai/api/v1",
         "LLM_TIMEOUT_SECONDS": "60",
         **overrides,
     }
@@ -296,10 +297,12 @@ async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyP
     assert result[0].vector == [0.1, 0.2, 0.3]
     # AC-3 + AC-4: batched single call, model + creds from config.
     assert captured["input"] == ["alpha", "beta"]
-    assert captured["model"] == "openrouter/openai/text-embedding-3-small"
+    assert captured["model"] == "openai/baai/bge-m3"
     assert captured["api_key"] == "sk-test-key"
     assert captured["timeout"] == 60.0
-    assert result[0].model == "openrouter/openai/text-embedding-3-small"
+    # #32: embeddings ride OpenRouter's OpenAI-compatible endpoint via api_base.
+    assert captured["api_base"] == "https://openrouter.ai/api/v1"
+    assert result[0].model == "openai/baai/bge-m3"
 
 
 async def test_embed_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,6 +317,25 @@ async def test_embed_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatc
 
     await gw.embed(["x"], model="openrouter/voyage/voyage-3")
     assert captured["model"] == "openrouter/voyage/voyage-3"
+
+
+async def test_embed_omits_api_base_when_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No api_base override when LLM_EMBEDDING_API_BASE is blank (#32).
+
+    Blanking the base lets a directly-routed embedding model (e.g. a native
+    LiteLLM provider) be used without the OpenRouter OpenAI-compatible shim.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        captured.update(kwargs)
+        return _EmbeddingResponse([[1.0]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings(LLM_EMBEDDING_API_BASE=""))
+
+    await gw.embed(["x"])
+    assert "api_base" not in captured
 
 
 # --- AC-6: blank key -> DependencyError, no network, no hang ----------------
@@ -533,22 +555,15 @@ async def test_live_openrouter_chat_smoke() -> None:
 async def test_live_embed_smoke() -> None:
     """One tiny real embedding call (skipped without a key).
 
-    NOTE: OpenRouter has **no embeddings API** — LiteLLM raises
-    "No valid embedding model args passed in" for an ``openrouter/...`` embedding
-    model. So this smoke runs only when ``LLM_EMBEDDING_MODEL`` is a non-OpenRouter
-    model id that LiteLLM can route directly (e.g. ``openai/...`` /
-    ``voyage/...`` with the matching key). Picking the embedding provider/model
-    and its credential is deferred to a follow-up (see PR notes); the gateway
-    itself is provider-agnostic and config-driven.
+    OpenRouter serves embeddings on an OpenAI-compatible endpoint (issue #32);
+    the gateway routes ``LLM_EMBEDDING_MODEL`` (default ``openai/baai/bge-m3``)
+    through ``LLM_EMBEDDING_API_BASE``. The returned vector width must equal the
+    configured ``LLM_EMBEDDING_DIMENSIONS`` so a model/dim mismatch fails here,
+    not deep in ingestion.
     """
     settings = Settings()  # type: ignore[call-arg]
-    if settings.llm_embedding_model.startswith("openrouter/"):
-        pytest.skip(
-            "LLM_EMBEDDING_MODEL is OpenRouter-routed, which has no embeddings "
-            "API — set a direct embedding model + key to run this smoke."
-        )
     gw = LLMGateway(settings)
 
     embeddings = await gw.embed(["lumen copilot smoke test"])
     assert len(embeddings) == 1
-    assert len(embeddings[0].vector) > 0
+    assert len(embeddings[0].vector) == settings.llm_embedding_dimensions
