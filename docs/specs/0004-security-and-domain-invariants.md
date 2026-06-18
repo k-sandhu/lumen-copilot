@@ -1,0 +1,99 @@
+# Spec 0004 — Security & Domain Invariants (closes OD-4)
+
+> Closes **OD-4** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-18**. Derives the concrete security/domain invariants from the decided scope ([spec 0003](0003-product-scope-and-mission.md)) and the landed stack/boundaries ([ADR-0003](../architecture/0003-application-stack.md), [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md)), and turns each invariant into a **negative-test category** (fills [AGENTS.md](../../AGENTS.md) §9).
+
+**Status:** adopted. **Last reviewed:** 2026-06-18. **Tracking issue:** [#14](https://github.com/k-sandhu/lumen-copilot/issues/14).
+
+---
+
+## 1. Purpose & precedence
+
+The four mission filters ([spec 0003](0003-product-scope-and-mission.md) §2 — *permissioned / cited / read-before-write / auditable*) are intent. This spec turns them into **enforceable invariants**: each names a single chokepoint module (per [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) §"Cross-cutting chokepoints") and a **negative test** that fails when the invariant is violated. Per `AGENTS.md` §4, these invariants sit **above** specs/ADRs/code: when anything conflicts with an invariant here, the invariant wins.
+
+**One rule governs the whole spec: deny by default.** Absence of an explicit grant is denial — for tenants, for documents, and for actions.
+
+This spec is the source of truth for `AGENTS.md` §9's negative-test set. It **closes OD-4 in full**; sub-decisions whose *implementation* is deferred past the MVP (SSO IdP wiring, connector-ACL mirroring, audit hash-chain) are **decided here** with a `revisit-at-implementation` note so nothing is left to silent defaulting.
+
+## 2. Decisions
+
+### 2.1 Tenancy isolation (CC-2, [#17])
+
+- **Model: single PostgreSQL database, row-level tenancy.** Every tenant-scoped table carries a non-null `tenant_id` (FK → `tenants.id`). No schema-per-tenant, no DB-per-tenant (premature for the MVP; row-level matches the shared-infra deployment in [spec 0003](0003-product-scope-and-mission.md) §3).
+- **Primary enforcement — repository predicate.** All relational access goes through `db/` repositories that require a tenant scope; a query against a tenant-scoped table with no `tenant_id` predicate is a boundary violation (review now; smoke-grep once wired). Repositories take the resolved tenant from `auth/`, never from request-body input.
+- **Defense in depth — Postgres RLS.** Enable row-level security on tenant-scoped tables with a policy keyed off a per-request session GUC (`SET LOCAL app.tenant_id`). RLS is the backstop if a predicate is ever forgotten. *(Decided; may land in a follow-up migration within M0 — `revisit-at-implementation`.)*
+- **Vectors are tenant-scoped too:** pgvector rows carry `tenant_id`; every retrieval query filters on it (§2.2).
+- **No cross-tenant learning or leakage** (non-goal, [spec 0003](0003-product-scope-and-mission.md) §6): tenant content never trains shared models nor crosses the boundary.
+- **Existence non-disclosure:** a cross-tenant resource access returns **404**, never 403 — tenant A must not learn that tenant B's resource exists.
+
+### 2.2 Permission / ACL model (CC-1, [#18])
+
+- **"Permitted to see"** = `same tenant` **AND** `requester ∈ resource.effective_allow_set`, where the allow-set is computed from **ownership + explicit grants + mirrored source ACL**. The same predicate gates **retrieval candidates and citations** — a citation can never point to a passage the user could not have retrieved.
+- **Uploaded documents (MVP):** each document has an `owner_id` within its `tenant_id`. **Default: a user sees only their own documents.** Sharing is explicit, via a `grants` table (`principal → resource → role`); principals are `user | group | role`, resources are `collection | document`. A grant on a collection cascades to its documents.
+- **Connector documents:** at ingestion each external document stores a **mirrored ACL principal-set** (the source's allow-list, normalized to tenant principal IDs), refreshed on sync. Retrieval intersects the requester's principal set with the document's allowed set. **Stale or unknown ACL ⇒ deny** (configurable freshness window). *(Connectors are post-MVP to build — [spec 0003](0003-product-scope-and-mission.md) §3 — but the model is decided here; `revisit-at-implementation`.)*
+- **Single chokepoint:** the permission filter lives **inside `retrieval/`**, keyed off the identity resolved in `auth/`. There is **no retrieval path that skips the filter** (ADR-0004). Citations inherit the guarantee because they are drawn only from retrieved passages.
+- **Never escalates:** the system mirrors and enforces source ACLs; it never grants access a source would deny ([spec 0003](0003-product-scope-and-mission.md) §6).
+
+### 2.3 Identity & authentication (CC-3, [#19])
+
+- **MVP — app-managed identity.** Email + password (**Argon2id** hashing, per-user salt). Auth issues a short-lived **access JWT** (≤ 15 min) + a rotating **refresh token** (httpOnly, revocable). Token claims: `sub` (user_id), `tenant_id`, `roles`. **Tokens are validated only in `auth/`** (ADR-0004); no other module decodes a token or trusts a client-supplied identity/tenant.
+- **One principal → one tenant** (MVP). Tenant is bound at the token, never taken from request input.
+- **Roles (MVP RBAC):** `member` (KW/NH/MGR/EXEC — chat, own docs), `admin` (ADM — tenant config, user management), `security` (SEC — read the audit trail). Role checks live in `services/`.
+- **End-state SSO — decided default: OIDC via Keycloak.** When SSO lands, identity federates through an external OIDC provider; **Keycloak** is the recorded default (mature OSS, realm-per-tenant fits multi-tenancy, OSS-only per ADR-0003). The `auth/` adapter abstracts the token source, so app-managed → OIDC is a localized swap (ADR-0004 adapter rule). *(`revisit-at-implementation` when SSO is scheduled; app-managed remains the supported fallback.)*
+
+### 2.4 Audit taxonomy (CC-8, [#23])
+
+- **One append-only sink** (ADR-0004 "audit through one sink"). Ops telemetry (structlog/OTel/Prometheus) is **separate** from this product audit log ([backend/AGENTS.md](../../backend/AGENTS.md)).
+- **Event types (MVP):** `auth.login`, `auth.login_failed`, `auth.logout`, `collection.created`, `document.uploaded`, `document.viewed`, `document.downloaded`, `document.deleted`, `retrieval.query`, `answer.generated`, `permission.denied`, and (reserved for the write tiers) `action.requested|approved|executed`.
+- **Required fields (every event):** `event_id` (uuid), `ts` (UTC, ISO-8601), `tenant_id`, `actor_id` (or `system`/`anonymous`), `action`, `resource_type`, `resource_id`, `outcome` (`allowed|denied|error`), `request_id` (correlation), `source_ip`, `metadata` (json). For `retrieval.query`/`answer.generated` add: query hash, retrieved document IDs, model ID, citation count.
+- **Retention:** ≥ **365 days** default (per-tenant configurable later); events are never deleted before retention elapses.
+- **Tamper-evidence:** the table is append-only — the application DB role holds **no `UPDATE`/`DELETE`** grant on it. A per-event **hash-chain** (`hash = H(prev_hash ‖ event)`) is the decided integrity mechanism. *(Append-only is required at MVP; the hash-chain may land in a follow-up within M0 — `revisit-at-implementation`.)*
+
+### 2.5 Read-before-write — risk tiers (mission filter #3)
+
+| Tier | Meaning | Examples | Gate |
+|---|---|---|---|
+| **T0** | Read-only | retrieve, answer, summarize, draft-in-chat | none — **the entire MVP is T0** |
+| **T1** | Reversible internal write | create collection, upload/delete *own* document, rename | authorized owner; audited; no extra approval |
+| **T2** | Consequential / external write | write-back to a source, send, external share | **explicit human approval** in-session + stated risk tier — **out of MVP** (E5/CC-7) |
+| **T3** | Destructive / irreversible external | bulk delete, change source permissions | approval **+** confirmation — out of MVP |
+
+- **Invariant:** no T2/T3 action executes without a recorded approval. The MVP asserts the *negative*: there is **no code path** that performs a T2+ action, and any attempt is rejected.
+
+## 3. Invariants → negative-test categories
+
+This table is the canonical set that `AGENTS.md` §9 references. Every feature touching a chokepoint ships the matching negative test (test-first, `AGENTS.md` §9).
+
+| ID | Invariant | Chokepoint | Negative test (must fail closed) |
+|---|---|---|---|
+| **INV-1 Tenancy** | A request in tenant A never reads/writes tenant B data. | `db/` predicate (+ RLS backstop) | cross-tenant read/write → **404** (not 403); no rows returned |
+| **INV-2 Permission** | A user receives only passages/documents in their effective allow-set. | `retrieval/` filter (keyed off `auth/`) | unauthorized retrieval → passage **excluded**; direct fetch → **404** |
+| **INV-3 Citation integrity** | No asserted fact without a resolvable citation to a **permitted** passage. | chat runtime (`services/` + `retrieval/`) | answer with unsourced/forbidden citation → **blocked/flagged**; prefer "couldn't find it" |
+| **INV-4 Authn** | No access without a valid, unexpired token bound to a tenant. | `auth/` | missing/expired/invalid token → **401** |
+| **INV-5 Authz (role)** | Actions require the role that authorizes them. | `services/` | wrong-role (e.g. member → admin route, non-security → audit) → **403** |
+| **INV-6 Audit** | Every retrieval/answer/auth/denied-access emits an audit event. | one audit sink | action with no emitted audit event → **fail** |
+| **INV-7 Read-before-write** | No consequential (T2+) action without recorded approval. | approval-gated action path | unapproved T2+ action → **forbidden** |
+| **INV-8 Input/state** | Malformed input and illegal state transitions are rejected at the boundary. | `api/` + `domain/` | malformed body → **422**; illegal transition → **409/422** |
+
+These extend the existing `AGENTS.md` §9 baseline (unauthorized → denied, wrong-role → forbidden, illegal transition, malformed input, broken invariant) with the concrete tenancy/permission/citation/audit categories above.
+
+## 4. Data-model implications (guidance for the DB-models issue)
+
+Non-binding shapes that satisfy the invariants; the migration issue refines them:
+
+- **Every tenant-scoped row carries `tenant_id` (non-null, FK, indexed).** Permission-sensitive rows also carry `owner_id`.
+- `tenants`, `users(tenant_id, email, password_hash, roles)`, `collections(tenant_id, owner_id)`, `documents(tenant_id, owner_id, collection_id, source, mime, …)`, `grants(tenant_id, resource_type, resource_id, principal_type, principal_id, role)`, `chunks(tenant_id, document_id, ord, text, embedding vector, char_start, char_end)`, `chat_sessions(tenant_id, owner_id, model)`, `messages(tenant_id, session_id, role, content)`, `citations(tenant_id, message_id, chunk_id, char_start, char_end)`, `audit_events(…fields from §2.4…)`.
+- **Vector + ACL/metadata live in the same row** ([backend/AGENTS.md](../../backend/AGENTS.md)) so permission-aware retrieval is one `WHERE` clause: `WHERE tenant_id = :t AND <allow-set predicate>`.
+
+## 5. What this closes / leaves open
+
+- **Closes OD-4 in full:** tenancy model, permission/ACL model, identity & authn (incl. the SSO IdP-technology default ADR-0003 deferred to CC-3), audit taxonomy, and read-before-write tiers — each with an invariant and a negative-test category.
+- **No part of OD-4 remains "ask, don't default."** Items marked `revisit-at-implementation` (RLS backstop, connector-ACL mirroring, SSO/OIDC wiring, audit hash-chain) are **decided**; only their build is sequenced later, and each will reconfirm against this spec when claimed.
+- **Feeds:** `AGENTS.md` §9 (negative-test set — updated in the same change); strikes **OD-4** in [0001-open-decisions.md](0001-open-decisions.md).
+
+---
+
+## Provenance
+
+- **Decided by:** human sponsor + Claude Opus 4.8, in session, 2026-06-18.
+- **Inputs:** [spec 0003](0003-product-scope-and-mission.md) (scope & mission filters), [ADR-0003](../architecture/0003-application-stack.md) (stack), [ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) (boundaries & chokepoints), the seed invariants in issue [#14](https://github.com/k-sandhu/lumen-copilot/issues/14).
+- **Traceability:** issue [#14](https://github.com/k-sandhu/lumen-copilot/issues/14); strikes OD-4 in [0001-open-decisions.md](0001-open-decisions.md); fills [AGENTS.md](../../AGENTS.md) §9. Unblocks CC-2 [#17], CC-1 [#18], CC-3 [#19], CC-8 [#23], CC-4 [#20].
