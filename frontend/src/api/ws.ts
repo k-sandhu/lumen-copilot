@@ -13,6 +13,7 @@
  * cancellable (close() stops the socket AND any pending reconnect).
  */
 import { WS_BASE_URL } from './env';
+import { getAccessToken } from './token';
 import type { WsEnvelope } from './types';
 
 export type WsConnectionState = 'connecting' | 'open' | 'closing' | 'closed';
@@ -34,6 +35,11 @@ export interface WsClientOptions {
   backoffMaxMs?: number;
   /** Override base URL resolution (tests). Defaults to WS_BASE_URL. */
   baseUrl?: string;
+  /**
+   * Opt out of carrying the bearer access token on the handshake (for public
+   * streams). Authenticated streams (the default) append `?access_token=…`.
+   */
+  tokenless?: boolean;
 }
 
 const ENVELOPE_TYPES = new Set(['start', 'delta', 'event', 'done', 'error']);
@@ -59,13 +65,19 @@ export function parseEnvelope(raw: string): WsEnvelope {
 /**
  * Resolve a ws:// or wss:// URL from a same-origin base path. In the browser we
  * derive scheme + host from `location`; tests can inject an absolute base.
+ *
+ * AUTH (issue #48): the browser WebSocket API cannot set an `Authorization`
+ * header on the handshake, so the bearer access token is appended as an
+ * `access_token` query param when present — the backend validates it in
+ * `auth/` exactly as it validates the REST bearer (spec 0004 §2.3 / INV-4).
  */
-export function resolveWsUrl(base: string, path: string): string {
+export function resolveWsUrl(base: string, path: string, token?: string | null): string {
   const suffix = path.startsWith('/') ? path : `/${path}`;
+  const query = token ? `?access_token=${encodeURIComponent(token)}` : '';
 
   // Already absolute (e.g. ws://host/...): just append the path.
   if (base.startsWith('ws://') || base.startsWith('wss://')) {
-    return `${base}${suffix}`;
+    return `${base}${suffix}${query}`;
   }
 
   // Same-origin path like "/ws": derive from the page location.
@@ -73,7 +85,7 @@ export function resolveWsUrl(base: string, path: string): string {
   const scheme = loc && loc.protocol === 'https:' ? 'wss' : 'ws';
   const host = loc?.host ?? 'localhost:5173';
   const normalizedBase = base.startsWith('/') ? base : `/${base}`;
-  return `${scheme}://${host}${normalizedBase}${suffix}`;
+  return `${scheme}://${host}${normalizedBase}${suffix}${query}`;
 }
 
 export class WsClient {
@@ -83,10 +95,7 @@ export class WsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manuallyClosed = false;
 
-  private readonly url: string;
-  private readonly opts: Required<
-    Pick<WsClientOptions, 'backoffBaseMs' | 'backoffMaxMs'>
-  > &
+  private readonly opts: Required<Pick<WsClientOptions, 'backoffBaseMs' | 'backoffMaxMs'>> &
     WsClientOptions;
 
   constructor(options: WsClientOptions) {
@@ -95,7 +104,16 @@ export class WsClient {
       backoffMaxMs: 10_000,
       ...options,
     };
-    this.url = resolveWsUrl(options.baseUrl ?? WS_BASE_URL, options.path);
+  }
+
+  /**
+   * Build the handshake URL at connect time so the CURRENT access token is used
+   * (a silent refresh may have replaced it since construction). A per-client
+   * `tokenless` flag opts public streams out of carrying a token.
+   */
+  private buildUrl(): string {
+    const token = this.opts.tokenless ? null : getAccessToken();
+    return resolveWsUrl(this.opts.baseUrl ?? WS_BASE_URL, this.opts.path, token);
   }
 
   getState(): WsConnectionState {
@@ -133,7 +151,7 @@ export class WsClient {
     this.setState('connecting');
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.url);
+      socket = new WebSocket(this.buildUrl());
     } catch {
       // Construction can throw on a malformed URL — treat as a closed cycle.
       this.scheduleReconnect();
