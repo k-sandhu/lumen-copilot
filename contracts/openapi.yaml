@@ -258,11 +258,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Document" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Target collection not found (or not permitted).
-          content:
-            application/problem+json:
-              schema: { $ref: "#/components/schemas/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "422": { $ref: "#/components/responses/ValidationError" }
@@ -307,7 +303,13 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
-        "302": { description: Redirect to a short-TTL presigned URL. }
+        "302":
+          description: Redirect to a short-TTL presigned URL.
+          headers:
+            Location:
+              required: true
+              description: Short-TTL presigned URL for the object.
+              schema: { type: string, format: uri }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
