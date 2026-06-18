@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
   "title": "Lumen Copilot WebSocket envelope",
-  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads (chat tokens, citations, tool calls) are defined by their cross-cuttings (CC-6, CC-11) and slotted into `data` per `type` — do not pre-invent them here. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error).",
+  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
   "$defs": {
     "BaseEnvelope": {
       "type": "object",
@@ -15,7 +15,7 @@
         },
         "streamId": {
           "type": "string",
-          "description": "Correlates all messages of one logical stream."
+          "description": "Correlates all messages of one logical stream (the chat send returns this as stream_id)."
         },
         "seq": {
           "type": "integer",
@@ -35,7 +35,7 @@
         "type": { "const": "start" },
         "data": {
           "type": "object",
-          "description": "Stream-open metadata; shape defined per feature."
+          "description": "Stream-open metadata; shape defined per feature (chat: ChatStartData)."
         }
       },
       "required": ["type", "streamId", "seq"]
@@ -45,7 +45,7 @@
       "properties": {
         "type": { "const": "delta" },
         "data": {
-          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature."
+          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta)."
         }
       },
       "required": ["type", "streamId", "seq", "data"]
@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name (e.g. citation, tool_call). Vocabulary defined per feature."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result."
         },
         "data": {}
       },
@@ -68,7 +68,7 @@
         "type": { "const": "done" },
         "data": {
           "type": "object",
-          "description": "Terminal success summary; shape defined per feature."
+          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData)."
         }
       },
       "required": ["type", "streamId", "seq"]
@@ -90,8 +90,108 @@
         }
       },
       "required": ["type", "streamId", "seq", "problem"]
+    },
+
+    "ChatStartData": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`start.data` for a chat answer stream.",
+      "required": ["sessionId", "messageId", "model"],
+      "properties": {
+        "sessionId": { "type": "string", "format": "uuid" },
+        "messageId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Id the in-progress assistant message will be persisted under."
+        },
+        "model": { "type": "string", "description": "Model id producing this answer." }
+      }
+    },
+    "ChatTokenDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`delta.data` — one streamed chunk of the assistant answer.",
+      "required": ["text"],
+      "properties": { "text": { "type": "string" } }
+    },
+    "ChatCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=citation. Mirrors openapi Citation (spec 0004 INV-3): a permitted passage the answer cites. The UI renders it as a clickable reference resolving to the document + span.",
+      "required": ["id", "documentId", "documentName", "chunkId", "snippet", "charStart", "charEnd"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "documentId": { "type": "string", "format": "uuid" },
+        "documentName": { "type": "string" },
+        "chunkId": { "type": "string", "format": "uuid" },
+        "snippet": { "type": "string" },
+        "charStart": { "type": "integer", "minimum": 0 },
+        "charEnd": { "type": "integer", "minimum": 0 },
+        "score": { "type": "number" }
+      }
+    },
+    "ChatToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=tool_call — the agent invoked a retrieval tool (CC-6 #24). Surfaced so the UI can show 'searching…'. Permission-filtered inside retrieval/ (INV-2).",
+      "required": ["callId", "tool", "args"],
+      "properties": {
+        "callId": { "type": "string" },
+        "tool": {
+          "type": "string",
+          "description": "search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; get_document = fetch a permitted document's text.",
+          "enum": ["search_text", "search_documents", "get_document"]
+        },
+        "args": { "type": "object", "description": "Tool arguments (shape per tool)." }
+      }
+    },
+    "ChatToolResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=tool_result — outcome of a tool_call.",
+      "required": ["callId", "tool", "hitCount"],
+      "properties": {
+        "callId": { "type": "string" },
+        "tool": { "type": "string", "enum": ["search_text", "search_documents", "get_document"] },
+        "hitCount": { "type": "integer", "minimum": 0 },
+        "summary": { "type": "string", "description": "Optional human-readable result summary." }
+      }
+    },
+    "ChatDoneData": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`done.data` — terminal success summary for a chat answer.",
+      "required": ["messageId", "finishReason", "citationCount"],
+      "properties": {
+        "messageId": { "type": "string", "format": "uuid" },
+        "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter." },
+        "citationCount": { "type": "integer", "minimum": 0 },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "promptTokens": { "type": "integer", "minimum": 0 },
+            "completionTokens": { "type": "integer", "minimum": 0 },
+            "totalTokens": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
     }
   },
+
+  "x-chatStream": {
+    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) )* -> done(ChatDoneData) | error(Problem)",
+    "mapping": {
+      "start.data": "#/$defs/ChatStartData",
+      "delta.data": "#/$defs/ChatTokenDelta",
+      "event.data[name=citation]": "#/$defs/ChatCitation",
+      "event.data[name=tool_call]": "#/$defs/ChatToolCall",
+      "event.data[name=tool_result]": "#/$defs/ChatToolResult",
+      "done.data": "#/$defs/ChatDoneData"
+    }
+  },
+
   "oneOf": [
     { "$ref": "#/$defs/Start" },
     { "$ref": "#/$defs/Delta" },
