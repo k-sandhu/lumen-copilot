@@ -22,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InvalidTokenError, Principal, verify_access_token
 from app.core.config import Settings, get_settings
+from app.db.repositories import AuditEventRepository
 from app.db.session import get_sessionmaker
 from app.domain.entities import Role
 from app.llm import LLMGateway
+from app.services.audit import AuditSink
 from app.services.auth_service import require_role
 from app.storage import ObjectStore
 
@@ -50,6 +52,28 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+def make_audit_sink_factory(session: DbSession) -> Callable[[UUID], AuditSink]:
+    """Yield a factory that builds a tenant-scoped audit sink (CC-8, spec 0004 §2.4).
+
+    The product-audit sink (mission filter #4) must be tenant-scoped, but the
+    tenant is resolved per-request in ``auth/`` — a reserved seam (CC-3). So the
+    injectable is a **factory**: a feature that already holds the resolved
+    tenant calls ``make_sink(tenant_id)`` to get a sink bound to that tenant
+    over *this* request's session, then ``await sink.emit(...)``. The audit row
+    flushes within the request transaction, committing atomically with the
+    action it records. When ``current_tenant`` lands, a thin ``audit_sink``
+    dependency can close over it and call this directly.
+    """
+
+    def _make(tenant_id: UUID) -> AuditSink:
+        return AuditSink(AuditEventRepository(session, tenant_id))
+
+    return _make
+
+
+AuditSinkFactory = Annotated[Callable[[UUID], AuditSink], Depends(make_audit_sink_factory)]
 
 
 @lru_cache(maxsize=1)
