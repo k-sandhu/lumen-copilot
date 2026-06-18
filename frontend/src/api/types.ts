@@ -63,6 +63,76 @@ export interface CurrentUser {
   created_at: string;
 }
 
+// --- Collections (contracts/openapi.yaml §collections) ---
+
+/** POST /collections body. */
+export interface CollectionCreate {
+  name: string;
+  description?: string;
+}
+
+/** PATCH /collections/{id} body — at least one property required (minProperties: 1). */
+export interface CollectionUpdate {
+  name?: string;
+  description?: string;
+}
+
+/** A collection (folder grouping documents). */
+export interface Collection {
+  id: string;
+  name: string;
+  description?: string;
+  owner_id: string;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /collections — a cursor page of collections. */
+export interface CollectionList {
+  items: Collection[];
+  /** Cursor for the next page, or null when exhausted. */
+  next_cursor?: string | null;
+}
+
+// --- Documents (contracts/openapi.yaml §documents) ---
+
+/** Ingestion lifecycle (parse → chunk → embed). */
+export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+/** A document's metadata, including its ingestion status. */
+export interface Document {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  collection_id: string;
+  owner_id: string;
+  status: DocumentStatus;
+  /** Failure reason when status is failed. */
+  error?: string;
+  /** Number of indexed chunks (0 until ingestion completes). */
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /documents — a cursor page of documents. */
+export interface DocumentList {
+  items: Document[];
+  next_cursor?: string | null;
+}
+
+/** Query filters for GET /documents (collection / status / filename substring). */
+export interface DocumentListQuery {
+  collection_id?: string;
+  status?: DocumentStatus;
+  /** Filename substring (lexical, not semantic). */
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
 // --- Shared error model: Problem (RFC-9457 application/problem+json) ---
 export interface ProblemFieldError {
   field: string;

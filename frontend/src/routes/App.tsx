@@ -127,6 +127,7 @@ function AppShell() {
       {/* Floating links to the standalone developer pages (docs + features). */}
       <NavOverlay
         items={[
+          { to: '/documents', label: 'Documents', icon: '📁' },
           { to: '/docs', label: 'Documentation', icon: '📖' },
           { to: '/features', label: 'Features built', icon: '✨' },
         ]}
