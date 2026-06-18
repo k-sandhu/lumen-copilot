@@ -1,0 +1,119 @@
+"""Audit taxonomy + envelope validation — pure domain (issue #23, spec 0004 §2.4).
+
+These exercise the *policy* half of the audit sink with zero I/O: the event-type
+taxonomy is exactly the set spec 0004 §2.4 enumerates, the actor value object
+models user / system / anonymous principals, and ``validate_envelope`` is the
+fail-closed gate that rejects an event missing a required field **before** any
+write (the INV-6 negative is asserted at the service layer in
+``test_audit_sink.py``; here we pin the rule itself).
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from app.domain.audit import (
+    AUDIT_ACTIONS,
+    AuditAction,
+    AuditActor,
+    AuditEnvelopeError,
+    validate_envelope,
+)
+from app.domain.entities import AuditOutcome
+
+
+def test_taxonomy_is_exactly_spec_0004_set() -> None:
+    """The action enum is precisely the spec 0004 §2.4 taxonomy — no more, no less."""
+    assert {a.value for a in AuditAction} == {
+        "auth.login",
+        "auth.login_failed",
+        "auth.logout",
+        "collection.created",
+        "document.uploaded",
+        "document.viewed",
+        "document.downloaded",
+        "document.deleted",
+        "retrieval.query",
+        "answer.generated",
+        "permission.denied",
+        # Reserved for the write tiers (T2+) — present but unused at MVP.
+        "action.requested",
+        "action.approved",
+        "action.executed",
+    }
+
+
+def test_audit_actions_frozenset_mirrors_enum() -> None:
+    """The string convenience set mirrors the enum (used for cheap membership)."""
+    assert AUDIT_ACTIONS == frozenset(a.value for a in AuditAction)
+
+
+def test_actor_user_carries_id() -> None:
+    uid = uuid.uuid4()
+    actor = AuditActor.user(uid)
+    assert actor.actor_id == uid
+    assert not actor.is_system
+    assert not actor.is_anonymous
+    assert actor.label == str(uid)
+
+
+def test_actor_system_has_no_id() -> None:
+    actor = AuditActor.system()
+    assert actor.actor_id is None
+    assert actor.is_system
+    assert actor.label == "system"
+
+
+def test_actor_anonymous_has_no_id() -> None:
+    actor = AuditActor.anonymous()
+    assert actor.actor_id is None
+    assert actor.is_anonymous
+    assert actor.label == "anonymous"
+
+
+def _valid_kwargs() -> dict[str, object]:
+    return {
+        "tenant_id": uuid.uuid4(),
+        "action": AuditAction.RETRIEVAL_QUERY,
+        "resource_type": "query",
+        "outcome": AuditOutcome.ALLOWED,
+    }
+
+
+def test_validate_envelope_accepts_a_complete_event() -> None:
+    """A complete envelope passes the gate (returns None, raises nothing)."""
+    validate_envelope(**_valid_kwargs())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("missing", ["tenant_id", "action", "resource_type", "outcome"])
+def test_validate_envelope_rejects_a_missing_required_field(missing: str) -> None:
+    """INV-6 (policy): a missing required field is rejected *before* any write."""
+    kwargs = _valid_kwargs()
+    kwargs[missing] = None
+    with pytest.raises(AuditEnvelopeError) as excinfo:
+        validate_envelope(**kwargs)  # type: ignore[arg-type]
+    assert missing in str(excinfo.value)
+
+
+def test_validate_envelope_rejects_an_unknown_action_string() -> None:
+    """A free-text action outside the taxonomy is rejected (deny by default)."""
+    kwargs = _valid_kwargs()
+    kwargs["action"] = "totally.made.up"
+    with pytest.raises(AuditEnvelopeError):
+        validate_envelope(**kwargs)  # type: ignore[arg-type]
+
+
+def test_validate_envelope_rejects_a_blank_resource_type() -> None:
+    kwargs = _valid_kwargs()
+    kwargs["resource_type"] = "   "
+    with pytest.raises(AuditEnvelopeError):
+        validate_envelope(**kwargs)  # type: ignore[arg-type]
+
+
+def test_validate_envelope_accepts_action_as_string_in_taxonomy() -> None:
+    """A taxonomy string (not the enum) is accepted and normalised."""
+    kwargs = _valid_kwargs()
+    kwargs["action"] = "answer.generated"
+    validate_envelope(**kwargs)  # type: ignore[arg-type]
