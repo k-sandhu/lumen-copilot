@@ -182,6 +182,14 @@ class Settings(BaseSettings):
             return frozenset(item.strip() for item in value.split(",") if item.strip())
         return value
 
+    # When true (default), GET /documents/{id}/content responds 302 to a
+    # short-TTL presigned GET URL (CC-12, the contract's primary path) so the
+    # bytes transfer directly from storage, not through the API process. When
+    # false, the API streams the bytes inline (application/octet-stream) — useful
+    # where a redirect is undesirable (e.g. same-origin embedding). Both are
+    # contract-valid (the 200 and 302 responses are both defined).
+    document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
+
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     llm_model: str = Field(default="openrouter/openai/gpt-4o-mini", alias="LLM_MODEL")
