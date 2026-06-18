@@ -78,6 +78,25 @@ class User:
 
 
 @dataclass(frozen=True, slots=True)
+class RefreshToken:
+    """A rotating, revocable refresh-token record (spec 0004 §2.3).
+
+    The opaque token itself is never stored — only its hash (``token_hash``), so
+    a DB leak does not yield usable tokens. ``revoked_at`` set ⇒ unusable
+    (logout or rotation); ``expires_at`` caps its lifetime. One row per issued
+    token; refresh rotates by revoking the presented row and issuing a new one.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    user_id: UUID
+    token_hash: str
+    expires_at: datetime
+    created_at: datetime
+    revoked_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Collection:
     """A folder grouping a user's documents. Ownership-bearing (spec 0004 §2.2)."""
 
