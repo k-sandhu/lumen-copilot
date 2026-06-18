@@ -12,10 +12,77 @@ process refuses to boot misconfigured rather than failing deep in a request.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.domain.models import ModelTier
+
+
+class ChatModelSetting(BaseModel):
+    """One entry in the curated chat-model registry (issue #47, AC-2).
+
+    A typed config row, not a router constant: the picker registry is config so
+    adding/removing a model is an env change. Field-for-field the domain
+    :class:`~app.domain.models.ChatModel`; ``core`` keeps no dependency on
+    ``services``, so the service maps this to the domain type. ``tier`` is the
+    contract enum (frontier/fast/oss) and is validated on construction.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    tier: ModelTier
+    is_default: bool = False
+    description: str | None = None
+
+
+# Seed registry (issue #47 AC-2): curated, config-driven, exactly one default.
+# Ids are provider-qualified as the chat runtime expects (and as listed on
+# OpenRouter). Override wholesale via the CHAT_MODEL_REGISTRY env var (JSON).
+_DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
+    ChatModelSetting(
+        id="anthropic/claude-opus-4.8",
+        label="Claude Opus 4.8",
+        provider="anthropic",
+        tier=ModelTier.FRONTIER,
+        is_default=True,
+    ),
+    ChatModelSetting(
+        id="openai/gpt-5.5",
+        label="GPT-5.5",
+        provider="openai",
+        tier=ModelTier.FRONTIER,
+    ),
+    ChatModelSetting(
+        id="google/gemini-3.5-flash",
+        label="Gemini 3.5 Flash",
+        provider="google",
+        tier=ModelTier.FAST,
+    ),
+    ChatModelSetting(
+        id="anthropic/claude-haiku-4.5",
+        label="Claude Haiku 4.5",
+        provider="anthropic",
+        tier=ModelTier.FAST,
+    ),
+    ChatModelSetting(
+        id="deepseek/deepseek-v3.2",
+        label="DeepSeek V3.2",
+        provider="deepseek",
+        tier=ModelTier.OSS,
+    ),
+    ChatModelSetting(
+        id="qwen/qwen3.7-max",
+        label="Qwen3.7 Max",
+        provider="qwen",
+        tier=ModelTier.OSS,
+    ),
+)
 
 
 class Settings(BaseSettings):
@@ -141,6 +208,58 @@ class Settings(BaseSettings):
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
+
+    # --- Chat-model picker registry (issue #47) ---
+    # The curated set the picker offers (GET /models), grouped by tier. Config,
+    # not a router constant (AC-2): the default seed lives in code as the typed
+    # _DEFAULT_CHAT_MODEL_REGISTRY; override the whole list via the
+    # CHAT_MODEL_REGISTRY env var as a JSON array of objects matching
+    # ChatModelSetting. Invariant (AC-1): non-empty, with EXACTLY ONE is_default.
+    chat_model_registry: tuple[ChatModelSetting, ...] = Field(
+        default=_DEFAULT_CHAT_MODEL_REGISTRY,
+        alias="CHAT_MODEL_REGISTRY",
+    )
+
+    @field_validator("chat_model_registry", mode="before")
+    @classmethod
+    def _parse_chat_model_registry(cls, value: object) -> object:
+        """Accept a JSON-array env string as the registry override.
+
+        pydantic-settings hands complex env values through as raw strings; parse
+        a ``CHAT_MODEL_REGISTRY`` JSON array here so each element is then
+        validated against :class:`ChatModelSetting`. A blank string falls back to
+        the default seed (treated as "unset").
+        """
+        if isinstance(value, str):
+            if not value.strip():
+                return _DEFAULT_CHAT_MODEL_REGISTRY
+            return json.loads(value)
+        return value
+
+    @field_validator("chat_model_registry")
+    @classmethod
+    def _registry_has_exactly_one_default(
+        cls, value: tuple[ChatModelSetting, ...]
+    ) -> tuple[ChatModelSetting, ...]:
+        """Enforce the registry invariants (issue #47 AC-1).
+
+        Non-empty, unique ids, and **exactly one** ``is_default`` — so the picker
+        always has a well-defined default and the contract's "exactly one
+        ``is_default``" holds for any (mis)configuration. A bad override fails at
+        startup, not deep in a request.
+        """
+        if not value:
+            raise ValueError("CHAT_MODEL_REGISTRY must list at least one model")
+        ids = [m.id for m in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("CHAT_MODEL_REGISTRY must not contain duplicate model ids")
+        defaults = [m for m in value if m.is_default]
+        if len(defaults) != 1:
+            raise ValueError(
+                "CHAT_MODEL_REGISTRY must mark EXACTLY ONE model is_default "
+                f"(found {len(defaults)})"
+            )
+        return value
 
     @property
     def llm_enabled(self) -> bool:
