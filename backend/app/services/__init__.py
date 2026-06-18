@@ -13,5 +13,6 @@ CC-8) — the single ``emit(...)`` seam every later feature calls to satisfy the
 """
 
 from app.services.audit import AuditSink
+from app.services.collections_service import CollectionsService
 
-__all__ = ["AuditSink"]
+__all__ = ["AuditSink", "CollectionsService"]
