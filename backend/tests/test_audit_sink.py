@@ -113,6 +113,9 @@ async def test_emit_accepts_system_actor(session: AsyncSession, tenant_id: uuid.
         actor=AuditActor.system(),
         resource_type="message",
         outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req-sys",
+        source_ip="203.0.113.7",
     )
     assert event.actor_id is None
 
@@ -127,6 +130,9 @@ async def test_emit_accepts_anonymous_actor_for_login_failed(
         actor=AuditActor.anonymous(),
         resource_type="session",
         outcome=AuditOutcome.DENIED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req-anon",
+        source_ip="203.0.113.7",
     )
     assert event.actor_id is None
     assert event.outcome is AuditOutcome.DENIED
@@ -142,6 +148,9 @@ async def test_emit_accepts_taxonomy_action_string(
         actor=AuditActor.user(uuid.uuid4()),
         resource_type="document",
         outcome=AuditOutcome.DENIED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req-str",
+        source_ip="203.0.113.7",
     )
     assert event.action == "permission.denied"
 
@@ -155,6 +164,9 @@ async def test_emit_defaults_metadata_to_empty_dict(
         actor=AuditActor.user(uuid.uuid4()),
         resource_type="session",
         outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req-meta",
+        source_ip="203.0.113.7",
     )
     assert event.metadata == {}
 
@@ -175,6 +187,9 @@ async def test_inv6_missing_resource_type_is_rejected_before_write(
             actor=AuditActor.user(uuid.uuid4()),
             resource_type="",  # required field missing
             outcome=AuditOutcome.ALLOWED,
+            resource_id=str(uuid.uuid4()),
+            request_id="req-1",
+            source_ip="203.0.113.7",
         )
     # Nothing was written — the table is empty.
     recent = await AuditEventRepository(session, tenant_id).list_recent()
@@ -192,6 +207,66 @@ async def test_inv6_unknown_action_is_rejected_before_write(
             actor=AuditActor.user(uuid.uuid4()),
             resource_type="document",
             outcome=AuditOutcome.ALLOWED,
+            resource_id=str(uuid.uuid4()),
+            request_id="req-2",
+            source_ip="203.0.113.7",
+        )
+    recent = await AuditEventRepository(session, tenant_id).list_recent()
+    assert recent == []
+
+
+async def test_inv6_missing_resource_id_is_rejected_before_write(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """Spec 0004 §2.4: ``resource_id`` is required — a blank value persists nothing."""
+    sink = _sink(session, tenant_id)
+    with pytest.raises(AuditEnvelopeError):
+        await sink.emit(
+            action=AuditAction.DOCUMENT_VIEWED,
+            actor=AuditActor.user(uuid.uuid4()),
+            resource_type="document",
+            outcome=AuditOutcome.ALLOWED,
+            resource_id="",  # required field missing
+            request_id="req-3",
+            source_ip="203.0.113.7",
+        )
+    recent = await AuditEventRepository(session, tenant_id).list_recent()
+    assert recent == []
+
+
+async def test_inv6_missing_request_id_is_rejected_before_write(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """Spec 0004 §2.4: ``request_id`` is required — a blank value persists nothing."""
+    sink = _sink(session, tenant_id)
+    with pytest.raises(AuditEnvelopeError):
+        await sink.emit(
+            action=AuditAction.DOCUMENT_VIEWED,
+            actor=AuditActor.user(uuid.uuid4()),
+            resource_type="document",
+            outcome=AuditOutcome.ALLOWED,
+            resource_id=str(uuid.uuid4()),
+            request_id="   ",  # required field missing
+            source_ip="203.0.113.7",
+        )
+    recent = await AuditEventRepository(session, tenant_id).list_recent()
+    assert recent == []
+
+
+async def test_inv6_missing_source_ip_is_rejected_before_write(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """Spec 0004 §2.4: ``source_ip`` is required — a blank value persists nothing."""
+    sink = _sink(session, tenant_id)
+    with pytest.raises(AuditEnvelopeError):
+        await sink.emit(
+            action=AuditAction.DOCUMENT_VIEWED,
+            actor=AuditActor.user(uuid.uuid4()),
+            resource_type="document",
+            outcome=AuditOutcome.ALLOWED,
+            resource_id=str(uuid.uuid4()),
+            request_id="req-4",
+            source_ip="",  # required field missing
         )
     recent = await AuditEventRepository(session, tenant_id).list_recent()
     assert recent == []

@@ -79,17 +79,37 @@ def _valid_kwargs() -> dict[str, object]:
         "action": AuditAction.RETRIEVAL_QUERY,
         "resource_type": "query",
         "outcome": AuditOutcome.ALLOWED,
+        "resource_id": str(uuid.uuid4()),
+        "request_id": "req-abc",
+        "source_ip": "203.0.113.7",
     }
 
 
 def test_validate_envelope_accepts_a_complete_event() -> None:
-    """A complete envelope passes the gate (returns None, raises nothing)."""
+    """A complete envelope passes the gate (returns the action, raises nothing)."""
     validate_envelope(**_valid_kwargs())  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("missing", ["tenant_id", "action", "resource_type", "outcome"])
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "tenant_id",
+        "action",
+        "resource_type",
+        "outcome",
+        # Spec 0004 §2.4 "Required fields (every event)" — enforced fail-closed.
+        "resource_id",
+        "request_id",
+        "source_ip",
+    ],
+)
 def test_validate_envelope_rejects_a_missing_required_field(missing: str) -> None:
-    """INV-6 (policy): a missing required field is rejected *before* any write."""
+    """INV-6 (policy): a missing required field is rejected *before* any write.
+
+    Covers every spec 0004 §2.4 required field validated here — including
+    ``resource_id``/``request_id``/``source_ip`` (the spec outranks code,
+    AGENTS.md §4).
+    """
     kwargs = _valid_kwargs()
     kwargs[missing] = None
     with pytest.raises(AuditEnvelopeError) as excinfo:
@@ -97,17 +117,20 @@ def test_validate_envelope_rejects_a_missing_required_field(missing: str) -> Non
     assert missing in str(excinfo.value)
 
 
+@pytest.mark.parametrize("blank_field", ["resource_type", "resource_id", "request_id", "source_ip"])
+def test_validate_envelope_rejects_a_blank_required_string(blank_field: str) -> None:
+    """A whitespace-only required string is as good as missing (fail-closed)."""
+    kwargs = _valid_kwargs()
+    kwargs[blank_field] = "   "
+    with pytest.raises(AuditEnvelopeError) as excinfo:
+        validate_envelope(**kwargs)  # type: ignore[arg-type]
+    assert blank_field in str(excinfo.value)
+
+
 def test_validate_envelope_rejects_an_unknown_action_string() -> None:
     """A free-text action outside the taxonomy is rejected (deny by default)."""
     kwargs = _valid_kwargs()
     kwargs["action"] = "totally.made.up"
-    with pytest.raises(AuditEnvelopeError):
-        validate_envelope(**kwargs)  # type: ignore[arg-type]
-
-
-def test_validate_envelope_rejects_a_blank_resource_type() -> None:
-    kwargs = _valid_kwargs()
-    kwargs["resource_type"] = "   "
     with pytest.raises(AuditEnvelopeError):
         validate_envelope(**kwargs)  # type: ignore[arg-type]
 
