@@ -1,18 +1,33 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.0.1
+  version: 0.1.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
-    Feature endpoints (chat, ingestion, connectors, citations) are added here,
-    contract-first (ADR-0006), as their cross-cuttings land. This bootstrap
-    revision defines only health + the shared error model.
+
+
+    This revision (0.1.0) freezes the **grounded-chat MVP wire** (issue #37,
+    ADR-0006 Phase 0): auth, collections, documents, chat, and the model
+    picker. Streaming assistant answers ride the WebSocket envelope
+    (`websocket-envelopes.schema.json`); request/response stays REST (ADR-0003).
+
+
+    **Tenancy & permission (spec 0004).** Every resource below is implicitly
+    scoped to the authenticated user's tenant and ownership. A request for a
+    resource in another tenant — or one the caller is not permitted to see —
+    returns **404** (existence non-disclosure, INV-1/INV-2), never 403. Clients
+    never send `tenant_id`; it is resolved from the bearer token in
+    `backend/app/auth/`. All endpoints except `getHealth`, `getReadiness`,
+    `login`, and `refresh` require the bearer token.
 servers:
   - url: http://localhost:47181
     description: Local compose (default host port; see ADR-0005 / .env.example)
   - url: /
     description: Same-origin (behind a reverse proxy / in dev via Vite proxy)
+
+security:
+  - bearerAuth: []
 
 paths:
   /health:
@@ -20,6 +35,7 @@ paths:
       operationId: getHealth
       summary: Liveness — the process is up.
       tags: [health]
+      security: []
       responses:
         "200":
           description: Service is alive.
@@ -32,6 +48,7 @@ paths:
       operationId: getReadiness
       summary: Readiness — the process and its dependencies are reachable.
       tags: [health]
+      security: []
       responses:
         "200":
           description: Service and all dependencies are ready.
@@ -44,7 +61,427 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ReadinessStatus" }
 
+  # --- Auth (CC-3 / spec 0004 §2.3) -----------------------------------------
+  /auth/login:
+    post:
+      operationId: login
+      summary: Exchange email + password for an access token.
+      description: >
+        App-managed identity (spec 0004): returns a short-lived access token and
+        sets a rotating, httpOnly refresh cookie. Invalid credentials → 401 with
+        a generic message (no account-existence disclosure).
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/refresh:
+    post:
+      operationId: refresh
+      summary: Mint a new access token from the refresh cookie.
+      tags: [auth]
+      security: []
+      responses:
+        "200":
+          description: Refreshed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the refresh token / clear the session.
+      tags: [auth]
+      responses:
+        "204": { description: Logged out. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/me:
+    get:
+      operationId: getCurrentUser
+      summary: The authenticated principal (id, tenant, roles).
+      tags: [auth]
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrentUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- Collections / folders -------------------------------------------------
+  /collections:
+    get:
+      operationId: listCollections
+      summary: List the caller's collections.
+      tags: [collections]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of collections.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CollectionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createCollection
+      summary: Create a collection.
+      tags: [collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CollectionCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /collections/{collectionId}:
+    parameters:
+      - { $ref: "#/components/parameters/CollectionId" }
+    get:
+      operationId: getCollection
+      summary: Get a collection by id.
+      tags: [collections]
+      responses:
+        "200":
+          description: The collection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateCollection
+      summary: Rename / re-describe a collection.
+      tags: [collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CollectionUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteCollection
+      summary: Delete a collection and its documents.
+      tags: [collections]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Documents (upload + multi-format ingestion: #28 / #21) ----------------
+  /documents:
+    get:
+      operationId: listDocuments
+      summary: List documents, optionally filtered by collection / status / text.
+      tags: [documents]
+      parameters:
+        - name: collection_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Restrict to one collection.
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/DocumentStatus" }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by filename substring (lexical, not semantic).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of documents.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: uploadDocument
+      summary: Upload a document into a collection (multi-format).
+      description: >
+        Stores the file (MinIO sandbox, CC-12) and creates a `Document` with
+        status `pending`; ingestion (parse → chunk → embed) runs async (#21).
+        Allowed content-types and the size cap are enforced server-side
+        (`UPLOAD_ALLOWED_CONTENT_TYPES`, `MAX_UPLOAD_BYTES`).
+      tags: [documents]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, collection_id]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                collection_id:
+                  type: string
+                  format: uuid
+      responses:
+        "201":
+          description: Accepted for ingestion.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /documents/{documentId}:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocument
+      summary: Get document metadata (incl. ingestion status).
+      tags: [documents]
+      responses:
+        "200":
+          description: The document.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteDocument
+      summary: Delete a document and its chunks/embeddings.
+      tags: [documents]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /documents/{documentId}/content:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocumentContent
+      summary: Download / view the original file bytes.
+      description: >
+        Returns the stored bytes for viewing in the UI. The server may instead
+        respond 302 to a short-TTL presigned URL (CC-12); clients must follow it.
+      tags: [documents]
+      responses:
+        "200":
+          description: The raw document bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "302":
+          description: Redirect to a short-TTL presigned URL.
+          headers:
+            Location:
+              required: true
+              description: Short-TTL presigned URL for the object.
+              schema: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Chat (sessions, history, send → stream) : CC-6 #24 --------------------
+  /chat/sessions:
+    get:
+      operationId: listChatSessions
+      summary: List the caller's chat sessions (history).
+      tags: [chat]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of chat sessions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatSessionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createChatSession
+      summary: Start a new chat session.
+      tags: [chat]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatSessionCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /chat/sessions/{sessionId}:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    get:
+      operationId: getChatSession
+      summary: Get a chat session.
+      tags: [chat]
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateChatSession
+      summary: Rename a session or change its default model.
+      tags: [chat]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatSessionUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteChatSession
+      summary: Delete a chat session and its messages.
+      tags: [chat]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /chat/sessions/{sessionId}/messages:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    get:
+      operationId: listMessages
+      summary: Message history for a session (oldest → newest).
+      tags: [chat]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of messages.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: sendMessage
+      summary: Send a user message; the assistant answer streams over WebSocket.
+      description: >
+        Persists the user message and returns a `stream_id`. The client then
+        consumes the answer over the WebSocket envelope stream with that id
+        (`start` → `delta`(token)* / `event`(citation|tool_call|tool_result)* →
+        `done|error`; see websocket-envelopes.schema.json). The finished
+        assistant message — with citations — is also retrievable via
+        `listMessages`. `model` overrides the session default for this turn;
+        `collection_ids` scopes retrieval (default: all the caller's documents).
+      tags: [chat]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendMessageRequest" }
+      responses:
+        "202":
+          description: Accepted; consume the answer on the WS stream.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SendMessageResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # --- Model picker ----------------------------------------------------------
+  /models:
+    get:
+      operationId: listModels
+      summary: The selectable chat models (picker registry).
+      description: >
+        The curated set the UI offers, grouped by tier (frontier / fast / oss).
+        Exactly one has `is_default: true`. Backed by config — adding a model is
+        a config change, not a contract change.
+      tags: [models]
+      responses:
+        "200":
+          description: Available chat models.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
 components:
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: Opaque pagination cursor from a previous response's next_cursor.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      description: Max items to return.
+    CollectionId:
+      name: collectionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
   schemas:
     HealthStatus:
       type: object
@@ -80,6 +517,266 @@ components:
           type: string
           description: Optional human-readable detail when not ok.
 
+    # --- Auth ---------------------------------------------------------------
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1, writeOnly: true }
+
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string, description: Short-lived JWT bearer token. }
+        token_type: { type: string, enum: [bearer] }
+        expires_in: { type: integer, description: Access-token lifetime in seconds. }
+
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      required: [id, email, tenant_id, roles, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        tenant_id: { type: string, format: uuid }
+        roles:
+          type: array
+          items: { type: string, enum: [member, admin, security] }
+        created_at: { type: string, format: date-time }
+
+    # --- Collections --------------------------------------------------------
+    CollectionCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+
+    CollectionUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+
+    Collection:
+      type: object
+      additionalProperties: false
+      required: [id, name, owner_id, document_count, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        owner_id: { type: string, format: uuid }
+        document_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CollectionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Collection" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    # --- Documents ----------------------------------------------------------
+    DocumentStatus:
+      type: string
+      description: Ingestion lifecycle.
+      enum: [pending, processing, ready, failed]
+
+    Document:
+      type: object
+      additionalProperties: false
+      required:
+        [id, filename, mime_type, size_bytes, collection_id, owner_id, status, chunk_count, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        mime_type: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+        collection_id: { type: string, format: uuid }
+        owner_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/DocumentStatus" }
+        error:
+          type: string
+          description: Failure reason when status is failed.
+        chunk_count:
+          type: integer
+          minimum: 0
+          description: Number of indexed chunks (0 until ingestion completes).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    DocumentList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Document" }
+        next_cursor:
+          type: [string, "null"]
+
+    # --- Chat ---------------------------------------------------------------
+    ChatSessionCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: string, maxLength: 200 }
+        model:
+          type: string
+          description: A model id from GET /models; omitted = server default.
+
+    ChatSessionUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, maxLength: 200 }
+        model: { type: string }
+
+    ChatSession:
+      type: object
+      additionalProperties: false
+      required: [id, title, model, owner_id, message_count, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        model: { type: string, description: The session's default model id. }
+        owner_id: { type: string, format: uuid }
+        message_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ChatSessionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ChatSession" }
+        next_cursor:
+          type: [string, "null"]
+
+    MessageRole:
+      type: string
+      enum: [user, assistant, system]
+
+    Citation:
+      type: object
+      additionalProperties: false
+      description: >
+        A clickable, passage-level reference (spec 0004 INV-3). Resolves to a
+        document the caller is permitted to see and a character span within it.
+      required: [id, document_id, document_name, chunk_id, snippet, char_start, char_end]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        document_name: { type: string }
+        chunk_id: { type: string, format: uuid }
+        snippet: { type: string, description: The cited passage text. }
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+        score:
+          type: number
+          description: Optional retrieval/rerank score.
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, role, content, citations, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/MessageRole" }
+        content: { type: string }
+        model:
+          type: string
+          description: Model that produced an assistant message (null for user).
+        citations:
+          type: array
+          description: Passage-level citations (assistant messages only).
+          items: { $ref: "#/components/schemas/Citation" }
+        created_at: { type: string, format: date-time }
+
+    MessageList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        next_cursor:
+          type: [string, "null"]
+
+    SendMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1 }
+        model:
+          type: string
+          description: Override the session model for this turn (a GET /models id).
+        collection_ids:
+          type: array
+          description: Restrict retrieval to these collections; omitted = all permitted docs.
+          items: { type: string, format: uuid }
+
+    SendMessageResponse:
+      type: object
+      additionalProperties: false
+      required: [message, stream_id]
+      properties:
+        message:
+          allOf: [{ $ref: "#/components/schemas/Message" }]
+          description: The persisted user message.
+        stream_id:
+          type: string
+          description: Subscribe to this WebSocket stream id for the assistant answer.
+
+    # --- Models -------------------------------------------------------------
+    ModelTier:
+      type: string
+      description: Picker grouping.
+      enum: [frontier, fast, oss]
+
+    ChatModelInfo:
+      type: object
+      additionalProperties: false
+      required: [id, label, provider, tier, is_default]
+      properties:
+        id: { type: string, description: Model id passed to chat (e.g. anthropic/claude-opus-4.8). }
+        label: { type: string, description: Display name for the picker. }
+        provider: { type: string, description: e.g. anthropic, openai, google, deepseek, qwen. }
+        tier: { $ref: "#/components/schemas/ModelTier" }
+        is_default: { type: boolean }
+        description: { type: string }
+
+    ModelList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ChatModelInfo" }
+
     # Single problem model for ALL errors (RFC-9457 application/problem+json).
     # Every endpoint's error responses reference this; both tiers depend on it.
     Problem:
@@ -114,11 +811,36 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: Missing, invalid, or expired credentials (INV-4).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Not found — or in another tenant / not permitted (INV-1/INV-2).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    ValidationError:
+      description: Malformed or invalid request body (INV-8).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    PayloadTooLarge:
+      description: Upload exceeds MAX_UPLOAD_BYTES.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    UnsupportedMediaType:
+      description: Content-type not in the upload allowlist.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
 
   securitySchemes:
-    # Identity/tenant is resolved in backend/app/auth (CC-3). The concrete IdP
-    # is deferred (ADR-0003); the scheme is reserved here so feature endpoints
-    # can require it once CC-3 lands.
+    # Identity/tenant is resolved in backend/app/auth (CC-3, spec 0004 §2.3):
+    # app-managed email+password → short-lived access JWT. Bearer-token on every
+    # endpoint except health + login + refresh.
     bearerAuth:
       type: http
       scheme: bearer
@@ -127,3 +849,13 @@ components:
 tags:
   - name: health
     description: Liveness & readiness probes.
+  - name: auth
+    description: App-managed identity — login, refresh, logout, whoami.
+  - name: collections
+    description: Folders that group uploaded documents.
+  - name: documents
+    description: Upload, list, view, and delete documents (multi-format).
+  - name: chat
+    description: Chat sessions, history, and message send (answer streams over WS).
+  - name: models
+    description: The selectable chat-model registry (picker).
