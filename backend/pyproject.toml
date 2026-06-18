@@ -21,6 +21,8 @@ dependencies = [
     "structlog==24.4.0",
     "aioboto3==13.2.0",
     "pgvector==0.4.2",  # SQLAlchemy `vector` column type for chunk embeddings (#44)
+    "argon2-cffi==23.1.0",
+    "pyjwt==2.10.1",
 ]
 
 [project.optional-dependencies]
