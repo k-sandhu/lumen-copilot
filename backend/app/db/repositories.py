@@ -22,6 +22,7 @@ touches several repositories commits atomically.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -649,6 +650,22 @@ class DocumentRepository(_TenantScopedRepository):
         return _to_document(row)
 
 
+@dataclass(frozen=True, slots=True)
+class ChunkInput:
+    """One chunk to persist for a document (ingestion, #21).
+
+    The plain inputs a :class:`ChunkRepository.replace_for_document` write needs:
+    text + its source span + the (optional) embedding. ``ord`` is assigned by the
+    repository from list position so the ``(document_id, ord)`` uniqueness holds
+    and the order is contiguous.
+    """
+
+    text: str
+    char_start: int
+    char_end: int
+    embedding: Sequence[float] | None = None
+
+
 class ChunkRepository(_TenantScopedRepository):
     """Chunks (passages + embeddings) within one tenant (#21 ingestion)."""
 
@@ -674,6 +691,55 @@ class ChunkRepository(_TenantScopedRepository):
         self._session.add(row)
         await self._session.flush()
         return _to_chunk(row)
+
+    async def delete_for_document(self, document_id: UUID) -> int:
+        """Delete every chunk of a document (tenant-scoped). Returns the count.
+
+        Tenant-scoped on the chunk rows (INV-1): a tenant-B repository deletes
+        nothing belonging to tenant A. Used by :meth:`replace_for_document` to
+        make re-ingestion idempotent (a re-run replaces, never duplicates).
+        """
+        stmt = select(models.Chunk).where(
+            models.Chunk.tenant_id == self._tenant_id,
+            models.Chunk.document_id == document_id,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        for row in rows:
+            await self._session.delete(row)
+        await self._session.flush()
+        return len(rows)
+
+    async def replace_for_document(
+        self, document_id: UUID, chunks: Sequence[ChunkInput]
+    ) -> list[Chunk]:
+        """Replace all of a document's chunks with ``chunks`` (idempotent, #21).
+
+        The idempotency primitive for ingestion (AC-5): re-running the task for
+        the same document **replaces** its chunk set rather than duplicating it.
+        Deletes the existing chunks first (so the ``(document_id, ord)`` unique
+        constraint never collides on a re-run), then inserts the new set with
+        contiguous ``ord`` assigned from list position. Tenant-scoped throughout
+        (INV-1): a foreign-tenant ``document_id`` deletes nothing and the
+        inserts carry this repository's tenant. The caller owns the transaction
+        boundary, so the delete + inserts commit atomically — a re-run is never
+        observed half-applied.
+        """
+        await self.delete_for_document(document_id)
+        rows = [
+            models.Chunk(
+                tenant_id=self._tenant_id,
+                document_id=document_id,
+                ord=ordinal,
+                text=chunk.text,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
+                embedding=list(chunk.embedding) if chunk.embedding is not None else None,
+            )
+            for ordinal, chunk in enumerate(chunks)
+        ]
+        self._session.add_all(rows)
+        await self._session.flush()
+        return [_to_chunk(row) for row in rows]
 
     async def get(self, chunk_id: UUID) -> Chunk | None:
         stmt = select(models.Chunk).where(

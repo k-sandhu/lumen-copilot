@@ -33,6 +33,28 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     timezone="UTC",
     enable_utc=True,
+    # Modules the worker imports to register tasks. Explicit so the worker
+    # entrypoint (``-A app.tasks.celery_app``) discovers the ingestion task (#21)
+    # regardless of package ``__init__`` side effects.
+    imports=("app.tasks.ingest",),
+    # Fail fast when publishing to an unreachable broker rather than looping
+    # through a long reconnect cycle: a producer (the API after-commit enqueue)
+    # must not block the response on a transient broker outage. The single
+    # publish attempt raises ``kombu.exceptions.OperationalError``, which
+    # ``enqueue_ingestion`` catches (best-effort). The worker's own consumer
+    # reconnect is unaffected.
+    broker_connection_retry_on_startup=False,
+    broker_connection_max_retries=0,
+    broker_transport_options={
+        "max_retries": 0,
+        "interval_start": 0,
+        "interval_step": 0,
+        "interval_max": 0,
+        "socket_connect_timeout": 2,
+        "socket_timeout": 2,
+    },
+    broker_pool_limit=0,
+    task_publish_retry=False,
 )
 
 

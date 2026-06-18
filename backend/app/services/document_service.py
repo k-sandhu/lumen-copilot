@@ -182,6 +182,7 @@ class DocumentService:
         upload_allowed_content_types: frozenset[str],
         max_upload_bytes: int,
     ) -> None:
+        self._session = session
         self._documents = DocumentRepository(session, tenant_id)
         self._collections = CollectionRepository(session, tenant_id)
         self._tenant_id = tenant_id
@@ -297,14 +298,43 @@ class DocumentService:
             },
         )
 
-        # TODO(#21, CC-5): enqueue the async parse → chunk → embed ingestion task
-        #   here (e.g. ``app.tasks.ingest_document.delay(tenant_id, document.id)``)
-        #   so the worker drives status pending → processing → ready/failed. The
-        #   Celery task is OUT of scope for #28 (upload half only); the document is
-        #   left ``status=pending`` as the seam the ingestion worker picks up.
+        # Enqueue ingestion (#21, CC-5): the worker drives the pending row through
+        # parse → chunk → embed → persist to ``ready`` (or ``failed`` with a
+        # reason). Enqueue is the single seam in ``tasks/`` (ADR-0004: only
+        # ``tasks/`` enqueues). Fire it **after** this request's transaction
+        # commits — otherwise the worker could pick up the message and not yet see
+        # the row (it would no-op and the document would stick at ``pending``). An
+        # after-commit session hook makes the enqueue exactly-once on success and
+        # never on rollback; the task is idempotent/defensive as a backstop.
+        self._enqueue_ingestion_after_commit(document.id)
 
         # A freshly uploaded document holds no chunks yet.
         return DocumentView(document=document, chunk_count=0)
+
+    def _enqueue_ingestion_after_commit(self, document_id: UUID) -> None:
+        """Schedule the ingestion enqueue to fire after the request commits.
+
+        Registers a one-shot SQLAlchemy ``after_commit`` listener on this
+        request's session so the Celery message is sent only once the ``pending``
+        document row is durably committed (and never if the transaction rolls
+        back). Enqueueing goes through ``tasks.enqueue_ingestion`` — the single
+        enqueue point (ADR-0004). ``once=True`` lets SQLAlchemy remove the
+        listener safely after it fires (removing it from inside the callback
+        would mutate the listener collection mid-dispatch); ``import app.tasks``
+        is resolved at call time so a test can monkeypatch the enqueue.
+        """
+        # Imported lazily so the service module does not pull in Celery at import
+        # time (keeps unit tests that exercise the pure helpers dependency-light).
+        from sqlalchemy import event
+
+        import app.tasks as tasks
+
+        tenant_id = self._tenant_id
+
+        def _on_commit(_session: object) -> None:
+            tasks.enqueue_ingestion(tenant_id, document_id)
+
+        event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
 
     async def list_page(
         self,
