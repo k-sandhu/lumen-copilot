@@ -188,6 +188,21 @@ export const CATALOG: readonly CatalogEntry[] = [
     ],
   },
   {
+    id: 'frontend-chat',
+    title: 'Frontend chat — streaming, citations, model picker & history',
+    area: 'Frontend',
+    status: 'shipped',
+    summary:
+      'The chat slice on the auth foundation: send → subscribe to the WS stream_id → render delta tokens live with tool activity ("searching documents…"), clickable passage-level citations that open the cited document, an honest zero-citation answer, a grouped model picker (frontier/fast/oss), and a history sidebar with new/rename/delete. WS error + disconnect are terminal with retry.',
+    links: [
+      {
+        label: 'Security invariants',
+        href: '/docs/specs/0004-security-and-domain-invariants',
+      },
+      { label: 'Issue #50', href: `${GH}/issues/50` },
+    ],
+  },
+  {
     id: 'dev-pages',
     title: 'In-app docs viewer & features catalog',
     area: 'Frontend',
