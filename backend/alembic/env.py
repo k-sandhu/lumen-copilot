@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
+from app.db import models as _models  # noqa: F401  (register models on Base.metadata)
 from app.db.base import Base
 
 # Alembic Config object (reads alembic.ini for logging config).
@@ -28,7 +29,8 @@ if config.config_file_name is not None:
 # Inject the DB URL from settings (the only env reader) at runtime.
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
-# Autogenerate target. Import models here as they are added so they register.
+# Autogenerate target. Importing app.db.models above registers every table on
+# this metadata, so autogenerate / `--sql` diff against the real schema.
 target_metadata = Base.metadata
 
 
