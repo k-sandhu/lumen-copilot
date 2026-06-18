@@ -1,49 +1,29 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * Skeleton smoke: the app boots and the shell + status surface render. The
- * backend may or may not be reachable in CI/dev, so we assert the shell and the
- * status panel (in ANY of its valid states — that's the quality bar: no blank
- * pane, no perpetual spinner), not a specific dependency outcome.
+ * Auth gate (issue #48, AC-3): the app root is guarded. With no backend
+ * reachable in CI/dev, the boot-time silent refresh fails and the app routes to
+ * the login screen — not the shell. We assert that grounded behavior: an
+ * accessible email/password form, never a blank pane or a perpetual spinner
+ * (quality bar). The authenticated shell is exercised in component tests
+ * (RouteGuard / LoginScreen) where the contract responses are mocked.
  */
-test('app shell and system-status panel render', async ({ page }) => {
+test('unauthenticated root routes to the login screen', async ({ page }) => {
   await page.goto('/');
 
-  // Header / shell. `exact` disambiguates the <h1> title from the welcome
-  // note's "Lumen Copilot — skeleton" <h2>.
-  await expect(page.getByRole('heading', { name: 'Lumen Copilot', exact: true })).toBeVisible();
-  await expect(page.getByText('Backend status')).toBeVisible();
-
-  // The rail welcome note rendered through the markdown pipeline.
-  await expect(
-    page.getByRole('heading', { name: /Lumen Copilot — skeleton/i }),
-  ).toBeVisible();
-
-  // The status panel resolves to one of its real states — never stays blank.
-  await expect(
-    page
-      .getByRole('list', { name: /backend dependencies/i })
-      .or(page.getByRole('alert'))
-      .or(page.getByText(/checking backend readiness/i)),
-  ).toBeVisible();
-
-  // The realtime indicator is present (`exact` avoids the welcome note's
-  // "…the realtime badge" prose).
-  await expect(page.getByText('Realtime', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /sign in to lumen copilot/i })).toBeVisible();
+  await expect(page.getByLabel(/email/i)).toBeVisible();
+  await expect(page.getByLabel(/password/i)).toBeVisible();
+  await expect(page.getByRole('button', { name: /sign in/i })).toBeVisible();
 });
 
 /**
- * The developer pages: the floating overlay reveals links to the standalone docs
- * viewer and features catalog, and both render real content.
+ * The developer pages are standalone, UNGUARDED top-level routes (the floating
+ * overlay that links to them lives inside the now auth-gated shell, issue #48,
+ * so we navigate to the routes directly). Both render real content.
  */
-test('overlay links reach the docs viewer and features catalog', async ({ page }) => {
-  await page.goto('/');
-
-  const trigger = page.getByRole('button', { name: /developer pages/i });
-  await expect(trigger).toBeVisible();
-  await trigger.hover();
-
-  await page.getByRole('link', { name: /documentation/i }).click();
+test('the docs viewer and features catalog render', async ({ page }) => {
+  await page.goto('/docs');
   await expect(page).toHaveURL(/\/docs\//); // index redirects to a default doc
   await expect(page.getByRole('navigation', { name: /documentation/i })).toBeVisible();
 
