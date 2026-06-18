@@ -125,6 +125,22 @@ class ForbiddenError(AppError):
     title = "Forbidden"
 
 
+class PayloadTooLargeError(AppError):
+    """An upload exceeds the configured size cap (contract 413)."""
+
+    status = 413
+    code = "payload_too_large"
+    title = "Payload Too Large"
+
+
+class UnsupportedMediaTypeError(AppError):
+    """A declared content-type is not in the upload allowlist (contract 415)."""
+
+    status = 415
+    code = "unsupported_media_type"
+    title = "Unsupported Media Type"
+
+
 class DependencyError(AppError):
     """A downstream dependency is unavailable (mapped to 503)."""
 
