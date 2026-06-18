@@ -217,6 +217,40 @@ class Settings(BaseSettings):
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
 
+    # --- Ingestion (CC-5 / issue #21) ---------------------------------------
+    # Chunking is config, not a literal at the call site (backend/AGENTS.md): the
+    # target chunk window and the overlap adjacent chunks share, both in
+    # characters. Defaults are a reasonable passage size for retrieval; tune per
+    # corpus without a code change. Invariant: 0 <= overlap < size (validated).
+    ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
+    ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")
+    # How many chunks are embedded per gateway ``embed()`` call. Batching keeps
+    # the provider round-trips down (one call per batch instead of per chunk);
+    # the gateway sends each batch as a single request preserving order.
+    ingestion_embed_batch_size: int = Field(default=64, alias="INGESTION_EMBED_BATCH_SIZE")
+    # Celery retry policy for the ingestion task (idempotent, backed off,
+    # dead-lettered — backend/AGENTS.md). Max attempts and the base backoff (the
+    # task uses exponential backoff capped by Celery's retry_backoff_max).
+    ingestion_max_retries: int = Field(default=3, alias="INGESTION_MAX_RETRIES")
+    ingestion_retry_backoff_seconds: int = Field(default=5, alias="INGESTION_RETRY_BACKOFF_SECONDS")
+
+    @field_validator("ingestion_chunk_size")
+    @classmethod
+    def _chunk_size_positive(cls, value: int) -> int:
+        """A non-positive chunk window would make ingestion loop/empty — reject."""
+        if value <= 0:
+            raise ValueError("INGESTION_CHUNK_SIZE must be positive")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_chunk_overlap(self) -> Settings:
+        """Enforce ``0 <= overlap < size`` so chunking always makes progress."""
+        if self.ingestion_chunk_overlap < 0:
+            raise ValueError("INGESTION_CHUNK_OVERLAP must be >= 0")
+        if self.ingestion_chunk_overlap >= self.ingestion_chunk_size:
+            raise ValueError("INGESTION_CHUNK_OVERLAP must be < INGESTION_CHUNK_SIZE")
+        return self
+
     # --- Chat-model picker registry (issue #47) ---
     # The curated set the picker offers (GET /models), grouped by tier. Config,
     # not a router constant (AC-2): the default seed lives in code as the typed

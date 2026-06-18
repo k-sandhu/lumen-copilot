@@ -174,6 +174,24 @@ def store() -> FakeObjectStore:
     return FakeObjectStore()
 
 
+@pytest.fixture(autouse=True)
+def enqueued(monkeypatch: pytest.MonkeyPatch) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Capture ingestion enqueues without touching a broker (offline-safe, #21).
+
+    ``DocumentService.upload`` enqueues ingestion via ``app.tasks.enqueue_ingestion``
+    in an after-commit hook (resolved by name at call time). Replace it with a
+    recorder so the upload tests assert the seam is wired (#21) without a live
+    Celery broker. Autouse so *every* test in this module is broker-free.
+    """
+    calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    def _record(tenant_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        calls.append((tenant_id, document_id))
+
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", _record)
+    return calls
+
+
 @pytest.fixture
 def app(
     sessionmaker: async_sessionmaker[AsyncSession], store: FakeObjectStore
@@ -319,6 +337,51 @@ async def test_upload_stores_object_in_object_store(
     key = next(iter(store.objects))
     assert key.startswith(f"{seeded.tenant_a}/")
     assert store.objects[key] == b"the body bytes"
+
+
+async def test_upload_enqueues_ingestion_after_commit(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    enqueued: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """The upload seam enqueues ingestion (#21) for the new pending document."""
+    coll_id = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/documents",
+        headers=_auth(token),
+        data={"collection_id": str(coll_id)},
+        files=_upload_files(),
+    )
+    assert resp.status_code == 201, resp.text
+    document_id = uuid.UUID(resp.json()["id"])
+    # Exactly one enqueue, for this tenant + document (fired after the commit).
+    assert enqueued == [(seeded.tenant_a, document_id)]
+
+
+async def test_failed_upload_does_not_enqueue_ingestion(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    enqueued: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """A rejected upload (foreign collection → 404) never enqueues ingestion."""
+    # Bob's collection in tenant A; Alice cannot upload into it (404).
+    coll_id = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email
+    )
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/documents",
+        headers=_auth(token),
+        data={"collection_id": str(coll_id)},
+        files=_upload_files(),
+    )
+    assert resp.status_code == 404, resp.text
+    assert enqueued == []
 
 
 # --- Happy path: list / get -------------------------------------------------
