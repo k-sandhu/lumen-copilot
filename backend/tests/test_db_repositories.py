@@ -25,6 +25,7 @@ from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
+    ChunkInput,
     ChunkRepository,
     CitationRepository,
     CollectionRepository,
@@ -481,3 +482,96 @@ async def test_collection_list_for_owner_page_excludes_other_owner(
 
     alice_page = await collections.list_for_owner_page(alice.id, limit=10)
     assert {c.name for c in alice_page} == {"alice-coll"}
+
+
+# ---------------------------------------------------------------------------
+# Chunk replace/delete — ingestion idempotency + tenant scope (#21).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_doc_for_chunks(session: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUID:
+    user = await UserRepository(session, tenant_id).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    coll = await CollectionRepository(session, tenant_id).create(owner_id=user.id, name="c")
+    doc = await DocumentRepository(session, tenant_id).create(
+        owner_id=user.id,
+        collection_id=coll.id,
+        filename="f.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        storage_key="k",
+    )
+    return doc.id
+
+
+async def test_replace_for_document_assigns_contiguous_ord(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    doc_id = await _seed_doc_for_chunks(session, tenant_a)
+    chunks = ChunkRepository(session, tenant_a)
+    persisted = await chunks.replace_for_document(
+        doc_id,
+        [
+            ChunkInput(text="one", char_start=0, char_end=3, embedding=[0.1] * 1024),
+            ChunkInput(text="two", char_start=3, char_end=6, embedding=[0.2] * 1024),
+        ],
+    )
+    assert [c.ord for c in persisted] == [0, 1]
+    listed = await chunks.list_for_document(doc_id)
+    assert [c.text for c in listed] == ["one", "two"]
+    assert all(c.embedding is not None and len(c.embedding) == 1024 for c in listed)
+
+
+async def test_replace_for_document_is_idempotent(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """A second replace deletes the first set — no duplicate (document_id, ord)."""
+    tenant_a, _ = two_tenants
+    doc_id = await _seed_doc_for_chunks(session, tenant_a)
+    chunks = ChunkRepository(session, tenant_a)
+
+    await chunks.replace_for_document(
+        doc_id,
+        [ChunkInput(text=f"v1-{i}", char_start=i, char_end=i + 1) for i in range(5)],
+    )
+    second = await chunks.replace_for_document(
+        doc_id,
+        [ChunkInput(text=f"v2-{i}", char_start=i, char_end=i + 1) for i in range(3)],
+    )
+    listed = await chunks.list_for_document(doc_id)
+    assert len(listed) == 3 == len(second)
+    assert [c.text for c in listed] == ["v2-0", "v2-1", "v2-2"]
+    assert [c.ord for c in listed] == [0, 1, 2]
+
+
+async def test_delete_for_document_returns_count(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    doc_id = await _seed_doc_for_chunks(session, tenant_a)
+    chunks = ChunkRepository(session, tenant_a)
+    await chunks.replace_for_document(doc_id, [ChunkInput(text="x", char_start=0, char_end=1)])
+    assert await chunks.delete_for_document(doc_id) == 1
+    assert await chunks.list_for_document(doc_id) == []
+    # Deleting again is a no-op (idempotent), returns 0.
+    assert await chunks.delete_for_document(doc_id) == 0
+
+
+async def test_inv1_chunk_replace_and_delete_are_tenant_scoped(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """A tenant-B repository cannot replace/delete tenant-A chunks (INV-1)."""
+    tenant_a, tenant_b = two_tenants
+    doc_id = await _seed_doc_for_chunks(session, tenant_a)
+    chunks_a = ChunkRepository(session, tenant_a)
+    await chunks_a.replace_for_document(
+        doc_id, [ChunkInput(text="secret", char_start=0, char_end=6)]
+    )
+
+    chunks_b = ChunkRepository(session, tenant_b)
+    # B sees nothing to delete, and a B-scoped replace cannot touch A's rows.
+    assert await chunks_b.delete_for_document(doc_id) == 0
+    # A's chunk is still there.
+    assert len(await chunks_a.list_for_document(doc_id)) == 1
