@@ -58,5 +58,8 @@ async def test_factory_builds_a_tenant_scoped_sink(session: AsyncSession) -> Non
         actor=AuditActor.user(uuid.uuid4()),
         resource_type="session",
         outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req-deps",
+        source_ip="203.0.113.7",
     )
     assert event.tenant_id == tenant.id

@@ -126,6 +126,9 @@ def validate_envelope(
     action: AuditAction | str | None,
     resource_type: str | None,
     outcome: AuditOutcome | None,
+    resource_id: str | None,
+    request_id: str | None,
+    source_ip: str | None,
 ) -> AuditAction:
     """Fail-closed required-field gate for an audit event (INV-6).
 
@@ -133,7 +136,10 @@ def validate_envelope(
     the normalised :class:`AuditAction`. ``event_id`` and ``ts`` are
     server-assigned (uuid default + ``now()``), and ``actor_id`` is allowed to
     be null (system/anonymous), so they are not checked here; everything else
-    must be present and well-formed.
+    listed under spec 0004 §2.4 "Required fields (every event)" must be present
+    and well-formed — including ``resource_id``, ``request_id``, and
+    ``source_ip`` (the spec outranks code, AGENTS.md §4): an event with any of
+    them nulled or blank is rejected, never persisted.
 
     Raises:
         AuditEnvelopeError: if any required field is missing or invalid. Nothing
@@ -152,4 +158,13 @@ def validate_envelope(
         raise AuditEnvelopeError(
             f"outcome {outcome!r} is not a valid AuditOutcome (allowed|denied|error)"
         )
+    # Per spec 0004 §2.4 these three are "Required fields (every event)"; the
+    # spec outranks code (AGENTS.md §4), so enforce them fail-closed rather than
+    # silently persisting an event with them nulled.
+    if resource_id is None or not str(resource_id).strip():
+        raise AuditEnvelopeError("audit event requires a non-empty resource_id")
+    if request_id is None or not str(request_id).strip():
+        raise AuditEnvelopeError("audit event requires a non-empty request_id")
+    if source_ip is None or not str(source_ip).strip():
+        raise AuditEnvelopeError("audit event requires a non-empty source_ip")
     return _coerce_action(action)

@@ -44,9 +44,9 @@ class AuditSink:
         actor: AuditActor,
         resource_type: str,
         outcome: AuditOutcome,
-        resource_id: str | None = None,
-        request_id: str | None = None,
-        source_ip: str | None = None,
+        resource_id: str,
+        request_id: str,
+        source_ip: str,
         metadata: dict[str, object] | None = None,
     ) -> AuditEvent:
         """Validate and persist one audit event, returning the stored record.
@@ -54,19 +54,22 @@ class AuditSink:
         The envelope is validated **before** the write (INV-6, fail-closed): a
         missing/invalid required field raises
         :class:`~app.domain.audit.AuditEnvelopeError` and nothing is persisted.
-        The repository assigns ``event_id`` (uuid) and ``ts`` (UTC ``now()``);
-        the tenant is fixed by the repository's scope. The caller owns the
-        transaction boundary (the row is flushed, not committed) so the audit
-        write commits atomically with the action it records.
+        Per spec 0004 §2.4 "Required fields (every event)", ``resource_id``,
+        ``request_id``, and ``source_ip`` are **required** (no silent ``None``
+        default) — the spec outranks code (AGENTS.md §4). The repository assigns
+        ``event_id`` (uuid) and ``ts`` (UTC ``now()``); the tenant is fixed by
+        the repository's scope. The caller owns the transaction boundary (the
+        row is flushed, not committed) so the audit write commits atomically
+        with the action it records.
 
         Args:
             action: A taxonomy action (enum or string in the taxonomy).
             actor: Who performed it — user / system / anonymous.
             resource_type: The kind of resource acted on (e.g. ``"document"``).
             outcome: ``allowed`` | ``denied`` | ``error``.
-            resource_id: The specific resource id, if any.
-            request_id: Correlation id (matches the ops-log request id).
-            source_ip: Client IP, if known.
+            resource_id: The specific resource id acted on (required).
+            request_id: Correlation id, matches the ops-log request id (required).
+            source_ip: Client IP the action originated from (required).
             metadata: Event-specific extras (e.g. query hash, retrieved document
                 ids, model id, citation count for retrieval/answer events).
 
@@ -83,6 +86,9 @@ class AuditSink:
             action=action,
             resource_type=resource_type,
             outcome=outcome,
+            resource_id=resource_id,
+            request_id=request_id,
+            source_ip=source_ip,
         )
         return await self._repository.record(
             action=validated_action.value,
