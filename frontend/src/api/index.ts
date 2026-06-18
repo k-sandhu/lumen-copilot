@@ -16,8 +16,20 @@ export {
   deleteDocument,
   uploadDocument,
   resolveDocumentContentUrl,
+  documentContentUrl,
 } from './documents';
 export type { PageQuery, UploadDocumentArgs } from './documents';
+export {
+  listChatSessions,
+  createChatSession,
+  getChatSession,
+  updateChatSession,
+  deleteChatSession,
+  listMessages,
+  sendMessage,
+} from './chat';
+export type { PageParams } from './chat';
+export { listModels } from './models';
 export {
   getAccessToken,
   hasAccessToken,

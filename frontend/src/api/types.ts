@@ -155,6 +155,111 @@ export interface Problem {
   errors?: ProblemFieldError[];
 }
 
+// --- Chat (contracts/openapi.yaml §chat) ---
+
+/** Picker grouping for chat models. */
+export type ModelTier = 'frontier' | 'fast' | 'oss';
+
+/** GET /models item — one selectable chat model. */
+export interface ChatModelInfo {
+  /** Model id passed to chat (e.g. anthropic/claude-opus-4.8). */
+  id: string;
+  /** Display name for the picker. */
+  label: string;
+  /** e.g. anthropic, openai, google, deepseek, qwen. */
+  provider: string;
+  tier: ModelTier;
+  is_default: boolean;
+  description?: string;
+}
+
+/** 200 from GET /models. */
+export interface ModelList {
+  items: ChatModelInfo[];
+}
+
+export type MessageRole = 'user' | 'assistant' | 'system';
+
+/**
+ * A clickable, passage-level reference (spec 0004 INV-3). Resolves to a document
+ * the caller is permitted to see and a character span within it.
+ */
+export interface Citation {
+  id: string;
+  document_id: string;
+  document_name: string;
+  chunk_id: string;
+  /** The cited passage text. */
+  snippet: string;
+  char_start: number;
+  char_end: number;
+  /** Optional retrieval/rerank score. */
+  score?: number;
+}
+
+export interface Message {
+  id: string;
+  session_id: string;
+  role: MessageRole;
+  content: string;
+  /** Model that produced an assistant message (absent for user). */
+  model?: string;
+  /** Passage-level citations (assistant messages only). */
+  citations?: Citation[];
+  created_at: string;
+}
+
+export interface MessageList {
+  items: Message[];
+  next_cursor?: string | null;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  /** The session's default model id. */
+  model: string;
+  owner_id: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatSessionList {
+  items: ChatSession[];
+  next_cursor?: string | null;
+}
+
+/** POST /chat/sessions body. */
+export interface ChatSessionCreate {
+  title?: string;
+  /** A model id from GET /models; omitted = server default. */
+  model?: string;
+}
+
+/** PATCH /chat/sessions/{id} body — at least one property. */
+export interface ChatSessionUpdate {
+  title?: string;
+  model?: string;
+}
+
+/** POST /chat/sessions/{id}/messages body. */
+export interface SendMessageRequest {
+  content: string;
+  /** Override the session model for this turn (a GET /models id). */
+  model?: string;
+  /** Restrict retrieval to these collections; omitted = all permitted docs. */
+  collection_ids?: string[];
+}
+
+/** 202 from POST /chat/sessions/{id}/messages. */
+export interface SendMessageResponse {
+  /** The persisted user message. */
+  message: Message;
+  /** Subscribe to this WebSocket stream id for the assistant answer. */
+  stream_id: string;
+}
+
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
 // Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
 export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';
@@ -216,3 +321,70 @@ export type WsEnvelope =
 
 /** A terminal envelope ends a stream (exactly one per streamId). */
 export type TerminalEnvelope = DoneEnvelope | ErrorEnvelope;
+
+// --- Chat answer-stream payloads (websocket-envelopes.schema.json x-chatStream) ---
+// These slot into the generic envelope `data`/`event` shapes for a chat answer:
+//   start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall)
+//     | event:tool_result(ChatToolResult) | event:citation(ChatCitation) )*
+//   -> done(ChatDoneData) | error(Problem)
+
+/** `start.data` for a chat answer stream. */
+export interface ChatStartData {
+  sessionId: string;
+  /** Id the in-progress assistant message will be persisted under. */
+  messageId: string;
+  /** Model id producing this answer. */
+  model: string;
+}
+
+/** `delta.data` — one streamed chunk of the assistant answer. */
+export interface ChatTokenDelta {
+  text: string;
+}
+
+/**
+ * `event.data` for name=citation. Mirrors the REST Citation (spec 0004 INV-3) but
+ * camelCased per the WS envelope schema. Rendered as a clickable reference
+ * resolving to the document + span.
+ */
+export interface ChatCitation {
+  id: string;
+  documentId: string;
+  documentName: string;
+  chunkId: string;
+  snippet: string;
+  charStart: number;
+  charEnd: number;
+  score?: number;
+}
+
+/** Retrieval tool the chat agent can invoke (surfaced for "searching…" UX). */
+export type ChatTool = 'search_text' | 'search_documents' | 'get_document';
+
+/** `event.data` for name=tool_call — the agent invoked a retrieval tool. */
+export interface ChatToolCall {
+  callId: string;
+  tool: ChatTool;
+  args: Record<string, unknown>;
+}
+
+/** `event.data` for name=tool_result — outcome of a tool_call. */
+export interface ChatToolResult {
+  callId: string;
+  tool: ChatTool;
+  hitCount: number;
+  summary?: string;
+}
+
+/** `done.data` — terminal success summary for a chat answer. */
+export interface ChatDoneData {
+  messageId: string;
+  /** e.g. stop, length, content_filter. */
+  finishReason: string;
+  citationCount: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}
