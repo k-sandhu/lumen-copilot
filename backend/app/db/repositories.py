@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -359,6 +359,117 @@ class CollectionRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_collection(r) for r in rows]
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[Collection]:
+        """A keyset page of an owner's collections (newest first).
+
+        Owner-scoped *and* tenant-scoped (deny-by-default ownership, spec 0004
+        §2.2 + INV-1): a caller only ever sees their own. Ordered by
+        ``(created_at, id)`` **descending** — ``id`` is the stable tiebreaker so
+        the total order is deterministic even when two rows share a timestamp.
+        ``after_id`` is the id of the last row of the previous page (the decoded
+        cursor); rows strictly *after* it in that order are returned. At most
+        ``limit`` rows come back; the caller decides if more remain.
+
+        The keyset boundary is the cursor row's ``(created_at, id)`` resolved by a
+        **correlated scalar subquery** rather than a client-supplied timestamp.
+        This is deliberate: comparing column-to-column inside the database is
+        exact on Postgres *and* on the SQLite used by the offline tests, whereas
+        re-binding a Python ``datetime`` would hit SQLite's lossy ``DateTime``
+        round-trip (sub-second precision dropped, tz rendering divergent) and
+        leak duplicates across pages. The cursor therefore carries only the id.
+        """
+        conditions = [
+            models.Collection.tenant_id == self._tenant_id,
+            models.Collection.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            # The cursor row's created_at, resolved in-DB (no Python datetime
+            # crosses the boundary). Scoped to this tenant so a foreign cursor id
+            # resolves to NULL and the keyset predicate excludes everything —
+            # fail-closed rather than leaking another tenant's ordering.
+            boundary_created_at = (
+                select(models.Collection.created_at)
+                .where(
+                    models.Collection.tenant_id == self._tenant_id,
+                    models.Collection.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            # Keyset predicate for DESC ordering by (created_at, id): the next
+            # page is rows whose (created_at, id) sorts strictly after the cursor.
+            conditions.append(
+                or_(
+                    models.Collection.created_at < boundary_created_at,
+                    and_(
+                        models.Collection.created_at == boundary_created_at,
+                        models.Collection.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Collection)
+            .where(*conditions)
+            .order_by(models.Collection.created_at.desc(), models.Collection.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_collection(r) for r in rows]
+
+    async def count_documents(self, collection_id: UUID) -> int:
+        """Count documents contained in a collection (the ``document_count``).
+
+        Tenant-scoped on both the collection and its documents (INV-1). Returns
+        ``0`` for an empty or non-existent collection — the service has already
+        established visibility before asking.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.collection_id == collection_id,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def update(
+        self,
+        collection_id: UUID,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        set_description: bool = False,
+    ) -> Collection | None:
+        """Apply a partial update to a collection (tenant-scoped).
+
+        Only the fields the caller supplied are touched. ``name`` is updated when
+        non-``None``. ``description`` is a tri-state: when ``set_description`` is
+        true the new value (possibly ``None`` to clear) is written; otherwise the
+        existing description is left untouched. Returns the updated entity, or
+        ``None`` if no row matches in this tenant (the service maps that to 404).
+        Ownership is enforced one layer up — this only guarantees tenancy.
+        """
+        stmt = select(models.Collection).where(
+            models.Collection.tenant_id == self._tenant_id,
+            models.Collection.id == collection_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if set_description:
+            row.description = description
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_collection(row)
 
     async def delete(self, collection_id: UUID) -> bool:
         stmt = select(models.Collection).where(
