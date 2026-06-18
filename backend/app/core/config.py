@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +41,32 @@ class Settings(BaseSettings):
     # --- Environment / observability ---
     environment: str = Field(default="local", alias="ENVIRONMENT")
     log_level: str = Field(default="info", alias="LOG_LEVEL")
+
+    # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
+    # Symmetric signing secret for the access JWT. A dev default is provided so
+    # the skeleton boots; production MUST override it (a deploy with the default
+    # in a non-local environment fails fast — see the validator below). The
+    # refresh token is opaque/random, not signed, so it has no separate secret.
+    jwt_secret: str = Field(default="dev-only-insecure-jwt-secret-change-me", alias="JWT_SECRET")
+    # HS256 keeps key management to one symmetric secret for the app-managed MVP;
+    # the OIDC end-state (Keycloak, spec 0004 §2.3) swaps this for asymmetric
+    # verification inside auth/ without touching callers.
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_issuer: str = Field(default="lumen-copilot", alias="JWT_ISSUER")
+    # Short-lived access token (spec 0004 §2.3: <= 15 min).
+    access_token_ttl_seconds: int = Field(default=900, alias="ACCESS_TOKEN_TTL_SECONDS")
+    # Rotating refresh token lifetime (default 14 days). Each use rotates it.
+    refresh_token_ttl_seconds: int = Field(
+        default=14 * 24 * 3600, alias="REFRESH_TOKEN_TTL_SECONDS"
+    )
+
+    @field_validator("access_token_ttl_seconds")
+    @classmethod
+    def _cap_access_ttl(cls, value: int) -> int:
+        """Enforce the spec 0004 §2.3 ceiling: access tokens are <= 15 minutes."""
+        if value <= 0 or value > 900:
+            raise ValueError("ACCESS_TOKEN_TTL_SECONDS must be in (0, 900] (spec 0004 §2.3)")
+        return value
 
     # --- Datastores / infra (required: misconfig should fail fast) ---
     database_url: str = Field(alias="DATABASE_URL")
@@ -125,6 +151,22 @@ class Settings(BaseSettings):
         may be left blank in ``.env``).
         """
         return bool(self.openrouter_api_key.strip())
+
+    _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
+
+    @model_validator(mode="after")
+    def _reject_dev_jwt_secret_in_prod(self) -> Settings:
+        """Fail fast if the insecure dev JWT secret leaks into a deployed env.
+
+        The dev default lets the skeleton boot locally; any non-``local``
+        environment that still carries it is a misconfiguration that must refuse
+        to start rather than mint forgeable tokens (spec 0004 §2.3).
+        """
+        if self.environment != "local" and self.jwt_secret == self._DEV_JWT_SECRET:
+            raise ValueError(
+                "JWT_SECRET must be overridden outside the local environment (spec 0004 §2.3)"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
