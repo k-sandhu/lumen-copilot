@@ -10,6 +10,9 @@ const DocsPage = lazy(() => import('@/features/docs').then((m) => ({ default: m.
 const FeaturesPage = lazy(() =>
   import('@/features/feature-catalog').then((m) => ({ default: m.FeaturesPage })),
 );
+const DocumentsRouteLazy = lazy(() =>
+  import('./DocumentsRoute').then((m) => ({ default: m.DocumentsRoute })),
+);
 
 function RouteFallback({ label }: { label: string }) {
   return (
@@ -33,6 +36,15 @@ export function FeaturesRoute() {
   return (
     <Suspense fallback={<RouteFallback label="features" />}>
       <FeaturesPage />
+    </Suspense>
+  );
+}
+
+/** `/documents` — collections + documents management (#49), auth-gated. */
+export function DocumentsRoute() {
+  return (
+    <Suspense fallback={<RouteFallback label="documents" />}>
+      <DocumentsRouteLazy />
     </Suspense>
   );
 }
