@@ -14,6 +14,7 @@ import 'highlight.js/styles/github-dark.css';
 import { queryClient } from './queryClient';
 import { router } from './routes/router';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { TooltipProvider } from './components/Tooltip';
 import { syncThemeToDom } from './stores/ui';
 import { installAuthRefresh } from './api';
 
@@ -34,7 +35,9 @@ createRoot(rootElement).render(
   <StrictMode>
     <ErrorBoundary label="Application">
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
+        <TooltipProvider delayDuration={200}>
+          <RouterProvider router={router} />
+        </TooltipProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   </StrictMode>,
