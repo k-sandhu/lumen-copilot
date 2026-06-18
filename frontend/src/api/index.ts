@@ -16,9 +16,9 @@ export {
   deleteDocument,
   uploadDocument,
   resolveDocumentContentUrl,
-  documentContentUrl,
+  fetchDocumentContent,
 } from './documents';
-export type { PageQuery, UploadDocumentArgs } from './documents';
+export type { PageQuery, UploadDocumentArgs, DocumentContent } from './documents';
 export {
   listChatSessions,
   createChatSession,
