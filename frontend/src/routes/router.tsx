@@ -1,6 +1,6 @@
 import { createBrowserRouter } from 'react-router-dom';
 import { App } from './App';
-import { DocsRoute, FeaturesRoute } from './devPageRoutes';
+import { DocsRoute, FeaturesRoute, DocumentsRoute } from './devPageRoutes';
 
 /**
  * Router. The chat shell (`App`) lives at `/`; the developer pages are SEPARATE
@@ -22,5 +22,10 @@ export const router = createBrowserRouter([
   {
     path: '/features',
     element: <FeaturesRoute />,
+  },
+  {
+    // Collections + documents management (#49). Auth-gated inside the route.
+    path: '/documents',
+    element: <DocumentsRoute />,
   },
 ]);

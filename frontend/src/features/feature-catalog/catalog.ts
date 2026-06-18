@@ -173,6 +173,21 @@ export const CATALOG: readonly CatalogEntry[] = [
     ],
   },
   {
+    id: 'frontend-documents',
+    title: 'Frontend documents — collections, upload & viewer',
+    area: 'Frontend',
+    status: 'shipped',
+    summary:
+      'Collections sidebar (list/create/rename/delete), multi-file drag-drop upload with live progress and pending→processing→ready→failed status polling, a filterable per-collection document list, a 302-following document viewer, and delete — with 413/415/failed/empty states handled.',
+    links: [
+      {
+        label: 'Security invariants',
+        href: '/docs/specs/0004-security-and-domain-invariants',
+      },
+      { label: 'Issue #49', href: `${GH}/issues/49` },
+    ],
+  },
+  {
     id: 'dev-pages',
     title: 'In-app docs viewer & features catalog',
     area: 'Frontend',
