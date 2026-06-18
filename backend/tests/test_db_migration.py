@@ -68,16 +68,19 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
-def test_migration_chain_is_linear_to_refresh_tokens() -> None:
-    """The chain is linear: 0001 → 0002 → 0003, a single head at 0003."""
+def test_migration_chain_is_linear_to_retrieval_indexes() -> None:
+    """The chain is linear: 0001 → 0002 → 0003 → 0004, a single head at 0004."""
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0003_refresh_tokens"]
+    assert list(script.get_heads()) == ["0004_retrieval_indexes"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
     rt = script.get_revision("0003_refresh_tokens")
     assert rt is not None
     assert rt.down_revision == "0002_mvp_schema"
+    ri = script.get_revision("0004_retrieval_indexes")
+    assert ri is not None
+    assert ri.down_revision == "0003_refresh_tokens"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -133,6 +136,28 @@ def test_offline_refresh_tokens_migration_round_trips(
     command.downgrade(cfg, "0003_refresh_tokens:0002_mvp_schema", sql=True)
     down = capsys.readouterr().out.lower()
     assert "drop table refresh_tokens" in down
+
+
+def test_offline_retrieval_indexes_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0004 creates the pgvector ANN + full-text GIN indexes; the downgrade drops them (#45)."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0003_refresh_tokens:0004_retrieval_indexes", sql=True)
+    up = capsys.readouterr().out.lower()
+    # pgvector HNSW ANN index over the cosine ops class (matches the query's <=>).
+    assert "create index ix_chunks_embedding_hnsw" in up
+    assert "using hnsw (embedding vector_cosine_ops)" in up
+    # Full-text GIN index on the same expression the lexical query matches.
+    assert "create index ix_chunks_text_fts" in up
+    assert "using gin (to_tsvector('english', text))" in up
+
+    command.downgrade(cfg, "0004_retrieval_indexes:0003_refresh_tokens", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop index if exists ix_chunks_text_fts" in down
+    assert "drop index if exists ix_chunks_embedding_hnsw" in down
 
 
 # ---------------------------------------------------------------------------
