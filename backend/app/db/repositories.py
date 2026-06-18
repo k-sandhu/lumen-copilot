@@ -531,6 +531,105 @@ class DocumentRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_document(r) for r in rows]
 
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        collection_id: UUID | None = None,
+        status: DocumentStatus | None = None,
+        filename_query: str | None = None,
+    ) -> list[Document]:
+        """A keyset page of an owner's documents (newest first), optionally filtered.
+
+        Owner-scoped *and* tenant-scoped (deny-by-default ownership, spec 0004
+        §2.2 + INV-1): a caller only ever sees their own documents. Ordered by
+        ``(created_at, id)`` **descending** with ``id`` the stable tiebreaker, so
+        the total order is deterministic even when two rows share a timestamp.
+        ``after_id`` is the id of the last row of the previous page (the decoded
+        cursor); rows strictly *after* it in that order are returned, capped at
+        ``limit``. The optional ``collection_id`` / ``status`` / ``filename_query``
+        narrow the result (the contract's list filters); ``filename_query`` is a
+        case-insensitive substring match on the filename (lexical, not semantic).
+
+        Like the collections keyset, the cursor boundary's ``created_at`` is
+        resolved by a **correlated scalar subquery** rather than a client-supplied
+        timestamp, so the comparison is exact on Postgres and on the SQLite used by
+        the offline tests (no lossy ``datetime`` round-trip across the wire).
+        """
+        conditions = [
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.owner_id == owner_id,
+        ]
+        if collection_id is not None:
+            conditions.append(models.Document.collection_id == collection_id)
+        if status is not None:
+            conditions.append(models.Document.status == status.value)
+        if filename_query:
+            conditions.append(models.Document.filename.ilike(f"%{filename_query}%"))
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Document.created_at)
+                .where(
+                    models.Document.tenant_id == self._tenant_id,
+                    models.Document.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Document.created_at < boundary_created_at,
+                    and_(
+                        models.Document.created_at == boundary_created_at,
+                        models.Document.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Document)
+            .where(*conditions)
+            .order_by(models.Document.created_at.desc(), models.Document.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_document(r) for r in rows]
+
+    async def count_chunks(self, document_id: UUID) -> int:
+        """Count indexed chunks for a document (the wire ``chunk_count``).
+
+        Tenant-scoped on both the document and its chunks (INV-1). Returns ``0``
+        until ingestion (#21) populates chunks; the service has already
+        established the document's visibility before asking.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Chunk)
+            .where(
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Chunk.document_id == document_id,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def delete(self, document_id: UUID) -> bool:
+        """Delete a document (tenant-scoped); cascades to its chunks.
+
+        Returns ``False`` when no row matches in this tenant (the service maps
+        that to 404). Ownership is enforced one layer up — this only guarantees
+        tenancy. The ORM ``delete-orphan`` cascade removes the document's chunks
+        in the same transaction (INV-1: same-tenant chunks only).
+        """
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
     async def set_status(
         self, document_id: UUID, status: DocumentStatus, *, error: str | None = None
     ) -> Document | None:

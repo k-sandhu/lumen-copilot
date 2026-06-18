@@ -14,10 +14,12 @@ from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.collections import router as collections_router
+from app.api.v1.documents import router as documents_router
 from app.api.v1.models import router as models_router
 
 # Aggregating router for all v1 feature routes. Mounted at /api/v1 in app.main.
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(collections_router)
+router.include_router(documents_router)
 router.include_router(models_router)
