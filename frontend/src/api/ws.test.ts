@@ -44,4 +44,20 @@ describe('resolveWsUrl', () => {
     expect(url.startsWith('ws://')).toBe(true);
     expect(url.endsWith('/ws/health')).toBe(true);
   });
+
+  it('appends the bearer access token as a query param when present (#48)', () => {
+    // The WS handshake can't set Authorization headers, so the token rides as
+    // ?access_token=… and the backend validates it in auth/ (INV-4).
+    expect(resolveWsUrl('ws://host/ws', '/chat', 'jwt-abc')).toBe(
+      'ws://host/ws/chat?access_token=jwt-abc',
+    );
+  });
+
+  it('url-encodes the token and omits the param when tokenless', () => {
+    expect(resolveWsUrl('ws://host/ws', '/chat', 'a/b+c')).toBe(
+      'ws://host/ws/chat?access_token=a%2Fb%2Bc',
+    );
+    expect(resolveWsUrl('ws://host/ws', '/chat')).toBe('ws://host/ws/chat');
+    expect(resolveWsUrl('ws://host/ws', '/chat', null)).toBe('ws://host/ws/chat');
+  });
 });
