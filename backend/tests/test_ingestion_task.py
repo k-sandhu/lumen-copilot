@@ -16,6 +16,12 @@ Coverage:
 * embeddings are **batched** (the fake counts its calls);
 * INV-1: chunks persist under the document's tenant only;
 * transient faults (storage/model unavailable) raise the retryable error.
+
+The Celery **sync wrapper** (``ingest_document``) and the **enqueue seam**
+(``enqueue_ingestion``) are covered separately at the bottom of the file with a
+fake Celery ``self`` and a faked broker connection, so the retry/backoff,
+dead-letter, and broker-outage-swallow branches are exercised fully offline (no
+real broker, no datastore).
 """
 
 from __future__ import annotations
@@ -25,10 +31,13 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 import pytest_asyncio
+from celery.exceptions import Retry
+from kombu.exceptions import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.db.session as db_session
+import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
 from app.db.base import Base
@@ -41,7 +50,14 @@ from app.db.repositories import (
 )
 from app.domain.entities import DocumentStatus, Role
 from app.domain.llm import Embedding
-from app.tasks.ingest import IngestionError, ingest_document_async
+from app.tasks.celery_app import celery_app
+from app.tasks.ingest import (
+    IngestionError,
+    IngestionResult,
+    enqueue_ingestion,
+    ingest_document,
+    ingest_document_async,
+)
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -416,3 +432,280 @@ async def test_embed_unavailable_raises_retryable(sqlite_engine: None) -> None:
             object_store=store,
             gateway=gateway,  # type: ignore[arg-type]
         )
+
+
+# --- The Celery sync wrapper: retry / backoff / dead-letter -----------------
+#
+# ``ingest_document`` (the ``@celery_app.task`` entrypoint) is the seam that maps
+# the async core's outcomes onto Celery's retry/terminal semantics. We drive its
+# *unwrapped* function with a fake ``self`` (a stand-in task object exposing
+# ``request.retries`` and a ``retry(...)`` that raises Celery's ``Retry`` exactly
+# as the real one does), and stub the heavy collaborators it builds
+# (``get_settings`` / ``ObjectStore`` / ``LLMGateway``) plus the async core so the
+# branch under test runs fully offline — no broker, no datastore, no event loop
+# into the real pipeline.
+
+# The raw (unbound) function under the Celery task wrapper. ``bind=True`` makes
+# Celery bind ``self`` to the task singleton on ``__wrapped__``; ``.__func__``
+# peels that off so we can drive it with our own fake ``self`` (``_FakeTask``).
+_ingest_wrapper = ingest_document.__wrapped__.__func__
+
+
+class _FakeRequest:
+    """Stand-in for ``self.request`` — only ``retries`` is read by the wrapper."""
+
+    def __init__(self, retries: int) -> None:
+        self.retries = retries
+
+
+class _FakeTask:
+    """A fake Celery task ``self``: exposes ``request`` and a ``retry`` that raises.
+
+    Mirrors ``celery.app.task.Task.retry`` closely enough for the wrapper: it
+    records the ``exc``/``countdown`` it was called with, then raises Celery's
+    real :class:`~celery.exceptions.Retry` (which is what the production code
+    re-raises). The test asserts on both the raised type and the recorded
+    ``countdown`` so the exponential-backoff math is pinned.
+    """
+
+    def __init__(self, retries: int) -> None:
+        self.request = _FakeRequest(retries)
+        self.retry_calls: list[dict[str, object]] = []
+
+    def retry(self, *, exc: BaseException, countdown: float) -> Retry:
+        self.retry_calls.append({"exc": exc, "countdown": countdown})
+        raise Retry("retrying", exc=exc, when=countdown)
+
+
+def _patch_wrapper_collaborators(monkeypatch: pytest.MonkeyPatch, *, settings: Settings) -> None:
+    """Stub the heavy collaborators the wrapper constructs from settings.
+
+    The wrapper resolves config via ``get_settings`` and builds an
+    ``ObjectStore`` / ``LLMGateway`` before delegating to the async core; for the
+    retry/dead-letter branches none of those need to be real, so we hand back the
+    test ``settings`` and inert adapters. The async core itself is patched
+    per-test to inject the fault (or success) under exercise.
+    """
+    monkeypatch.setattr(ingest_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(ingest_module, "ObjectStore", lambda _s: object())
+    monkeypatch.setattr(ingest_module, "LLMGateway", lambda _s: object())
+
+
+def test_wrapper_transient_fault_retries_with_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient fault on a non-final attempt → Celery ``Retry`` with backoff.
+
+    The countdown is ``ingestion_retry_backoff_seconds * 2**retries``; we assert
+    it for two distinct (non-final) attempt counts so the *exponential* shape —
+    not just "some delay" — is pinned. Also exercises the UUID-string parsing in
+    the wrapper (real UUID strings are passed in).
+    """
+    settings = _settings(INGESTION_MAX_RETRIES="3", INGESTION_RETRY_BACKOFF_SECONDS="5")
+    _patch_wrapper_collaborators(monkeypatch, settings=settings)
+
+    # Async core raises a retryable fault; the wrapper must translate to Retry.
+    def _boom(*_a: object, **_k: object) -> object:
+        raise IngestionError("storage flaked")
+
+    monkeypatch.setattr(ingest_module, "ingest_document_async", _boom)
+
+    tenant_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+
+    # Attempt 0 → countdown 5 * 2**0 == 5.
+    task0 = _FakeTask(retries=0)
+    with pytest.raises(Retry):
+        _ingest_wrapper(task0, str(tenant_id), str(document_id))
+    assert len(task0.retry_calls) == 1
+    assert task0.retry_calls[0]["countdown"] == 5
+    assert isinstance(task0.retry_calls[0]["exc"], IngestionError)
+
+    # Attempt 2 → countdown 5 * 2**2 == 20 (exponential, not linear).
+    task2 = _FakeTask(retries=2)
+    with pytest.raises(Retry):
+        _ingest_wrapper(task2, str(tenant_id), str(document_id))
+    assert task2.retry_calls[0]["countdown"] == 20
+
+
+def test_wrapper_dependency_error_also_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``DependencyError`` from the core is retried just like ``IngestionError``."""
+    settings = _settings(INGESTION_MAX_RETRIES="3", INGESTION_RETRY_BACKOFF_SECONDS="2")
+    _patch_wrapper_collaborators(monkeypatch, settings=settings)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise DependencyError("model down", code="llm_unconfigured")
+
+    monkeypatch.setattr(ingest_module, "ingest_document_async", _boom)
+
+    task = _FakeTask(retries=1)
+    with pytest.raises(Retry):
+        _ingest_wrapper(task, str(uuid.uuid4()), str(uuid.uuid4()))
+    # base 2 * 2**1 == 4.
+    assert task.retry_calls[0]["countdown"] == 4
+    assert isinstance(task.retry_calls[0]["exc"], DependencyError)
+
+
+def test_wrapper_final_attempt_dead_letters_and_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the final attempt the doc is marked ``failed`` and the task RETURNS.
+
+    ``request.retries >= ingestion_max_retries`` is the dead-letter boundary: the
+    wrapper must NOT raise ``Retry`` (that would redeliver forever) — it records a
+    permanent ``failed`` status via ``_fail`` and returns the result dict so the
+    message is acknowledged. We fake ``_fail`` (no datastore) and assert it was
+    called with the parsed UUIDs and a reason mentioning the retry count, and that
+    the returned dict reports ``status=failed`` and ``chunk_count=0``.
+    """
+    settings = _settings(INGESTION_MAX_RETRIES="3", INGESTION_RETRY_BACKOFF_SECONDS="5")
+    _patch_wrapper_collaborators(monkeypatch, settings=settings)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise IngestionError("storage still down")
+
+    monkeypatch.setattr(ingest_module, "ingest_document_async", _boom)
+
+    fail_calls: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    async def _fake_fail(tid: uuid.UUID, did: uuid.UUID, reason: str) -> IngestionResult:
+        fail_calls.append((tid, did, reason))
+        return IngestionResult(did, DocumentStatus.FAILED, 0, reason)
+
+    monkeypatch.setattr(ingest_module, "_fail", _fake_fail)
+
+    tenant_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    task = _FakeTask(retries=3)  # retries >= max_retries → dead-letter
+
+    # Returns (does not raise): no infinite redelivery.
+    result = _ingest_wrapper(task, str(tenant_id), str(document_id))
+
+    assert task.retry_calls == []  # never asked Celery to retry
+    assert result["status"] == DocumentStatus.FAILED.value
+    assert result["chunk_count"] == 0
+    # ``_fail`` got the parsed UUIDs (not the raw strings) and a reason that
+    # records the exhausted-retry count.
+    assert len(fail_calls) == 1
+    tid, did, reason = fail_calls[0]
+    assert (tid, did) == (tenant_id, document_id)
+    assert "after 3 retries" in reason
+
+
+def test_wrapper_success_returns_result_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Success path: the wrapper renders the core's result as the JSON-able dict.
+
+    Also pins the UUID-string → ``UUID`` parsing: the async core is handed parsed
+    ``UUID`` objects, never the raw strings Celery serialized.
+    """
+    settings = _settings()
+    _patch_wrapper_collaborators(monkeypatch, settings=settings)
+
+    tenant_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    seen_args: dict[str, object] = {}
+
+    async def _ok(tid: uuid.UUID, did: uuid.UUID, **_k: object) -> IngestionResult:
+        seen_args["tid"] = tid
+        seen_args["did"] = did
+        return IngestionResult(did, DocumentStatus.READY, 7)
+
+    monkeypatch.setattr(ingest_module, "ingest_document_async", _ok)
+
+    task = _FakeTask(retries=0)
+    result = _ingest_wrapper(task, str(tenant_id), str(document_id))
+
+    assert task.retry_calls == []
+    assert result == {
+        "document_id": str(document_id),
+        "status": DocumentStatus.READY.value,
+        "chunk_count": 7,
+        "error": None,
+    }
+    # UUID-string parsing: the core received parsed UUIDs of the right value/type.
+    assert seen_args["tid"] == tenant_id and isinstance(seen_args["tid"], uuid.UUID)
+    assert seen_args["did"] == document_id and isinstance(seen_args["did"], uuid.UUID)
+
+
+# --- The enqueue seam: bounded reconnect + best-effort swallow --------------
+#
+# ``enqueue_ingestion`` runs after-commit on the request path; a broker outage
+# must never 500 a successful upload, so an ``OperationalError`` from the bounded
+# reconnect is logged and swallowed (the doc stays ``pending``). We fake the
+# broker connection so nothing real is published.
+
+
+class _FakeConnection:
+    """A fake broker connection usable as a context manager.
+
+    ``ensure_connection`` is where a real bounded reconnect would raise on an
+    unreachable broker; the test sets ``raise_on_ensure`` to simulate the outage.
+    """
+
+    def __init__(self, *, raise_on_ensure: Exception | None = None) -> None:
+        self.raise_on_ensure = raise_on_ensure
+        self.ensure_kwargs: dict[str, object] = {}
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def ensure_connection(self, **kwargs: object) -> None:
+        self.ensure_kwargs = kwargs
+        if self.raise_on_ensure is not None:
+            raise self.raise_on_ensure
+
+
+def test_enqueue_swallows_broker_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broker ``OperationalError`` is logged and swallowed — no raise.
+
+    A transient broker outage after a committed upload must not turn the request
+    into a 500; the document is simply left ``pending``. We make the bounded
+    reconnect raise ``kombu.exceptions.OperationalError`` and assert
+    ``enqueue_ingestion`` returns normally and never publishes.
+    """
+    conn = _FakeConnection(raise_on_ensure=OperationalError("broker unreachable"))
+    monkeypatch.setattr(celery_app, "connection_for_write", lambda: conn)
+
+    published: list[object] = []
+    monkeypatch.setattr(
+        ingest_module.ingest_document,
+        "apply_async",
+        lambda *a, **k: published.append((a, k)),
+    )
+
+    # Must not raise.
+    enqueue_ingestion(uuid.uuid4(), uuid.uuid4())
+
+    # The bounded-reconnect cap was actually requested, and nothing was published.
+    assert conn.ensure_kwargs == {"max_retries": 1, "timeout": 2}
+    assert published == []
+
+
+def test_enqueue_publishes_once_with_string_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Positive path: ``apply_async`` is called exactly once with string id args.
+
+    Celery's JSON serializer can't carry ``UUID``, so the ids must be passed as
+    strings; the publish goes on the bounded connection with ``retry=False``.
+    """
+    conn = _FakeConnection()
+    monkeypatch.setattr(celery_app, "connection_for_write", lambda: conn)
+
+    calls: list[dict[str, object]] = []
+
+    def _apply_async(*_args: object, **kwargs: object) -> None:
+        calls.append(dict(kwargs))
+
+    monkeypatch.setattr(ingest_module.ingest_document, "apply_async", _apply_async)
+
+    tenant_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    enqueue_ingestion(tenant_id, document_id)
+
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["args"] == (str(tenant_id), str(document_id))
+    assert kwargs["connection"] is conn
+    assert kwargs["retry"] is False
