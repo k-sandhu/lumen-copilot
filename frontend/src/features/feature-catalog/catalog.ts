@@ -158,6 +158,21 @@ export const CATALOG: readonly CatalogEntry[] = [
     links: [{ label: 'PR #30', href: `${GH}/pull/30` }],
   },
   {
+    id: 'frontend-auth',
+    title: 'Frontend auth — login, session & bearer wiring',
+    area: 'Frontend',
+    status: 'shipped',
+    summary:
+      'Login screen against POST /auth/login, in-memory access-token storage, every request bearer-authed, silent refresh-then-retry on 401, GET /auth/me, logout, and a route guard (unauthenticated → login, authenticated → app shell).',
+    links: [
+      {
+        label: 'Security invariants',
+        href: '/docs/specs/0004-security-and-domain-invariants',
+      },
+      { label: 'Issue #48', href: `${GH}/issues/48` },
+    ],
+  },
+  {
     id: 'dev-pages',
     title: 'In-app docs viewer & features catalog',
     area: 'Frontend',
@@ -185,9 +200,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     status: 'planned',
     summary:
       'The MVP: permissioned, cited, auditable answers over connected sources and uploaded documents.',
-    links: [
-      { label: 'Scope spec', href: '/docs/specs/0003-product-scope-and-mission' },
-    ],
+    links: [{ label: 'Scope spec', href: '/docs/specs/0003-product-scope-and-mission' }],
   },
   {
     id: 'security-invariants',
