@@ -92,10 +92,26 @@ class Settings(BaseSettings):
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     llm_model: str = Field(default="openrouter/openai/gpt-4o-mini", alias="LLM_MODEL")
+    # Embedding model id (issue #32). OpenRouter serves embeddings on an
+    # OpenAI-compatible endpoint; LiteLLM's native ``openrouter/`` route for
+    # embeddings is unreliable (BerriAI/litellm#17773), so embeddings go through
+    # LiteLLM's OpenAI-compatible client pointed at ``llm_embedding_api_base``
+    # with the OpenRouter key — chat keeps the native ``openrouter/`` route.
+    # Hence the ``openai/<author>/<model>`` form: LiteLLM strips ``openai/`` and
+    # sends ``baai/bge-m3`` to the configured base.
     llm_embedding_model: str = Field(
-        default="openrouter/openai/text-embedding-3-small",
+        default="openai/baai/bge-m3",
         alias="LLM_EMBEDDING_MODEL",
     )
+    # Base URL embeddings are sent to (OpenRouter's OpenAI-compatible endpoint).
+    # Blank disables the override — use only with a model LiteLLM routes natively.
+    llm_embedding_api_base: str = Field(
+        default="https://openrouter.ai/api/v1",
+        alias="LLM_EMBEDDING_API_BASE",
+    )
+    # Output dimension of ``llm_embedding_model`` (bge-m3 = 1024). Pins the
+    # pgvector column width for the ingestion migration; change with the model.
+    llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
