@@ -33,3 +33,14 @@ if (!('ResizeObserver' in globalThis)) {
   }
   globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 }
+
+// jsdom lacks URL.createObjectURL / revokeObjectURL, which the document viewer
+// uses to render bearer-fetched content as a blob: URL. Provide a deterministic
+// stub so components that load document content mount in tests.
+if (typeof URL.createObjectURL !== 'function') {
+  let counter = 0;
+  URL.createObjectURL = () => `blob:test/${++counter}`;
+}
+if (typeof URL.revokeObjectURL !== 'function') {
+  URL.revokeObjectURL = () => {};
+}

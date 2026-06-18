@@ -3,6 +3,10 @@
  * ONLY place the SPA performs HTTP for the documents slice (ADR-0004); features
  * consume hooks built on these, never `fetch`/`XMLHttpRequest` directly.
  *
+ * Also hosts the chat citation click-through path (#50): the viewer loads a
+ * permitted document's bytes so it can open at the cited passage (spec 0004
+ * INV-2/INV-3 — the backend returns 404 for a document the caller may not see).
+ *
  * Conforms to the FROZEN contract (contracts/openapi.yaml 0.1.0):
  *   GET    /collections                 → CollectionList
  *   POST   /collections                 → Collection (201)
@@ -45,6 +49,29 @@ function buildQuery(params: Record<string, string | number | undefined>): string
   }
   const qs = search.toString();
   return qs ? `?${qs}` : '';
+}
+
+function joinApi(path: string): string {
+  const b = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${b}${p}`;
+}
+
+/** Coerce a parsed body into a Problem when it has the required shape. */
+function problemFrom(value: unknown): Problem | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.title === 'string' && typeof v.status === 'number') return value as Problem;
+  return undefined;
+}
+
+/** Parse a (possibly non-JSON) response body string into a Problem, if it is one. */
+function problemFromText(text: string): Problem | undefined {
+  try {
+    return problemFrom(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
 }
 
 // --- Collections ----------------------------------------------------------
@@ -104,29 +131,6 @@ export interface UploadDocumentArgs {
   signal?: AbortSignal;
 }
 
-function joinApi(path: string): string {
-  const b = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
-  const p = path.startsWith('/') ? path : `/${path}`;
-  return `${b}${p}`;
-}
-
-function problemFrom(text: string): Problem | undefined {
-  try {
-    const data: unknown = JSON.parse(text);
-    if (
-      typeof data === 'object' &&
-      data !== null &&
-      typeof (data as Record<string, unknown>).title === 'string' &&
-      typeof (data as Record<string, unknown>).status === 'number'
-    ) {
-      return data as Problem;
-    }
-  } catch {
-    /* non-JSON body */
-  }
-  return undefined;
-}
-
 /**
  * Upload a file into a collection via `POST /documents` (multipart/form-data).
  *
@@ -172,7 +176,7 @@ export function uploadDocument({
         new ApiError(
           `Upload to ${url} failed with ${xhr.status}`,
           xhr.status,
-          problemFrom(xhr.responseText),
+          problemFromText(xhr.responseText),
         ),
       );
     };
@@ -196,10 +200,10 @@ export function uploadDocument({
   });
 }
 
-// --- Document content (viewer): follow a 302 → presigned URL ---------------
+// --- Document content (documents viewer): follow a 302 → presigned URL ------
 
 /**
- * Resolve a viewable URL for a document's original bytes (AC-3).
+ * Resolve a viewable URL for a document's original bytes (AC-3, #49 viewer).
  *
  * `GET /documents/{id}/content` may either stream the bytes (200) or 302 to a
  * short-TTL presigned URL (CC-12). We issue a `redirect: 'manual'` request so we
@@ -244,14 +248,7 @@ export async function resolveDocumentContentUrl(id: string, signal?: AbortSignal
 
   let problem: Problem | undefined;
   try {
-    const data: unknown = await response.json();
-    if (
-      typeof data === 'object' &&
-      data !== null &&
-      typeof (data as Record<string, unknown>).title === 'string'
-    ) {
-      problem = data as Problem;
-    }
+    problem = problemFrom(await response.json());
   } catch {
     /* non-JSON body */
   }
@@ -260,13 +257,72 @@ export async function resolveDocumentContentUrl(id: string, signal?: AbortSignal
 
 // --- Document content (chat citation viewer, #50) --------------------------
 
+/** A loadable document content source, plus a revoke for any object URL we minted. */
+export interface DocumentContent {
+  /** URL to point the viewer's <iframe>/<a> at. */
+  url: string;
+  /** Release the underlying object URL (no-op for a passthrough presigned URL). */
+  revoke: () => void;
+}
+
 /**
- * Same-origin URL for a document's original bytes (`GET /documents/{id}/content`).
- * The server may 200 the bytes or 302 to a short-TTL presigned URL; either way
- * this is the URL the viewer points an <iframe>/<a> at. It rides the httpOnly
- * session cookie (credentials are same-origin); a not-permitted id yields 404.
+ * Load a permitted document's content for the citation viewer (AC-2).
+ *
+ * INV-4 / contract: `GET /documents/{id}/content` is a `bearerAuth` endpoint —
+ * it is authorized by the in-memory access JWT, NOT by a cookie. (The only
+ * cookie is the httpOnly REFRESH cookie, used solely by /auth/refresh +
+ * /auth/logout.) A browser-initiated `<iframe src>` / `<a href>` GET cannot
+ * attach an `Authorization: Bearer` header, so it would 401. We therefore fetch
+ * the bytes here with the bearer attached and hand back a `blob:` object URL the
+ * viewer can safely render.
+ *
+ * The endpoint may instead 302 to a short-TTL presigned URL (CC-12). We issue a
+ * `redirect: 'follow'` fetch so the browser transparently follows that redirect
+ * and streams the bytes; the resulting body is still turned into a blob URL, so
+ * the viewer never has to re-request (and never leaks the access token into an
+ * iframe/anchor URL). A 404 (cross-tenant / not permitted, INV-2) and a 401
+ * surface as a typed ApiError carrying the Problem body.
  */
-export function documentContentUrl(documentId: string): string {
-  const base = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
-  return `${base}/documents/${documentId}/content`;
+export async function fetchDocumentContent(
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<DocumentContent> {
+  const url = joinApi(`/documents/${documentId}/content`);
+  const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
+  const token = getAccessToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  let response: Response;
+  try {
+    // credentials:'include' lets the refresh cookie ride along, but the actual
+    // authorization is the bearer header above; redirect:'follow' transparently
+    // chases the contract's optional 302 → presigned URL.
+    response = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'follow',
+      headers,
+      signal,
+    });
+  } catch (cause) {
+    throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
+  }
+
+  if (!response.ok) {
+    let problem: Problem | undefined;
+    try {
+      problem = problemFrom(await response.json());
+    } catch {
+      /* non-JSON body */
+    }
+    throw new ApiError(
+      `Content request for ${documentId} failed with ${response.status}`,
+      response.status,
+      problem,
+    );
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
 }

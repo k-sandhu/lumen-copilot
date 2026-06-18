@@ -27,8 +27,10 @@ Transport (the `api/` boundary — the only backend caller):
 - [`api/chat.ts`](../../api/chat.ts) — typed session CRUD, `listMessages`,
   `sendMessage`.
 - [`api/models.ts`](../../api/models.ts) — `listModels` (the picker registry).
-- [`api/documents.ts`](../../api/documents.ts) — `documentContentUrl` for citation
-  click-through to the original bytes.
+- [`api/documents.ts`](../../api/documents.ts) — `fetchDocumentContent` for
+  citation click-through: fetches the original bytes with the bearer (INV-4 —
+  `GET /documents/{id}/content` is bearer-authed, not cookie-authed) and hands
+  back a `blob:` URL the viewer renders.
 - [`api/ws.ts`](../../api/ws.ts) — the typed WS client (reused from #48); features
   consume a hook, never the raw socket.
 
