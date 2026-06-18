@@ -97,4 +97,42 @@
   .prose-md td {
     @apply border border-border px-2 py-1;
   }
+
+  /* Long-form docs need a fuller heading scale + the rest of GFM. */
+  .prose-md h1 {
+    @apply text-xl;
+  }
+  .prose-md h2 {
+    @apply text-lg;
+  }
+  .prose-md h3 {
+    @apply text-base;
+  }
+  .prose-md h4,
+  .prose-md h5,
+  .prose-md h6 {
+    @apply mb-1 mt-3 font-semibold;
+  }
+  .prose-md blockquote {
+    @apply my-3 border-l-2 border-border pl-3 italic text-foreground-muted;
+  }
+  .prose-md hr {
+    @apply my-4 border-border;
+  }
+  .prose-md ul ul,
+  .prose-md ul ol,
+  .prose-md ol ul,
+  .prose-md ol ol {
+    @apply my-1;
+  }
+  .prose-md img {
+    @apply max-w-full;
+  }
+  /* GFM task lists (our status markers): drop the bullet, align the checkbox. */
+  .prose-md li:has(> input[type='checkbox']) {
+    @apply -ml-5 list-none;
+  }
+  .prose-md input[type='checkbox'] {
+    @apply mr-1.5 align-middle;
+  }
 }

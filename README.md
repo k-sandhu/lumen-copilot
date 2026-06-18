@@ -10,6 +10,13 @@ The product scope and stack are being defined from user stories; what's intentio
 - **Open decisions:** [docs/specs/0001-open-decisions.md](docs/specs/0001-open-decisions.md)
 - **Architecture decisions:** [docs/architecture/](docs/architecture/)
 
+## In-app developer pages
+The frontend SPA ships two developer-facing pages, reachable from the main app via a floating "🧭 Pages" overlay (hover or focus):
+- **`/docs`** — renders every markdown file under `docs/` (plus the AGENTS/README contracts), bundled at build time and shown through the sanitized markdown pipeline; doc-to-doc links navigate in-app.
+- **`/features`** — a curated, grounded catalog of what's shipped, each entry linking to its ADR/spec/PR.
+
+Keep `/features` honest: when a feature lands, update `frontend/src/features/feature-catalog/catalog.ts` in the **same** PR (a test fails if any catalog→doc link rots). How docs are bundled into the static SPA: [frontend/src/features/docs/README.md](frontend/src/features/docs/README.md).
+
 ## Issue pipeline (TL;DR)
 ```powershell
 powershell -File .\scripts\setup-board-and-labels.ps1      # base labels + board (idempotent)
