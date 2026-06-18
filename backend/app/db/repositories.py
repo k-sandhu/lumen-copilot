@@ -22,6 +22,7 @@ touches several repositories commits atomically.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -38,6 +39,7 @@ from app.domain.entities import (
     DocumentStatus,
     Message,
     MessageRole,
+    RefreshToken,
     Role,
     Tenant,
     User,
@@ -62,6 +64,18 @@ def _to_user(row: models.User) -> User:
         roles=tuple(Role(r) for r in row.roles),
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _to_refresh_token(row: models.RefreshToken) -> RefreshToken:
+    return RefreshToken(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        user_id=row.user_id,
+        token_hash=row.token_hash,
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        created_at=row.created_at,
     )
 
 
@@ -200,6 +214,37 @@ class TenantRepository:
         return _to_tenant(row) if row is not None else None
 
 
+class UserLookupRepository:
+    """The one **non**-tenant-scoped user lookup — the pre-identity step (CC-3).
+
+    Login arrives with no tenant (the client never sends one, spec 0004 §2.3),
+    so resolving *which* tenant an email belongs to must precede tenant scoping.
+    This is that single, deliberate exception: a tenant-agnostic lookup by email
+    or id, used **only** by ``auth``/the auth service. Email is unique within a
+    tenant; for the MVP (one principal → one tenant) it is effectively unique
+    globally, so this returns at most one user. Every operation *after* identity
+    resolution goes through the tenant-scoped :class:`UserRepository`.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def find_by_email(self, email: str) -> User | None:
+        stmt = select(models.User).where(models.User.email == email)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_user(row) if row is not None else None
+
+    async def find_refresh_token_owner(self, token_hash: str) -> RefreshToken | None:
+        """Resolve a refresh-token row by hash, tenant-agnostically (refresh path).
+
+        The refresh cookie carries no tenant; the hash is globally unique, so
+        this finds the owning row, after which the caller scopes to its tenant.
+        """
+        stmt = select(models.RefreshToken).where(models.RefreshToken.token_hash == token_hash)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_refresh_token(row) if row is not None else None
+
+
 class UserRepository(_TenantScopedRepository):
     """Users within one tenant (spec 0004 §2.3)."""
 
@@ -229,6 +274,54 @@ class UserRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
+
+
+class RefreshTokenRepository(_TenantScopedRepository):
+    """Rotating, revocable refresh tokens within one tenant (spec 0004 §2.3).
+
+    Only the token **hash** is ever passed in/out — the opaque token is hashed
+    in ``auth/`` before it reaches here. Lookups are tenant-scoped (INV-1) so a
+    token minted in tenant A can never be resolved by a tenant-B repository.
+    """
+
+    async def create(
+        self,
+        *,
+        user_id: UUID,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> RefreshToken:
+        row = models.RefreshToken(
+            tenant_id=self._tenant_id,
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_refresh_token(row)
+
+    async def get_by_hash(self, token_hash: str) -> RefreshToken | None:
+        stmt = select(models.RefreshToken).where(
+            models.RefreshToken.tenant_id == self._tenant_id,
+            models.RefreshToken.token_hash == token_hash,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_refresh_token(row) if row is not None else None
+
+    async def revoke(self, token_hash: str) -> bool:
+        """Mark a token revoked (idempotent). Returns False if not found here."""
+        stmt = select(models.RefreshToken).where(
+            models.RefreshToken.tenant_id == self._tenant_id,
+            models.RefreshToken.token_hash == token_hash,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.revoked_at is None:
+            row.revoked_at = datetime.now(UTC)
+            await self._session.flush()
+        return True
 
 
 class CollectionRepository(_TenantScopedRepository):
