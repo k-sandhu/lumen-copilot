@@ -14,5 +14,6 @@ CC-8) — the single ``emit(...)`` seam every later feature calls to satisfy the
 
 from app.services.audit import AuditSink
 from app.services.collections_service import CollectionsService
+from app.services.models_service import ChatModelService, is_allowed_model
 
-__all__ = ["AuditSink", "CollectionsService"]
+__all__ = ["AuditSink", "ChatModelService", "CollectionsService", "is_allowed_model"]
