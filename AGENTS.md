@@ -94,7 +94,7 @@ Stack-independent; binding from the first commit:
 ## 9. Test-driven (hard gate — binding once a test runner exists)
 Write the test → watch it fail for the *right reason* → smallest change to green → confirm green. Plus:
 - A **regression test for every bug fix.**
-- **Negative tests required** for: unauthorized → denied, wrong-role → forbidden, illegal state transition, malformed input, broken invariant. (The concrete categories firm up with the security invariants — §2/§6 open decisions.)
+- **Negative tests required** — concrete categories fixed by [spec 0004](docs/specs/0004-security-and-domain-invariants.md) (INV-1..INV-8): cross-tenant → 404 (INV-1) · unauthorized retrieval → excluded / direct fetch → 404 (INV-2) · uncited-or-forbidden citation → blocked (INV-3) · missing/expired token → 401 (INV-4) · wrong-role → 403 (INV-5) · missing audit event → fail (INV-6) · unapproved T2+ action → forbidden (INV-7) · malformed input → 422 / illegal transition → 409 (INV-8).
 
 ## 10. Verification — tiers & named gates
 🔓 Mechanisms are **pending the stack** (OD-5). The intended shape (do not build yet):
