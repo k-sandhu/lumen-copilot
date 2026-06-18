@@ -370,3 +370,114 @@ async def test_repositories_require_a_tenant_scope() -> None:
     """A tenant-scoped repository cannot be built without a tenant id (INV-1)."""
     with pytest.raises(TypeError):
         UserRepository(session=None)  # type: ignore[call-arg]  # missing tenant_id
+
+
+# ---------------------------------------------------------------------------
+# Collection list/count/update additions (#46).
+# ---------------------------------------------------------------------------
+
+
+async def test_collection_count_documents(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    collections = CollectionRepository(session, tenant_a)
+    coll = await collections.create(owner_id=user.id, name="c")
+    assert await collections.count_documents(coll.id) == 0
+
+    documents = DocumentRepository(session, tenant_a)
+    for i in range(3):
+        await documents.create(
+            owner_id=user.id,
+            collection_id=coll.id,
+            filename=f"f{i}.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key=f"k{i}",
+        )
+    assert await collections.count_documents(coll.id) == 3
+
+
+async def test_collection_update_partial(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    collections = CollectionRepository(session, tenant_a)
+    coll = await collections.create(owner_id=user.id, name="old", description="orig")
+
+    # Name-only update leaves the description untouched.
+    updated = await collections.update(coll.id, name="new")
+    assert updated is not None
+    assert updated.name == "new"
+    assert updated.description == "orig"
+
+    # set_description clears it to None.
+    cleared = await collections.update(coll.id, set_description=True, description=None)
+    assert cleared is not None
+    assert cleared.description is None
+    assert cleared.name == "new"  # name preserved
+
+
+async def test_collection_update_cross_tenant_returns_none(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, tenant_b = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    coll = await CollectionRepository(session, tenant_a).create(owner_id=user.id, name="A")
+    # A tenant-B repository cannot mutate tenant-A rows (INV-1).
+    assert await CollectionRepository(session, tenant_b).update(coll.id, name="x") is None
+
+
+async def test_collection_list_for_owner_page_keyset_pagination(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    collections = CollectionRepository(session, tenant_a)
+    created = [await collections.create(owner_id=user.id, name=f"c{i}") for i in range(5)]
+    created_ids = {c.id for c in created}
+
+    seen: set[uuid.UUID] = set()
+    after_id: uuid.UUID | None = None
+    pages = 0
+    while True:
+        page = await collections.list_for_owner_page(user.id, limit=2, after_id=after_id)
+        if not page:
+            break
+        for c in page:
+            assert c.id not in seen  # deterministic, no overlap
+            seen.add(c.id)
+        after_id = page[-1].id
+        pages += 1
+        if len(page) < 2:
+            break
+        assert pages < 10
+    assert seen == created_ids
+
+
+async def test_collection_list_for_owner_page_excludes_other_owner(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    alice = await UserRepository(session, tenant_a).create(
+        email="alice@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    bob = await UserRepository(session, tenant_a).create(
+        email="bob@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    collections = CollectionRepository(session, tenant_a)
+    await collections.create(owner_id=alice.id, name="alice-coll")
+    await collections.create(owner_id=bob.id, name="bob-coll")
+
+    alice_page = await collections.list_for_owner_page(alice.id, limit=10)
+    assert {c.name for c in alice_page} == {"alice-coll"}
