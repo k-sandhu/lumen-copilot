@@ -4,9 +4,10 @@ Two layers, both offline-safe:
 
 * **Offline DDL** (no DB) — render the ``0002`` upgrade *and* downgrade to SQL via
   Alembic's offline mode and assert the headline shapes are present: all nine
-  tables created, the ``vector(1024)`` embedding column, every ``tenant_id`` FK,
-  and the append-only ``REVOKE`` on ``audit_events``. This proves the migration
-  is *reversible* (AC-3: a downgrade exists and renders) without a live Postgres.
+  MVP tables created, the ``vector(1024)`` embedding column, every ``tenant_id``
+  FK, and the append-only ``REVOKE`` on ``audit_events``. The ``0003`` step
+  (``refresh_tokens``, issue #19) gets its own round-trip check. This proves the
+  migrations are *reversible* (AC-3: a downgrade exists and renders) offline.
 * **Live apply/reverse** (compose Postgres) — actually run ``upgrade head`` then
   ``downgrade base`` against a real database and assert the schema appears and
   fully disappears. Skipped automatically when Postgres is unreachable, matching
@@ -35,7 +36,9 @@ import app.db.models  # noqa: F401  isort: skip
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
 
-_ALL_TABLES = {
+# Tables created by the 0002 MVP-schema migration (the offline-DDL step checks
+# render only that revision).
+_MVP_TABLES = {
     "tenants",
     "users",
     "collections",
@@ -46,6 +49,10 @@ _ALL_TABLES = {
     "citations",
     "audit_events",
 }
+
+# Every table the ORM registry now carries: the MVP set plus refresh_tokens,
+# added by the 0003 migration (issue #19, spec 0004 §2.3).
+_ALL_TABLES = _MVP_TABLES | {"refresh_tokens"}
 
 
 def _alembic_config(url: str | None = None) -> Config:
@@ -61,13 +68,16 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
-def test_migration_chain_is_linear_to_mvp_schema() -> None:
-    """``0002`` follows ``0001`` and is reachable as a single head."""
+def test_migration_chain_is_linear_to_refresh_tokens() -> None:
+    """The chain is linear: 0001 → 0002 → 0003, a single head at 0003."""
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0002_mvp_schema"]
-    rev = script.get_revision("0002_mvp_schema")
-    assert rev is not None
-    assert rev.down_revision == "0001_enable_pgvector"
+    assert list(script.get_heads()) == ["0003_refresh_tokens"]
+    mvp = script.get_revision("0002_mvp_schema")
+    assert mvp is not None
+    assert mvp.down_revision == "0001_enable_pgvector"
+    rt = script.get_revision("0003_refresh_tokens")
+    assert rt is not None
+    assert rt.down_revision == "0002_mvp_schema"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -81,7 +91,7 @@ def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
     command.upgrade(cfg, "0001_enable_pgvector:0002_mvp_schema", sql=True)
     sql = capsys.readouterr().out.lower()
 
-    for table in _ALL_TABLES:
+    for table in _MVP_TABLES:
         assert f"create table {table}" in sql, f"missing CREATE for {table}"
     # The pgvector embedding column, pinned to LLM_EMBEDDING_DIMENSIONS = 1024.
     assert "vector(1024)" in sql
@@ -101,10 +111,28 @@ def test_offline_downgrade_sql_drops_all_tables(
     command.downgrade(cfg, "0002_mvp_schema:0001_enable_pgvector", sql=True)
     sql = capsys.readouterr().out.lower()
 
-    for table in _ALL_TABLES:
+    for table in _MVP_TABLES:
         assert f"drop table {table}" in sql, f"missing DROP for {table}"
     # The append-only revoke is undone before the drop.
     assert "grant update, delete on table audit_events" in sql
+
+
+def test_offline_refresh_tokens_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0003 creates refresh_tokens (FK → users) and the downgrade drops it."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0002_mvp_schema:0003_refresh_tokens", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table refresh_tokens" in up
+    assert "references users" in up  # token rows hang off a user (CASCADE)
+    assert "references tenants" in up  # tenant-scoped like every table (INV-1)
+
+    command.downgrade(cfg, "0003_refresh_tokens:0002_mvp_schema", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table refresh_tokens" in down
 
 
 # ---------------------------------------------------------------------------

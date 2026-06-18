@@ -113,6 +113,36 @@ class User(TenantScopedMixin, TimestampMixin, Base):
     roles: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
 
 
+class RefreshToken(TenantScopedMixin, Base):
+    """A rotating, revocable refresh token (spec 0004 §2.3).
+
+    No ``TimestampMixin``/``updated_at``: a token row is created, optionally
+    revoked, then expires — it is never re-described. Only the **hash** of the
+    opaque token is stored (``token_hash``, unique) so a DB read yields no usable
+    token. ``revoked_at`` set ⇒ the token can no longer be used (logout or
+    rotation); ``expires_at`` is the hard lifetime cap.
+    """
+
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_refresh_tokens_token_hash"),
+        Index("ix_refresh_tokens_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Collection(TenantScopedMixin, TimestampMixin, Base):
     """A folder grouping a user's documents. Ownership-bearing."""
 
