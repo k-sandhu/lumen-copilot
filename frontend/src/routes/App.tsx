@@ -15,11 +15,25 @@ import { ScrollArea } from '@/components/ScrollArea';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { NavOverlay } from '@/components/NavOverlay';
 import { SystemStatusPanel } from '@/features/system-status';
+import { CurrentUserMenu, RouteGuard } from '@/features/auth';
 import { useUiStore } from '@/stores/ui';
 import { cn } from '@/lib/cn';
 import { WELCOME_NOTE } from './welcomeNote';
 
+/**
+ * Route root for `/`. The auth guard (AC-3) gates the shell: unauthenticated →
+ * login screen; authenticated → the app shell below; bootstrapping → a loading
+ * state. The guard owns the silent-refresh boot so a reload keeps the session.
+ */
 export function App() {
+  return (
+    <RouteGuard>
+      <AppShell />
+    </RouteGuard>
+  );
+}
+
+function AppShell() {
   const railCollapsed = useUiStore((s) => s.railCollapsed);
   const toggleRail = useUiStore((s) => s.toggleRail);
   const theme = useUiStore((s) => s.theme);
@@ -44,14 +58,19 @@ export function App() {
             skeleton
           </span>
         </div>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          aria-label="Toggle color theme"
-          className="rounded-md border border-border px-2 py-1 text-sm hover:bg-surface-muted"
-        >
-          {theme === 'dark' ? '☾ Dark' : '☀ Light'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label="Toggle color theme"
+            className="rounded-md border border-border px-2 py-1 text-sm hover:bg-surface-muted"
+          >
+            {theme === 'dark' ? '☾ Dark' : '☀ Light'}
+          </button>
+          <ErrorBoundary label="Account menu">
+            <CurrentUserMenu />
+          </ErrorBoundary>
+        </div>
       </header>
 
       {/* Middle row — min-h-0 is the load-bearing rule for independent scroll. */}

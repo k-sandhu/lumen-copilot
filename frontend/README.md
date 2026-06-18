@@ -22,10 +22,16 @@ In compose the dev server binds `0.0.0.0:5173` and proxies `/health`, `/api`, an
 ## Layout (feature-sliced)
 
 - `src/api/` — **the only place that talks to the backend.** `client.ts` (typed
-  fetch, parses RFC-9457 `Problem` into `ApiError`), `health.ts` (`getReadiness`),
-  `ws.ts` (typed WebSocket client: envelope parsing, lifecycle, backoff reconnect).
-- `src/features/<name>/` — vertical slices (today: `system-status`). Components +
-  hooks; consume `api/` via hooks, never raw transport.
+  fetch, parses RFC-9457 `Problem` into `ApiError`, injects `Authorization:
+Bearer` + does one silent refresh-then-retry on 401), `auth.ts` (login / refresh
+  / me / logout), `token.ts` (in-memory access-token holder — never localStorage),
+  `health.ts` (`getReadiness`), `ws.ts` (typed WebSocket client: envelope parsing,
+  lifecycle, backoff reconnect; appends the bearer token on the handshake).
+- `src/features/<name>/` — vertical slices (`auth`, `system-status`, `docs`,
+  `feature-catalog`). Components + hooks; consume `api/` via hooks, never raw
+  transport. `auth` owns the login screen, session bootstrap (silent refresh on
+  load), the `RouteGuard` (unauthenticated → login, authenticated → shell), and
+  the current-user menu / logout.
 - `src/components/` — shared Radix-based primitives (Card, StatusBadge, ScrollArea,
   ErrorBoundary). `src/lib/` — markdown renderer + utils. `src/stores/` — Zustand
   UI-only state (theme, rail). `src/routes/` — the two-pane shell + router.

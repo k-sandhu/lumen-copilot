@@ -33,6 +33,36 @@ export interface ReadinessStatus {
   dependencies: DependencyStatus[];
 }
 
+// --- Auth (contracts/openapi.yaml §auth, spec 0004 §2.3) ---
+
+/** POST /auth/login body. `password` is write-only on the wire. */
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+/** 200 from POST /auth/login and POST /auth/refresh. */
+export interface TokenResponse {
+  /** Short-lived JWT bearer token. */
+  access_token: string;
+  token_type: 'bearer';
+  /** Access-token lifetime in seconds. */
+  expires_in: number;
+}
+
+/** Tenant roles (MVP RBAC, spec 0004 §2.3). */
+export type UserRole = 'member' | 'admin' | 'security';
+
+/** 200 from GET /auth/me — the authenticated principal. */
+export interface CurrentUser {
+  id: string;
+  email: string;
+  /** Resolved from the bearer token; clients never send it (spec 0004). */
+  tenant_id: string;
+  roles: UserRole[];
+  created_at: string;
+}
+
 // --- Shared error model: Problem (RFC-9457 application/problem+json) ---
 export interface ProblemFieldError {
   field: string;

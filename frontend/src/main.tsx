@@ -15,9 +15,15 @@ import { queryClient } from './queryClient';
 import { router } from './routes/router';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { syncThemeToDom } from './stores/ui';
+import { installAuthRefresh } from './api';
 
 // Reflect the persisted/system theme onto <html> before first paint.
 syncThemeToDom();
+
+// Wire the silent-refresh handler into the api/ client so any 401 triggers one
+// refresh + retry before surfacing (issue #48, AC-2/AC-4). Must run before the
+// first request — and before the auth store, which subscribes to the token.
+installAuthRefresh();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
