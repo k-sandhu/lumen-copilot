@@ -459,7 +459,7 @@ def test_ws_relays_published_envelopes(
     token = client.post(
         "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
     ).json()["access_token"]
-    with client.websocket_connect(f"/ws/chat/{stream_id}?token={token}") as ws:
+    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
         received = [ws.receive_json(), ws.receive_json(), ws.receive_json()]
 
     assert [e["type"] for e in received] == ["start", "delta", "done"]
@@ -485,7 +485,7 @@ def test_ws_terminal_error_is_terminal(
     token = client.post(
         "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
     ).json()["access_token"]
-    with client.websocket_connect(f"/ws/chat/{stream_id}?token={token}") as ws:
+    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
         start = ws.receive_json()
         err = ws.receive_json()
 
@@ -506,7 +506,7 @@ def _assert_ws_denied_no_leak(client: TestClient, stream_id: str, token: str) ->
     """
     leaked: dict[str, object] | None = None
     try:
-        with client.websocket_connect(f"/ws/chat/{stream_id}?token={token}") as ws:
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
             # Reaching here means the socket was accepted; any envelope received is
             # a cross-user leak of the answer stream.
             leaked = ws.receive_json()
@@ -589,7 +589,7 @@ def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _
 
     # The background task published the full stream into the replay buffer; relay
     # it over the WS and assert the lifecycle + a citation event.
-    with client.websocket_connect(f"/ws/chat/{stream_id}?token={token}") as ws:
+    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
         events: list[dict[str, object]] = []
         for _ in range(50):
             env = ws.receive_json()
