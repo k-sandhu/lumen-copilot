@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign in · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  .auth-brand-narrow { display: none; }
+  .auth-input-suffix {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  @media (max-width: 760px) {
+    .auth-left { display: none !important; }
+    .auth-brand-narrow { display: flex !important; }
+  }
+</style>
+</head>
+<body data-screen="login">
+  <div class="flex" style="min-height:100vh">
+
+    <!-- LEFT brand panel -->
+    <div class="auth-left" style="flex:1;background:var(--accent-grad);color:#fff;padding:56px 48px;display:flex;flex-direction:column">
+      <div class="flex items-center gap-3">
+        <div class="brand-logo" style="background:rgba(255,255,255,.16);color:#fff;box-shadow:none">
+          <svg class="icon"><use href="#i-sparkle"/></svg>
+        </div>
+        <div style="font-weight:700;font-size:18px;letter-spacing:-0.01em">Lumen Copilot</div>
+      </div>
+
+      <div style="margin-top:auto">
+        <h1 class="display" style="font-size:32px;line-height:1.12;letter-spacing:-0.02em;max-width:14ch">
+          Answers you can trust, grounded in your work.
+        </h1>
+        <p class="t-lg" style="color:rgba(255,255,255,.82);margin-top:18px;max-width:46ch;line-height:1.55">
+          Every reply is permission-checked against the sources you already have access to, cited to its passage, and written to the audit log.
+        </p>
+
+        <div class="col gap-4 mt-6">
+          <div class="flex items-center gap-3">
+            <div style="width:38px;height:38px;flex:none;background:rgba(255,255,255,.16);border-radius:50%;display:grid;place-items:center">
+              <svg class="icon"><use href="#i-shield-check"/></svg>
+            </div>
+            <div>
+              <div class="t-medium" style="color:#fff">Permission-aware by default</div>
+              <div class="t-sm" style="color:rgba(255,255,255,.8)">Never see data you couldn't already access</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <div style="width:38px;height:38px;flex:none;background:rgba(255,255,255,.16);border-radius:50%;display:grid;place-items:center">
+              <svg class="icon"><use href="#i-doc"/></svg>
+            </div>
+            <div>
+              <div class="t-medium" style="color:#fff">Every answer cited</div>
+              <div class="t-sm" style="color:rgba(255,255,255,.8)">Trace each claim to its source passage</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <div style="width:38px;height:38px;flex:none;background:rgba(255,255,255,.16);border-radius:50%;display:grid;place-items:center">
+              <svg class="icon"><use href="#i-shield"/></svg>
+            </div>
+            <div>
+              <div class="t-medium" style="color:#fff">Fully auditable</div>
+              <div class="t-sm" style="color:rgba(255,255,255,.8)">Every retrieval and action is logged</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT auth panel -->
+    <div style="flex:1;background:var(--surface);display:flex;align-items:center;justify-content:center;padding:40px;position:relative">
+
+      <button class="btn btn-sm btn-subtle" data-open-theme style="position:absolute;top:20px;right:20px">
+        <svg class="icon icon-sm"><use href="#i-sun"/></svg>
+        <span data-theme-name>Aurora</span>
+        <svg class="icon icon-sm"><use href="#i-chevron-down"/></svg>
+      </button>
+
+      <div style="width:100%;max-width:380px">
+
+        <!-- narrow-screen brand row -->
+        <div class="auth-brand-narrow items-center gap-3 mb-6">
+          <div class="brand-logo"><svg class="icon"><use href="#i-sparkle"/></svg></div>
+          <div class="brand-name" style="font-size:16px">Lumen Copilot</div>
+        </div>
+
+        <h1 style="font-size:22px;letter-spacing:-0.01em">Sign in to continue</h1>
+        <p class="t-muted" style="margin-top:6px">Use your company single sign-on.</p>
+
+        <!-- Workspace -->
+        <div class="field mt-6">
+          <label class="label">Workspace</label>
+          <div class="input-group rel">
+            <svg class="icon"><use href="#i-globe"/></svg>
+            <input class="input" value="northwind" style="padding-right:76px" />
+            <span class="auth-input-suffix mono t-xs t-subtle">.lumen.app</span>
+          </div>
+        </div>
+
+        <a class="btn btn-primary btn-lg btn-block" href="chat.html" style="margin-top:16px">
+          <svg class="icon"><use href="#i-key"/></svg> Continue with SSO
+        </a>
+
+        <!-- divider -->
+        <div class="flex items-center gap-3" style="margin:22px 0">
+          <span class="grow divider"></span>
+          <span class="t-xs t-subtle">or</span>
+          <span class="grow divider"></span>
+        </div>
+
+        <!-- Email -->
+        <div class="field">
+          <label class="label">Email</label>
+          <div class="input-group">
+            <svg class="icon"><use href="#i-mail"/></svg>
+            <input class="input" value="avery@northwind.com" />
+          </div>
+        </div>
+
+        <!-- Password -->
+        <div class="field mt-4">
+          <label class="label">Password</label>
+          <div class="input-group">
+            <svg class="icon"><use href="#i-lock"/></svg>
+            <input class="input" type="password" value="········" />
+          </div>
+        </div>
+
+        <a class="btn btn-block mt-4" href="chat.html">Sign in</a>
+
+        <div class="flex items-center justify-center gap-2 mt-4 t-xs t-subtle">
+          <svg class="icon icon-sm"><use href="#i-shield"/></svg>
+          Single sign-on is enforced by your administrator.
+        </div>
+
+        <div class="flex gap-2 justify-center mt-6 wrap">
+          <span class="badge"><svg class="icon"><use href="#i-shield-check"/></svg> Permissioned</span>
+          <span class="badge"><svg class="icon"><use href="#i-doc"/></svg> Cited</span>
+          <span class="badge"><svg class="icon"><use href="#i-history"/></svg> Auditable</span>
+          <span class="badge badge-ok"><svg class="icon"><use href="#i-check"/></svg> SOC 2</span>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+<script src="assets/app.js"></script>
+</body>
+</html>

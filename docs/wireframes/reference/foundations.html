@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Foundations · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/tokens.css" />
+<link rel="stylesheet" href="../assets/app.css" />
+</head>
+<body data-screen="foundations" data-base="..">
+<div class="app"><main class="main"><div class="main-scroll"><div class="page page-wide">
+
+  <div class="page-head">
+    <h1>Foundations</h1>
+    <p class="sub">Seven themes, each with a light <em>and</em> dark mode — plus accent, density, navigation layout and interface font, all from the top-bar appearance panel.</p>
+  </div>
+
+  <!-- ============================== THEMES × MODES ============================== -->
+  <h2 class="mt-8 mb-3">Themes &amp; modes</h2>
+  <div class="cols-3 gap-4" id="theme-grid">
+
+    <div class="card card-pad">
+      <div class="t-semibold">Aurora</div>
+      <div class="t-sm t-muted">Indigo → violet · cool neutrals · sans</div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Light</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#4f46e5;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#4f46e5</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#ffffff;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#ffffff</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#eef1f8;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#eef1f8</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#e5e8f0;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#e5e8f0</div></div>
+      </div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Dark</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#9b8cfa;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#9b8cfa</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#161a27;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#161a27</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#0c0e16;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#0c0e16</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#272d42;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#272d42</div></div>
+      </div>
+    </div>
+
+    <div class="card card-pad">
+      <div class="t-semibold">Graphite</div>
+      <div class="t-sm t-muted">Periwinkle · pure neutral grays · hairlines</div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Light</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#4b53d4;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#4b53d4</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#ffffff;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#ffffff</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#f3f4f6;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#f3f4f6</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#e3e5ea;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#e3e5ea</div></div>
+      </div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Dark</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#818cf8;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#818cf8</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#12151d;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#12151d</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#0a0c11;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#0a0c11</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#232a36;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#232a36</div></div>
+      </div>
+    </div>
+
+    <div class="card card-pad">
+      <div class="t-semibold">Editorial</div>
+      <div class="t-sm t-muted">Teal · warm paper · serif display</div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Light</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#15776a;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#15776a</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#fbfaf5;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#fbfaf5</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#f1ece1;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#f1ece1</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#e2dbca;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#e2dbca</div></div>
+      </div>
+      <div class="t-xs t-up t-subtle mt-3 mb-1">Dark</div>
+      <div class="flex wrap gap-2">
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#5bb7a6;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#5bb7a6</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#1e1810;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#1e1810</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#16120c;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#16120c</div></div>
+        <div style="text-align:center"><div style="width:40px;height:40px;border-radius:var(--r-md);background:#332a1c;border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">#332a1c</div></div>
+      </div>
+    </div>
+
+  </div>
+  <p class="t-sm t-muted mt-3">Swatch order: <span class="t-medium">accent · surface · background · border</span>. Each theme ships both modes; <span class="t-medium">text size, spacing, and roundness</span> are set by the Compact / Cozy / Comfortable density presets in the top-bar appearance panel.</p>
+
+  <!-- ===================== ACTIVE THEME TOKENS ===================== -->
+  <h2 class="mt-8 mb-3">Active theme tokens</h2>
+  <div class="card card-pad">
+    <div class="t-sm t-muted mb-3">Live values for the currently selected look — flip the theme switcher in the top bar to watch every swatch recolour.</div>
+    <div class="flex wrap gap-3">
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--surface);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--surface</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--surface-2);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--surface-2</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--surface-3);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--surface-3</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--border);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--border</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--text);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--text</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--text-muted);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--text-muted</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--accent);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--accent</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--accent-weak);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--accent-weak</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--ok);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--ok</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--warn);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--warn</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--danger);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--danger</div></div>
+      <div style="text-align:center"><div style="width:96px;height:54px;border-radius:var(--r-sm);background:var(--info);border:1px solid var(--border)"></div><div class="t-xs mono t-subtle mt-1">--info</div></div>
+    </div>
+  </div>
+
+  <!-- ========================= TYPE SCALE ========================= -->
+  <h2 class="mt-8 mb-3">Type scale</h2>
+  <div class="card card-pad">
+    <div class="display" style="font-size:32px;line-height:1.1">Grounded. Cited. Auditable.</div>
+    <h2 class="mt-3">Acme renewal risk — Q3 pricing change brief</h2>
+    <div class="t-xl mt-2">Every answer is permissioned, cited, and traceable to its source.</div>
+    <p class="t-base mt-2" style="max-width:62ch">Lumen Copilot answers only over the enterprise sources Avery Madison is allowed to see. When Priya Shah asks about the FY25 budget or the vendor MSA, the model retrieves passages, attaches inline citations, and surfaces freshness so nothing stale slips through.</p>
+    <div class="t-sm t-muted mt-2">Secondary copy — onboarding and PTO policy, last reviewed by Dana Wu.</div>
+    <div class="t-xs t-subtle mt-1">Caption / metadata — Northwind Inc. · workspace foundations</div>
+    <div class="mono t-sm mt-2">evt_9f2a7c14 · 1,204 passages</div>
+    <div class="t-sm t-subtle mt-3">Note: the Editorial look swaps the display family to a serif (Source Serif 4); sans and mono are shared across all three looks.</div>
+  </div>
+
+  <!-- ===================== SPACING & RADIUS ===================== -->
+  <h2 class="mt-8 mb-3">Spacing &amp; radius</h2>
+  <div class="cols-2 gap-4">
+
+    <div class="card card-pad">
+      <div class="t-semibold mb-3">Radius</div>
+      <div class="flex wrap gap-3 items-end">
+        <div style="text-align:center"><div style="width:60px;height:60px;background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:var(--r-sm)"></div><div class="t-xs mono t-subtle mt-1">--r-sm</div></div>
+        <div style="text-align:center"><div style="width:60px;height:60px;background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:var(--r-md)"></div><div class="t-xs mono t-subtle mt-1">--r-md</div></div>
+        <div style="text-align:center"><div style="width:60px;height:60px;background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:var(--r-lg)"></div><div class="t-xs mono t-subtle mt-1">--r-lg</div></div>
+        <div style="text-align:center"><div style="width:60px;height:60px;background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:var(--r-xl)"></div><div class="t-xs mono t-subtle mt-1">--r-xl</div></div>
+        <div style="text-align:center"><div style="width:90px;height:36px;background:var(--accent-weak);border:1px solid var(--accent-line);border-radius:var(--r-full)"></div><div class="t-xs mono t-subtle mt-1">--r-full</div></div>
+      </div>
+    </div>
+
+    <div class="card card-pad">
+      <div class="t-semibold mb-3">Spacing scale</div>
+      <div class="col gap-2">
+        <div class="flex items-center gap-3"><div style="width:4px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">4 · space-1</span></div>
+        <div class="flex items-center gap-3"><div style="width:8px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">8 · space-2</span></div>
+        <div class="flex items-center gap-3"><div style="width:12px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">12 · space-3</span></div>
+        <div class="flex items-center gap-3"><div style="width:16px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">16 · space-4</span></div>
+        <div class="flex items-center gap-3"><div style="width:20px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">20 · space-5</span></div>
+        <div class="flex items-center gap-3"><div style="width:24px;height:14px;background:var(--accent);border-radius:var(--r-xs)"></div><span class="t-xs mono t-subtle">24 · space-6</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ========================= ELEVATION ========================= -->
+  <h2 class="mt-8 mb-3">Elevation</h2>
+  <div class="cols-3 gap-4">
+    <div class="card card-pad" style="box-shadow:var(--shadow-sm)">
+      <div class="t-semibold">Subtle</div>
+      <div class="t-xs mono t-subtle mt-1">--shadow-sm</div>
+      <div class="t-sm t-muted mt-2">Resting cards, table rows, inline chips.</div>
+    </div>
+    <div class="card card-pad" style="box-shadow:var(--shadow-md)">
+      <div class="t-semibold">Raised</div>
+      <div class="t-xs mono t-subtle mt-1">--shadow-md</div>
+      <div class="t-sm t-muted mt-2">Hovered cards, menus, popovers.</div>
+    </div>
+    <div class="card card-pad" style="box-shadow:var(--shadow-lg)">
+      <div class="t-semibold">Floating</div>
+      <div class="t-xs mono t-subtle mt-1">--shadow-lg</div>
+      <div class="t-sm t-muted mt-2">Drawers, modals, the command palette.</div>
+    </div>
+  </div>
+
+  <!-- ======================== ICONOGRAPHY ======================== -->
+  <h2 class="mt-8 mb-3">Iconography</h2>
+  <div class="card card-pad">
+    <div class="t-sm t-muted mb-3">The complete icon set. Reference an icon as <span class="mono">&lt;svg class="icon"&gt;&lt;use href="#i-NAME"/&gt;&lt;/svg&gt;</span>.</div>
+    <div class="flex wrap gap-2">
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-sparkle"/></svg><div class="t-xs mono t-subtle mt-1">i-sparkle</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-chat"/></svg><div class="t-xs mono t-subtle mt-1">i-chat</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-search"/></svg><div class="t-xs mono t-subtle mt-1">i-search</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-doc"/></svg><div class="t-xs mono t-subtle mt-1">i-doc</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-folder"/></svg><div class="t-xs mono t-subtle mt-1">i-folder</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-plug"/></svg><div class="t-xs mono t-subtle mt-1">i-plug</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-shield"/></svg><div class="t-xs mono t-subtle mt-1">i-shield</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-shield-check"/></svg><div class="t-xs mono t-subtle mt-1">i-shield-check</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-sliders"/></svg><div class="t-xs mono t-subtle mt-1">i-sliders</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-send"/></svg><div class="t-xs mono t-subtle mt-1">i-send</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-paperclip"/></svg><div class="t-xs mono t-subtle mt-1">i-paperclip</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-plus"/></svg><div class="t-xs mono t-subtle mt-1">i-plus</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-check"/></svg><div class="t-xs mono t-subtle mt-1">i-check</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-x"/></svg><div class="t-xs mono t-subtle mt-1">i-x</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-chevron-down"/></svg><div class="t-xs mono t-subtle mt-1">i-chevron-down</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-chevron-right"/></svg><div class="t-xs mono t-subtle mt-1">i-chevron-right</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-arrow-right"/></svg><div class="t-xs mono t-subtle mt-1">i-arrow-right</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-arrow-up"/></svg><div class="t-xs mono t-subtle mt-1">i-arrow-up</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-external"/></svg><div class="t-xs mono t-subtle mt-1">i-external</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-lock"/></svg><div class="t-xs mono t-subtle mt-1">i-lock</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-globe"/></svg><div class="t-xs mono t-subtle mt-1">i-globe</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-upload"/></svg><div class="t-xs mono t-subtle mt-1">i-upload</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-user"/></svg><div class="t-xs mono t-subtle mt-1">i-user</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-users"/></svg><div class="t-xs mono t-subtle mt-1">i-users</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-filter"/></svg><div class="t-xs mono t-subtle mt-1">i-filter</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-dots"/></svg><div class="t-xs mono t-subtle mt-1">i-dots</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-dots-v"/></svg><div class="t-xs mono t-subtle mt-1">i-dots-v</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-clock"/></svg><div class="t-xs mono t-subtle mt-1">i-clock</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-alert"/></svg><div class="t-xs mono t-subtle mt-1">i-alert</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-info"/></svg><div class="t-xs mono t-subtle mt-1">i-info</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-refresh"/></svg><div class="t-xs mono t-subtle mt-1">i-refresh</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-database"/></svg><div class="t-xs mono t-subtle mt-1">i-database</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-bolt"/></svg><div class="t-xs mono t-subtle mt-1">i-bolt</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-command"/></svg><div class="t-xs mono t-subtle mt-1">i-command</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-sun"/></svg><div class="t-xs mono t-subtle mt-1">i-sun</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-moon"/></svg><div class="t-xs mono t-subtle mt-1">i-moon</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-grid"/></svg><div class="t-xs mono t-subtle mt-1">i-grid</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-eye"/></svg><div class="t-xs mono t-subtle mt-1">i-eye</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-copy"/></svg><div class="t-xs mono t-subtle mt-1">i-copy</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-thumb-up"/></svg><div class="t-xs mono t-subtle mt-1">i-thumb-up</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-thumb-down"/></svg><div class="t-xs mono t-subtle mt-1">i-thumb-down</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-cpu"/></svg><div class="t-xs mono t-subtle mt-1">i-cpu</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-layers"/></svg><div class="t-xs mono t-subtle mt-1">i-layers</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-trash"/></svg><div class="t-xs mono t-subtle mt-1">i-trash</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-edit"/></svg><div class="t-xs mono t-subtle mt-1">i-edit</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-book"/></svg><div class="t-xs mono t-subtle mt-1">i-book</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-flag"/></svg><div class="t-xs mono t-subtle mt-1">i-flag</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-key"/></svg><div class="t-xs mono t-subtle mt-1">i-key</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-link"/></svg><div class="t-xs mono t-subtle mt-1">i-link</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-list"/></svg><div class="t-xs mono t-subtle mt-1">i-list</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-pin"/></svg><div class="t-xs mono t-subtle mt-1">i-pin</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-history"/></svg><div class="t-xs mono t-subtle mt-1">i-history</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-check-circle"/></svg><div class="t-xs mono t-subtle mt-1">i-check-circle</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-slash-circle"/></svg><div class="t-xs mono t-subtle mt-1">i-slash-circle</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-mail"/></svg><div class="t-xs mono t-subtle mt-1">i-mail</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-tag"/></svg><div class="t-xs mono t-subtle mt-1">i-tag</div></div>
+      <div style="width:88px;text-align:center;padding:10px 4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)"><svg class="icon icon-lg"><use href="#i-zap-off"/></svg><div class="t-xs mono t-subtle mt-1">i-zap-off</div></div>
+    </div>
+  </div>
+
+</div></div></main></div>
+<script src="../assets/app.js"></script>
+<script>
+  (function () {
+    var T = [
+      ["Aurora", "Indigo to violet, cool", ["#4f46e5", "#ffffff", "#eef1f8"], ["#818cf8", "#161a27", "#0c0e16"]],
+      ["Graphite", "Sky blue, neutral grays", ["#0284c7", "#ffffff", "#f3f4f6"], ["#38bdf8", "#12151d", "#0a0c11"]],
+      ["Meridian", "Green to gold, warm", ["#9c7a1e", "#fdfcf8", "#f4f1e9"], ["#e2b04e", "#1c1a10", "#14130c"]],
+      ["Indigo", "Deep violet, navy", ["#6d28d9", "#ffffff", "#eeeefa"], ["#a78bfa", "#171331", "#0d0a1a"]],
+      ["Sunset", "Orange to red, warm", ["#e0561f", "#fffaf6", "#fbf0ea"], ["#fb7a45", "#211210", "#170d0a"]],
+      ["Forest", "Green, deep green", ["#15803d", "#ffffff", "#ecf2ec"], ["#4ade80", "#101a13", "#08110b"]],
+      ["Slate", "Monochrome gray-blue", ["#475569", "#ffffff", "#f1f2f4"], ["#94a3b8", "#14171c", "#0b0d10"]]
+    ];
+    function sw(c) {
+      return '<span style="width:26px;height:26px;border-radius:7px;background:' + c + ';border:1px solid var(--border);display:inline-block"></span>';
+    }
+    function grp(l, a) {
+      return '<div><div class="t-xs t-up t-subtle mb-1">' + l + '</div><div class="flex gap-1">' + a.map(sw).join("") + "</div></div>";
+    }
+    var el = document.getElementById("theme-grid");
+    if (el) {
+      el.innerHTML = T.map(function (t) {
+        return '<div class="card card-pad"><div class="t-semibold">' + t[0] + "</div>" +
+          '<div class="t-xs t-muted mb-2">' + t[1] + "</div>" +
+          '<div class="flex gap-4">' + grp("Light", t[2]) + grp("Dark", t[3]) + "</div></div>";
+      }).join("");
+    }
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Assistant · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="chat">
+<div class="app"><main class="main">
+  <div class="split">
+
+    <!-- ===================== LEFT: history subrail ===================== -->
+    <div class="subrail">
+      <div class="subrail-head">
+        <button class="btn btn-primary btn-block">
+          <svg class="icon"><use href="#i-plus"/></svg> New chat
+        </button>
+        <div class="input-group mt-3">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input class="input" type="text" placeholder="Search chats" />
+        </div>
+      </div>
+      <div class="subrail-scroll">
+
+        <div class="hist-day">Today</div>
+        <a class="histitem active">
+          <div class="title">Q3 pricing sign-off</div>
+          <div class="meta">4 sources · GPT-4o · 2h ago</div>
+        </a>
+        <a class="histitem">
+          <div class="title">Acme renewal risk</div>
+          <div class="meta">6 sources · GPT-4o · 5h ago</div>
+        </a>
+
+        <div class="hist-day">Yesterday</div>
+        <a class="histitem">
+          <div class="title">Onboarding: PTO policy</div>
+          <div class="meta">3 sources · GPT-4o · 1d ago</div>
+        </a>
+        <a class="histitem">
+          <div class="title">FY25 budget variance</div>
+          <div class="meta">5 sources · Claude 3.5 · 1d ago</div>
+        </a>
+
+        <div class="hist-day">Previous 7 days</div>
+        <a class="histitem">
+          <div class="title">Vendor MSA review</div>
+          <div class="meta">7 sources · GPT-4o · 3d ago</div>
+        </a>
+        <a class="histitem">
+          <div class="title">Acme renewal — exec summary</div>
+          <div class="meta">2 sources · GPT-4o · 4d ago</div>
+        </a>
+        <a class="histitem">
+          <div class="title">Q3 discount approval thresholds</div>
+          <div class="meta">4 sources · Claude 3.5 · 6d ago</div>
+        </a>
+
+      </div>
+    </div>
+
+    <!-- ===================== CENTER: chat ===================== -->
+    <div class="split-main">
+      <div class="chat">
+        <div class="chat-scroll">
+          <div class="thread" data-thread>
+
+            <!-- user turn 1 -->
+            <div class="turn bubble-user">
+              <div class="who"><div class="avatar sm">AM</div></div>
+              <div class="turn-body">
+                <div class="name">You</div>
+                <div>What did we decide on the Q3 pricing change, and who signed off?</div>
+              </div>
+            </div>
+
+            <!-- assistant turn 1 -->
+            <div class="turn">
+              <div class="who">
+                <div class="brand-logo" style="width:30px;height:30px">
+                  <svg class="icon"><use href="#i-sparkle"/></svg>
+                </div>
+              </div>
+              <div class="turn-body">
+                <div class="name">Lumen
+                  <span class="badge badge-accent"><svg class="icon"><use href="#i-cpu"/></svg>GPT-4o</span>
+                </div>
+
+                <!-- collapsible retrieval trace -->
+                <div class="trace">
+                  <div class="trace-head" data-acc="trace1">
+                    <span class="chev"><svg class="icon icon-sm"><use href="#i-chevron-right"/></svg></span>
+                    Looked at 3 sources · 1,204 passages
+                  </div>
+                  <div id="trace1">
+                    <div class="trace-step">
+                      <svg class="icon icon-sm"><use href="#i-sliders"/></svg>
+                      Planned retrieval across permitted sources
+                    </div>
+                    <div class="trace-step">
+                      <svg class="icon icon-sm"><use href="#i-search"/></svg>
+                      Searched Google Drive, Confluence, Slack
+                    </div>
+                    <div class="trace-step">
+                      <svg class="icon icon-sm"><use href="#i-layers"/></svg>
+                      Ranked 1,204 passages
+                    </div>
+                    <div class="trace-step">
+                      <svg class="icon icon-sm"><use href="#i-shield"/></svg>
+                      38 results excluded — you don't have access
+                    </div>
+                  </div>
+                </div>
+
+                <!-- answer prose -->
+                <div class="assistant-md">
+                  <p>Northwind approved the Q3 pricing change on May 28: a flat <strong>7% list-price
+                  increase</strong> on the Platform and Growth tiers, effective for all new and renewing
+                  contracts from July 1. Existing annual contracts are honored at their current rate until
+                  renewal, and any discount above 15% now requires VP-level approval <span class="cite" data-cite="1">1</span>.</p>
+
+                  <p>The decision was signed off by <strong>Priya Shah (VP Sales)</strong> and
+                  <strong>Marcus Lee (Finance)</strong>, with the guardrails ratified against the standing
+                  pricing policy <span class="cite" data-cite="2">2</span>. The rollout sequencing was confirmed in the
+                  #pricing channel <span class="cite" data-cite="3">3</span>.</p>
+
+                  <ul>
+                    <li><strong>What changed:</strong> +7% list price on Platform &amp; Growth; discounts &gt;15% need VP approval.</li>
+                    <li><strong>Who signed off:</strong> Priya Shah (VP Sales) and Marcus Lee (Finance), effective Jul 1.</li>
+                  </ul>
+                </div>
+
+                <!-- answer meta + actions -->
+                <div class="answer-meta">
+                  <span class="status"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> Permission-checked</span>
+                  <span class="status"><svg class="icon icon-sm"><use href="#i-clock"/></svg> freshest 2d ago</span>
+                  <div class="answer-actions ml-auto">
+                    <button class="act-btn tip" data-tip="Helpful"><svg class="icon icon-sm"><use href="#i-thumb-up"/></svg></button>
+                    <button class="act-btn tip" data-tip="Not helpful"><svg class="icon icon-sm"><use href="#i-thumb-down"/></svg></button>
+                    <button class="act-btn tip" data-tip="Copy" data-toast="Answer copied"><svg class="icon icon-sm"><use href="#i-copy"/></svg></button>
+                  </div>
+                </div>
+
+                <!-- sources used -->
+                <div class="t-up t-subtle mt-4 mb-2">Sources used</div>
+                <div class="sources-strip">
+
+                  <div class="source-row" data-source="1" data-source-open="1">
+                    <div class="num">1</div>
+                    <div class="src src-gdrive">GD</div>
+                    <div class="grow">
+                      <div class="cell-title">Q3 Pricing — Decision Memo</div>
+                      <div class="flex items-center gap-2 mt-1">
+                        <span class="t-xs t-subtle">Priya Shah</span>
+                        <span class="fresh"><svg class="icon icon-sm"><use href="#i-clock"/></svg> 2d ago</span>
+                      </div>
+                    </div>
+                    <span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+
+                  <div class="source-row" data-source="2" data-source-open="2">
+                    <div class="num">2</div>
+                    <div class="src src-confluence">CF</div>
+                    <div class="grow">
+                      <div class="cell-title">Pricing Guardrails (wiki)</div>
+                      <div class="flex items-center gap-2 mt-1">
+                        <span class="t-xs t-subtle">Marcus Lee</span>
+                        <span class="fresh"><svg class="icon icon-sm"><use href="#i-clock"/></svg> 9d ago</span>
+                      </div>
+                    </div>
+                    <span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+
+                  <div class="source-row" data-source="3" data-source-open="3">
+                    <div class="num">3</div>
+                    <div class="src src-slack">SL</div>
+                    <div class="grow">
+                      <div class="cell-title">#pricing thread</div>
+                      <div class="flex items-center gap-2 mt-1">
+                        <span class="t-xs t-subtle">Dana Wu</span>
+                        <span class="fresh"><svg class="icon icon-sm"><use href="#i-clock"/></svg> 4d ago</span>
+                      </div>
+                    </div>
+                    <span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+
+                </div>
+              </div>
+            </div>
+
+            <!-- user turn 2 -->
+            <div class="turn bubble-user">
+              <div class="who"><div class="avatar sm">AM</div></div>
+              <div class="turn-body">
+                <div class="name">You</div>
+                <div>Draft a short note to the team summarizing this.</div>
+              </div>
+            </div>
+
+            <!-- assistant turn 2 -->
+            <div class="turn">
+              <div class="who">
+                <div class="brand-logo" style="width:30px;height:30px">
+                  <svg class="icon"><use href="#i-sparkle"/></svg>
+                </div>
+              </div>
+              <div class="turn-body">
+                <div class="name">Lumen
+                  <span class="badge badge-accent"><svg class="icon"><use href="#i-cpu"/></svg>GPT-4o</span>
+                </div>
+
+                <div class="assistant-md">
+                  <p><strong>Subject: Q3 pricing change — what's changing &amp; effective dates</strong></p>
+                  <p>Team — quick summary of the Q3 pricing decision (approved May 28):</p>
+                  <ul>
+                    <li>A <strong>7% list-price increase</strong> on the Platform and Growth tiers, effective July 1 for all new and renewing contracts.</li>
+                    <li>Existing annual contracts stay at their current rate until renewal.</li>
+                    <li>Any discount above 15% now requires <strong>VP-level approval</strong>.</li>
+                  </ul>
+                  <p>Signed off by Priya Shah (VP Sales) and Marcus Lee (Finance). Reach out with questions before customer conversations begin.</p>
+                </div>
+
+                <div class="badge badge-warn mt-3">
+                  <svg class="icon icon-sm"><use href="#i-alert"/></svg> Draft — nothing is sent without your approval
+                </div>
+
+                <div class="answer-actions mt-3">
+                  <button class="act-btn tip" data-tip="Helpful"><svg class="icon icon-sm"><use href="#i-thumb-up"/></svg></button>
+                  <button class="act-btn tip" data-tip="Not helpful"><svg class="icon icon-sm"><use href="#i-thumb-down"/></svg></button>
+                  <button class="act-btn tip" data-tip="Copy" data-toast="Draft copied"><svg class="icon icon-sm"><use href="#i-copy"/></svg></button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===================== composer ===================== -->
+        <div class="composer-wrap">
+          <div class="composer">
+            <div class="mode-chips">
+              <button class="chip-toggle active" data-toggle><svg class="icon icon-sm"><use href="#i-database"/></svg> Company sources</button>
+              <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-folder"/></svg> Selected sources</button>
+              <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-doc"/></svg> Uploaded files</button>
+              <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-globe"/></svg> Web</button>
+              <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-cpu"/></svg> Model knowledge</button>
+            </div>
+
+            <form class="composer-box" data-chat-form>
+              <textarea class="composer-input" placeholder="Ask anything about your work…  (Enter to send, Shift+Enter for newline)"></textarea>
+              <div class="composer-bar">
+                <button type="button" class="btn-icon btn-ghost tip" data-tip="Attach"><svg class="icon"><use href="#i-paperclip"/></svg></button>
+                <button type="button" class="btn btn-sm btn-subtle">
+                  <svg class="icon icon-sm"><use href="#i-cpu"/></svg> GPT-4o <svg class="icon icon-sm"><use href="#i-chevron-down"/></svg>
+                </button>
+                <span class="badge"><svg class="icon icon-sm"><use href="#i-database"/></svg> Company sources</span>
+                <div class="grow"></div>
+                <button type="submit" class="btn btn-primary btn-icon" data-send><svg class="icon"><use href="#i-send"/></svg></button>
+              </div>
+            </form>
+
+            <div class="t-xs t-subtle center mt-2">Lumen can be wrong — answers are grounded and cited so you can verify.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ===================== RIGHT: source inspector ===================== -->
+    <aside class="inspector" id="inspector">
+      <div class="inspector-head">
+        <svg class="icon"><use href="#i-book"/></svg> Source
+        <div class="grow"></div>
+        <button class="btn-icon btn-ghost" onclick="document.getElementById('inspector').classList.add('hidden')">
+          <svg class="icon"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <div class="inspector-scroll">
+        <div data-cite-slot>
+
+          <!-- detail 1 -->
+          <div data-cite-detail="1">
+            <div class="flex items-center gap-2">
+              <div class="src src-gdrive">GD</div>
+              <div class="t-sm t-medium">Google Drive</div>
+            </div>
+            <h3 class="mt-3">Q3 Pricing — Decision Memo</h3>
+            <div class="grid cols-2 gap-2 mt-3 t-sm">
+              <div class="t-subtle">Owner</div><div>Priya Shah</div>
+              <div class="t-subtle">Last modified</div><div>Jun 16, 2026</div>
+              <div class="t-subtle">Last indexed</div><div>2 days ago</div>
+              <div class="t-subtle">Visibility</div><div><span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span></div>
+            </div>
+            <div class="passage mt-3">
+              "Following review with Finance, the Q3 pricing change is approved.
+              <mark>A 7% list-price increase applies to the Platform and Growth tiers, effective July 1, 2026, for all new and renewing contracts.</mark>
+              Existing annual contracts are honored at current rates until renewal; discounts exceeding 15% require VP approval."
+            </div>
+            <button class="btn btn-subtle btn-block mt-3"><svg class="icon icon-sm"><use href="#i-external"/></svg> Open in source</button>
+            <div class="t-xs t-subtle center mt-2">Cited as [1] in the answer above</div>
+          </div>
+
+          <!-- detail 2 -->
+          <div data-cite-detail="2" class="hidden">
+            <div class="flex items-center gap-2">
+              <div class="src src-confluence">CF</div>
+              <div class="t-sm t-medium">Confluence</div>
+            </div>
+            <h3 class="mt-3">Pricing Guardrails (wiki)</h3>
+            <div class="grid cols-2 gap-2 mt-3 t-sm">
+              <div class="t-subtle">Owner</div><div>Marcus Lee</div>
+              <div class="t-subtle">Last modified</div><div>Jun 9, 2026</div>
+              <div class="t-subtle">Last indexed</div><div>9 days ago</div>
+              <div class="t-subtle">Visibility</div><div><span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span></div>
+            </div>
+            <div class="passage mt-3">
+              "Standing pricing policy for FY25–26.
+              <mark>Any discount above 15% off list price requires VP-level approval before the quote is issued.</mark>
+              List-price changes are ratified jointly by VP Sales and Finance and recorded in the decision log."
+            </div>
+            <button class="btn btn-subtle btn-block mt-3"><svg class="icon icon-sm"><use href="#i-external"/></svg> Open in source</button>
+            <div class="t-xs t-subtle center mt-2">Cited as [2] in the answer above</div>
+          </div>
+
+          <!-- detail 3 -->
+          <div data-cite-detail="3" class="hidden">
+            <div class="flex items-center gap-2">
+              <div class="src src-slack">SL</div>
+              <div class="t-sm t-medium">Slack · #pricing</div>
+            </div>
+            <h3 class="mt-3">#pricing thread</h3>
+            <div class="grid cols-2 gap-2 mt-3 t-sm">
+              <div class="t-subtle">Owner</div><div>Dana Wu</div>
+              <div class="t-subtle">Last modified</div><div>Jun 14, 2026</div>
+              <div class="t-subtle">Last indexed</div><div>4 days ago</div>
+              <div class="t-subtle">Visibility</div><div><span class="perm"><svg class="icon icon-sm"><use href="#i-shield-check"/></svg> You have access</span></div>
+            </div>
+            <div class="passage mt-3">
+              "Confirming rollout sequencing with the team.
+              <mark>New list prices go live July 1; renewals get the new rate at their renewal date, not before.</mark>
+              Marcus and Priya have both signed off — flagging here so AEs update their decks."
+            </div>
+            <button class="btn btn-subtle btn-block mt-3"><svg class="icon icon-sm"><use href="#i-external"/></svg> Open in source</button>
+            <div class="t-xs t-subtle center mt-2">Cited as [3] in the answer above</div>
+          </div>
+
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</main></div>
+<script src="assets/app.js"></script>
+</body>
+</html>

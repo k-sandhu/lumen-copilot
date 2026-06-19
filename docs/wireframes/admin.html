@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Admin · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="admin">
+<div class="app"><main class="main"><div class="main-scroll"><div class="page page-wide">
+
+  <div class="page-head">
+    <div>
+      <h1>Admin</h1>
+      <div class="sub">Northwind Inc. · governance, models, and data controls.</div>
+    </div>
+  </div>
+
+  <!-- TAB BAR -->
+  <div class="segmented" style="margin-bottom:20px">
+    <button data-tab="adm:members" class="active"><svg class="icon icon-sm"><use href="#i-users"/></svg> Members &amp; roles</button>
+    <button data-tab="adm:models"><svg class="icon icon-sm"><use href="#i-cpu"/></svg> Model governance</button>
+    <button data-tab="adm:data"><svg class="icon icon-sm"><use href="#i-shield"/></svg> Data minimization</button>
+    <button data-tab="adm:approvals"><svg class="icon icon-sm"><use href="#i-check-circle"/></svg> Approvals &amp; risk</button>
+  </div>
+
+  <!-- ============ PANEL: MEMBERS & ROLES ============ -->
+  <div data-panel="adm:members">
+    <div class="flex justify-between items-center mb-4 gap-3 wrap">
+      <div class="input-group" style="max-width:340px;flex:1">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input class="input" type="text" placeholder="Search members" />
+      </div>
+      <div class="iflex items-center gap-3">
+        <span class="badge"><svg class="icon"><use href="#i-key"/></svg> SSO enforced</span>
+        <button class="btn btn-primary"><svg class="icon icon-sm"><use href="#i-plus"/></svg> Invite</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Member</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Last active</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">AM</span>
+                <div>
+                  <div class="cell-title">Avery Madison</div>
+                  <div class="cell-sub">avery.madison@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge badge-accent">Admin</span></td>
+            <td><span class="badge badge-ok">Active</span></td>
+            <td class="t-sm t-muted">Just now</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">PS</span>
+                <div>
+                  <div class="cell-title">Priya Shah</div>
+                  <div class="cell-sub">priya.shah@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">Knowledge Worker</span></td>
+            <td><span class="badge badge-ok">Active</span></td>
+            <td class="t-sm t-muted">12 min ago</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">ML</span>
+                <div>
+                  <div class="cell-title">Marcus Lee</div>
+                  <div class="cell-sub">marcus.lee@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">Knowledge Worker</span></td>
+            <td><span class="badge badge-ok">Active</span></td>
+            <td class="t-sm t-muted">2 hours ago</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">DW</span>
+                <div>
+                  <div class="cell-title">Dana Wu</div>
+                  <div class="cell-sub">dana.wu@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge badge-info">Security</span></td>
+            <td><span class="badge badge-ok">Active</span></td>
+            <td class="t-sm t-muted">Yesterday</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">TR</span>
+                <div>
+                  <div class="cell-title">Tomás Reyes</div>
+                  <div class="cell-sub">tomas.reyes@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">Knowledge Worker</span></td>
+            <td><span class="badge">Invited</span></td>
+            <td class="t-sm t-subtle">—</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <span class="avatar sm">SC</span>
+                <div>
+                  <div class="cell-title">Sam Carter</div>
+                  <div class="cell-sub">sam.carter@northwind.com</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge badge-accent">Admin</span></td>
+            <td><span class="badge badge-ok">Active</span></td>
+            <td class="t-sm t-muted">3 days ago</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============ PANEL: MODEL GOVERNANCE ============ -->
+  <div data-panel="adm:models" class="hidden">
+    <p class="t-muted mb-4">All model calls route through the gateway — choose what each role may use.</p>
+
+    <div class="card">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Capability</th>
+            <th>Speed &amp; cost</th>
+            <th>Enabled</th>
+            <th>Default</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <svg class="icon"><use href="#i-cpu"/></svg>
+                <div>
+                  <div class="cell-title">GPT-4o</div>
+                  <div class="cell-sub">via OpenRouter</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">chat</span></td>
+            <td>
+              <span class="badge badge-ok">Fast</span>
+              <span class="badge mono">$$</span>
+            </td>
+            <td><button class="switch on" aria-label="Enabled"></button></td>
+            <td><span class="checkbox on"><svg class="icon icon-sm"><use href="#i-check"/></svg></span></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <svg class="icon"><use href="#i-cpu"/></svg>
+                <div>
+                  <div class="cell-title">Claude 3.5 Sonnet</div>
+                  <div class="cell-sub">via OpenRouter</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">chat</span></td>
+            <td>
+              <span class="badge badge-ok">Fast</span>
+              <span class="badge mono">$$</span>
+            </td>
+            <td><button class="switch on" aria-label="Enabled"></button></td>
+            <td><span class="checkbox"></span></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <svg class="icon"><use href="#i-cpu"/></svg>
+                <div>
+                  <div class="cell-title">Llama 3.1 70B</div>
+                  <div class="cell-sub">via OpenRouter</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">chat</span></td>
+            <td>
+              <span class="badge badge-ok">Fastest</span>
+              <span class="badge mono">$</span>
+            </td>
+            <td><button class="switch on" aria-label="Enabled"></button></td>
+            <td><span class="checkbox"></span></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-main">
+                <svg class="icon"><use href="#i-cpu"/></svg>
+                <div>
+                  <div class="cell-title">text-embedding-3</div>
+                  <div class="cell-sub">via OpenRouter</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="badge">embed</span></td>
+            <td class="t-subtle">—</td>
+            <td><button class="switch on" aria-label="Enabled"></button></td>
+            <td class="t-subtle">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============ PANEL: DATA MINIMIZATION ============ -->
+  <div data-panel="adm:data" class="hidden">
+    <p class="t-muted mb-4">Index only what's needed. Off by default — turn a source on only with a clear reason; every change is logged.</p>
+
+    <div class="col gap-3">
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Index direct messages</div>
+          <div class="t-sm t-muted">Include Slack &amp; Teams DMs in retrieval. Off — private 1:1 conversations stay out of the index.</div>
+        </div>
+        <button class="switch" aria-label="Index direct messages"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Index email</div>
+          <div class="t-sm t-muted">Include connected mailboxes in retrieval. Off — mailbox content is excluded tenant-wide.</div>
+        </div>
+        <button class="switch" aria-label="Index email"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Index private notes</div>
+          <div class="t-sm t-muted">Include personal Notion &amp; OneNote pages. Off — notes marked private are never indexed.</div>
+        </div>
+        <button class="switch" aria-label="Index private notes"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Exclude files labelled Confidential</div>
+          <div class="t-sm t-muted">Skip any document carrying the "Confidential" sensitivity label at ingest time.</div>
+        </div>
+        <button class="switch on" aria-label="Exclude files labelled Confidential"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Exclude /Legal/Sealed folder</div>
+          <div class="t-sm t-muted">Never crawl the sealed legal directory, including subfolders and attachments.</div>
+        </div>
+        <button class="switch on" aria-label="Exclude /Legal/Sealed folder"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Allow Web knowledge mode</div>
+          <div class="t-sm t-muted">Let users pull in public web results alongside grounded sources. Off by default.</div>
+        </div>
+        <button class="switch" aria-label="Allow Web knowledge mode"></button>
+      </div>
+
+      <div class="card card-pad flex items-center justify-between gap-3">
+        <div>
+          <div class="t-medium">Allow general model knowledge</div>
+          <div class="t-sm t-muted">Permit the model to answer from its own training when no source matches, clearly flagged as ungrounded.</div>
+        </div>
+        <button class="switch on" aria-label="Allow general model knowledge"></button>
+      </div>
+    </div>
+
+    <p class="t-xs t-subtle mt-4 iflex items-center gap-1">
+      <svg class="icon icon-sm"><use href="#i-shield"/></svg> Every exclusion change is recorded in the audit log.
+    </p>
+  </div>
+
+  <!-- ============ PANEL: APPROVALS & RISK ============ -->
+  <div data-panel="adm:approvals" class="hidden">
+    <p class="t-muted mb-4">Read before write — consequential actions require human approval.</p>
+
+    <div class="card">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>Risk tier</th>
+            <th>Approver</th>
+            <th>Reversible</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="cell-title">Search &amp; read</td>
+            <td><span class="badge badge-ok">T0 · Auto</span></td>
+            <td class="t-subtle">—</td>
+            <td class="t-subtle">—</td>
+          </tr>
+          <tr>
+            <td class="cell-title">Summarize &amp; draft</td>
+            <td><span class="badge badge-ok">T0 · Auto</span></td>
+            <td class="t-subtle">—</td>
+            <td class="t-subtle">—</td>
+          </tr>
+          <tr>
+            <td class="cell-title">Create ticket</td>
+            <td><span class="badge">T1 · Low</span></td>
+            <td class="t-sm">Self</td>
+            <td class="t-sm">Yes</td>
+          </tr>
+          <tr>
+            <td class="cell-title">Send email</td>
+            <td><span class="badge badge-warn">T2 · Approval</span></td>
+            <td class="t-sm">Manager</td>
+            <td class="t-sm">No</td>
+          </tr>
+          <tr>
+            <td class="cell-title">Update CRM record</td>
+            <td><span class="badge badge-warn">T2 · Approval</span></td>
+            <td class="t-sm">Ops lead</td>
+            <td class="t-sm">Yes (undo)</td>
+          </tr>
+          <tr>
+            <td class="cell-title">Delete / bulk change</td>
+            <td><span class="badge badge-danger">T3 · Dual approval</span></td>
+            <td class="t-sm">Two admins</td>
+            <td class="t-sm">No</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div></div></main></div>
+<script src="assets/app.js"></script>
+</body>
+</html>
