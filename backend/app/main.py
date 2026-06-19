@@ -33,6 +33,7 @@ from app.core.errors import (
 )
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
+from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
 
 log = get_logger(__name__)
@@ -157,8 +158,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     # Versioned feature routes mount under /api/v1 (empty in the skeleton).
     app.include_router(v1_router, prefix="/api/v1")
-    # WebSocket transport: the health heartbeat (proves the WS path + envelope).
+    # WebSocket transport: the health heartbeat (proves the WS path + envelope)
+    # and the chat answer stream consumer (CC-6 #24 / CC-11 #26).
     app.include_router(health_ws_router)
+    app.include_router(chat_ws_router)
 
     return app
 
