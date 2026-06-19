@@ -28,7 +28,9 @@ import asyncio
 import json
 from collections import defaultdict
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+from uuid import UUID
 
 import redis.asyncio as aioredis
 
@@ -38,15 +40,39 @@ _TERMINAL_TYPES = frozenset({"done", "error"})
 
 # Channel namespace so chat streams never collide with other realtime traffic.
 _CHANNEL_PREFIX = "chat:stream:"
+# Key namespace for the stream→owner binding (separate from the pub/sub channel).
+_OWNER_PREFIX = "chat:stream-owner:"
+# How long the owner binding lives. Comfortably outstrips the gap between the 202
+# (when the binding is written) and the WS connect that follows it, while bounding
+# how long a (single-use) stream id stays authoritative. Matches the access-token
+# ceiling (spec 0004 §2.3) — a stream cannot outlive the token that minted it.
+_OWNER_TTL_SECONDS = 900
 
 
 def _channel(stream_id: str) -> str:
     return f"{_CHANNEL_PREFIX}{stream_id}"
 
 
+def _owner_key(stream_id: str) -> str:
+    return f"{_OWNER_PREFIX}{stream_id}"
+
+
 def is_terminal(envelope: dict[str, Any]) -> bool:
     """True iff ``envelope`` is a terminal (``done``/``error``) envelope."""
     return envelope.get("type") in _TERMINAL_TYPES
+
+
+@dataclass(frozen=True, slots=True)
+class StreamOwner:
+    """The principal a stream is bound to — its asking owner + tenant.
+
+    Written at the 202 (when the ``stream_id`` is minted) and read by the WS
+    consumer before it subscribes, so an answer stream is only ever relayed to
+    the user who asked the question (INV-1/INV-2, spec 0004 §2.1/§2.2).
+    """
+
+    owner_id: UUID
+    tenant_id: UUID
 
 
 @runtime_checkable
@@ -72,6 +98,22 @@ class Backplane(Protocol):
         """
         ...
 
+    async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
+        """Bind ``stream_id`` to the principal that may consume it (short TTL).
+
+        Called at the 202 (mint time) so the WS consumer can later verify the
+        connecting principal owns the stream before relaying a single envelope.
+        """
+        ...
+
+    async def get_owner(self, stream_id: str) -> StreamOwner | None:
+        """Return the principal ``stream_id`` is bound to, or ``None`` if unknown.
+
+        ``None`` covers an unknown/expired id; the consumer must treat that
+        identically to a mismatch (deny, existence non-disclosure).
+        """
+        ...
+
 
 class RedisBackplane:
     """Redis-backed pub/sub fan-out (the production backplane)."""
@@ -86,6 +128,31 @@ class RedisBackplane:
             await client.publish(_channel(stream_id), json.dumps(envelope))
         finally:
             await client.aclose()
+
+    async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
+        """Persist ``stream_id``'s owner binding with a short TTL (``SETEX``)."""
+        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        try:
+            payload = json.dumps(
+                {"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)}
+            )
+            await client.set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
+        finally:
+            await client.aclose()
+
+    async def get_owner(self, stream_id: str) -> StreamOwner | None:
+        """Read ``stream_id``'s owner binding, or ``None`` if absent/expired."""
+        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        try:
+            raw = await client.get(_owner_key(stream_id))
+        finally:
+            await client.aclose()
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        data = json.loads(raw)
+        return StreamOwner(owner_id=UUID(data["owner_id"]), tenant_id=UUID(data["tenant_id"]))
 
     async def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:
         """Subscribe to ``stream_id`` and yield envelopes until a terminal one.
@@ -142,6 +209,7 @@ class InMemoryBackplane:
     def __init__(self) -> None:
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._replay: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._owners: dict[str, StreamOwner] = {}
 
     async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
         buf = self._replay[stream_id]
@@ -150,6 +218,12 @@ class InMemoryBackplane:
             del buf[0 : len(buf) - self._MAX_REPLAY]
         for queue in list(self._subscribers.get(stream_id, ())):
             queue.put_nowait(envelope)
+
+    async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
+        self._owners[stream_id] = owner
+
+    async def get_owner(self, stream_id: str) -> StreamOwner | None:
+        return self._owners.get(stream_id)
 
     async def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()

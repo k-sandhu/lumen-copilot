@@ -423,7 +423,9 @@ async def send_message(
     service = _build_service(
         session=session, principal=principal, tenant_id=tenant_id, settings=settings
     )
-    result = await service.send_message(session_id, content=body.content, model=body.model)
+    result = await service.send_message(
+        session_id, content=body.content, model=body.model, backplane=backplane
+    )
     if result is None:
         raise NotFoundError("Chat session not found.")
     await session.commit()

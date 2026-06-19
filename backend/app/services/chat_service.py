@@ -45,6 +45,7 @@ from app.db.repositories import (
     MessageRepository,
 )
 from app.domain.entities import ChatSession, Message, MessageRole
+from app.realtime.backplane import Backplane, StreamOwner
 from app.services.models_service import is_allowed_model
 
 _MIN_LIMIT = 1
@@ -274,7 +275,7 @@ class ChatService:
         return MessagePage(items=items, next_cursor=next_cursor)
 
     async def send_message(
-        self, session_id: UUID, *, content: str, model: str | None
+        self, session_id: UUID, *, content: str, model: str | None, backplane: Backplane
     ) -> SendResult | None:
         """Persist a user message and prepare the answer stream (the 202 path).
 
@@ -284,6 +285,13 @@ class ChatService:
         user message is added, the session is touched (re-sorts the list), and a
         fresh ``stream_id`` + the recent history are returned for the runtime. The
         caller commits, then launches the runtime.
+
+        The minted ``stream_id`` is **bound to the asking principal** (owner +
+        tenant) on the backplane before it is handed back (INV-1/INV-2): a bare
+        random id carries no identity, so without this binding any authenticated
+        — even cross-tenant — client that learned the id could subscribe and read
+        another user's answer (incl. permitted-only citation snippets). The WS
+        consumer verifies this binding before relaying a single envelope.
         """
         session = await self._sessions.get(session_id)
         if session is None or not self._owns(session):
@@ -300,6 +308,10 @@ class ChatService:
         )
         await self._sessions.touch(session_id)
         stream_id = uuid.uuid4().hex
+        await backplane.bind_owner(
+            stream_id,
+            StreamOwner(owner_id=self._owner_id, tenant_id=self._tenant_id),
+        )
         return SendResult(
             user_message=user_message,
             stream_id=stream_id,
