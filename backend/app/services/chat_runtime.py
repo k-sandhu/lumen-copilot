@@ -223,7 +223,6 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
-        emitted_chunk_ids: set[UUID] = set()
         answer_parts: list[str] = []
         prompt_tokens = completion_tokens = total_tokens = 0
         finish_reason = "stop"
@@ -302,12 +301,10 @@ class ChatRuntime:
             content=answer_text,
             citations=list(cited.values()),
         )
-        # Emit a citation event per persisted citation (now carrying its row id),
-        # skipping any already emitted during the loop.
+        # Emit a citation event per persisted citation (now carrying its row id).
+        # ``cited`` is already deduplicated by chunk_id, so each stored citation is
+        # a distinct permitted passage — one event each, no extra guard needed.
         for citation in stored_citations:
-            if citation.chunk_id in emitted_chunk_ids:
-                continue
-            emitted_chunk_ids.add(citation.chunk_id)
             await self._emit_citation(state, citation)
 
         await self._audit_answer(

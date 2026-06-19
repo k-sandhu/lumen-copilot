@@ -14,6 +14,7 @@ from app.realtime.backplane import (
     Backplane,
     InMemoryBackplane,
     RedisBackplane,
+    StreamOwner,
     is_terminal,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "Backplane",
     "InMemoryBackplane",
     "RedisBackplane",
+    "StreamOwner",
     "is_terminal",
 ]

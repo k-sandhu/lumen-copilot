@@ -27,6 +27,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import MessageRole, Role
+from app.realtime.backplane import InMemoryBackplane
 from app.services.chat_service import ChatService
 
 import app.db.models  # noqa: F401  isort: skip
@@ -190,11 +191,14 @@ async def test_send_persists_user_message_and_returns_stream_id(
     world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
 ) -> None:
     world, factory = world_and_factory
+    backplane = InMemoryBackplane()
     async with factory() as session:
         svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
         created = await svc.create_session(title="t", model=None)
         await session.commit()
-        result = await svc.send_message(created.session.id, content="hi there", model=None)
+        result = await svc.send_message(
+            created.session.id, content="hi there", model=None, backplane=backplane
+        )
         await session.commit()
     assert result is not None
     assert result.user_message.role == MessageRole.USER
@@ -202,6 +206,12 @@ async def test_send_persists_user_message_and_returns_stream_id(
     assert result.stream_id  # a non-empty stream id
     # The model resolves to the session default.
     assert result.model == created.session.model
+    # The stream is bound to the asking principal (owner + tenant) so the WS
+    # consumer can authorize it (INV-1/INV-2, spec 0004 §2.1/§2.2).
+    owner = await backplane.get_owner(result.stream_id)
+    assert owner is not None
+    assert owner.owner_id == world.alice
+    assert owner.tenant_id == world.tenant_a
 
 
 async def test_send_unknown_model_is_422_before_persist(
@@ -213,7 +223,12 @@ async def test_send_unknown_model_is_422_before_persist(
         created = await svc.create_session(title="t", model=None)
         await session.commit()
         with pytest.raises(ValidationError):
-            await svc.send_message(created.session.id, content="hi", model="nope/nope")
+            await svc.send_message(
+                created.session.id,
+                content="hi",
+                model="nope/nope",
+                backplane=InMemoryBackplane(),
+            )
         # Nothing was persisted (the validation precedes the write).
         msgs = await MessageRepository(session, world.tenant_a).list_for_session(created.session.id)
     assert msgs == []
@@ -229,7 +244,12 @@ async def test_send_to_other_owner_session_is_none(
         )
         await session.commit()
         svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
-        assert await svc.send_message(bob_session.id, content="hi", model=None) is None
+        assert (
+            await svc.send_message(
+                bob_session.id, content="hi", model=None, backplane=InMemoryBackplane()
+            )
+            is None
+        )
 
 
 # --- history ----------------------------------------------------------------

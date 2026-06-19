@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from starlette.websockets import WebSocketDisconnect
 
 import app.api.v1.chat as chat_module
 from app.api.deps import get_backplane_dep, get_db_session
@@ -47,7 +48,7 @@ from app.domain.entities import Role
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.main import create_app
-from app.realtime.backplane import InMemoryBackplane
+from app.realtime.backplane import InMemoryBackplane, StreamOwner
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -60,11 +61,17 @@ class _Seeded:
         *,
         tenant_a: uuid.UUID,
         tenant_b: uuid.UUID,
+        alice_id: uuid.UUID,
+        bob_id: uuid.UUID,
+        carol_id: uuid.UUID,
         alice_doc: uuid.UUID,
         alice_chunk: uuid.UUID,
     ) -> None:
         self.tenant_a = tenant_a
         self.tenant_b = tenant_b
+        self.alice_id = alice_id
+        self.bob_id = bob_id
+        self.carol_id = carol_id
         self.alice_email = "alice@acme.test"
         self.bob_email = "bob@acme.test"
         self.carol_email = "carol@globex.test"
@@ -133,10 +140,10 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             alice = await UserRepository(seed, ta.id).create(
                 email="alice@acme.test", password_hash=hash_password(_PASSWORD), roles=[Role.MEMBER]
             )
-            await UserRepository(seed, ta.id).create(
+            bob = await UserRepository(seed, ta.id).create(
                 email="bob@acme.test", password_hash=hash_password(_PASSWORD), roles=[Role.MEMBER]
             )
-            await UserRepository(seed, tb.id).create(
+            carol = await UserRepository(seed, tb.id).create(
                 email="carol@globex.test",
                 password_hash=hash_password(_PASSWORD),
                 roles=[Role.MEMBER],
@@ -156,7 +163,13 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             )
             await seed.commit()
             factory.lumen_seeded = _Seeded(  # type: ignore[attr-defined]
-                tenant_a=ta.id, tenant_b=tb.id, alice_doc=doc.id, alice_chunk=chunks[0].id
+                tenant_a=ta.id,
+                tenant_b=tb.id,
+                alice_id=alice.id,
+                bob_id=bob.id,
+                carol_id=carol.id,
+                alice_doc=doc.id,
+                alice_chunk=chunks[0].id,
             )
             yield factory
     finally:
@@ -407,13 +420,32 @@ def _fill_replay(backplane: InMemoryBackplane, envs: list[dict[str, object]]) ->
     asyncio.run(_run())
 
 
-def test_ws_relays_published_envelopes(app: FastAPI, backplane: InMemoryBackplane) -> None:
+def _bind_owner(
+    backplane: InMemoryBackplane, stream_id: str, *, owner_id: uuid.UUID, tenant_id: uuid.UUID
+) -> None:
+    """Synchronously bind a stream's owner (the 202 does this in real flow).
+
+    The replay-based WS tests publish envelopes directly without going through the
+    202 send, so they must seed the owner binding too — the consumer now refuses
+    to relay a stream that is not bound to the connecting principal (INV-1/INV-2).
+    """
+
+    async def _run() -> None:
+        await backplane.bind_owner(stream_id, StreamOwner(owner_id=owner_id, tenant_id=tenant_id))
+
+    asyncio.run(_run())
+
+
+def test_ws_relays_published_envelopes(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
     # Publish a full lifecycle first; the backplane's replay buffer lets the WS
     # consumer (connecting after) relay it and stop on the terminal — the
     # realistic "connect right after the 202" flow.
     from app.realtime import envelopes
 
     stream_id = "ws-test-1"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
     _fill_replay(
         backplane,
         [
@@ -434,10 +466,13 @@ def test_ws_relays_published_envelopes(app: FastAPI, backplane: InMemoryBackplan
     assert received[-1]["data"]["citationCount"] == 0
 
 
-def test_ws_terminal_error_is_terminal(app: FastAPI, backplane: InMemoryBackplane) -> None:
+def test_ws_terminal_error_is_terminal(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
     from app.realtime import envelopes
 
     stream_id = "ws-test-err"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
     _fill_replay(
         backplane,
         [
@@ -457,6 +492,79 @@ def test_ws_terminal_error_is_terminal(app: FastAPI, backplane: InMemoryBackplan
     assert start["type"] == "start"
     assert err["type"] == "error"
     assert err["problem"]["status"] == 503
+
+
+def _assert_ws_denied_no_leak(client: TestClient, stream_id: str, token: str) -> None:
+    """Connect to ``stream_id`` and assert the consumer denied it with no leak.
+
+    A denied stream closes **before accept**, so the ``TestClient`` raises
+    ``WebSocketDisconnect`` on connect. The leak we guard against is the opposite:
+    the server accepts and relays an envelope — so if any ``receive_json``
+    succeeds, that envelope leaked and the test must fail. ``WebSocketDisconnect``
+    is *not* an ``AssertionError``, so a real leak (our explicit failure) is never
+    swallowed by the disconnect handling.
+    """
+    leaked: dict[str, object] | None = None
+    try:
+        with client.websocket_connect(f"/ws/chat/{stream_id}?token={token}") as ws:
+            # Reaching here means the socket was accepted; any envelope received is
+            # a cross-user leak of the answer stream.
+            leaked = ws.receive_json()
+    except WebSocketDisconnect:
+        pass  # Closed before/without delivering anything — the correct deny path.
+    assert leaked is None, f"answer-stream envelope leaked to a foreign subscriber: {leaked!r}"
+
+
+def test_ws_denies_same_tenant_other_owner(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
+    # Alice's answer stream (bound to alice at the 202) carries permitted-only
+    # citation snippets. A *second* authenticated user in the same tenant (bob)
+    # who learned the stream_id must be denied — the socket closes (policy code)
+    # and NO envelope leaks (INV-1/INV-2).
+    from app.realtime import envelopes
+
+    stream_id = "alice-stream-bob-attacks"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    _fill_replay(
+        backplane,
+        [
+            envelopes.start(stream_id, 0, data={"model": "m"}),
+            envelopes.delta(stream_id, 1, {"text": "secret answer for alice"}),
+            envelopes.done(stream_id, 2, data={"citationCount": 1}),
+        ],
+    )
+
+    client = TestClient(app)
+    bob_token = client.post(
+        "/api/v1/auth/login", json={"email": seeded.bob_email, "password": _PASSWORD}
+    ).json()["access_token"]
+    _assert_ws_denied_no_leak(client, stream_id, bob_token)
+
+
+def test_ws_denies_cross_tenant_subscriber(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
+    # A cross-tenant authenticated user (carol, tenant B) connecting to alice's
+    # (tenant A) stream_id is denied identically — closed, no envelope (INV-1).
+    from app.realtime import envelopes
+
+    stream_id = "alice-stream-carol-attacks"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    _fill_replay(
+        backplane,
+        [
+            envelopes.start(stream_id, 0, data={"model": "m"}),
+            envelopes.delta(stream_id, 1, {"text": "secret answer for alice"}),
+            envelopes.done(stream_id, 2, data={"citationCount": 1}),
+        ],
+    )
+
+    client = TestClient(app)
+    carol_token = client.post(
+        "/api/v1/auth/login", json={"email": seeded.carol_email, "password": _PASSWORD}
+    ).json()["access_token"]
+    _assert_ws_denied_no_leak(client, stream_id, carol_token)
 
 
 def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _Seeded) -> None:
