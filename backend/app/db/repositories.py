@@ -796,6 +796,116 @@ class ChatSessionRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_chat_session(r) for r in rows]
 
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[ChatSessionEntity]:
+        """A keyset page of an owner's chat sessions (newest-updated first).
+
+        Owner- *and* tenant-scoped (spec 0004 §2.2 + INV-1): a caller only ever
+        sees their own sessions. Ordered by ``(updated_at, id)`` **descending**
+        with ``id`` the stable tiebreaker, so the order is deterministic even
+        when two rows share a timestamp. ``after_id`` is the decoded cursor (the
+        previous page's last id); rows strictly after it are returned, capped at
+        ``limit``. The boundary's ``updated_at`` is resolved by a correlated
+        scalar subquery (exact on Postgres + the offline SQLite, no timestamp
+        crosses the wire), mirroring the collections/documents keyset.
+        """
+        conditions = [
+            models.ChatSession.tenant_id == self._tenant_id,
+            models.ChatSession.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            boundary_updated_at = (
+                select(models.ChatSession.updated_at)
+                .where(
+                    models.ChatSession.tenant_id == self._tenant_id,
+                    models.ChatSession.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.ChatSession.updated_at < boundary_updated_at,
+                    and_(
+                        models.ChatSession.updated_at == boundary_updated_at,
+                        models.ChatSession.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.ChatSession)
+            .where(*conditions)
+            .order_by(models.ChatSession.updated_at.desc(), models.ChatSession.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_chat_session(r) for r in rows]
+
+    async def count_messages(self, session_id: UUID) -> int:
+        """Count messages in a session (the wire ``message_count``).
+
+        Tenant-scoped on both the session and its messages (INV-1). Returns ``0``
+        for an empty or non-existent session — the service establishes visibility
+        before asking.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Message)
+            .where(
+                models.Message.tenant_id == self._tenant_id,
+                models.Message.session_id == session_id,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def update(
+        self,
+        session_id: UUID,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+    ) -> ChatSessionEntity | None:
+        """Apply a partial update (rename / change default model), tenant-scoped.
+
+        Only supplied fields are touched. Returns the updated entity, or ``None``
+        if no row matches in this tenant (the service maps that to 404). Ownership
+        is enforced one layer up — this only guarantees tenancy.
+        """
+        stmt = select(models.ChatSession).where(
+            models.ChatSession.tenant_id == self._tenant_id,
+            models.ChatSession.id == session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if title is not None:
+            row.title = title
+        if model is not None:
+            row.model = model
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_chat_session(row)
+
+    async def touch(self, session_id: UUID) -> None:
+        """Bump a session's ``updated_at`` so a new turn re-sorts it to the top.
+
+        Tenant-scoped (INV-1). A no-op for a foreign/missing id. Used by the send
+        path so an active conversation surfaces first in the session list.
+        """
+        stmt = select(models.ChatSession).where(
+            models.ChatSession.tenant_id == self._tenant_id,
+            models.ChatSession.id == session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+
     async def delete(self, session_id: UUID) -> bool:
         stmt = select(models.ChatSession).where(
             models.ChatSession.tenant_id == self._tenant_id,
@@ -830,6 +940,35 @@ class MessageRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_message(row)
 
+    async def add_with_id(
+        self,
+        *,
+        message_id: UUID,
+        session_id: UUID,
+        role: MessageRole,
+        content: str,
+        model: str | None = None,
+    ) -> Message:
+        """Persist a message under a **pre-minted** id (the streamed answer path).
+
+        The chat runtime mints the assistant message id up front so it can ride
+        the WS ``start`` envelope (``messageId``) *before* the row exists, then
+        persists the finished answer under that exact id — so the streamed id and
+        the stored row always agree, and the citations attach to it. Tenant-scoped
+        (INV-1).
+        """
+        row = models.Message(
+            id=message_id,
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            role=role.value,
+            content=content,
+            model=model,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_message(row)
+
     async def get(self, message_id: UUID) -> Message | None:
         stmt = select(models.Message).where(
             models.Message.tenant_id == self._tenant_id,
@@ -849,6 +988,77 @@ class MessageRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_message(r) for r in rows]
+
+    async def list_for_session_page(
+        self,
+        session_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[Message]:
+        """A keyset page of a session's messages (oldest → newest, contract order).
+
+        Tenant-scoped (INV-1). Ordered by ``(created_at, id)`` **ascending** —
+        message history reads oldest-first (contracts/openapi.yaml ``listMessages``)
+        — with ``id`` the stable tiebreaker. ``after_id`` is the decoded cursor
+        (previous page's last id); rows strictly after it are returned, capped at
+        ``limit``. The boundary's ``created_at`` is resolved by a correlated scalar
+        subquery so the comparison is exact on Postgres + the offline SQLite.
+        """
+        conditions = [
+            models.Message.tenant_id == self._tenant_id,
+            models.Message.session_id == session_id,
+        ]
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Message.created_at)
+                .where(
+                    models.Message.tenant_id == self._tenant_id,
+                    models.Message.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Message.created_at > boundary_created_at,
+                    and_(
+                        models.Message.created_at == boundary_created_at,
+                        models.Message.id > after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Message)
+            .where(*conditions)
+            .order_by(models.Message.created_at.asc(), models.Message.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_message(r) for r in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class CitationView:
+    """A citation joined to its source chunk + document (the wire ``Citation``).
+
+    The stored :class:`~app.domain.entities.Citation` carries only ``chunk_id`` +
+    the span + score; the contract's ``Citation`` also needs the source
+    ``document_id`` / ``document_name`` and the ``snippet`` text. This view is the
+    citation row joined (tenant-scoped) to its chunk and that chunk's document, so
+    ``GET .../messages`` can render a deep-linkable reference (CC-11 AC-2/AC-3)
+    without a per-row N+1. A citation only exists for a permitted passage (INV-3),
+    so the join never reveals foreign content.
+    """
+
+    id: UUID
+    message_id: UUID
+    document_id: UUID
+    document_name: str
+    chunk_id: UUID
+    snippet: str
+    char_start: int
+    char_end: int
+    score: float | None
 
 
 class CitationRepository(_TenantScopedRepository):
@@ -886,6 +1096,103 @@ class CitationRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_citation(r) for r in rows]
+
+    async def list_for_message_hydrated(self, message_id: UUID) -> list[CitationView]:
+        """Citations for a message, joined to source document + chunk text.
+
+        Tenant-scoped on the citation, its chunk, and that chunk's document
+        (INV-1, defense in depth). Returns the contract-shaped :class:`CitationView`
+        (document id/name + snippet) ordered by char span, so the messages route
+        renders a deep-linkable reference without an N+1.
+        """
+        stmt = (
+            select(
+                models.Citation.id,
+                models.Citation.message_id,
+                models.Citation.chunk_id,
+                models.Citation.char_start,
+                models.Citation.char_end,
+                models.Citation.score,
+                models.Chunk.text,
+                models.Document.id,
+                models.Document.filename,
+            )
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .join(models.Document, models.Document.id == models.Chunk.document_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id == message_id,
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Document.tenant_id == self._tenant_id,
+            )
+            .order_by(models.Citation.char_start.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            CitationView(
+                id=row[0],
+                message_id=row[1],
+                chunk_id=row[2],
+                char_start=row[3],
+                char_end=row[4],
+                score=row[5],
+                snippet=row[6],
+                document_id=row[7],
+                document_name=row[8],
+            )
+            for row in rows
+        ]
+
+    async def list_for_messages_hydrated(
+        self, message_ids: Sequence[UUID]
+    ) -> dict[UUID, list[CitationView]]:
+        """Batch the hydrated-citation join across many messages (history page).
+
+        One query for a page of messages (avoids N+1 on ``listMessages``), grouped
+        by ``message_id``. Tenant-scoped throughout (INV-1). Messages with no
+        citations are simply absent from the map (the caller defaults to ``[]``).
+        """
+        if not message_ids:
+            return {}
+        stmt = (
+            select(
+                models.Citation.id,
+                models.Citation.message_id,
+                models.Citation.chunk_id,
+                models.Citation.char_start,
+                models.Citation.char_end,
+                models.Citation.score,
+                models.Chunk.text,
+                models.Document.id,
+                models.Document.filename,
+            )
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .join(models.Document, models.Document.id == models.Chunk.document_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id.in_(list(message_ids)),
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Document.tenant_id == self._tenant_id,
+            )
+            .order_by(models.Citation.char_start.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        grouped: dict[UUID, list[CitationView]] = {}
+        for row in rows:
+            grouped.setdefault(row[1], []).append(
+                CitationView(
+                    id=row[0],
+                    message_id=row[1],
+                    chunk_id=row[2],
+                    char_start=row[3],
+                    char_end=row[4],
+                    score=row[5],
+                    snippet=row[6],
+                    document_id=row[7],
+                    document_name=row[8],
+                )
+            )
+        return grouped
 
 
 class AuditEventRepository(_TenantScopedRepository):

@@ -26,6 +26,7 @@ from app.db.repositories import AuditEventRepository
 from app.db.session import get_sessionmaker
 from app.domain.entities import Role
 from app.llm import LLMGateway
+from app.realtime.backplane import Backplane, RedisBackplane
 from app.services.audit import AuditSink
 from app.services.auth_service import require_role
 from app.storage import ObjectStore
@@ -80,6 +81,27 @@ AuditSinkFactory = Annotated[Callable[[UUID], AuditSink], Depends(make_audit_sin
 def get_llm_gateway() -> LLMGateway:
     """Process-wide LLM gateway singleton."""
     return LLMGateway(get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_backplane() -> Backplane:
+    """Process-wide realtime pub/sub backplane singleton (CC-6 #24).
+
+    The Redis-backed fan-out the chat answer producer publishes to and the WS
+    consumer subscribes from. Returned as the :class:`Backplane` Protocol so the
+    offline tests override it with an in-memory implementation (the streaming
+    lifecycle is then exercised without a running Redis) — ``realtime/`` stays the
+    only Redis owner (ADR-0004).
+    """
+    return RedisBackplane(get_settings().redis_url)
+
+
+def get_backplane_dep() -> Backplane:
+    """Backplane dependency (delegates to the cached singleton)."""
+    return get_backplane()
+
+
+BackplaneDep = Annotated[Backplane, Depends(get_backplane_dep)]
 
 
 @lru_cache(maxsize=1)

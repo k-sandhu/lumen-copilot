@@ -16,12 +16,17 @@ leaks a vendor object upward. Notable behaviours:
   come from :class:`Settings` only — switching ``LLM_MODEL`` or the provider is
   a config change, no code change (AC-4).
 
-Routing, fallback, cost/limits, caching, and tool-calling are deliberately OUT
-of this scope (issue #25 fences) and get their own decision later.
+**Tool-calling (CC-6 #24).** :meth:`stream_tools` streams a tool-aware turn:
+incremental answer tokens plus the model's tool-call requests, parsed into
+domain :class:`~app.domain.llm.ToolCall` / :class:`~app.domain.llm.StreamEvent`
+(never a vendor tool object). The agentic loop runs the tools and calls back for
+the next turn. Routing, fallback, cost/limits, and caching remain OUT of this
+scope (issue #25 fences) and get their own decision later.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +37,10 @@ from app.domain.llm import (
     Completion,
     CompletionChunk,
     Embedding,
+    StreamEvent,
     TokenUsage,
+    ToolCall,
+    ToolSpec,
 )
 
 if TYPE_CHECKING:
@@ -113,9 +121,50 @@ class LLMGateway:
         return {"api_key": self._settings.openrouter_api_key}
 
     @staticmethod
-    def _to_wire_messages(messages: Sequence[ChatMessage]) -> list[dict[str, str]]:
-        """Render domain messages as the role/content dicts LiteLLM expects."""
-        return [{"role": m.role.value, "content": m.content} for m in messages]
+    def _to_wire_messages(messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
+        """Render domain messages as the role/content dicts LiteLLM expects.
+
+        Plain messages render as ``{"role", "content"}``. An assistant turn that
+        requested tools also carries an OpenAI-style ``tool_calls`` array; a tool
+        turn carries the ``tool_call_id`` (and optional ``name``) tying the result
+        back to its call. This is the only place the vendor wire shape is built.
+        """
+        wire: list[dict[str, Any]] = []
+        for m in messages:
+            entry: dict[str, Any] = {"role": m.role.value, "content": m.content}
+            if m.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in m.tool_calls
+                ]
+            if m.tool_call_id is not None:
+                entry["tool_call_id"] = m.tool_call_id
+            if m.name is not None:
+                entry["name"] = m.name
+            wire.append(entry)
+        return wire
+
+    @staticmethod
+    def _to_wire_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
+        """Render domain tool specs into the OpenAI/LiteLLM ``tools`` array."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in tools
+        ]
 
     async def chat(
         self,
@@ -197,6 +246,80 @@ class LLMGateway:
             # the upstream HTTP connection is released and no task lingers.
             await _aclose(response)
 
+    async def stream_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        model: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
+
+        The tool-calling counterpart of :meth:`stream` (CC-6 #24). Sends
+        ``messages`` with the ``tools`` the model may call; yields incremental
+        ``text`` events as the answer streams, accumulates any tool-call deltas
+        (providers stream them argument-fragment by fragment), and emits a final
+        event carrying ``tool_calls`` (when the model chose to call tools) plus
+        the ``finish_reason`` and ``usage``. The caller (the agentic loop) runs
+        the requested tools, appends their results, and calls ``stream_tools``
+        again for the next turn — so multi-step tool use is a loop over single
+        turns, each fully streamed.
+
+        Like :meth:`stream`, this is a cancellable async generator: breaking out
+        of the consumer closes the provider stream in the ``finally`` block.
+        """
+        self._require_enabled()
+        import litellm  # lazy
+
+        model_id = model or self._settings.llm_model
+        try:
+            response = await litellm.acompletion(
+                model=model_id,
+                messages=self._to_wire_messages(messages),
+                tools=self._to_wire_tools(tools),
+                stream=True,
+                stream_options={"include_usage": True},
+                timeout=self._settings.llm_timeout_seconds,
+                **self._credentials(),
+            )
+        except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
+            raise _map_vendor_error(exc) from None
+
+        # Tool-call fragments arrive across many chunks keyed by ``index``; we
+        # accumulate name + the arguments string per index and parse once at end.
+        tool_acc: dict[int, _ToolCallAccumulator] = {}
+        finish_reason: str | None = None
+        usage: TokenUsage | None = None
+        try:
+            async for part in response:
+                usage = _extract_usage(part) if getattr(part, "usage", None) else usage
+                choices = getattr(part, "choices", None)
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.delta
+                content = getattr(delta, "content", None)
+                if content:
+                    yield StreamEvent(text=content)
+                for frag in getattr(delta, "tool_calls", None) or []:
+                    _accumulate_tool_call(tool_acc, frag)
+                fr = getattr(choice, "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+        except Exception as exc:  # noqa: BLE001 — mid-stream provider fault
+            if isinstance(exc, AppError):
+                raise
+            raise _map_vendor_error(exc) from None
+        finally:
+            await _aclose(response)
+
+        tool_calls = tuple(acc.build() for _, acc in sorted(tool_acc.items()))
+        yield StreamEvent(
+            tool_calls=tool_calls,
+            finish_reason=finish_reason or ("tool_calls" if tool_calls else "stop"),
+            usage=usage,
+        )
+
     async def embed(
         self,
         inputs: Sequence[str],
@@ -229,6 +352,49 @@ class LLMGateway:
             raise _map_vendor_error(exc) from None
 
         return [Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data]
+
+
+class _ToolCallAccumulator:
+    """Accumulates a streamed tool call's fragments into one :class:`ToolCall`.
+
+    Providers stream a tool call across chunks: the ``id`` + ``name`` arrive once
+    (usually the first fragment), the ``arguments`` JSON string arrives in pieces.
+    This stitches them, then parses the arguments at the end (defensively — a
+    malformed/empty arguments string yields ``{}`` rather than crashing the loop).
+    """
+
+    def __init__(self) -> None:
+        self.id: str = ""
+        self.name: str = ""
+        self._args = ""
+
+    def feed(self, *, call_id: str | None, name: str | None, arguments: str | None) -> None:
+        if call_id:
+            self.id = call_id
+        if name:
+            self.name = name
+        if arguments:
+            self._args += arguments
+
+    def build(self) -> ToolCall:
+        try:
+            parsed = json.loads(self._args) if self._args.strip() else {}
+        except (ValueError, TypeError):
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return ToolCall(id=self.id, name=self.name, arguments=parsed)
+
+
+def _accumulate_tool_call(acc: dict[int, _ToolCallAccumulator], frag: Any) -> None:
+    """Fold one streamed tool-call fragment into the per-index accumulator."""
+    index = int(getattr(frag, "index", 0) or 0)
+    fn = getattr(frag, "function", None)
+    acc.setdefault(index, _ToolCallAccumulator()).feed(
+        call_id=getattr(frag, "id", None),
+        name=getattr(fn, "name", None) if fn is not None else None,
+        arguments=getattr(fn, "arguments", None) if fn is not None else None,
+    )
 
 
 def _extract_usage(response: Any) -> TokenUsage:
