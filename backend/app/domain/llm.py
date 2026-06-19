@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class Role(str, Enum):
@@ -22,11 +23,36 @@ class Role(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A model-requested tool invocation (function/tool-calling).
+
+    The provider-agnostic form of a tool call the model emitted during a
+    completion: a stable ``id`` (correlates the call to its result), the tool
+    ``name`` (matches a :class:`ToolSpec`), and the JSON-decoded ``arguments``.
+    The gateway parses the vendor's tool-call payload into this so callers never
+    see a LiteLLM/OpenAI tool object (ADR-0004 adapter rule).
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """A single message in a chat exchange."""
+    """A single message in a chat exchange.
+
+    For an ``assistant`` turn that requested tools, ``tool_calls`` carries them
+    (and ``content`` may be empty); for a ``tool`` turn, ``tool_call_id`` ties
+    the result back to the originating call. Both default empty for the common
+    plain text message.
+    """
 
     role: Role
     content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +85,46 @@ class CompletionChunk:
 
     delta: str
     index: int
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """A tool the model may call (the function/tool-calling schema).
+
+    Provider-agnostic description of a callable the chat runtime exposes to the
+    model: its ``name`` (the LLM references this in a :class:`ToolCall`), a
+    human ``description`` the model reads to decide when to use it, and a JSON
+    Schema for its ``parameters``. The gateway renders this into the vendor's
+    tool format; callers never construct a LiteLLM/OpenAI tool dict.
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEvent:
+    """One item from a tool-aware streamed completion.
+
+    A streamed tool-calling turn yields a sequence of these. Exactly one of the
+    payload fields is set per event:
+
+    * ``text`` — an incremental answer token chunk (most events);
+    * ``tool_calls`` — the model finished the turn by requesting tools (the
+      runtime runs them, appends results, and streams the next turn);
+    * ``finish_reason`` — the terminal marker for this turn (``stop`` /
+      ``tool_calls`` / ``length`` / ...), carried on the last event;
+    * ``usage`` — token accounting, when the provider reports it at end-of-turn.
+
+    Keeping this one flat type (rather than a union) keeps the consumer loop a
+    single ``async for`` and the gateway the only place vendor chunks are parsed.
+    """
+
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
