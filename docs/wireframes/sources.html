@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sources · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="sources">
+<div class="app"><main class="main"><div class="main-scroll"><div class="page page-wide">
+
+  <div class="page-head">
+    <div>
+      <h1>Sources</h1>
+      <div class="sub">Connected systems Lumen reads from — source permissions are mirrored, never widened.</div>
+    </div>
+    <div class="page-head-actions">
+      <button class="btn btn-subtle" data-toast="Syncing all connected sources…">
+        <svg class="icon"><use href="#i-refresh"/></svg>
+        Sync all
+      </button>
+      <button class="btn btn-primary" data-modal-open="add-source">
+        <svg class="icon"><use href="#i-plus"/></svg>
+        Add source
+      </button>
+    </div>
+  </div>
+
+  <div class="cols-4 gap-4 mb-6">
+    <div class="card kpi">
+      <div class="k">Connected sources</div>
+      <div class="v">6</div>
+    </div>
+    <div class="card kpi">
+      <div class="k">Objects indexed</div>
+      <div class="v">1.28M</div>
+    </div>
+    <div class="card kpi">
+      <div class="k">Permissions mirrored</div>
+      <div class="v t-ok">100%</div>
+      <div class="delta t-ok">in sync</div>
+    </div>
+    <div class="card kpi">
+      <div class="k">Last full sync</div>
+      <div class="v">12m ago</div>
+    </div>
+  </div>
+
+  <div class="tile-grid">
+
+    <!-- 1. Google Drive -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-gdrive">GD</div>
+        <div class="grow">
+          <div class="name">Google Drive</div>
+          <div class="t-xs t-subtle">Managed · Read-only</div>
+        </div>
+        <span class="badge badge-ok">Connected</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-ok"></span>Synced 8m ago</span>
+        <span class="fresh">Fresh</span>
+      </div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">612k</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v t-ok">100%</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v">0</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-ghost" data-toast="Syncing Google Drive…">Sync now</button>
+      </div>
+    </div>
+
+    <!-- 2. Slack -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-slack">SL</div>
+        <div class="grow">
+          <div class="name">Slack</div>
+          <div class="t-xs t-subtle">Managed · Read-only</div>
+        </div>
+        <span class="badge badge-info">Syncing</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-sync"></span>Syncing… 72%</span>
+      </div>
+      <div class="bar bar-grad" style="margin-top:8px"><span style="width:72%"></span></div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">410k</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v t-ok">100%</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v">0</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-ghost" data-toast="Sync already in progress…">Sync now</button>
+      </div>
+    </div>
+
+    <!-- 3. Confluence -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-confluence">CF</div>
+        <div class="grow">
+          <div class="name">Confluence</div>
+          <div class="t-xs t-subtle">Managed · Read-only</div>
+        </div>
+        <span class="badge badge-ok">Connected</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-ok"></span>Synced 31m ago</span>
+        <span class="fresh">Fresh</span>
+      </div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">188k</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v t-ok">100%</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v">0</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-ghost" data-toast="Syncing Confluence…">Sync now</button>
+      </div>
+    </div>
+
+    <!-- 4. Jira -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-jira">JR</div>
+        <div class="grow">
+          <div class="name">Jira</div>
+          <div class="t-xs t-subtle">Read-only</div>
+        </div>
+        <span class="badge badge-ok">Connected</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-ok"></span>Synced 5m ago</span>
+        <span class="fresh">Fresh</span>
+      </div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">64k</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v t-ok">100%</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v t-warn">2</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-ghost" data-toast="Syncing Jira…">Sync now</button>
+      </div>
+    </div>
+
+    <!-- 5. GitHub -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-github">GH</div>
+        <div class="grow">
+          <div class="name">GitHub</div>
+          <div class="t-xs t-subtle">Code-aware · Read-only</div>
+        </div>
+        <span class="badge badge-ok">Connected</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-ok"></span>Synced 2m ago</span>
+        <span class="fresh">Fresh</span>
+      </div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">9.4k</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v t-ok">100%</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v">0</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-ghost" data-toast="Syncing GitHub…">Sync now</button>
+      </div>
+    </div>
+
+    <!-- 6. Salesforce -->
+    <div class="card connector">
+      <div class="connector-top">
+        <div class="src src-lg src-salesforce">SF</div>
+        <div class="grow">
+          <div class="name">Salesforce</div>
+          <div class="t-xs t-subtle">Read-write capable</div>
+        </div>
+        <span class="badge badge-danger">Auth expired</span>
+      </div>
+      <div class="flex items-center gap-2 t-sm">
+        <span class="status"><span class="dot dot-danger"></span>Failed 3h ago</span>
+        <span class="fresh fresh-stale">Stale</span>
+      </div>
+      <div class="connector-stats">
+        <div class="stat"><div class="k">Objects</div><div class="v">—</div></div>
+        <div class="stat"><div class="k">Permissions</div><div class="v">—</div></div>
+        <div class="stat"><div class="k">Errors</div><div class="v t-danger">1</div></div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-subtle">Configure</button>
+        <button class="btn btn-sm btn-primary" data-toast="Reconnecting Salesforce…">Reconnect</button>
+      </div>
+    </div>
+
+    <!-- Add a connector -->
+    <div class="card flex items-center justify-center gap-2 pointer" style="border-style:dashed;border-color:var(--border-strong);min-height:120px" data-modal-open="add-source">
+      <svg class="icon"><use href="#i-plus"/></svg>
+      Add a connector
+    </div>
+
+  </div>
+
+</div></div></main></div>
+
+<!-- Add source modal -->
+<div class="modal" id="add-source">
+  <div class="modal-card">
+    <div class="card-head">
+      <h3>Add a source</h3>
+      <div class="grow"></div>
+      <button class="btn-icon btn-ghost" data-modal-close>
+        <svg class="icon"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="card-pad">
+      <p class="t-muted mb-4">Lumen mirrors each source's existing permissions — connecting a system never widens access. Choose a connector to begin.</p>
+      <div class="cols-2 gap-3">
+        <div class="inset p-3 flex items-center gap-3 pointer">
+          <div class="src src-notion">NO</div>
+          <div class="grow">
+            <div class="t-medium">Notion</div>
+            <div class="t-xs t-subtle">Read-only</div>
+          </div>
+        </div>
+        <div class="inset p-3 flex items-center gap-3 pointer">
+          <div class="src src-sharepoint">SP</div>
+          <div class="grow">
+            <div class="t-medium">SharePoint</div>
+            <div class="t-xs t-subtle">Read-only</div>
+          </div>
+        </div>
+        <div class="inset p-3 flex items-center gap-3 pointer">
+          <div class="src src-zendesk">ZD</div>
+          <div class="grow">
+            <div class="t-medium">Zendesk</div>
+            <div class="t-xs t-subtle">Read-only</div>
+          </div>
+        </div>
+        <div class="inset p-3 flex items-center gap-3 pointer">
+          <div class="src"><svg class="icon"><use href="#i-database"/></svg></div>
+          <div class="grow">
+            <div class="t-medium">Database / Warehouse</div>
+            <div class="t-xs t-subtle">Read-only</div>
+          </div>
+        </div>
+        <div class="inset p-3 flex items-center gap-3 pointer full" style="grid-column:1 / -1">
+          <div class="src"><svg class="icon"><use href="#i-key"/></svg></div>
+          <div class="grow">
+            <div class="t-medium">Custom connector — push API</div>
+            <div class="t-xs t-subtle">Read-write</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-foot flex justify-end gap-2">
+      <button class="btn btn-ghost" data-modal-close>Cancel</button>
+      <button class="btn btn-primary" data-toast="Starting connector setup…">Continue</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

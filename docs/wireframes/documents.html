@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Documents · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="documents">
+<div class="app">
+  <main class="main">
+    <div class="main-scroll">
+      <div class="flex" style="min-height:100%">
+
+        <!-- LEFT: collections subrail -->
+        <div class="subrail">
+          <div class="subrail-head">
+            <div class="flex justify-between items-center">
+              <span class="t-semibold">Collections</span>
+              <button class="btn-icon btn-ghost tip" data-tip="New collection" data-toast="New collection — name it to get started">
+                <svg class="icon"><use href="#i-plus"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="subrail-scroll">
+            <div class="histitem active">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-folder"/></svg>
+                <span class="grow truncate">All documents</span>
+                <span class="badge-count">24</span>
+              </div>
+            </div>
+            <div class="histitem">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-folder"/></svg>
+                <span class="grow truncate">Onboarding</span>
+                <span class="badge-count">6</span>
+              </div>
+            </div>
+            <div class="histitem">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-folder"/></svg>
+                <span class="grow truncate">Contracts</span>
+                <span class="badge-count">5</span>
+              </div>
+            </div>
+            <div class="histitem">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-folder"/></svg>
+                <span class="grow truncate">Q3 Planning</span>
+                <span class="badge-count">8</span>
+              </div>
+            </div>
+            <div class="histitem">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-folder"/></svg>
+                <span class="grow truncate">Personal uploads</span>
+                <span class="badge-count">3</span>
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div class="histitem">
+              <div class="flex items-center gap-2">
+                <svg class="icon icon-sm t-muted"><use href="#i-users"/></svg>
+                <span class="grow truncate">Shared with me</span>
+                <span class="badge-count">4</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: documents page -->
+        <div class="grow">
+          <div class="page">
+
+            <div class="page-head">
+              <h1>Documents</h1>
+              <p class="sub">Upload many file types — each is parsed, chunked, embedded, and permission-scoped.</p>
+              <div class="page-head-actions">
+                <button class="btn btn-subtle">
+                  <svg class="icon"><use href="#i-filter"/></svg>Filter
+                </button>
+                <button class="btn btn-primary" data-upload>
+                  <svg class="icon"><use href="#i-upload"/></svg>Upload
+                </button>
+              </div>
+            </div>
+
+            <!-- Dropzone -->
+            <div class="dropzone" data-upload>
+              <div class="empty-ico">
+                <svg class="icon icon-lg"><use href="#i-upload"/></svg>
+              </div>
+              <div class="t-medium">Drop files here or click to upload</div>
+              <div class="t-sm t-muted mt-1">PDF, DOCX, XLSX, PPTX, MD, CSV, PNG · up to 50 MB each</div>
+              <div class="t-xs t-subtle mt-1">Uploaded files are private to you until you add them to a shared collection.</div>
+            </div>
+            <div data-upload-list class="mt-2"></div>
+
+            <!-- Documents table -->
+            <div class="card mt-4">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Collection</th>
+                    <th>Status</th>
+                    <th>Visibility</th>
+                    <th>Owner</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-pdf">PDF</span>
+                        <div>
+                          <div class="cell-title">Vendor-MSA-Final.pdf</div>
+                          <div class="cell-sub">PDF · 2.4 MB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Contracts</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Confidential</span></td>
+                    <td>Marcus Lee</td>
+                    <td><span class="fresh">2h ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-sheet">XLS</span>
+                        <div>
+                          <div class="cell-title">FY25-Budget-Plan.xlsx</div>
+                          <div class="cell-sub">XLSX · 1.1 MB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Q3 Planning</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm">Team</span></td>
+                    <td>Dana Wu</td>
+                    <td><span class="fresh">Yesterday</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-doc">DOC</span>
+                        <div>
+                          <div class="cell-title">Onboarding-Runbook.docx</div>
+                          <div class="cell-sub">DOCX · 680 KB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Onboarding</td>
+                    <td><span class="status"><span class="dot dot-sync"></span>Embedding…</span></td>
+                    <td><span class="perm">Org</span></td>
+                    <td>Priya Shah</td>
+                    <td><span class="fresh">12m ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-pdf">PDF</span>
+                        <div>
+                          <div class="cell-title">Q3-Pricing-Memo.pdf</div>
+                          <div class="cell-sub">PDF · 540 KB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Q3 Planning</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Confidential</span></td>
+                    <td>Avery Madison</td>
+                    <td><span class="fresh">3d ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-slide">PPT</span>
+                        <div>
+                          <div class="cell-title">All-Hands-Sept.pptx</div>
+                          <div class="cell-sub">PPTX · 8.7 MB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Personal uploads</td>
+                    <td><span class="badge badge-danger"><svg class="icon icon-sm"><use href="#i-alert"/></svg>Failed</span></td>
+                    <td><span class="perm"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Private</span></td>
+                    <td>Avery Madison</td>
+                    <td><span class="fresh fresh-stale">5d ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-pdf">PDF</span>
+                        <div>
+                          <div class="cell-title">PTO-Policy-2025.pdf</div>
+                          <div class="cell-sub">PDF · 310 KB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Onboarding</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm">Org</span></td>
+                    <td>Priya Shah</td>
+                    <td><span class="fresh">1w ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-doc">DOC</span>
+                        <div>
+                          <div class="cell-title">Acme-Account-Notes.docx</div>
+                          <div class="cell-sub">DOCX · 220 KB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Contracts</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm">Team</span></td>
+                    <td>Tomás Reyes</td>
+                    <td><span class="fresh">4h ago</span></td>
+                  </tr>
+
+                  <tr data-drawer-open="doc-drawer" class="pointer">
+                    <td>
+                      <div class="cell-main">
+                        <span class="src src-pdf">PDF</span>
+                        <div>
+                          <div class="cell-title">Competitive-Teardown.pdf</div>
+                          <div class="cell-sub">PDF · 1.9 MB</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>Q3 Planning</td>
+                    <td><span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Indexed</span></td>
+                    <td><span class="perm"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Private</span></td>
+                    <td>Avery Madison</td>
+                    <td><span class="fresh">2w ago</span></td>
+                  </tr>
+
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Document viewer drawer -->
+<aside class="drawer" id="doc-drawer">
+  <div class="drawer-head">
+    <span class="src src-pdf src-lg">PDF</span>
+    <div>
+      <div class="t-semibold">Vendor-MSA-Final.pdf</div>
+      <div class="t-xs t-subtle">PDF · 2.4 MB</div>
+    </div>
+    <div class="grow"></div>
+    <button class="btn-icon btn-ghost" data-drawer-close>
+      <svg class="icon"><use href="#i-x"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- Metadata grid -->
+    <div class="grid cols-2 gap-3">
+      <div>
+        <div class="t-xs t-subtle t-up">Type</div>
+        <div class="t-sm">PDF</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Size</div>
+        <div class="t-sm">2.4 MB</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Owner</div>
+        <div class="t-sm">Marcus Lee</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Collection</div>
+        <div class="t-sm">Contracts</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Uploaded</div>
+        <div class="t-sm">Jun 16, 2026</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Last indexed</div>
+        <div class="t-sm">2h ago</div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Visibility</div>
+        <div class="t-sm"><span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Confidential</span></div>
+      </div>
+      <div>
+        <div class="t-xs t-subtle t-up">Chunks</div>
+        <div class="t-sm">142</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Ingestion trace -->
+    <div class="t-xs t-subtle t-up mb-2">Ingestion</div>
+    <div class="trace">
+      <div class="trace-step">
+        <svg class="icon icon-sm t-ok"><use href="#i-check"/></svg>
+        <span>Parsed (PDF, 24 pages)</span>
+      </div>
+      <div class="trace-step">
+        <svg class="icon icon-sm t-ok"><use href="#i-check"/></svg>
+        <span>Chunked into 142 passages</span>
+      </div>
+      <div class="trace-step">
+        <svg class="icon icon-sm t-ok"><use href="#i-check"/></svg>
+        <span>Embedded (text-embedding-3)</span>
+      </div>
+      <div class="trace-step">
+        <svg class="icon icon-sm t-ok"><use href="#i-check"/></svg>
+        <span>Permission ACL mirrored from source</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Preview -->
+    <div class="t-xs t-subtle t-up mb-2">Preview</div>
+    <div class="passage">
+      This Master Services Agreement ("Agreement") is entered into by Northwind Inc. and the Vendor. Section 7.2 states that <mark>either party may terminate for convenience with sixty (60) days' written notice</mark>, provided all outstanding fees through the effective termination date are settled. Renewal terms auto-extend for successive twelve-month periods unless notice is given.
+    </div>
+
+    <!-- Footer actions -->
+    <div class="flex gap-2 mt-4">
+      <button class="btn btn-subtle">
+        <svg class="icon"><use href="#i-external"/></svg>Open
+      </button>
+      <button class="btn btn-subtle">
+        <svg class="icon"><use href="#i-chat"/></svg>Ask about this
+      </button>
+      <div class="grow"></div>
+      <button class="btn btn-danger btn-icon" data-toast="Document deleted">
+        <svg class="icon"><use href="#i-trash"/></svg>
+      </button>
+    </div>
+
+  </div>
+</aside>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

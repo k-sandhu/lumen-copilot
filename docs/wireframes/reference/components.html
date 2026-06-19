@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Components · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/tokens.css" />
+<link rel="stylesheet" href="../assets/app.css" />
+</head>
+<body data-screen="components" data-base="..">
+<div class="app">
+<main class="main">
+<div class="main-scroll">
+<div class="page page-wide">
+
+  <div class="page-head">
+    <h1>Components</h1>
+    <p class="sub">Every building block, rendered on the active look.</p>
+  </div>
+
+  <!-- ============ BUTTONS ============ -->
+  <h2 class="mt-8 mb-3">Buttons</h2>
+  <div class="card card-pad">
+    <div class="flex wrap gap-3 items-center">
+      <button class="btn"><svg class="icon"><use href="#i-plus"/></svg>Default</button>
+      <button class="btn btn-primary"><svg class="icon"><use href="#i-check"/></svg>Primary</button>
+      <button class="btn btn-accent-grad"><svg class="icon"><use href="#i-sparkle"/></svg>Ask Copilot</button>
+      <button class="btn btn-subtle"><svg class="icon"><use href="#i-filter"/></svg>Subtle</button>
+      <button class="btn btn-ghost"><svg class="icon"><use href="#i-dots"/></svg>Ghost</button>
+      <button class="btn btn-danger"><svg class="icon"><use href="#i-trash"/></svg>Delete</button>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-3 items-center">
+      <button class="btn btn-primary btn-sm"><svg class="icon icon-sm"><use href="#i-check"/></svg>Small</button>
+      <button class="btn btn-primary"><svg class="icon"><use href="#i-check"/></svg>Default</button>
+      <button class="btn btn-primary btn-lg"><svg class="icon"><use href="#i-check"/></svg>Large</button>
+      <span class="divider-v" style="height:28px"></span>
+      <button class="btn btn-icon" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
+      <button class="btn btn-icon" aria-label="More"><svg class="icon"><use href="#i-dots-v"/></svg></button>
+    </div>
+  </div>
+
+  <!-- ============ FORM CONTROLS ============ -->
+  <h2 class="mt-8 mb-3">Form controls</h2>
+  <div class="card card-pad">
+    <div class="flex wrap gap-3 items-start">
+      <div class="field" style="min-width:220px">
+        <label class="label">Plain input</label>
+        <input class="input" type="text" value="Acme renewal risk" />
+      </div>
+      <div class="field" style="min-width:240px">
+        <label class="label">Input group</label>
+        <div class="input-group">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input class="input" type="text" placeholder="Search Northwind knowledge…" />
+        </div>
+      </div>
+      <div class="field" style="min-width:200px">
+        <label class="label">Select</label>
+        <select class="select">
+          <option>All connectors</option>
+          <option>Google Drive</option>
+          <option>Confluence</option>
+          <option>Salesforce</option>
+        </select>
+      </div>
+    </div>
+    <div class="field mt-3" style="max-width:520px">
+      <label class="label">Textarea</label>
+      <textarea class="textarea" rows="3">Summarize the Q3 pricing change and the impact on the Acme renewal.</textarea>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-3 items-center">
+      <div class="segmented">
+        <button data-seg="demo:a" class="active">Answer</button>
+        <button data-seg="demo:b">Sources</button>
+        <button data-seg="demo:c">Trace</button>
+      </div>
+      <span class="divider-v" style="height:28px"></span>
+      <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-globe"/></svg>Web</button>
+      <button class="chip-toggle active" data-toggle><svg class="icon icon-sm"><use href="#i-database"/></svg>Internal</button>
+      <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-upload"/></svg>My uploads</button>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-6 items-center">
+      <div class="flex items-center gap-3">
+        <span class="switch"></span><span class="t-sm t-muted">Web search off</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="switch on"></span><span class="t-sm">Permission-aware retrieval on</span>
+      </div>
+    </div>
+    <div class="mt-3" style="max-width:360px">
+      <div class="filter-row">
+        <span class="checkbox on"><svg class="icon icon-sm"><use href="#i-check"/></svg></span>
+        <span class="grow">Only sources I can access</span>
+        <span class="count">128</span>
+      </div>
+      <div class="filter-row">
+        <span class="checkbox"></span>
+        <span class="grow">Include archived documents</span>
+        <span class="count">42</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ BADGES & STATUS ============ -->
+  <h2 class="mt-8 mb-3">Badges &amp; status</h2>
+  <div class="card card-pad">
+    <div class="flex wrap gap-3 items-center">
+      <span class="badge">Default</span>
+      <span class="badge badge-ok"><svg class="icon icon-sm"><use href="#i-check"/></svg>Approved</span>
+      <span class="badge badge-warn"><svg class="icon icon-sm"><use href="#i-alert"/></svg>Review</span>
+      <span class="badge badge-danger"><svg class="icon icon-sm"><use href="#i-x"/></svg>Blocked</span>
+      <span class="badge badge-info"><svg class="icon icon-sm"><use href="#i-info"/></svg>Info</span>
+      <span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-sparkle"/></svg>GPT-4o</span>
+      <span class="badge">Drafts <span class="badge-count">7</span></span>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-3 items-center">
+      <span class="perm"><svg class="icon icon-sm"><use href="#i-globe"/></svg>Org-wide</span>
+      <span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Restricted · Finance</span>
+      <span class="fresh"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>Synced 4m ago</span>
+      <span class="fresh fresh-stale"><svg class="icon icon-sm"><use href="#i-clock"/></svg>Stale · 9 days</span>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-4 items-center">
+      <span class="status"><span class="dot dot-ok"></span>Connected</span>
+      <span class="status"><span class="dot dot-warn"></span>Degraded</span>
+      <span class="status"><span class="dot dot-danger"></span>Auth expired</span>
+      <span class="status"><span class="dot dot-sync"></span>Syncing…</span>
+      <span class="status"><span class="dot dot-muted"></span>Paused</span>
+    </div>
+  </div>
+
+  <!-- ============ SOURCE GLYPHS ============ -->
+  <h2 class="mt-8 mb-3">Source glyphs</h2>
+  <div class="card card-pad">
+    <div class="flex wrap gap-3 items-center">
+      <span class="src src-lg src-gdrive">GD</span>
+      <span class="src src-lg src-slack">SL</span>
+      <span class="src src-lg src-jira">JI</span>
+      <span class="src src-lg src-confluence">CF</span>
+      <span class="src src-lg src-github">GH</span>
+      <span class="src src-lg src-salesforce">SF</span>
+      <span class="src src-lg src-notion">NO</span>
+      <span class="src src-lg src-sharepoint">SP</span>
+      <span class="src src-lg src-zendesk">ZD</span>
+    </div>
+    <div class="divider"></div>
+    <div class="flex wrap gap-3 items-center">
+      <span class="src src-lg src-pdf">PDF</span>
+      <span class="src src-lg src-doc">DOC</span>
+      <span class="src src-lg src-sheet">XLS</span>
+      <span class="src src-lg src-slide">PPT</span>
+      <span class="src src-lg src-upload"><svg class="icon"><use href="#i-upload"/></svg></span>
+    </div>
+  </div>
+
+  <!-- ============ CITATIONS & PROVENANCE ============ -->
+  <h2 class="mt-8 mb-3">Citations &amp; provenance</h2>
+  <div class="card card-pad">
+    <div class="assistant-md" style="max-width:640px">
+      <p>The Q3 pricing change raised the platform tier by 12%, which is the primary driver of the Acme renewal risk<span class="cite" data-cite="1">1</span>. Finance has flagged a mitigation discount of up to 8% pending VP approval<span class="cite" data-cite="2">2</span>.</p>
+    </div>
+    <div class="sources-strip mt-4">
+      <div class="source-row" data-source="1" data-source-open="1">
+        <span class="num">1</span>
+        <span class="src src-sm src-confluence">CF</span>
+        <div class="grow">
+          <div class="t-sm t-medium truncate">Q3 2025 Pricing Change — Rollout Brief</div>
+          <div class="t-xs t-muted truncate">Confluence · Revenue Ops · updated by Priya Shah</div>
+        </div>
+        <span class="perm"><svg class="icon icon-sm"><use href="#i-globe"/></svg>Org-wide</span>
+        <span class="fresh"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>2d</span>
+      </div>
+      <div class="source-row" data-source="2" data-source-open="2">
+        <span class="num">2</span>
+        <span class="src src-sm src-gdrive">GD</span>
+        <div class="grow">
+          <div class="t-sm t-medium truncate">Acme Renewal — Discount Approval Memo</div>
+          <div class="t-xs t-muted truncate">Google Drive · Finance · owned by Marcus Lee</div>
+        </div>
+        <span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Restricted</span>
+        <span class="fresh fresh-stale"><svg class="icon icon-sm"><use href="#i-clock"/></svg>9d</span>
+      </div>
+    </div>
+    <div class="passage mt-4">
+      <p>“Effective Q3, the Platform tier list price increases by <mark>12%</mark>. Accounts within 60 days of renewal may receive a one-time mitigation discount not to exceed 8% with VP Finance sign-off.”</p>
+      <div class="t-xs t-muted mt-2">Q3 2025 Pricing Change — Rollout Brief · §3 Renewal Impact</div>
+    </div>
+  </div>
+
+  <!-- ============ MESSAGES ============ -->
+  <h2 class="mt-8 mb-3">Messages</h2>
+  <div class="card card-pad">
+    <div class="thread" style="max-width:680px">
+      <div class="turn bubble-user">
+        <span class="who"><span class="avatar sm">AM</span></span>
+        <div class="turn-body">
+          <div class="name">Avery Madison</div>
+          <div>What's driving the Acme renewal risk this quarter?</div>
+        </div>
+      </div>
+      <div class="turn">
+        <span class="who"><span class="brand-logo" style="width:30px;height:30px"><svg class="icon"><use href="#i-sparkle"/></svg></span></span>
+        <div class="turn-body">
+          <div class="name">Lumen Copilot <span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-cpu"/></svg>GPT-4o</span></div>
+          <div class="assistant-md"><p>The Q3 pricing change raised Acme's platform tier by 12%, which is the leading renewal risk for the account.</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SEARCH RESULT + CONNECTOR ============ -->
+  <h2 class="mt-8 mb-3">Search result</h2>
+  <div class="card card-pad">
+    <div class="result" data-source-open="1">
+      <div class="title">Acme Renewal — Discount Approval Memo <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg>Top semantic match</span></div>
+      <div class="snippet">Accounts within 60 days of renewal may receive a one-time <mark>mitigation discount</mark> not to exceed 8% with VP Finance sign-off. Acme falls in this window…</div>
+      <div class="meta">
+        <span class="src src-sm src-gdrive">GD</span>
+        <span>Google Drive</span>
+        <span>·</span>
+        <span>Marcus Lee</span>
+        <span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Restricted</span>
+        <span class="fresh fresh-stale"><svg class="icon icon-sm"><use href="#i-clock"/></svg>Stale · 9d</span>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="mt-8 mb-3">Connector card</h2>
+  <div class="card connector" style="max-width:360px">
+    <div class="connector-top">
+      <span class="src src-lg src-salesforce">SF</span>
+      <div class="grow">
+        <div class="t-medium">Salesforce</div>
+        <span class="status"><span class="dot dot-ok"></span>Connected</span>
+      </div>
+      <button class="btn btn-icon btn-ghost" aria-label="Settings"><svg class="icon"><use href="#i-sliders"/></svg></button>
+    </div>
+    <div class="connector-stats">
+      <div class="stat"><div class="k">Records</div><div class="v">18,402</div></div>
+      <div class="stat"><div class="k">Last sync</div><div class="v">4m ago</div></div>
+      <div class="stat"><div class="k">Scope</div><div class="v">Read-only</div></div>
+    </div>
+  </div>
+
+  <!-- ============ TABLES & DATA ============ -->
+  <h2 class="mt-8 mb-3">Tables &amp; data</h2>
+  <div class="card card-pad">
+    <div class="cols-4 gap-3">
+      <div class="kpi"><div class="k">Indexed documents</div><div class="v">42,118</div><div class="delta t-ok">+1,204</div></div>
+      <div class="kpi"><div class="k">Questions answered</div><div class="v">9,873</div><div class="delta t-ok">+312</div></div>
+      <div class="kpi"><div class="k">Citations served</div><div class="v">31,540</div><div class="delta t-ok">+2.1%</div></div>
+      <div class="kpi"><div class="k">Stale sources</div><div class="v">87</div><div class="delta t-warn">+14</div></div>
+    </div>
+    <div class="divider"></div>
+    <div class="col gap-3" style="max-width:520px">
+      <div><div class="t-xs t-muted mb-1">Google Drive coverage</div><div class="bar"><span style="width:72%"></span></div></div>
+      <div><div class="t-xs t-muted mb-1">Confluence freshness</div><div class="bar bar-ok"><span style="width:91%"></span></div></div>
+      <div><div class="t-xs t-muted mb-1">Answer grounding rate</div><div class="bar bar-grad"><span style="width:64%"></span></div></div>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <table class="table">
+      <thead>
+        <tr><th>Document</th><th>Source</th><th>Permission</th><th>Freshness</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><div class="cell-main"><span class="src src-sm src-confluence">CF</span><div><div class="cell-title">Q3 Pricing Change — Rollout Brief</div><div class="cell-sub">Revenue Ops</div></div></div></td>
+          <td>Confluence</td>
+          <td><span class="perm"><svg class="icon icon-sm"><use href="#i-globe"/></svg>Org-wide</span></td>
+          <td><span class="fresh"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>2d</span></td>
+        </tr>
+        <tr>
+          <td><div class="cell-main"><span class="src src-sm src-gdrive">GD</span><div><div class="cell-title">Acme Renewal — Discount Memo</div><div class="cell-sub">Finance</div></div></div></td>
+          <td>Google Drive</td>
+          <td><span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Restricted</span></td>
+          <td><span class="fresh fresh-stale"><svg class="icon icon-sm"><use href="#i-clock"/></svg>9d</span></td>
+        </tr>
+        <tr>
+          <td><div class="cell-main"><span class="src src-sm src-sharepoint">SP</span><div><div class="cell-title">PTO &amp; Onboarding Policy FY25</div><div class="cell-sub">People Ops</div></div></div></td>
+          <td>SharePoint</td>
+          <td><span class="perm"><svg class="icon icon-sm"><use href="#i-globe"/></svg>Org-wide</span></td>
+          <td><span class="fresh"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>6h</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ============ OVERLAYS ============ -->
+  <h2 class="mt-8 mb-3">Overlays</h2>
+  <div class="card card-pad">
+    <div class="flex wrap gap-3 items-center">
+      <button class="btn" data-drawer-open="demo-drawer"><svg class="icon"><use href="#i-layers"/></svg>Open drawer</button>
+      <button class="btn" data-modal-open="demo-modal"><svg class="icon"><use href="#i-grid"/></svg>Open modal</button>
+      <button class="btn" data-toast="Saved to collection"><svg class="icon"><use href="#i-check"/></svg>Show toast</button>
+      <button class="btn" data-open-cmdk><svg class="icon"><use href="#i-command"/></svg>Command palette</button>
+      <span class="divider-v" style="height:28px"></span>
+      <button class="btn btn-ghost tip" data-tip="Provenance is recorded for every answer"><svg class="icon"><use href="#i-info"/></svg>Hover for tooltip</button>
+    </div>
+    <div class="divider"></div>
+    <div class="menu" style="max-width:240px">
+      <button class="menu-item"><svg class="icon"><use href="#i-copy"/></svg>Copy answer</button>
+      <button class="menu-item"><svg class="icon"><use href="#i-pin"/></svg>Pin to collection</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item"><svg class="icon"><use href="#i-flag"/></svg>Flag for review</button>
+    </div>
+  </div>
+
+  <!-- drawer markup -->
+  <aside class="drawer" id="demo-drawer">
+    <div class="drawer-head">
+      <h3>Source details</h3>
+      <button class="btn btn-icon btn-ghost" data-drawer-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="drawer-body">
+      <div class="flex items-center gap-3 mb-3">
+        <span class="src src-lg src-gdrive">GD</span>
+        <div>
+          <div class="t-medium">Acme Renewal — Discount Approval Memo</div>
+          <div class="t-xs t-muted">Google Drive · owned by Marcus Lee</div>
+        </div>
+      </div>
+      <div class="flex wrap gap-2 mb-3">
+        <span class="perm perm-restricted"><svg class="icon icon-sm"><use href="#i-lock"/></svg>Restricted · Finance</span>
+        <span class="fresh fresh-stale"><svg class="icon icon-sm"><use href="#i-clock"/></svg>Stale · 9d</span>
+      </div>
+      <div class="passage">
+        <p>“Accounts within 60 days of renewal may receive a one-time mitigation discount <mark>not to exceed 8%</mark> with VP Finance sign-off.”</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- modal markup -->
+  <div class="modal" id="demo-modal">
+    <div class="modal-card">
+      <div class="card-head">
+        <h3>Request access</h3>
+        <button class="btn btn-icon btn-ghost" data-modal-close aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="card-pad">
+        <p class="t-sm t-muted">This document is restricted to the Finance group. Send an access request to the owner, Marcus Lee.</p>
+        <div class="field mt-3">
+          <label class="label">Reason</label>
+          <textarea class="textarea" rows="2">Needed to answer an Acme renewal question.</textarea>
+        </div>
+      </div>
+      <div class="card-foot flex justify-end gap-2">
+        <button class="btn btn-ghost" data-modal-close>Cancel</button>
+        <button class="btn btn-primary" data-modal-close data-toast="Access request sent to Marcus Lee">Send request</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ STATES ============ -->
+  <h2 class="mt-8 mb-3">States</h2>
+  <div class="card card-pad">
+    <div class="empty">
+      <div class="empty-ico"><svg class="icon icon-lg"><use href="#i-search"/></svg></div>
+      <div class="t-medium">No accessible results</div>
+      <div class="t-sm t-muted">Nothing you can access matches “FY25 budget”. Try broadening your filters.</div>
+      <button class="btn btn-primary mt-3"><svg class="icon"><use href="#i-filter"/></svg>Clear filters</button>
+    </div>
+    <div class="divider"></div>
+    <div class="col gap-2" style="max-width:520px">
+      <div class="skeleton" style="width:90%"></div>
+      <div class="skeleton" style="width:70%"></div>
+      <div class="skeleton" style="width:50%"></div>
+    </div>
+    <div class="divider"></div>
+    <div class="dropzone">
+      <svg class="icon icon-lg"><use href="#i-upload"/></svg>
+      <div class="t-medium mt-2">Drop documents to upload</div>
+      <div class="t-sm t-muted">PDF, DOCX, XLSX, or PPTX up to 50 MB</div>
+    </div>
+  </div>
+
+</div>
+</div>
+</main>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>

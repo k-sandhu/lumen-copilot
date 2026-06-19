@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en" data-theme="aurora" data-mode="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumen Copilot — System Wireframes</title>
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+    /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="assets/tokens.css" />
+    <link rel="stylesheet" href="assets/app.css" />
+    <style>
+      .lp {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 0 28px;
+      }
+      .lp-top {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        height: 68px;
+      }
+      .hero {
+        padding: 64px 0 30px;
+        max-width: 760px;
+      }
+      .hero .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 12px 5px 8px;
+        border-radius: var(--r-full);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow-sm);
+        font-size: 12.5px;
+        font-weight: 560;
+        color: var(--text-muted);
+        margin-bottom: 22px;
+      }
+      .hero h1 {
+        font-size: 46px;
+        line-height: 1.05;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+      .hero h1 .grad {
+        background: var(--accent-grad);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .hero p {
+        font-size: 17px;
+        color: var(--text-muted);
+        margin-top: 18px;
+        line-height: 1.6;
+      }
+      .sec-label {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        margin: 46px 0 18px;
+      }
+      .sec-label h2 {
+        font-size: 19px;
+      }
+      .sec-label .ln {
+        flex: 1;
+        height: 1px;
+        background: var(--border);
+      }
+      /* look cards */
+      .looks {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+      }
+      .look {
+        border-radius: var(--r-lg);
+        border: 2px solid var(--border);
+        overflow: hidden;
+        cursor: pointer;
+        transition: transform var(--dur-2), box-shadow var(--dur-2),
+          border-color var(--dur-2);
+        background: var(--surface);
+      }
+      .look:hover {
+        transform: translateY(-4px);
+        box-shadow: var(--shadow-lg);
+      }
+      .look.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 4px var(--accent-weak), var(--shadow-md);
+      }
+      .look-prev {
+        height: 168px;
+        padding: 14px;
+        position: relative;
+      }
+      .lp-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .lp-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+      .lp-bubble {
+        border-radius: 10px;
+        padding: 8px 10px;
+        font-size: 11.5px;
+        margin-top: 12px;
+      }
+      .lp-chip {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 5px;
+      }
+      .lp-btn {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: 8px;
+        margin-top: 12px;
+      }
+      .lp-swatches {
+        display: flex;
+        gap: 5px;
+        margin-top: 12px;
+      }
+      .lp-sw {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+      }
+      .look-meta {
+        padding: 14px 16px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .look-check {
+        margin-left: auto;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        border: 1.5px solid var(--border-strong);
+        display: grid;
+        place-items: center;
+        flex: none;
+      }
+      .look.active .look-check {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .look:not(.active) .look-check .icon {
+        opacity: 0;
+      }
+      /* screen grid */
+      .screens {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+      .screen-card {
+        display: flex;
+        gap: 14px;
+        padding: 18px;
+        align-items: flex-start;
+      }
+      .screen-ico {
+        width: 42px;
+        height: 42px;
+        border-radius: var(--r-md);
+        background: var(--accent-weak);
+        color: var(--accent);
+        display: grid;
+        place-items: center;
+        flex: none;
+      }
+      .screen-card h3 {
+        font-size: 15px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .screen-card p {
+        font-size: 12.5px;
+        color: var(--text-muted);
+        margin-top: 4px;
+        line-height: 1.5;
+      }
+      .screen-card .go {
+        color: var(--text-subtle);
+        transition: transform var(--dur-2), color var(--dur-2);
+      }
+      .screen-card:hover .go {
+        transform: translateX(3px);
+        color: var(--accent);
+      }
+      .lp-foot {
+        margin: 60px 0 40px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border);
+        color: var(--text-subtle);
+        font-size: 12.5px;
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      @media (max-width: 860px) {
+        .looks,
+        .screens {
+          grid-template-columns: 1fr;
+        }
+        .hero h1 {
+          font-size: 34px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="lp">
+      <!-- top -->
+      <div class="lp-top">
+        <div class="brand-logo"><svg class="icon"><use href="#i-sparkle" /></svg></div>
+        <div>
+          <div class="brand-name">Lumen Copilot</div>
+          <div class="brand-sub">System wireframes</div>
+        </div>
+        <div class="topbar-spacer"></div>
+        <button class="btn btn-sm btn-subtle" data-open-cmdk>
+          <svg class="icon icon-sm"><use href="#i-command" /></svg> Command
+          <span class="kbd">Ctrl K</span>
+        </button>
+        <a class="btn btn-sm btn-primary" href="chat.html"
+          >Open prototype <svg class="icon icon-sm"><use href="#i-arrow-right" /></svg
+        ></a>
+      </div>
+
+      <!-- hero -->
+      <div class="hero">
+        <span class="eyebrow"
+          ><span class="badge badge-accent" style="height:18px"
+            >v0 · M0–M1</span
+          >
+          Grounded · Permissioned · Cited · Auditable</span
+        >
+        <h1>
+          The enterprise Work-AI assistant,
+          <span class="grad">wireframed end to end.</span>
+        </h1>
+        <p>
+          A clickable prototype of Lumen Copilot — grounded chat over your
+          connected sources and uploaded documents, where every answer is
+          permission-checked, citation-backed, and auditable. Pick a look below;
+          it applies live across every screen.
+        </p>
+      </div>
+
+      <!-- LOOK OPTIONS -->
+      <div class="sec-label">
+        <h2>Choose a look</h2>
+        <span class="t-sm t-subtle">7 themes · light &amp; dark · + accent, density, layout &amp; font</span>
+        <span class="ln"></span>
+      </div>
+      <div class="looks">
+        <!-- Aurora -->
+        <div class="look" data-theme-card="aurora" data-set="aurora">
+          <div
+            class="look-prev"
+            style="background: radial-gradient(120% 120% at 80% 0%, #e9ecfb, #eef1f8)"
+          >
+            <div class="lp-bar" style="color: #14161f">
+              <span class="lp-dot" style="background: #4f46e5"></span> Lumen
+              <span style="margin-left:auto;color:#8b93a7;font-weight:500"
+                >Assistant</span
+              >
+            </div>
+            <div
+              class="lp-bubble"
+              style="background: #fff; color: #14161f; border: 1px solid #e5e8f0"
+            >
+              The Q3 plan is approved
+              <span
+                class="lp-chip"
+                style="background: #eef0fe; color: #4338ca"
+                >1</span
+              >
+            </div>
+            <span
+              class="lp-btn"
+              style="background: #4f46e5; color: #fff"
+              >Ask Lumen</span
+            >
+            <div class="lp-swatches">
+              <span class="lp-sw" style="background: #4f46e5"></span>
+              <span class="lp-sw" style="background: #fff; border:1px solid #e5e8f0"></span>
+              <span class="lp-sw" style="background: #eef1f8; border:1px solid #e5e8f0"></span>
+              <span class="lp-sw" style="background: #14161f"></span>
+            </div>
+          </div>
+          <div class="look-meta">
+            <div>
+              <div class="t-semibold">Aurora</div>
+              <div class="t-xs t-subtle">Bright enterprise SaaS · indigo</div>
+            </div>
+            <div class="look-check"><svg class="icon icon-sm"><use href="#i-check" /></svg></div>
+          </div>
+        </div>
+
+        <!-- Graphite -->
+        <div class="look" data-theme-card="graphite" data-set="graphite">
+          <div
+            class="look-prev"
+            style="background: radial-gradient(120% 120% at 80% 0%, #eceef2, #f3f4f6)"
+          >
+            <div class="lp-bar" style="color: #15171c">
+              <span class="lp-dot" style="background: #0284c7"></span> Lumen
+              <span style="margin-left:auto;color:#888e9a;font-weight:500"
+                >Assistant</span
+              >
+            </div>
+            <div
+              class="lp-bubble"
+              style="background: #fff; color: #15171c; border: 1px solid #e3e5ea"
+            >
+              The Q3 plan is approved
+              <span
+                class="lp-chip"
+                style="background: #e0f2fe; color: #0369a1"
+                >1</span
+              >
+            </div>
+            <span
+              class="lp-btn"
+              style="background: #0284c7; color: #fff"
+              >Ask Lumen</span
+            >
+            <div class="lp-swatches">
+              <span class="lp-sw" style="background: #0284c7"></span>
+              <span class="lp-sw" style="background: #fff; border:1px solid #e3e5ea"></span>
+              <span class="lp-sw" style="background: #f3f4f6; border:1px solid #e3e5ea"></span>
+              <span class="lp-sw" style="background: #15171c"></span>
+            </div>
+          </div>
+          <div class="look-meta">
+            <div>
+              <div class="t-semibold">Graphite</div>
+              <div class="t-xs t-subtle">Sky blue · neutral gray</div>
+            </div>
+            <div class="look-check"><svg class="icon icon-sm"><use href="#i-check" /></svg></div>
+          </div>
+        </div>
+
+        <!-- Meridian -->
+        <div class="look" data-theme-card="meridian" data-set="meridian">
+          <div
+            class="look-prev"
+            style="background: radial-gradient(120% 120% at 80% 0%, #efe7d2, #f4f1e9)"
+          >
+            <div class="lp-bar" style="color: #1f1c14">
+              <span class="lp-dot" style="background: #9c7a1e"></span> Lumen
+              <span style="margin-left:auto;color:#968d77;font-weight:500"
+                >Assistant</span
+              >
+            </div>
+            <div
+              class="lp-bubble"
+              style="background: #fdfcf8; color: #1f1c14; border: 1px solid #e4ddcc"
+            >
+              The Q3 plan is approved
+              <span
+                class="lp-chip"
+                style="background: #eef0e0; color: #6b6a1f"
+                >1</span
+              >
+            </div>
+            <span
+              class="lp-btn"
+              style="background: linear-gradient(90deg, #4e8a3f, #c79a2e); color: #fff"
+              >Ask Lumen</span
+            >
+            <div class="lp-swatches">
+              <span class="lp-sw" style="background: #9c7a1e"></span>
+              <span class="lp-sw" style="background: #fdfcf8; border:1px solid #e4ddcc"></span>
+              <span class="lp-sw" style="background: #f4f1e9; border:1px solid #e4ddcc"></span>
+              <span class="lp-sw" style="background: #1f1c14"></span>
+            </div>
+          </div>
+          <div class="look-meta">
+            <div>
+              <div class="t-semibold">Meridian</div>
+              <div class="t-xs t-subtle">Green → gold · warm</div>
+            </div>
+            <div class="look-check"><svg class="icon icon-sm"><use href="#i-check" /></svg></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- appearance controls -->
+      <div class="card card-pad" style="margin-top:18px;display:flex;flex-wrap:wrap;gap:20px;align-items:center">
+        <div class="flex items-center gap-3">
+          <span class="t-sm t-medium t-muted">Mode</span>
+          <div class="segmented">
+            <button data-mode-opt="light"><svg class="icon icon-sm"><use href="#i-sun" /></svg>Light</button>
+            <button data-mode-opt="dark"><svg class="icon icon-sm"><use href="#i-moon" /></svg>Dark</button>
+            <button data-mode-opt="system"><svg class="icon icon-sm"><use href="#i-globe" /></svg>System</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="t-sm t-medium t-muted">Density</span>
+          <div class="segmented">
+            <button data-dens-opt="compact">Compact</button>
+            <button data-dens-opt="cozy">Cozy</button>
+            <button data-dens-opt="comfortable">Comfortable</button>
+          </div>
+        </div>
+        <div class="grow"></div>
+        <button class="btn btn-primary" data-open-appearance>
+          <svg class="icon icon-sm"><use href="#i-sliders" /></svg> Appearance &amp; preferences
+        </button>
+      </div>
+
+      <!-- SCREENS -->
+      <div class="sec-label">
+        <h2>Explore the system</h2>
+        <span class="t-sm t-subtle">7 clickable screens</span>
+        <span class="ln"></span>
+      </div>
+      <div class="screens">
+        <a class="card card-hover screen-card" href="chat.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-chat" /></svg></div>
+          <div class="grow">
+            <h3>Assistant <span class="badge badge-accent">Hero</span></h3>
+            <p>Grounded chat with inline citations, source inspector, model picker & knowledge modes.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="search.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-search" /></svg></div>
+          <div class="grow">
+            <h3>Search</h3>
+            <p>One permissioned box across every source, a cited direct answer, filters & "why it matched".</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="documents.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-doc" /></svg></div>
+          <div class="grow">
+            <h3>Documents</h3>
+            <p>Upload many file types, collections, ingest status & a viewer with cited passages.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="sources.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-plug" /></svg></div>
+          <div class="grow">
+            <h3>Sources</h3>
+            <p>Connector grid with sync health, indexed counts & permission-mirror status.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="audit.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-shield" /></svg></div>
+          <div class="grow">
+            <h3>Audit log</h3>
+            <p>Every retrieval, answer & access decision — with a full provenance drawer.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="admin.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-sliders" /></svg></div>
+          <div class="grow">
+            <h3>Admin</h3>
+            <p>Members & roles, model governance, data-minimization & approval risk tiers.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="login.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-lock" /></svg></div>
+          <div class="grow">
+            <h3>Sign in</h3>
+            <p>Tenant-aware SSO entry point — the front door to the workspace.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="reference/foundations.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-grid" /></svg></div>
+          <div class="grow">
+            <h3>Foundations</h3>
+            <p>Color tokens across all looks, type scale, spacing, elevation & motion.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+        <a class="card card-hover screen-card" href="reference/components.html">
+          <div class="screen-ico"><svg class="icon icon-lg"><use href="#i-layers" /></svg></div>
+          <div class="grow">
+            <h3>Components</h3>
+            <p>The full UI kit — buttons, badges, citation chips, result rows, tables & overlays.</p>
+          </div>
+          <svg class="icon go"><use href="#i-arrow-right" /></svg>
+        </a>
+      </div>
+
+      <div class="lp-foot">
+        <span class="brand-name" style="font-size: 13px">Lumen Copilot</span>
+        <span>Static prototype — no backend. Open any file directly in a browser.</span>
+        <span class="grow"></span>
+        <span class="badge"><svg class="icon"><use href="#i-shield-check" /></svg> Permission-first</span>
+        <span class="badge"><svg class="icon"><use href="#i-book" /></svg> Citation-backed</span>
+      </div>
+    </div>
+
+    <script src="assets/app.js"></script>
+    <script>
+      // launcher: theme cards, mode toggle, and density presets — all persisted
+      document.querySelectorAll("[data-set]").forEach(function (card) {
+        card.addEventListener("click", function () {
+          var t = card.getAttribute("data-set");
+          window.Lumen.setTheme(t);
+          window.Lumen.toast(
+            "Theme set to " + t.charAt(0).toUpperCase() + t.slice(1) + " — applies across all screens"
+          );
+        });
+      });
+      document.querySelectorAll("[data-mode-opt]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          window.Lumen.setMode(b.getAttribute("data-mode-opt"));
+        });
+      });
+      document.querySelectorAll("[data-dens-opt]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          window.Lumen.setDensity(b.getAttribute("data-dens-opt"));
+        });
+      });
+      document.querySelectorAll("[data-open-appearance]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          window.Lumen.openPanel();
+        });
+      });
+    </script>
+  </body>
+</html>
