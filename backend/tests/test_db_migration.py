@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import pytest
 from alembic.config import Config
@@ -180,6 +180,11 @@ def _pg_reachable(url: str) -> bool:
         return False
 
 
+def _swap_db(url: str, dbname: str) -> str:
+    """Return ``url`` with its database path replaced by ``dbname``."""
+    return urlunparse(urlparse(url)._replace(path=f"/{dbname}"))
+
+
 _live = pytest.mark.skipif(
     not _pg_reachable(_PG_URL),
     reason=f"Postgres not reachable for {_PG_URL}; live migration test skipped (offline-safe).",
@@ -190,30 +195,60 @@ _live = pytest.mark.skipif(
 async def test_live_upgrade_then_downgrade_round_trip() -> None:
     """AC-1 + AC-3: apply head, assert tables exist, then fully reverse.
 
-    Runs the project's real async migration path (env.py → asyncpg), so the
-    pgvector ``vector(1024)`` column is created against a live Postgres exactly
-    as production would. The two ``alembic`` commands run in a worker thread
-    because they spin up their own event loop (``asyncio.run`` in env.py).
+    Runs the project's real async migration path (env.py → asyncpg) against a
+    **disposable throwaway database** — NEVER the app/CI database. A migration
+    round-trip ends in ``downgrade base`` (every table dropped), so pointing it
+    at a populated DB would destroy data; we CREATE a temp database, run
+    upgrade→inspect→downgrade→inspect there, and DROP it in teardown. The
+    ``alembic`` commands run in a worker thread because env.py spins up its own
+    event loop (``asyncio.run``); env.py reads the URL from Settings, so we
+    redirect the run via ``DATABASE_URL`` + a settings-cache reset.
     """
     import asyncio
+    import uuid
 
     from alembic import command
-    from sqlalchemy import inspect
+    from sqlalchemy import inspect, text
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    cfg = _alembic_config(_PG_URL)
+    from app.core.config import get_settings
 
-    await asyncio.to_thread(command.upgrade, cfg, "head")
-    engine = create_async_engine(_PG_URL)
+    tmp_db = f"lumen_migtest_{uuid.uuid4().hex[:12]}"
+    admin_url = _swap_db(_PG_URL, "postgres")  # maintenance DB for CREATE/DROP
+    tmp_url = _swap_db(_PG_URL, tmp_db)
+
+    admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{tmp_db}"'))
+    finally:
+        await admin.dispose()
+
+    orig = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = tmp_url
+    get_settings.cache_clear()
+    engine = create_async_engine(tmp_url)
+    try:
+        await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
         async with engine.connect() as conn:
             names = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
         assert _ALL_TABLES <= names
 
-        await asyncio.to_thread(command.downgrade, cfg, "base")
+        await asyncio.to_thread(command.downgrade, _alembic_config(), "base")
         async with engine.connect() as conn:
             names_after = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
         # Every MVP table is gone (alembic_version may remain; that's fine).
         assert not (_ALL_TABLES & names_after)
     finally:
         await engine.dispose()
+        if orig is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = orig
+        get_settings.cache_clear()
+        admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{tmp_db}" WITH (FORCE)'))
+        finally:
+            await admin.dispose()
