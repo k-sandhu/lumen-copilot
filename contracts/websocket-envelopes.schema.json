@@ -182,6 +182,7 @@
   "x-chatStream": {
     "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`.",
     "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) )* -> done(ChatDoneData) | error(Problem)",
+    "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
       "start.data": "#/$defs/ChatStartData",
       "delta.data": "#/$defs/ChatTokenDelta",
