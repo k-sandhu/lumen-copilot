@@ -1,0 +1,264 @@
+"""Chat retrieval-tool tests — dispatch + the INV-2 permission filter (CC-6 #24).
+
+The tools (``search_text`` / ``search_documents`` / ``get_document``) are the
+model-callable bridge to ``retrieval/``. These offline (in-memory SQLite) tests
+assert the dispatch (a model ``ToolCall`` → the right retrieval method, args
+mapped) and — the headline — that the permission filter rides through: a tool
+call as user A never returns user B's data (same tenant) nor another tenant's
+(INV-2 / CC-11 AC-4). The semantic ``search_text`` path needs pgvector (live
+only), so the permission assertions here use the relational tools, which run on
+SQLite and exercise the same allow-set chokepoint.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from app.auth.principal import Principal
+from app.db.base import Base
+from app.db.repositories import (
+    ChunkInput,
+    ChunkRepository,
+    CollectionRepository,
+    DocumentRepository,
+    TenantRepository,
+    UserRepository,
+)
+from app.domain.entities import DocumentStatus, Role
+from app.domain.llm import Embedding, ToolCall
+from app.retrieval import RetrievalService
+from app.services.chat_tools import TOOL_SPECS, run_tool
+
+import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
+
+_EMBED_DIM = 1024
+
+
+class _FakeGateway:
+    async def embed(self, inputs: list[str]) -> list[Embedding]:
+        return [Embedding(vector=[0.0] * _EMBED_DIM, model="fake") for _ in inputs]
+
+
+def _principal(user_id: uuid.UUID, tenant_id: uuid.UUID) -> Principal:
+    return Principal(user_id=user_id, tenant_id=tenant_id, roles=(Role.MEMBER,))
+
+
+class _World:
+    def __init__(
+        self,
+        *,
+        tenant_a: uuid.UUID,
+        tenant_b: uuid.UUID,
+        alice: uuid.UUID,
+        bob: uuid.UUID,
+        carol: uuid.UUID,
+        alice_doc: uuid.UUID,
+        bob_doc: uuid.UUID,
+        carol_doc: uuid.UUID,
+    ) -> None:
+        self.tenant_a = tenant_a
+        self.tenant_b = tenant_b
+        self.alice = alice
+        self.bob = bob
+        self.carol = carol
+        self.alice_doc = alice_doc
+        self.bob_doc = bob_doc
+        self.carol_doc = carol_doc
+
+
+@pytest_asyncio.fixture
+async def session_and_world() -> AsyncIterator[tuple[AsyncSession, _World]]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        async with factory() as session:
+            ta = await TenantRepository(session).create(name="Acme")
+            tb = await TenantRepository(session).create(name="Globex")
+            alice = await UserRepository(session, ta.id).create(
+                email="alice@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            bob = await UserRepository(session, ta.id).create(
+                email="bob@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            carol = await UserRepository(session, tb.id).create(
+                email="carol@globex.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            alice_doc = await _doc(session, ta.id, alice.id, "alice-taxes.txt", "Alice tax notes.")
+            bob_doc = await _doc(session, ta.id, bob.id, "bob-secret.txt", "Bob private notes.")
+            carol_doc = await _doc(session, tb.id, carol.id, "carol.txt", "Carol notes.")
+            await session.commit()
+            world = _World(
+                tenant_a=ta.id,
+                tenant_b=tb.id,
+                alice=alice.id,
+                bob=bob.id,
+                carol=carol.id,
+                alice_doc=alice_doc,
+                bob_doc=bob_doc,
+                carol_doc=carol_doc,
+            )
+            yield session, world
+    finally:
+        await engine.dispose()
+
+
+async def _doc(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    filename: str,
+    text: str,
+) -> uuid.UUID:
+    coll = await CollectionRepository(session, tenant_id).create(owner_id=owner_id, name="c")
+    doc = await DocumentRepository(session, tenant_id).create(
+        owner_id=owner_id,
+        collection_id=coll.id,
+        filename=filename,
+        mime_type="text/plain",
+        size_bytes=len(text),
+        storage_key=f"{tenant_id}/{filename}",
+        status=DocumentStatus.READY,
+    )
+    await ChunkRepository(session, tenant_id).replace_for_document(
+        doc.id, [ChunkInput(text=text, char_start=0, char_end=len(text))]
+    )
+    return doc.id
+
+
+def _service(session: AsyncSession) -> RetrievalService:
+    return RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+
+
+# --- Tool spec sanity -------------------------------------------------------
+
+
+def test_tool_specs_match_ws_vocabulary() -> None:
+    names = {spec.name for spec in TOOL_SPECS}
+    assert names == {"search_text", "search_documents", "get_document"}
+
+
+# --- search_documents -------------------------------------------------------
+
+
+async def test_search_documents_returns_only_callers_docs(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c1", name="search_documents", arguments={"name_or_query": "txt"}),
+        collection_ids=None,
+        default_k=6,
+    )
+    # Alice sees only her own doc — never Bob's (same tenant) or Carol's (other).
+    assert world.alice_doc in outcome.document_ids
+    assert world.bob_doc not in outcome.document_ids
+    assert world.carol_doc not in outcome.document_ids
+    assert outcome.hit_count == 1
+
+
+async def test_search_documents_blank_query_returns_nothing(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="search_documents", arguments={"name_or_query": "  "}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 0
+
+
+# --- get_document (INV-2 existence non-disclosure) --------------------------
+
+
+async def test_get_document_returns_own_document(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.alice_doc)}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 1
+    assert "Alice tax notes" in outcome.content
+
+
+async def test_get_document_other_owner_same_tenant_is_not_found(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    # Alice asks for Bob's document (same tenant) — must be "not found" (INV-2).
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.bob_doc)}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 0
+    assert "not found" in outcome.content.lower()
+
+
+async def test_get_document_cross_tenant_is_not_found(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.carol_doc)}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 0
+
+
+async def test_get_document_invalid_id_is_handled(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="get_document", arguments={"document_id": "not-a-uuid"}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 0
+    assert "invalid" in outcome.content.lower()
+
+
+# --- unknown tool -----------------------------------------------------------
+
+
+async def test_unknown_tool_returns_recoverable_outcome(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    outcome = await run_tool(
+        _service(session),
+        principal=_principal(world.alice, world.tenant_a),
+        call=ToolCall(id="c", name="delete_everything", arguments={}),
+        collection_ids=None,
+        default_k=6,
+    )
+    assert outcome.hit_count == 0
+    assert "Unknown tool" in outcome.content
