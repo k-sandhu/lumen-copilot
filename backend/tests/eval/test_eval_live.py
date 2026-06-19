@@ -96,7 +96,9 @@ async def test_live_eval_meets_thresholds() -> None:
         async with engine.begin() as conn:
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
-            await conn.execute(sql_text(f'SET search_path TO "{schema}"'))
+            # Include `public` so the pgvector `vector` type (the extension lives
+            # in public) resolves while new tables are created in the eval schema.
+            await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
             await conn.run_sync(Base.metadata.create_all)
 
         # Pin the search_path to the isolated schema on every new DB connection,
@@ -107,13 +109,13 @@ async def test_live_eval_meets_thresholds() -> None:
         @event.listens_for(engine.sync_engine, "connect")
         def _set_search_path(dbapi_conn: object, _record: object) -> None:
             cur = dbapi_conn.cursor()  # type: ignore[attr-defined]
-            cur.execute(f'SET search_path TO "{schema}"')
+            cur.execute(f'SET search_path TO "{schema}", public')
             cur.close()
 
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
 
         async with factory() as seed:
-            await seed.execute(sql_text(f'SET search_path TO "{schema}"'))
+            await seed.execute(sql_text(f'SET search_path TO "{schema}", public'))
             tenant = await TenantRepository(seed).create(name="Acme")
             user = await UserRepository(seed, tenant.id).create(
                 email="kw@acme.test", password_hash="x", roles=[Role.MEMBER]
