@@ -366,12 +366,14 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
         async with engine.begin() as conn:
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
-            await conn.execute(sql_text(f'SET search_path TO "{schema}"'))
+            # Include `public` so pgvector's `vector` type (the extension lives in
+            # public) resolves while new tables are created in the isolated schema.
+            await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
             await conn.run_sync(Base.metadata.create_all)
 
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
-            await sess.execute(sql_text(f'SET search_path TO "{schema}"'))
+            await sess.execute(sql_text(f'SET search_path TO "{schema}", public'))
 
             tenant_a = (await TenantRepository(sess).create(name="A")).id
             tenant_b = (await TenantRepository(sess).create(name="B")).id
