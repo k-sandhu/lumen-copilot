@@ -45,39 +45,43 @@ class ChatModelSetting(BaseModel):
 # Ids are provider-qualified as the chat runtime expects (and as listed on
 # OpenRouter). Override wholesale via the CHAT_MODEL_REGISTRY env var (JSON).
 _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
+    # ``id`` is the LiteLLM routing id: the OpenRouter gateway routes via the
+    # ``openrouter/`` prefix (matching the LLM_MODEL default). Without it LiteLLM
+    # would treat e.g. ``anthropic/...`` as a direct Anthropic call (no key →
+    # AuthenticationError). ``label`` is the clean display name for the picker.
     ChatModelSetting(
-        id="anthropic/claude-opus-4.8",
+        id="openrouter/anthropic/claude-opus-4.8",
         label="Claude Opus 4.8",
         provider="anthropic",
         tier=ModelTier.FRONTIER,
         is_default=True,
     ),
     ChatModelSetting(
-        id="openai/gpt-5.5",
+        id="openrouter/openai/gpt-5.5",
         label="GPT-5.5",
         provider="openai",
         tier=ModelTier.FRONTIER,
     ),
     ChatModelSetting(
-        id="google/gemini-3.5-flash",
+        id="openrouter/google/gemini-3.5-flash",
         label="Gemini 3.5 Flash",
         provider="google",
         tier=ModelTier.FAST,
     ),
     ChatModelSetting(
-        id="anthropic/claude-haiku-4.5",
+        id="openrouter/anthropic/claude-haiku-4.5",
         label="Claude Haiku 4.5",
         provider="anthropic",
         tier=ModelTier.FAST,
     ),
     ChatModelSetting(
-        id="deepseek/deepseek-v3.2",
+        id="openrouter/deepseek/deepseek-v3.2",
         label="DeepSeek V3.2",
         provider="deepseek",
         tier=ModelTier.OSS,
     ),
     ChatModelSetting(
-        id="qwen/qwen3.7-max",
+        id="openrouter/qwen/qwen3.7-max",
         label="Qwen3.7 Max",
         provider="qwen",
         tier=ModelTier.OSS,
