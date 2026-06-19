@@ -10,8 +10,8 @@ function readEnv(key: string, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
 }
 
-/** REST base, e.g. "/api". Same-origin in dev via the Vite proxy. */
-export const API_BASE_URL: string = readEnv('VITE_API_BASE_URL', '/api');
+/** REST base — the versioned API mount "/api/v1". Same-origin in dev via the Vite proxy. */
+export const API_BASE_URL: string = readEnv('VITE_API_BASE_URL', '/api/v1');
 
 /** WebSocket base, e.g. "/ws". Same-origin in dev via the Vite proxy. */
 export const WS_BASE_URL: string = readEnv('VITE_WS_BASE_URL', '/ws');
