@@ -19,7 +19,7 @@ import json
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Dialect, types
+from sqlalchemy import Dialect, Float, cast, types
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.types import TypeDecorator
 
@@ -64,6 +64,26 @@ class Embedding(TypeDecorator[list[float]]):
 
     impl = types.Text
     cache_ok = True
+
+    class comparator_factory(TypeDecorator.Comparator[list[float]]):  # noqa: N801
+        """Expose pgvector distance operators on the portable column.
+
+        A ``TypeDecorator`` does not inherit pgvector ``Vector``'s comparator, so
+        ``Chunk.embedding.cosine_distance(q)`` would otherwise raise
+        ``AttributeError``. These emit the pgvector operators (``<=>`` cosine,
+        ``<->`` L2, ``<#>`` inner product), casting the operand to ``vector`` so
+        asyncpg binds the query list correctly. Only exercised on PostgreSQL
+        (offline/SQLite retrieval is faked).
+        """
+
+        def cosine_distance(self, other: Any) -> Any:
+            return self.op("<=>", return_type=Float())(cast(other, Vector()))
+
+        def l2_distance(self, other: Any) -> Any:
+            return self.op("<->", return_type=Float())(cast(other, Vector()))
+
+        def max_inner_product(self, other: Any) -> Any:
+            return self.op("<#>", return_type=Float())(cast(other, Vector()))
 
     def __init__(self, dim: int) -> None:
         self.dim = dim
