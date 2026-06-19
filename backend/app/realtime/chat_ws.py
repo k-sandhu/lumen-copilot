@@ -18,9 +18,10 @@ the consumer holds no business logic and never touches the model, retrieval, or
 the DB (ADR-0004 boundaries).
 
 **Auth.** A browser WebSocket cannot send an ``Authorization`` header, so the
-access token rides the ``token`` query param and is validated through ``auth/``
-(the only token validator) before the socket is accepted; an invalid/missing
-token closes the socket with a policy-violation code (INV-4).
+access token rides the ``access_token`` query param (matching the frontend WS
+client, ``frontend/src/api/ws.ts``) and is validated through ``auth/`` (the only
+token validator) before the socket is accepted; an invalid/missing token closes
+the socket with a policy-violation code (INV-4).
 
 **Authz (INV-1/INV-2).** A bare random ``stream_id`` carries no identity, so a
 valid token alone is *not* enough: every stream is bound to the asking principal
@@ -59,7 +60,7 @@ _WS_POLICY_VIOLATION = 1008
 async def chat_ws(
     websocket: WebSocket,
     stream_id: str,
-    token: str = Query(default=""),
+    access_token: str = Query(default=""),
 ) -> None:
     """Authenticate + authorize, then relay the answer stream for ``stream_id``.
 
@@ -72,7 +73,7 @@ async def chat_ws(
     """
     settings = get_settings_dep()
     try:
-        principal = verify_access_token(token, settings)
+        principal = verify_access_token(access_token, settings)
     except InvalidTokenError:
         # Reject before accept: close with a policy-violation code (no envelope).
         await websocket.close(code=_WS_POLICY_VIOLATION)
