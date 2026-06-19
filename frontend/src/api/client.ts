@@ -97,8 +97,11 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { json, okStatuses = [], headers, skipAuth = false, _isRetry = false, ...init } = options;
 
-  // Absolute same-origin paths (e.g. "/health/ready") bypass the API base.
-  const url = path.startsWith('/') ? path : joinUrl(API_BASE_URL, path);
+  // Health/readiness live outside the versioned API base (they're proxied at
+  // "/health"); every other path is relative to API_BASE_URL (the "/api/v1"
+  // mount), whether or not it has a leading slash. Without this, leading-slash
+  // feature paths like "/auth/login" would hit the SPA origin and 404.
+  const url = path.startsWith('/health') ? path : joinUrl(API_BASE_URL, path);
 
   const finalHeaders = new Headers(headers);
   finalHeaders.set('Accept', 'application/json, application/problem+json');
