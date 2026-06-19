@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Search · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="search">
+  <div class="app"><main class="main">
+    <div class="main-scroll">
+      <div class="page page-wide">
+
+        <!-- page head -->
+        <div class="page-head">
+          <h1>Search</h1>
+          <div class="sub">One permissioned box across every connected source.</div>
+        </div>
+
+        <!-- big search bar -->
+        <div class="input-group" style="max-width:760px">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input class="input" data-search-input value="Q3 pricing change approval" aria-label="Search Northwind workspace" />
+        </div>
+
+        <!-- scope chips -->
+        <div class="flex gap-2 wrap mt-3">
+          <button class="chip-toggle active" data-toggle>All sources</button>
+          <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-doc"/></svg> Docs</button>
+          <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-chat"/></svg> Messages</button>
+          <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-flag"/></svg> Tickets</button>
+          <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-cpu"/></svg> Code</button>
+          <button class="chip-toggle" data-toggle><svg class="icon icon-sm"><use href="#i-users"/></svg> People</button>
+        </div>
+
+        <!-- two columns -->
+        <div class="flex gap-5 mt-5">
+
+          <!-- LEFT: filters -->
+          <div class="filters">
+            <div class="card card-pad">
+
+              <div class="filter-group">
+                <div class="t-up t-xs t-subtle t-semibold mb-2">Source</div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-gdrive">GD</span>
+                  <span class="grow">Google Drive</span>
+                  <span class="count">18</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-slack">SL</span>
+                  <span class="grow">Slack</span>
+                  <span class="count">9</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-confluence">CF</span>
+                  <span class="grow">Confluence</span>
+                  <span class="count">7</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-jira">JR</span>
+                  <span class="grow">Jira</span>
+                  <span class="count">5</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-github">GH</span>
+                  <span class="grow">GitHub</span>
+                  <span class="count">2</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="src src-sm src-salesforce">SF</span>
+                  <span class="grow">Salesforce</span>
+                  <span class="count">1</span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <div class="t-up t-xs t-subtle t-semibold mb-2">File type</div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Document</span><span class="count">25</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Message</span><span class="count">9</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Ticket</span><span class="count">5</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Code</span><span class="count">2</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Record</span><span class="count">1</span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <div class="t-up t-xs t-subtle t-semibold mb-2">Last modified</div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Any time</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Last 24 hours</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Last 7 days</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Last 30 days</span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <div class="t-up t-xs t-subtle t-semibold mb-2">Sensitivity</div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Public</span><span class="count">6</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Internal</span><span class="count">21</span>
+                </div>
+                <div class="filter-row">
+                  <span class="checkbox on"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <span class="grow">Confidential</span><span class="count">15</span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- RIGHT: answer + results -->
+          <div class="grow">
+
+            <!-- direct answer -->
+            <div class="card">
+              <div class="card-head">
+                <h3 class="flex items-center gap-2">
+                  <svg class="icon icon-sm t-accent"><use href="#i-sparkle"/></svg>
+                  Direct answer
+                </h3>
+                <span class="badge badge-accent ml-auto">Cited</span>
+              </div>
+              <div class="card-pad">
+                <div class="assistant-md">
+                  The Q3 pricing change was <strong>approved on May 28</strong> by Priya Shah after Finance sign-off, raising list prices 6% across the Pro and Enterprise tiers effective July 1.<span class="cite" data-cite="1">1</span> Approval followed the standard guardrail workflow — any change above 5% requires a VP-Finance review, which Marcus Lee completed before the deal desk unlocked the new rate card.<span class="cite" data-cite="2">2</span>
+                </div>
+                <div class="answer-meta flex items-center wrap gap-3 mt-4">
+                  <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> Permission-checked</span>
+                  <span class="fresh"><svg class="icon"><use href="#i-clock"/></svg> Freshest source 1d ago</span>
+                  <span class="badge badge-warn">Evidence: 2 strong sources</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- results toolbar -->
+            <div class="flex items-center justify-between mt-5 mb-3">
+              <span class="t-sm t-muted"><b data-result-count>6</b> results · permission-trimmed</span>
+              <div class="segmented">
+                <button data-seg="sort:rel" class="active">Relevance</button>
+                <button data-seg="sort:rec">Most recent</button>
+              </div>
+            </div>
+
+            <!-- results -->
+            <div class="col gap-1">
+
+              <!-- 1 -->
+              <div class="result" data-result data-text="q3 pricing decision memo approval finance priya drive document" data-source="1" data-source-open="1">
+                <span class="src src-gdrive">GD</span>
+                <div class="grow">
+                  <div class="title">Q3 Pricing — Decision Memo</div>
+                  <div class="snippet">Records the final decision to raise list prices 6% across Pro and Enterprise. <mark>Approval</mark> by Priya Shah, Finance sign-off by Marcus Lee, effective July 1.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-gdrive">GD</span> Google Drive</span>
+                    <span>Priya Shah</span>
+                    <span class="fresh"><svg class="icon"><use href="#i-clock"/></svg> 1d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: title + body</span>
+                    <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 2 -->
+              <div class="result" data-result data-text="pricing guardrails confluence policy vp finance review approval threshold" data-source="2" data-source-open="2">
+                <span class="src src-confluence">CF</span>
+                <div class="grow">
+                  <div class="title">Pricing Guardrails</div>
+                  <div class="snippet">Any list-price change above 5% requires a VP-Finance review before the deal desk unlocks a new rate card. Documents the <mark>approval</mark> workflow and exception path.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-confluence">CF</span> Confluence</span>
+                    <span>Dana Wu</span>
+                    <span class="fresh"><svg class="icon"><use href="#i-clock"/></svg> 9d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: title + body</span>
+                    <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 3 -->
+              <div class="result" data-result data-text="pricing thread slack message channel q3 change discussion effective date" data-source="3" data-source-open="3">
+                <span class="src src-slack">SL</span>
+                <div class="grow">
+                  <div class="title">#pricing — "Q3 change is locked" thread</div>
+                  <div class="snippet">Marcus Lee: "Deal desk just confirmed the new rate card is live." Tomás Reyes asks about grandfathering existing Acme terms before the <mark>pricing</mark> cutover.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-slack">SL</span> Slack</span>
+                    <span>Marcus Lee</span>
+                    <span class="fresh fresh-stale"><svg class="icon"><use href="#i-clock"/></svg> 14d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: body</span>
+                    <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 4 -->
+              <div class="result" data-result data-text="price-142 jira ticket approval workflow deal desk pricing engineering" data-source="4" data-source-open="4">
+                <span class="src src-jira">JR</span>
+                <div class="grow">
+                  <div class="title">PRICE-142 · Build deal-desk approval workflow</div>
+                  <div class="snippet">Implements the &gt;5% gate so changes route to VP-Finance for <mark>approval</mark> before the rate card publishes. Linked to the Q3 pricing decision memo.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-jira">JR</span> Jira · Done</span>
+                    <span>Dana Wu</span>
+                    <span class="fresh"><svg class="icon"><use href="#i-clock"/></svg> 6d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: title + body</span>
+                    <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 5 -->
+              <div class="result" data-result data-text="pr 318 github pricing flags feature flag rate card code rollout" data-source="5" data-source-open="5">
+                <span class="src src-github">GH</span>
+                <div class="grow">
+                  <div class="title">PR #318 · Gate new rate card behind pricing flags</div>
+                  <div class="snippet">Adds <code>q3_pricing_enabled</code> feature flag so the 6% increase rolls out only after deal-desk <mark>approval</mark> is recorded. Reviewed by Tomás Reyes.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-github">GH</span> GitHub · Merged</span>
+                    <span>Tomás Reyes</span>
+                    <span class="fresh fresh-stale"><svg class="icon"><use href="#i-clock"/></svg> 11d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: body</span>
+                    <span class="perm"><svg class="icon"><use href="#i-shield-check"/></svg> You have access</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 6 -->
+              <div class="result" data-result data-text="acme renewal opportunity salesforce record pricing risk q3 grandfather" data-source="6" data-source-open="6">
+                <span class="src src-salesforce">SF</span>
+                <div class="grow">
+                  <div class="title">Acme — Renewal opportunity</div>
+                  <div class="snippet">Renewal flagged at risk pending grandfathered terms after the Q3 <mark>pricing</mark> change. Notes reference the approval memo and the deal-desk effective date.</div>
+                  <div class="meta">
+                    <span class="iflex items-center gap-1"><span class="src src-sm src-salesforce">SF</span> Salesforce</span>
+                    <span>Avery Madison</span>
+                    <span class="fresh"><svg class="icon"><use href="#i-clock"/></svg> 3d ago</span>
+                    <span class="why"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> Matched: notes</span>
+                    <span class="perm perm-restricted"><svg class="icon"><use href="#i-eye"/></svg> Restricted · masked fields</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- permission-trim notice -->
+            <div class="inset p-3 flex items-center gap-2 mt-4 t-muted">
+              <svg class="icon icon-sm"><use href="#i-lock"/></svg>
+              <span class="t-sm">12 results are hidden because you don't have access to them — titles and snippets are never shown.</span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </main></div>
+<script src="assets/app.js"></script>
+</body>
+</html>

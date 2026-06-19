@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Audit log · Lumen Copilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/tokens.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body data-screen="audit">
+<div class="app"><main class="main">
+<div class="main-scroll">
+<div class="page page-wide">
+
+  <!-- PAGE HEAD -->
+  <div class="page-head">
+    <div>
+      <h1>Audit log</h1>
+      <div class="sub">Every retrieval, answer, and access decision — provable after the fact.</div>
+    </div>
+    <div class="page-head-actions">
+      <button class="btn btn-subtle" data-toast="Exporting audit log to signed CSV…">
+        <svg class="icon"><use href="#i-external"/></svg> Export
+      </button>
+      <button class="btn btn-subtle">
+        <svg class="icon"><use href="#i-clock"/></svg> Last 24h
+        <svg class="icon icon-sm"><use href="#i-chevron-down"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="cols-4 mb-4">
+    <div class="card card-pad kpi">
+      <div class="k">Events (24h)</div>
+      <div class="v">8,412</div>
+      <div class="delta"><svg class="icon icon-sm"><use href="#i-history"/></svg> across 214 actors</div>
+    </div>
+    <div class="card card-pad kpi">
+      <div class="k">Access denied</div>
+      <div class="v t-warn">37</div>
+      <div class="delta"><svg class="icon icon-sm"><use href="#i-slash-circle"/></svg> 0.4% of requests</div>
+    </div>
+    <div class="card card-pad kpi">
+      <div class="k">Avg latency</div>
+      <div class="v">1.9s</div>
+      <div class="delta"><svg class="icon icon-sm"><use href="#i-bolt"/></svg> p95 3.4s</div>
+    </div>
+    <div class="card card-pad kpi">
+      <div class="k">Answers cited</div>
+      <div class="v t-ok">99.6%</div>
+      <div class="delta"><svg class="icon icon-sm"><use href="#i-book"/></svg> grounding rate</div>
+    </div>
+  </div>
+
+  <!-- FILTER TOOLBAR -->
+  <div class="flex items-center justify-between gap-3 mb-4">
+    <div class="segmented">
+      <button data-seg="evt:all" class="active">All</button>
+      <button data-seg="evt:ret">Retrieval</button>
+      <button data-seg="evt:ans">Answer</button>
+      <button data-seg="evt:act">Action</button>
+      <button data-seg="evt:deny">Access denied</button>
+    </div>
+    <div class="input-group" style="max-width:280px">
+      <svg class="icon"><use href="#i-search"/></svg>
+      <input class="input" placeholder="Filter by actor or resource" />
+    </div>
+  </div>
+
+  <!-- EVENT TABLE -->
+  <div class="card">
+    <table class="table">
+      <thead>
+        <tr>
+          <th style="width:88px">Time</th>
+          <th style="width:180px">Actor</th>
+          <th style="width:130px">Event</th>
+          <th>Resource</th>
+          <th style="width:140px">Decision</th>
+          <th style="width:64px">Cites</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:07:52</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">AM</span> Avery Madison</div></td>
+          <td><span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-sparkle"/></svg> Answer</span></td>
+          <td class="cell-main">Q3 pricing change — decision memo</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono">2</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:07:51</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">AM</span> Avery Madison</div></td>
+          <td><span class="badge badge-info"><svg class="icon icon-sm"><use href="#i-search"/></svg> Retrieval</span></td>
+          <td class="cell-main">4 candidates · Drive, Confluence</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:06:33</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">PS</span> Priya Shah</div></td>
+          <td><span class="badge badge-danger"><svg class="icon icon-sm"><use href="#i-slash-circle"/></svg> Access denied</span></td>
+          <td class="cell-main">Acme renewal risk — board deck <span class="t-subtle">(cross-tenant resource)</span></td>
+          <td><span class="badge badge-danger">Denied</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:05:18</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">ML</span> Marcus Lee</div></td>
+          <td><span class="badge badge-warn"><svg class="icon icon-sm"><use href="#i-mail"/></svg> Action</span></td>
+          <td class="cell-main">Draft email created — Acme renewal follow-up</td>
+          <td><span class="badge badge-warn">Pending approval</span></td>
+          <td class="mono">3</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:04:47</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">DW</span> Dana Wu</div></td>
+          <td><span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-sparkle"/></svg> Answer</span></td>
+          <td class="cell-main">Onboarding &amp; PTO policy — HR handbook</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono">4</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:03:29</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">TR</span> Tomás Reyes</div></td>
+          <td><span class="badge badge-danger"><svg class="icon icon-sm"><use href="#i-slash-circle"/></svg> Access denied</span></td>
+          <td class="cell-main">FY25 budget — exec compensation tab <span class="t-subtle">(insufficient access)</span></td>
+          <td><span class="badge badge-danger">Denied</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:02:55</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">ML</span> Marcus Lee</div></td>
+          <td><span class="badge badge-info"><svg class="icon icon-sm"><use href="#i-search"/></svg> Retrieval</span></td>
+          <td class="cell-main">6 candidates · Salesforce, Slack</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:01:40</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">PS</span> Priya Shah</div></td>
+          <td><span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-sparkle"/></svg> Answer</span></td>
+          <td class="cell-main">Vendor MSA — termination clause</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono">2</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:00:38</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">AM</span> Avery Madison</div></td>
+          <td><span class="badge"><svg class="icon icon-sm"><use href="#i-key"/></svg> Login</span></td>
+          <td class="cell-main">SSO · Okta · Northwind Inc.</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+        <tr class="pointer" data-drawer-open="event-drawer">
+          <td class="mono t-subtle">14:00:12</td>
+          <td><div class="cell-main flex items-center gap-2"><span class="avatar sm">DW</span> Dana Wu</div></td>
+          <td><span class="badge badge-info"><svg class="icon icon-sm"><use href="#i-search"/></svg> Retrieval</span></td>
+          <td class="cell-main">3 candidates · uploaded documents</td>
+          <td><span class="badge badge-ok">Allowed</span></td>
+          <td class="mono t-subtle">—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="flex items-center justify-between mt-4 t-sm t-subtle">
+    <span>Showing 10 of 8,412 events · retained 400 days · tamper-evident</span>
+    <span class="status"><span class="dot dot-ok"></span> Append-only ledger</span>
+  </div>
+
+</div>
+</div>
+</main></div>
+
+<!-- EVENT DETAIL DRAWER -->
+<aside class="drawer" id="event-drawer">
+  <div class="drawer-head">
+    <h3>Event detail</h3>
+    <div class="grow"></div>
+    <button class="btn-icon btn-ghost" data-drawer-close><svg class="icon"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- summary block -->
+    <div class="flex items-center wrap gap-2 mb-4">
+      <span class="mono t-sm t-subtle">evt_9f2a7c14</span>
+      <span class="badge badge-accent"><svg class="icon icon-sm"><use href="#i-sparkle"/></svg> Answer</span>
+      <span class="badge badge-ok">Allowed</span>
+      <span class="t-subtle t-sm ml-auto">2026-06-18 · 14:07:52 UTC</span>
+    </div>
+
+    <!-- metadata grid -->
+    <div class="inset p-3">
+      <div class="grid cols-2 gap-3 t-sm">
+        <div><div class="t-subtle t-xs t-up mb-1">Actor</div>Avery Madison</div>
+        <div><div class="t-subtle t-xs t-up mb-1">Tenant</div>Northwind Inc.</div>
+        <div><div class="t-subtle t-xs t-up mb-1">Source IP</div><span class="mono">10.4.18.221</span></div>
+        <div><div class="t-subtle t-xs t-up mb-1">Model</div>GPT-4o</div>
+        <div><div class="t-subtle t-xs t-up mb-1">Latency</div>1.4s</div>
+        <div><div class="t-subtle t-xs t-up mb-1">Session</div><span class="mono">ses_4d10</span></div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- query -->
+    <div class="t-up t-xs t-subtle t-semibold mb-2">Query</div>
+    <div class="passage">What did we decide on the Q3 pricing change, and who signed off?</div>
+
+    <div class="divider"></div>
+
+    <!-- retrieval candidates -->
+    <div class="t-up t-xs t-subtle t-semibold mb-2">Retrieval — 4 candidates</div>
+    <div class="col gap-2">
+      <div class="flex items-center gap-3">
+        <span class="src src-sm src-gdrive">GD</span>
+        <span class="grow truncate">Q3 pricing change — decision memo</span>
+        <span class="badge badge-ok">Allowed</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="src src-sm src-confluence">CF</span>
+        <span class="grow truncate">Pricing committee — meeting notes</span>
+        <span class="badge badge-ok">Allowed</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="src src-sm src-slack">SL</span>
+        <span class="grow truncate">#pricing — sign-off thread</span>
+        <span class="badge badge-ok">Allowed</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="src src-sm src-salesforce">SF</span>
+        <span class="grow truncate">Acme — exec margin worksheet</span>
+        <span class="badge badge-danger">Excluded — no access</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- citations -->
+    <div class="t-up t-xs t-subtle t-semibold mb-2">Citations (2)</div>
+    <div class="col gap-2">
+      <div class="source-row" data-source="1" data-source-open="1">
+        <span class="num">1</span>
+        <span class="src src-sm src-gdrive">GD</span>
+        <div class="grow">
+          <div class="truncate t-medium">Q3 pricing change — decision memo</div>
+          <div class="t-xs t-subtle">Google Drive · updated Jun 14 · p.2</div>
+        </div>
+      </div>
+      <div class="source-row" data-source="2" data-source-open="2">
+        <span class="num">2</span>
+        <span class="src src-sm src-confluence">CF</span>
+        <div class="grow">
+          <div class="truncate t-medium">Pricing committee — meeting notes</div>
+          <div class="t-xs t-subtle">Confluence · updated Jun 12 · sign-off section</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- raw event -->
+    <div class="t-up t-xs t-subtle t-semibold mb-2">Raw event</div>
+    <div class="inset p-3 mono t-xs" style="white-space:pre-wrap;overflow:auto">{
+  "event_id": "evt_9f2a7c14",
+  "actor_id": "usr_avery_madison",
+  "tenant_id": "tnt_northwind",
+  "type": "answer",
+  "decision": "allowed",
+  "query": "What did we decide on the Q3 pricing change, and who signed off?",
+  "resource_ids": ["doc_q3_memo", "cfl_pricing_notes", "slk_signoff"],
+  "citation_ids": ["doc_q3_memo#p2", "cfl_pricing_notes#signoff"],
+  "excluded_count": 1,
+  "model": "gpt-4o",
+  "source_ip": "10.4.18.221",
+  "latency_ms": 1420,
+  "ts": "2026-06-18T14:07:52Z"
+}</div>
+
+  </div>
+</aside>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
