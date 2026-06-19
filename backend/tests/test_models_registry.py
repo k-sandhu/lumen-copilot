@@ -49,36 +49,36 @@ def test_default_registry_is_the_seed_set() -> None:
         ids_by_tier[m.tier].add(m.id)
 
     assert ids_by_tier[ModelTier.FRONTIER] == {
-        "anthropic/claude-opus-4.8",
-        "openai/gpt-5.5",
+        "openrouter/anthropic/claude-opus-4.8",
+        "openrouter/openai/gpt-5.5",
     }
     assert ids_by_tier[ModelTier.FAST] == {
-        "google/gemini-3.5-flash",
-        "anthropic/claude-haiku-4.5",
+        "openrouter/google/gemini-3.5-flash",
+        "openrouter/anthropic/claude-haiku-4.5",
     }
     assert ids_by_tier[ModelTier.OSS] == {
-        "deepseek/deepseek-v3.2",
-        "qwen/qwen3.7-max",
+        "openrouter/deepseek/deepseek-v3.2",
+        "openrouter/qwen/qwen3.7-max",
     }
 
 
 def test_seed_registry_has_exactly_one_default() -> None:
     defaults = [m for m in _DEFAULT_CHAT_MODEL_REGISTRY if m.is_default]
-    assert [m.id for m in defaults] == ["anthropic/claude-opus-4.8"]
+    assert [m.id for m in defaults] == ["openrouter/anthropic/claude-opus-4.8"]
 
 
 def test_registry_override_via_env_json_replaces_seed() -> None:
     override = json.dumps(
         [
             {
-                "id": "anthropic/claude-opus-4.8",
+                "id": "openrouter/anthropic/claude-opus-4.8",
                 "label": "Opus",
                 "provider": "anthropic",
                 "tier": "frontier",
                 "is_default": True,
             },
             {
-                "id": "openai/gpt-5.5",
+                "id": "openrouter/openai/gpt-5.5",
                 "label": "GPT",
                 "provider": "openai",
                 "tier": "frontier",
@@ -87,8 +87,8 @@ def test_registry_override_via_env_json_replaces_seed() -> None:
     )
     settings = _settings(CHAT_MODEL_REGISTRY=override)
     assert [m.id for m in settings.chat_model_registry] == [
-        "anthropic/claude-opus-4.8",
-        "openai/gpt-5.5",
+        "openrouter/anthropic/claude-opus-4.8",
+        "openrouter/openai/gpt-5.5",
     ]
 
 
@@ -146,8 +146,8 @@ def test_unknown_tier_is_rejected() -> None:
 
 def test_is_allowed_model_accepts_registered_id() -> None:
     settings = _settings()
-    assert is_allowed_model("anthropic/claude-opus-4.8", settings) is True
-    assert is_allowed_model("qwen/qwen3.7-max", settings) is True
+    assert is_allowed_model("openrouter/anthropic/claude-opus-4.8", settings) is True
+    assert is_allowed_model("openrouter/qwen/qwen3.7-max", settings) is True
 
 
 def test_is_allowed_model_rejects_unknown_id() -> None:
@@ -182,5 +182,5 @@ def test_service_lists_registry_as_domain_models() -> None:
 def test_service_is_allowed_model_matches_free_function() -> None:
     settings = _settings()
     service = ChatModelService(settings)
-    assert service.is_allowed_model("openai/gpt-5.5") is True
+    assert service.is_allowed_model("openrouter/openai/gpt-5.5") is True
     assert service.is_allowed_model("openai/gpt-0") is False
