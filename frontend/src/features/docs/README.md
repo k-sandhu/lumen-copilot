@@ -36,7 +36,24 @@ When a feature lands, **add or flip its entry in `catalog.ts` in the same PR**
 resolve to a real bundled doc — `catalog.test.ts` fails otherwise, so a
 renamed/removed doc is caught instead of shipping a dead link.
 
-## Note on exposure
-These pages currently surface internal docs/research to anyone who can reach the
-SPA, with no auth (OD-4 is open). The routes + overlay are isolated so they can be
-gated behind auth or a build flag once the security invariants land.
+## Gating — build-time eliminable (issue #40)
+These pages surface internal docs/research, so they are gated behind
+`VITE_ENABLE_DEV_PAGES` (**OFF by default**, see `.env.example`). The gate is
+**build-time**, not merely runtime — the security property is "the bytes are not
+shipped", because static JS is fetchable by direct URL regardless of auth or a
+nav gate, and the docs viewer inlines every repo markdown file into its chunk.
+
+- `vite.config.ts` resolves the flag at config time and injects it as the literal
+  `__DEV_PAGES_ENABLED__` (via `define`). Read in `api/env.ts` as `DEV_PAGES_ENABLED`.
+- Each feature's `route.tsx`/`nav.ts` gates its `lazy(() => import(...))` on that
+  **literal**, with the `import()` held inside the gated branch. When OFF, Rollup
+  dead-code-eliminates the whole branch — so the DocsPage/FeaturesPage chunks and
+  the inlined docs are **not emitted at all**, and the modules export
+  `route`/`navItem` = `undefined`, which `routes/discovery.ts` drops (so `/docs`
+  and `/features` are absent from the nav and unroutable → 404).
+- When ON, each page is wrapped in the same auth `RouteGuard` as `/documents`, so
+  it still requires an authenticated session.
+- `src/buildguards/dist-no-dev-pages.test.ts` runs a real flag-OFF `vite build` and
+  greps the output for internal-doc strings + dev-page markers — it fails if the
+  gate ever regresses to a runtime read (e.g. dynamic `import.meta.env[key]`),
+  which Vite cannot inline and Rollup cannot tree-shake.
