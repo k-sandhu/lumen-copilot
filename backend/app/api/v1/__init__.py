@@ -1,27 +1,55 @@
-"""Versioned API routes (``/api/v1``).
+"""Versioned API routes (``/api/v1``) — auto-discovered, no hand-edited include list.
 
-Feature routers (chat, ingestion, connectors, citations) mount here as their
-cross-cuttings land, contract-first per ``contracts/openapi.yaml`` (ADR-0006).
-``app.main`` includes this package's ``router`` under the ``/api/v1`` prefix.
-Empty by design in the skeleton — only the seam exists.
+The aggregating ``router`` is assembled by **scanning** this package for
+submodules that expose a module-level ``router: APIRouter`` and including each in
+a deterministic, sorted-by-module-name order (ADR-0008 §3, "auto-discovery
+registration"). Adding a feature router means dropping ``api/v1/<x>.py`` with a
+``router`` in it — **no edit to this file**. ``app.main`` mounts this package's
+``router`` under the ``/api/v1`` prefix.
 
-Example (later):
-    from app.api.v1.chat import router as chat_router
-    router.include_router(chat_router)
+This retires the append-target that forced past rebases (#59/#46, #57/#19): the
+file no longer carries a per-feature ``include_router(...)`` line.
 """
+
+from __future__ import annotations
+
+import importlib
+import pkgutil
 
 from fastapi import APIRouter
 
-from app.api.v1.auth import router as auth_router
-from app.api.v1.chat import router as chat_router
-from app.api.v1.collections import router as collections_router
-from app.api.v1.documents import router as documents_router
-from app.api.v1.models import router as models_router
+__all__ = ["discover_router_modules", "router"]
+
+
+def discover_router_modules() -> list[str]:
+    """Return the sorted names of submodules in this package exposing a ``router``.
+
+    Scans the ``app.api.v1`` package (non-recursively — feature routers live
+    directly under it), imports each submodule, and keeps the ones with a
+    module-level ``router`` that is an :class:`~fastapi.APIRouter`. The result is
+    sorted by module name so route registration order is deterministic across
+    machines and runs.
+    """
+    module_names: list[str] = []
+    for module_info in pkgutil.iter_modules(__path__):
+        if module_info.ispkg:
+            continue
+        full_name = f"{__name__}.{module_info.name}"
+        module = importlib.import_module(full_name)
+        candidate = getattr(module, "router", None)
+        if isinstance(candidate, APIRouter):
+            module_names.append(full_name)
+    return sorted(module_names)
+
+
+def _build_router() -> APIRouter:
+    """Assemble the aggregating v1 router from the discovered feature routers."""
+    aggregate = APIRouter()
+    for module_name in discover_router_modules():
+        module = importlib.import_module(module_name)
+        aggregate.include_router(module.router)
+    return aggregate
+
 
 # Aggregating router for all v1 feature routes. Mounted at /api/v1 in app.main.
-router = APIRouter()
-router.include_router(auth_router)
-router.include_router(chat_router)
-router.include_router(collections_router)
-router.include_router(documents_router)
-router.include_router(models_router)
+router = _build_router()
