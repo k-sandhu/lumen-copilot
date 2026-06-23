@@ -438,3 +438,61 @@ async def _aclose(stream: Any) -> None:
             close()
         except Exception:  # noqa: BLE001 — teardown is best-effort
             return
+
+
+async def aclose_litellm_clients() -> None:
+    """Close LiteLLM's process-global async HTTP clients (#94).
+
+    LiteLLM keeps reusable ``httpx.AsyncClient`` connections alive between calls:
+    a ``module_level_aclient`` handler plus a per-model cache
+    (``in_memory_llm_clients_cache``). A real call (the key-gated live smoke)
+    opens sockets on those clients that are otherwise only released on late GC —
+    which, under ``filterwarnings = error``, surfaces as a
+    ``ResourceWarning: unclosed socket`` mis-attributed to whatever test runs
+    next (see issue #94). Closing them here releases every upstream socket
+    deterministically.
+
+    Confined to ``app/llm/`` because it is the only importer of LiteLLM
+    (ADR-0004). Best-effort and idempotent: a missing attribute or a failing
+    close is swallowed so teardown never masks the test's own result. Safe to
+    call even when no live call was made (closing an unused client is a no-op).
+    """
+    import litellm  # lazy: keep the litellm import inside app/llm/
+
+    async def _close_handler(handler: Any) -> None:
+        """Close one client/handler via whatever async-close hook it exposes."""
+        for attr in ("close", "aclose"):
+            hook: Any = getattr(handler, attr, None)
+            if callable(hook):
+                try:
+                    result = hook()
+                    if result is not None:
+                        await result
+                except Exception:  # noqa: BLE001 — teardown is best-effort
+                    pass
+                return
+        # Some handlers wrap the httpx client on a ``.client`` attribute.
+        inner: Any = getattr(handler, "client", None)
+        inner_aclose: Any = getattr(inner, "aclose", None) if inner is not None else None
+        if callable(inner_aclose):
+            try:
+                await inner_aclose()
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                pass
+
+    # The module-level shared async handler.
+    handler = getattr(litellm, "module_level_aclient", None)
+    if handler is not None:
+        await _close_handler(handler)
+
+    # The per-model client cache: close each cached handler, then clear it so a
+    # later call rebuilds fresh clients rather than reusing closed ones.
+    cache = getattr(litellm, "in_memory_llm_clients_cache", None)
+    cache_dict: Any = getattr(cache, "cache_dict", None) if cache is not None else None
+    if isinstance(cache_dict, dict):
+        for cached in list(cache_dict.values()):
+            await _close_handler(cached)
+        try:
+            cache_dict.clear()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            pass

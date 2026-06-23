@@ -101,8 +101,20 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra -q"
+# Registered markers (use --strict-markers-friendly names; unregistered markers
+# would warn -> error under `filterwarnings`). `live` gates tests that open a
+# REAL outbound socket to a provider/datastore; they are SKIPPED by default and
+# only run when explicitly opted in (e.g. RUN_LIVE=1 plus the needed
+# credentials/reachability). The default offline `uv run pytest` opens no
+# external sockets (issue #94).
+markers = [
+    "live: opens a real network socket to an external provider/datastore; skipped by default, opt in with RUN_LIVE=1 (+ the needed key/reachability).",
+]
 # Surface our own warnings as errors, but don't fail on third-party deprecation
 # noise (FastAPI/Starlette/pydantic/celery). Tighten per-module as needed.
+# The `error` rule is what turns a leaked unclosed socket into a hard,
+# order-dependent failure — the live tests above are skipped by default and
+# close LiteLLM's clients in teardown so nothing leaks even when they run (#94).
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
