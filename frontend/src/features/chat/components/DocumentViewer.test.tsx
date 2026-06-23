@@ -9,7 +9,7 @@
  * target the raw content endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { setAccessToken, clearAccessToken } from '@/api';
 import { DocumentViewer } from './DocumentViewer';
 import type { UiCitation } from '../model/citation';
@@ -107,5 +107,40 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
 
     unmount();
     expect(revokeSpy).toHaveBeenCalled();
+  });
+
+  describe('source metadata grid (#120)', () => {
+    beforeEach(() => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(bytesResponse());
+    });
+
+    it('renders owner / last-modified / last-indexed rows', () => {
+      render(<DocumentViewer citation={CITATION} freshness="2d ago" onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('Owner')).toBeInTheDocument();
+      expect(within(grid).getByText('Last modified')).toBeInTheDocument();
+      expect(within(grid).getByText('Last indexed')).toBeInTheDocument();
+    });
+
+    it('shows the real derived freshness as last-indexed', () => {
+      render(<DocumentViewer citation={CITATION} freshness="2d ago" onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('2d ago')).toBeInTheDocument();
+    });
+
+    it('shows "Not available" — never a fabricated name — for owner off the wire (GUARD #120)', () => {
+      render(<DocumentViewer citation={CITATION} freshness="2d ago" onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      // Owner + last-modified are not on the chat wire → honest placeholders.
+      expect(within(grid).getAllByText(/not available/i).length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('lights up the owner row when a source actually carries one', () => {
+      render(
+        <DocumentViewer citation={CITATION} owner="Priya Shah" freshness="2d ago" onClose={() => {}} />,
+      );
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('Priya Shah')).toBeInTheDocument();
+    });
   });
 });

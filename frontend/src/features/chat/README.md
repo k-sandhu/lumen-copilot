@@ -49,10 +49,11 @@ Feature (`features/chat`):
   id, per-turn model, citation viewer target (incl. the source freshness label).
 - `model/presentation.ts` — **pure** trust-signal derivation for the #89 re-skin:
   the retrieval-trace summary/steps (`buildRetrievalSummary`), relative-time +
-  staleness, the model-badge label, and the SourceInspector passage. No I/O.
+  staleness, the model-badge label, the SourceInspector passage, and the
+  source-inspector metadata rows (`sourceMetadataRows`, #120). No I/O.
 - `components/` — `ChatView` (orchestrator), `ChatThread`, `MessageBubble`,
   `Composer`, `ModelPicker`, `HistorySidebar`, `KnowledgeModeChips`,
-  `ToolActivity`, `DocumentViewer`.
+  `ToolActivity`, `DocumentViewer`, `AnswerFooter`.
 
 ## Trust-signal re-skin (#89, ADR-0007 §1 / DESIGN.md §1/§6)
 
@@ -71,6 +72,33 @@ signal derived from data the turn already has:
   sources" (all permitted docs — the existing behavior) is the default. Modes the
   contract has no backing for (web, model-only) are **not** offered — no invented
   product behavior (AGENTS.md §8).
+
+## Answer footer + inspector metadata (#120, wireframe `chat.html`)
+
+A polish pass that adds the wireframe's answer-bubble footer and the
+source-inspector metadata grid — **content only** (the screen nests in the app
+shell via `PageChrome`; no top bar / RouteGuard added here). Like #89, **no
+contract change** and **no invented data**:
+
+- **`AnswerFooter`** (under a settled assistant answer): a **"Permission-checked"**
+  status shown only when the answer is grounded in ≥1 cited source (honest by
+  construction — the backend returns only sources the caller may see, INV-2/INV-3,
+  so a grounded answer is permission-checked; never a bare claim), a **freshness**
+  timestamp ("freshest <ago>") derived from the real message timestamp, plus three
+  actions: **helpful / not-helpful** and **copy**. The footer is omitted while the
+  turn is still streaming.
+- **Helpful / not-helpful are LOCAL-ONLY UI** — a mutually-exclusive,
+  clearable `aria-pressed` toggle. There is **no backend feedback endpoint**, so
+  the vote persists **nothing** and the UI never implies it does (honest per #120).
+- **Copy** is **client-side only** (`navigator.clipboard.writeText`) — it copies
+  the rendered answer text and flips to a transient "Copied" confirmation.
+- **Source-inspector metadata grid** (in `DocumentViewer`): the wireframe's
+  **owner / last-modified / last-indexed** rows. The chat/citation wire
+  (`Citation` / `ChatCitation`) carries **none** of these — only the answer's
+  evidence recency (the message timestamp → **last-indexed**). `sourceMetadataRows`
+  passes through what is real and renders the rest as **"Not available"** rather
+  than fabricate a name/date (GUARD #120: never surface backend-unsupported data).
+  The owner row lights up honestly if a source ever starts carrying one.
 
 ## Invariants honored
 

@@ -133,3 +133,53 @@ export function passageFromCitation(citation: UiCitation): SourcePassage {
   if (!text) return { runs: [] };
   return { runs: [{ text, highlight: true }] };
 }
+
+/** One label/value row of the source-inspector metadata grid (#120). */
+export interface MetadataRow {
+  label: string;
+  value: string;
+  /** True when the wire doesn't carry this field — rendered muted, never faked. */
+  unknown: boolean;
+}
+
+/**
+ * The values we genuinely have to drive the inspector metadata grid (#120). The
+ * chat/citation wire (Citation / ChatCitation, spec 0004 INV-3) carries neither
+ * a source owner nor a last-modified date — only the answer's evidence recency
+ * (the message timestamp → `lastIndexed`). We pass through what is real and let
+ * `sourceMetadataRows` mark the rest honestly, rather than fabricate names/dates.
+ */
+export interface SourceMetadataInput {
+  /** Source/document owner, when known (currently never on the chat wire). */
+  owner?: string | undefined;
+  /** Last-modified label, when known (currently never on the chat wire). */
+  lastModified?: string | undefined;
+  /** Freshness/last-indexed relative label, e.g. "2d ago" — derived, real. */
+  lastIndexed?: string | undefined;
+}
+
+/** Shown for a field the wire doesn't carry — honest, never a fabricated value. */
+export const METADATA_UNKNOWN = 'Not available';
+
+/**
+ * Build the source-inspector metadata grid rows (owner / last-modified /
+ * last-indexed — the wireframe grid, DESIGN.md §6 / chat.html). Each row always
+ * renders so the grid shape is stable; a field with no real data is flagged
+ * `unknown` and shown as "Not available" rather than invented (GUARD #120: never
+ * surface backend-unsupported data).
+ */
+export function sourceMetadataRows({
+  owner,
+  lastModified,
+  lastIndexed,
+}: SourceMetadataInput): MetadataRow[] {
+  const row = (label: string, value: string | undefined): MetadataRow =>
+    value && value.trim()
+      ? { label, value, unknown: false }
+      : { label, value: METADATA_UNKNOWN, unknown: true };
+  return [
+    row('Owner', owner),
+    row('Last modified', lastModified),
+    row('Last indexed', lastIndexed),
+  ];
+}

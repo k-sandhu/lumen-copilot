@@ -104,6 +104,54 @@ describe('MessageBubble', () => {
     expect(screen.queryByText(/^sources$/i)).not.toBeInTheDocument();
   });
 
+  it('renders the answer footer on a settled grounded assistant turn (#120)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Revenue rose in Q4."
+        citations={[CITATION]}
+        freshness="2d ago"
+        onOpenCitation={() => {}}
+      />,
+    );
+    // Permission-checked status (grounded answer), freshness, and the actions.
+    expect(screen.getByText(/permission-checked/i)).toBeInTheDocument();
+    expect(screen.getByText(/freshest 2d ago/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /copy answer/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /mark this answer helpful/i })).toBeInTheDocument();
+  });
+
+  it('omits the answer footer while the turn is still streaming (#120)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Partial answer so f"
+        citations={[]}
+        streaming
+        freshness="Just now"
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /copy answer/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/permission-checked/i)).not.toBeInTheDocument();
+  });
+
+  it('does not claim "Permission-checked" on an ungrounded answer (#120, honest)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="I could not find that in your documents."
+        citations={[]}
+        freshness="Just now"
+        showNoCitationsNotice
+        onOpenCitation={() => {}}
+      />,
+    );
+    // The footer still renders (freshness) but makes no permission claim.
+    expect(screen.queryByText(/permission-checked/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/freshest just now/i)).toBeInTheDocument();
+  });
+
   it('renders user messages as plain text (no markdown interpretation)', () => {
     render(
       <MessageBubble role="user" content="**not bold**" citations={[]} onOpenCitation={() => {}} />,
