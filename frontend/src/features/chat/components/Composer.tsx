@@ -3,10 +3,15 @@
  * send/stop. Enter sends, Shift+Enter inserts a newline. While an answer is
  * streaming, Send becomes Stop (cancellable streams — frontend/AGENTS.md). The
  * input is local UI state (draft), so it lives here, not in a server cache.
+ *
+ * Trust-signal re-skin (#89): a knowledge-mode chip group surfaces WHAT the next
+ * answer is grounded on (the wireframe composer), defaulting to "Company
+ * sources" — the existing behavior (retrieve across all permitted docs).
  */
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { ChatModelInfo } from '@/api';
 import { ModelPicker } from './ModelPicker';
+import { KnowledgeModeChips, type KnowledgeMode } from './KnowledgeModeChips';
 
 export interface ComposerProps {
   models: ChatModelInfo[];
@@ -34,6 +39,10 @@ export function Composer({
   disabled = false,
 }: ComposerProps) {
   const [draft, setDraft] = useState('');
+  // Knowledge mode is a presentational scope indicator (#89). It defaults to
+  // "company" (all permitted docs — the existing behavior); "selected" stays
+  // disabled until a collection scope is wired, so we never imply a fake feature.
+  const [knowledgeMode, setKnowledgeMode] = useState<KnowledgeMode>('company');
   const canSend = draft.trim().length > 0 && !busy && !disabled;
 
   function submit(e: FormEvent) {
@@ -59,6 +68,11 @@ export function Composer({
       onSubmit={submit}
       aria-label="Message composer"
     >
+      <KnowledgeModeChips
+        value={knowledgeMode}
+        onChange={setKnowledgeMode}
+        disabled={disabled || streaming}
+      />
       <div className="flex items-end gap-2">
         <textarea
           value={draft}

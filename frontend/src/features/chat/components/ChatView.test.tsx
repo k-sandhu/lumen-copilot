@@ -242,10 +242,10 @@ describe('ChatView (critical flow)', () => {
     // persisted assistant message arrives) before interacting with the citation.
     await waitFor(() => expect(useChatStore.getState().activeStreamId).toBeNull());
 
-    // The reloaded assistant message renders a clickable citation; clicking opens
-    // the viewer pane at the cited document (AC-2 click-through).
+    // The reloaded assistant message renders a clickable citation chip; clicking
+    // opens the viewer pane at the cited document (AC-2 click-through).
     const citeButton = await screen.findByRole('button', {
-      name: /citation 1: open Q4 report\.pdf/i,
+      name: /citation 1: Q4 report\.pdf/i,
     });
     await user.click(citeButton);
     const viewer = await screen.findByRole('region', { name: /cited document: Q4 report\.pdf/i });

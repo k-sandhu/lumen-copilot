@@ -103,6 +103,8 @@ export function ChatView() {
                   charStart: viewer.charStart,
                   charEnd: viewer.charEnd,
                 }}
+                freshness={viewer.freshness}
+                stale={viewer.stale}
                 onClose={closeViewer}
               />
             </ErrorBoundary>
@@ -126,6 +128,8 @@ interface ActiveSessionProps {
     charStart: number;
     charEnd: number;
     snippet: string;
+    freshness?: string;
+    stale?: boolean;
   }) => void;
   onDoneReload: () => void;
 }
@@ -238,19 +242,22 @@ function ActiveSession({
       <div className="min-h-0 flex-1">
         <ChatThread
           messages={messages.data?.items ?? []}
+          models={models}
           isLoading={messages.isLoading}
           isError={messages.isError}
           error={messages.error}
           onRetryLoad={() => void messages.refetch()}
           live={live}
           onRetryStream={onRetryStream}
-          onOpenCitation={(c) =>
+          onOpenCitation={(c, meta) =>
             openViewer({
               documentId: c.documentId,
               documentName: c.documentName,
               charStart: c.charStart,
               charEnd: c.charEnd,
               snippet: c.snippet,
+              ...(meta?.freshness ? { freshness: meta.freshness } : {}),
+              ...(meta?.stale !== undefined ? { stale: meta.stale } : {}),
             })
           }
         />
