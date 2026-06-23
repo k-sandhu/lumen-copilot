@@ -4,7 +4,7 @@
  * (contracts/openapi.yaml §search; mirrored in api/types.ts) onto the trust-kit
  * component props. Kept pure so each mapping is unit-tested in isolation.
  */
-import type { MatchSpan, PermissionState, SearchResult } from '@/api';
+import type { MatchSpan, PermissionState, ResultSource, SearchResult } from '@/api';
 import type { PermissionLevel, SourcePassage } from '@/ui';
 
 /**
@@ -115,6 +115,96 @@ export function sourceGlyph(source: SearchResult['source']): string {
     default:
       return '📄';
   }
+}
+
+/**
+ * Human label per source kind. Mirrors the FROZEN `ResultSource` enum
+ * (contracts/openapi.yaml §search) — the ONLY source kinds the backend serves:
+ * uploaded documents, prior chat messages, and connected (web) sources. No
+ * invented connectors (Slack/Jira/etc.) — those are not in the contract.
+ */
+export function sourceLabel(source: ResultSource): string {
+  switch (source) {
+    case 'upload':
+      return 'Uploaded documents';
+    case 'chat':
+      return 'Chat messages';
+    case 'connector':
+      return 'Connected sources';
+    default:
+      return source;
+  }
+}
+
+/** The source-kind filter options, in the order they should render. */
+export const SOURCE_FILTERS: ResultSource[] = ['upload', 'chat', 'connector'];
+
+/**
+ * Tally how many of the current (permitted) results came from each source kind,
+ * so the source facet can show honest, data-backed counts. Only source kinds the
+ * server actually returned appear — never an invented connector with a faked count.
+ */
+export function sourceFacets(results: SearchResult[]): Array<{ source: ResultSource; count: number }> {
+  const counts = new Map<ResultSource, number>();
+  for (const r of results) counts.set(r.source, (counts.get(r.source) ?? 0) + 1);
+  return SOURCE_FILTERS.filter((s) => counts.has(s)).map((s) => ({
+    source: s,
+    count: counts.get(s) ?? 0,
+  }));
+}
+
+/**
+ * Tally the distinct content `type`s present in the current results (e.g.
+ * "document", "message"). The wire `type` is a free-form string, so we derive the
+ * available facet values from the data itself rather than hardcoding a list the
+ * backend may not serve — never an invented "Code"/"Ticket" facet with a fake count.
+ */
+export function typeFacets(results: SearchResult[]): Array<{ type: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const r of results) {
+    if (!r.type) continue;
+    counts.set(r.type, (counts.get(r.type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([type, count]) => ({ type, count }));
+}
+
+/**
+ * Parse the literal `[n]` citation markers a synthesized answer carries, splitting
+ * the text into plain runs and citation markers. Each `[n]` becomes an inline,
+ * clickable marker (1-based `n` indexing into the answer's `citations`); markers
+ * that point past the available citations are left as plain text so the UI never
+ * renders an un-resolvable citation. Returns only plain runs when the text has no
+ * markers — the caller then falls back to a trailing marker row.
+ */
+export interface AnswerSegment {
+  text: string;
+  /** Present on a citation marker — the 1-based citation ordinal it references. */
+  cite?: number;
+}
+
+const CITE_MARKER = /\[(\d{1,3})\]/g;
+
+export function segmentAnswer(text: string, citationCount: number): AnswerSegment[] {
+  const segments: AnswerSegment[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(CITE_MARKER)) {
+    const ordinal = Number(match[1]);
+    const at = match.index ?? 0;
+    // Only treat it as a real citation marker when it resolves to a citation.
+    if (ordinal < 1 || ordinal > citationCount) continue;
+    if (at > cursor) segments.push({ text: text.slice(cursor, at) });
+    segments.push({ text: match[0], cite: ordinal });
+    cursor = at + match[0].length;
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor) });
+  return segments;
+}
+
+/** Whether the answer text carries any resolvable inline `[n]` marker. */
+export function hasInlineCitations(text: string, citationCount: number): boolean {
+  return segmentAnswer(text, citationCount).some((s) => s.cite !== undefined);
 }
 
 /**

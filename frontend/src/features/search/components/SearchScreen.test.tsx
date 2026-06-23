@@ -9,7 +9,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { SearchResponse } from '@/api';
+import type { CollectionList, SearchResponse } from '@/api';
 import { SearchScreen } from './SearchScreen';
 
 function json(body: unknown, status = 200): Response {
@@ -22,6 +22,27 @@ function problem(status: number, title: string): Response {
   return new Response(JSON.stringify({ type: 'about:blank', title, status }), {
     status,
     headers: { 'Content-Type': 'application/problem+json' },
+  });
+}
+
+/** The filter sidebar loads the caller's collections on mount (an empty list here). */
+const emptyCollections: CollectionList = { items: [], next_cursor: null };
+
+function urlOf(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
+/**
+ * Route `/collections` (the filter sidebar) vs `/search` so the search response
+ * under test is never swallowed by the collections fetch. `searchResponse` is the
+ * Response (or thrown error) the `/search` call resolves to.
+ */
+function mockSearch(searchResponse: Response | (() => Response | Promise<Response>)) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+    if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+    return Promise.resolve(
+      typeof searchResponse === 'function' ? searchResponse() : searchResponse,
+    );
   });
 }
 
@@ -48,6 +69,38 @@ const fullResponse: SearchResponse = {
   hidden_count: 3,
 };
 
+/** A response spanning two REAL source kinds + content types, for the facet test. */
+const multiSourceResponse: SearchResponse = {
+  query: 'pricing',
+  results: [
+    {
+      id: 'r1',
+      title: 'PTO Policy 2026',
+      snippet: 'Employees accrue 20 days of paid time off per year.',
+      match_spans: [],
+      why_matched: 'title',
+      source: 'upload',
+      type: 'document',
+      owner: 'Dana Ruiz',
+      last_indexed: '2026-06-18T00:00:00Z',
+      permission: 'allowed',
+    },
+    {
+      id: 'r2',
+      title: 'Pricing thread',
+      snippet: 'The Q3 change is locked.',
+      match_spans: [],
+      why_matched: 'body',
+      source: 'chat',
+      type: 'message',
+      owner: 'Marcus Lee',
+      last_indexed: '2026-06-10T00:00:00Z',
+      permission: 'allowed',
+    },
+  ],
+  hidden_count: 0,
+};
+
 async function runSearch(term = 'pto policy') {
   const user = userEvent.setup();
   await user.type(screen.getByRole('searchbox'), term);
@@ -69,12 +122,16 @@ describe('SearchScreen', () => {
   });
 
   it('renders a LOADING skeleton, then the SUCCESS results', async () => {
+    // The `/search` call is deferred; `/collections` resolves immediately so the
+    // sidebar never blocks the loading assertion.
     let resolve!: (r: Response) => void;
-    vi.spyOn(globalThis, 'fetch').mockReturnValue(
-      new Promise<Response>((r) => {
-        resolve = r;
-      }),
-    );
+    const deferred = new Promise<Response>((r) => {
+      resolve = r;
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+      return deferred;
+    });
     renderWithQuery(<SearchScreen />);
     await runSearch();
 
@@ -85,7 +142,7 @@ describe('SearchScreen', () => {
   });
 
   it('renders the cited direct answer + ranked rows + the trim notice on SUCCESS', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(fullResponse));
+    mockSearch(json(fullResponse));
     renderWithQuery(<SearchScreen />);
     await runSearch();
 
@@ -105,9 +162,7 @@ describe('SearchScreen', () => {
   });
 
   it('shows the EMPTY state for a submitted query with no results', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse),
-    );
+    mockSearch(json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse));
     renderWithQuery(<SearchScreen />);
     await runSearch('no hits here');
     expect(await screen.findByText(/no results for/i)).toBeInTheDocument();
@@ -115,7 +170,7 @@ describe('SearchScreen', () => {
   });
 
   it('shows an actionable ERROR with retry on a 401 (INV-4)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401, 'Unauthorized'));
+    mockSearch(problem(401, 'Unauthorized'));
     renderWithQuery(<SearchScreen />);
     await runSearch();
     const alert = await screen.findByRole('alert');
@@ -124,17 +179,20 @@ describe('SearchScreen', () => {
   });
 
   it('shows a rephrase ERROR on a 422 (INV-8)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(422, 'Unprocessable Entity'));
+    mockSearch(problem(422, 'Unprocessable Entity'));
     renderWithQuery(<SearchScreen />);
     await runSearch();
     expect(await screen.findByRole('alert')).toHaveTextContent(/couldn’t be understood/i);
   });
 
   it('retries the search when Try again is clicked', async () => {
-    const spy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(problem(500, 'Server Error'))
-      .mockResolvedValue(json(fullResponse));
+    // `/search` fails once (500) then succeeds; `/collections` always resolves.
+    let searchCalls = 0;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+      searchCalls += 1;
+      return Promise.resolve(searchCalls === 1 ? problem(500, 'Server Error') : json(fullResponse));
+    });
     renderWithQuery(<SearchScreen />);
     const user = await runSearch();
 
@@ -143,5 +201,24 @@ describe('SearchScreen', () => {
 
     expect(await screen.findByRole('article', { name: /PTO Policy 2026/i })).toBeInTheDocument();
     expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('filters the source facet and the result count from the data, never an invented connector', async () => {
+    mockSearch(json(multiSourceResponse));
+    renderWithQuery(<SearchScreen />);
+    await runSearch();
+
+    // The filter sidebar shows only the source kinds the contract serves —
+    // derived from the data — never Slack/Jira/Tickets/Code/People.
+    const filters = await screen.findByRole('navigation', { name: /search filters/i });
+    expect(within(filters).getByText('Uploaded documents')).toBeInTheDocument();
+    expect(within(filters).getByText('Chat messages')).toBeInTheDocument();
+    expect(within(filters).queryByText(/slack|jira|tickets|github|salesforce|people/i)).toBeNull();
+
+    // Narrow to the "message" content type → only the chat result remains.
+    await userEvent.setup().click(within(filters).getByRole('checkbox', { name: /^message/i }));
+    const list = screen.getByRole('list', { name: /search results/i });
+    expect(within(list).getByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
+    expect(within(list).queryByRole('heading', { name: /PTO Policy/i })).toBeNull();
   });
 });

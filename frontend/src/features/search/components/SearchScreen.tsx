@@ -1,8 +1,9 @@
 /**
- * SearchScreen (#84) — the search feature root. Composes the composer, the
- * optional cited direct answer, the ranked result rows, and the permission-trim
- * notice, and implements every async state (frontend/AGENTS.md "every state, not
- * just success"):
+ * SearchScreen (#84, polished #118) — the search feature root. Composes a page
+ * head, the composer, a TWO-COLUMN body (filter sidebar left, answer + results
+ * right), the optional cited direct answer, the ranked result rows, and the
+ * permission-trim notice, and implements every async state (frontend/AGENTS.md
+ * "every state, not just success"):
  *
  *   initial  → a prompt to search (no query submitted yet)
  *   loading  → skeleton rows while the search runs
@@ -10,19 +11,26 @@
  *   empty    → "no results" for a submitted query that matched nothing
  *   success  → direct answer (if any) + trim notice + ranked rows
  *
- * The draft query and the submitted query are the only client-side state and live
- * here; the results are server state via `useSearch` (never mirrored into a store).
- * The body scrolls independently of the pinned composer (min-h-0 + ScrollArea).
+ * Filters (#118) are backed by the REAL `/search` contract only: a collection
+ * scope (`collection_id`) and a source-kind scope (`source`, the frozen
+ * `ResultSource` enum) drive the server query; a content-type facet narrows the
+ * returned rows client-side. No invented connectors.
+ *
+ * The draft query, the submitted query and the filter state are the only
+ * client-side state and live here; the results are server state via `useSearch`
+ * (never mirrored into a store). The results pane scrolls independently of the
+ * pinned composer (min-h-0 + ScrollArea).
  */
 import { useMemo, useState } from 'react';
 import { ApiError } from '@/api';
 import type { SearchResult } from '@/api';
 import { ScrollArea } from '@/components/ScrollArea';
 import { Icon } from '@/ui';
-import { useSearch } from '../model/queries';
+import { useSearch, useSearchCollections } from '../model/queries';
 import { SearchComposer } from './SearchComposer';
 import { DirectAnswerBlock } from './DirectAnswerBlock';
 import { SearchResultRow } from './SearchResultRow';
+import { SearchFilters, type SearchFilterState } from './SearchFilters';
 import { TrimNotice } from './TrimNotice';
 
 /** Map a transport failure to a user-facing, actionable message. */
@@ -39,16 +47,33 @@ function errorMessage(error: unknown): string {
 export function SearchScreen() {
   const [draft, setDraft] = useState('');
   const [submitted, setSubmitted] = useState('');
+  const [filters, setFilters] = useState<SearchFilterState>({});
 
-  const query = useSearch({ q: submitted });
+  // Collection + source are server params (they change the result set and the
+  // permission-trim count); the content-type facet narrows client-side.
+  const query = useSearch({
+    q: submitted,
+    collection_id: filters.collectionId,
+    source: filters.source,
+  });
+  const collections = useSearchCollections();
   const data = query.data;
 
-  // Index results by id so the direct answer's citations resolve to their source.
+  const allResults = useMemo(() => data?.results ?? [], [data]);
+
+  // Content-type facet is applied client-side over the permitted results.
+  const visibleResults = useMemo(
+    () => (filters.type ? allResults.filter((r) => r.type === filters.type) : allResults),
+    [allResults, filters.type],
+  );
+
+  // Index VISIBLE results by id so the direct answer's citations resolve to a
+  // source the user can still see in the list.
   const resultsById = useMemo(() => {
     const map = new Map<string, SearchResult>();
-    for (const r of data?.results ?? []) map.set(r.id, r);
+    for (const r of visibleResults) map.set(r.id, r);
     return map;
-  }, [data]);
+  }, [visibleResults]);
 
   const hasQuery = submitted.trim().length > 0;
   const isLoading = hasQuery && query.isLoading;
@@ -58,9 +83,15 @@ export function SearchScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Pinned composer — stays put while results scroll below it. */}
-      <div className="shrink-0 border-b border-border bg-surface p-4">
-        <div className="mx-auto w-full max-w-3xl">
+      {/* Page head + pinned composer — stay put while results scroll below. */}
+      <div className="shrink-0 border-b border-border bg-surface px-4 pb-4 pt-5">
+        <div className="mx-auto w-full max-w-5xl">
+          <header className="mb-4">
+            <h1 className="text-xl font-semibold text-foreground">Search</h1>
+            <p className="mt-1 text-sm text-foreground-muted">
+              One permissioned box across your connected sources and uploaded documents.
+            </p>
+          </header>
           <SearchComposer
             value={draft}
             onChange={setDraft}
@@ -72,7 +103,7 @@ export function SearchScreen() {
 
       {/* Independently scrollable results pane. */}
       <ScrollArea viewportClassName="px-4 py-6">
-        <div className="mx-auto w-full max-w-3xl space-y-4">
+        <div className="mx-auto w-full max-w-5xl">
           {!hasQuery ? (
             <InitialState />
           ) : isLoading ? (
@@ -82,24 +113,58 @@ export function SearchScreen() {
           ) : isEmpty ? (
             <EmptyState query={data?.query ?? submitted} />
           ) : data ? (
-            <>
-              {data.direct_answer ? (
-                <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
-              ) : null}
+            <div className="flex flex-col gap-6 md:flex-row">
+              {/* LEFT: filter sidebar — backed by the real contract only. */}
+              <aside className="shrink-0 md:w-60">
+                <div className="rounded-lg border border-border bg-surface p-4 md:sticky md:top-0">
+                  <SearchFilters
+                    state={filters}
+                    onChange={setFilters}
+                    collections={collections.data?.items ?? []}
+                    collectionsLoading={collections.isLoading}
+                    results={allResults}
+                  />
+                </div>
+              </aside>
 
-              <TrimNotice hiddenCount={data.hidden_count} />
+              {/* RIGHT: direct answer + ranked results. */}
+              <div className="min-w-0 flex-1 space-y-4">
+                {data.direct_answer ? (
+                  <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
+                ) : null}
 
-              <ul className="space-y-3" aria-label="Search results">
-                {data.results.map((result) => (
-                  <li key={result.id}>
-                    <SearchResultRow result={result} />
-                  </li>
-                ))}
-              </ul>
-            </>
+                <ResultsToolbar count={visibleResults.length} filtered={Boolean(filters.type)} />
+
+                <TrimNotice hiddenCount={data.hidden_count} />
+
+                {visibleResults.length === 0 ? (
+                  <FacetEmptyState onClear={() => setFilters((f) => ({ ...f, type: undefined }))} />
+                ) : (
+                  <ul className="space-y-3" aria-label="Search results">
+                    {visibleResults.map((result) => (
+                      <li key={result.id}>
+                        <SearchResultRow result={result} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
           ) : null}
         </div>
       </ScrollArea>
+    </div>
+  );
+}
+
+function ResultsToolbar({ count, filtered }: { count: number; filtered: boolean }) {
+  return (
+    <div className="flex items-center justify-between">
+      <p className="text-sm text-foreground-muted">
+        <b className="text-foreground">{count}</b> {count === 1 ? 'result' : 'results'} ·
+        permission-trimmed
+        {filtered ? ' · filtered' : ''}
+      </p>
     </div>
   );
 }
@@ -157,6 +222,22 @@ function EmptyState({ query }: { query: string }) {
         No results for <span className="font-medium text-foreground">“{query}”</span>.
       </p>
       <p className="text-xs">Try different words, or check that the source has been indexed.</p>
+    </div>
+  );
+}
+
+/** When the content-type facet trims every visible row, offer to clear it. */
+function FacetEmptyState({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-foreground-muted">
+      <p>No results of this content type on this page.</p>
+      <button
+        type="button"
+        onClick={onClear}
+        className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 text-foreground hover:bg-surface-muted"
+      >
+        Clear the type filter
+      </button>
     </div>
   );
 }
