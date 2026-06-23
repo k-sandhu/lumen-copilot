@@ -50,9 +50,9 @@ _MVP_TABLES = {
     "audit_events",
 }
 
-# Every table the ORM registry now carries: the MVP set plus refresh_tokens,
-# added by the 0003 migration (issue #19, spec 0004 §2.3).
-_ALL_TABLES = _MVP_TABLES | {"refresh_tokens"}
+# Every table the ORM registry now carries: the MVP set plus refresh_tokens
+# (0003, issue #19, spec 0004 §2.3) and sources (0006, issue #109, ADR-0009 §4).
+_ALL_TABLES = _MVP_TABLES | {"refresh_tokens", "sources"}
 
 
 def _alembic_config(url: str | None = None) -> Config:
@@ -69,14 +69,14 @@ def test_metadata_covers_every_mvp_table() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0005 with a SINGLE head (ADR-0008 §4).
+    """The chain is linear 0001 → … → 0006 with a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0005_audit_query_indexes"]
+    assert list(script.get_heads()) == ["0006_sources"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -89,6 +89,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     aqi = script.get_revision("0005_audit_query_indexes")
     assert aqi is not None
     assert aqi.down_revision == "0004_retrieval_indexes"
+    src = script.get_revision("0006_sources")
+    assert src is not None
+    assert src.down_revision == "0005_audit_query_indexes"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -196,6 +199,44 @@ def test_offline_audit_query_indexes_migration_round_trips(
     down = capsys.readouterr().out.lower()
     for name, _cols in _AUDIT_QUERY_INDEXES:
         assert f"drop index {name}" in down, f"missing DROP for {name}"
+
+
+def test_offline_sources_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0006 creates ``sources`` + the ``documents.source_id`` link; down() reverses (#109).
+
+    AC: the upgrade renders the tenant/owner-scoped ``sources`` table (with its
+    JSONB ``config`` and the tenant-leading index), and the nullable
+    ``source_id`` FK on ``documents`` with ``ON DELETE CASCADE``; the downgrade
+    drops the column and the table. Offline DDL render (Postgres dialect) — the
+    structural check that proves reversibility without a DB (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0005_audit_query_indexes:0006_sources", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped sources table with its JSONB config column.
+    assert "create table sources" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK
+    assert "config jsonb" in up
+    assert "indexed_count" in up
+    # Tenant-leading index (the INV-1 predicate column).
+    assert "create index ix_sources_tenant_id on sources (tenant_id)" in up
+    assert "create index ix_sources_owner_id on sources (owner_id)" in up
+    # The nullable source_id FK on documents, CASCADE on source delete.
+    assert "alter table documents add column source_id" in up
+    assert "references sources" in up
+    assert "on delete cascade" in up
+    assert "create index ix_documents_source_id on documents (source_id)" in up
+
+    command.downgrade(cfg, "0006_sources:0005_audit_query_indexes", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop index ix_documents_source_id" in down
+    assert "alter table documents drop column source_id" in down
+    assert "drop table sources" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:
