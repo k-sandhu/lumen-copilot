@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.2.0
+  version: 0.3.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -21,6 +21,15 @@ info:
     hand-off artifact that gates the parallel M2 build slices; no shape from
     0.1.0 changed. All three are REST request/response — no new WebSocket
     envelope shapes were required.
+
+
+    This revision (0.3.0) **additively** freezes the **Sources wire** (issue
+    #108, ADR-0009 §5, ADR-0006 Phase 0): `GET /sources` (the connector grid),
+    `POST /sources` (add a source — the first connector is a Web URL; an invalid
+    or SSRF-blocked URL is a **422**, ADR-0009 §3), `POST /sources/{id}/sync`
+    (re-sync), and `DELETE /sources/{id}` (remove, cascading the source's
+    documents). Sources are tenant- and owner-scoped (INV-1/INV-2). No shape from
+    0.1.0 or 0.2.0 changed; these are REST request/response only.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -627,6 +636,108 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
+  /sources:
+    get:
+      operationId: listSources
+      summary: The caller's connected sources (connector grid).
+      description: >
+        Lists the sources the caller has connected, tenant- and owner-scoped
+        (ADR-0009 §5, spec 0004 INV-1/INV-2): a caller only ever sees their own
+        sources within their tenant. Each item carries the connector `type`, its
+        `config`, sync `status` and `indexed_count` for the health grid, plus
+        `owner_id` so the UI can show ownership.
+      tags: [sources]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of sources.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createSource
+      summary: Connect a source (first connector — a Web URL).
+      description: >
+        Adds a source and enqueues its first sync (ADR-0009 §5). For the `web`
+        connector the body is `{type: web, url}`: the server validates the URL and
+        runs the mandatory SSRF check (allow only http/https; reject loopback,
+        private/RFC-1918, link-local, CGNAT, and cloud-metadata ranges, on every
+        redirect hop; ADR-0009 §3). An invalid OR SSRF-blocked URL is rejected with
+        **422** (INV-8) — a blocked URL is a validation failure, not a 403. The
+        created source is returned with status `pending`; the sync runs async as a
+        Celery task (never in the request path). A write at read-before-write tier
+        T1 (owner-gated; spec 0004 §2.5) — every add emits an audit event.
+      tags: [sources]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceCreate" }
+      responses:
+        "201":
+          description: Connected; the first sync is enqueued (status pending).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: >
+            Malformed body, an unsupported `type`, or an invalid / SSRF-blocked
+            URL (INV-8, ADR-0009 §3). `code` distinguishes the cases (e.g.
+            `url_blocked` for an SSRF rejection).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /sources/{sourceId}:
+    parameters:
+      - { $ref: "#/components/parameters/SourceId" }
+    delete:
+      operationId: deleteSource
+      summary: Remove a source (cascades its ingested documents).
+      description: >
+        Deletes the source and cascades the documents it ingested — their chunks
+        and embeddings are removed too (ADR-0009 §5). Owner-gated: a caller who is
+        not the owner receives **404** (existence non-disclosure within the tenant,
+        INV-1/INV-2); a source in another tenant is likewise **404**. Emits an
+        audit event.
+      tags: [sources]
+      responses:
+        "204": { description: Deleted (source + its documents). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /sources/{sourceId}/sync:
+    parameters:
+      - { $ref: "#/components/parameters/SourceId" }
+    post:
+      operationId: syncSource
+      summary: Re-sync a source (re-fetch and re-index).
+      description: >
+        Re-fetches the source and re-indexes its content (ADR-0009 §2/§5). The
+        sync runs async as a Celery task; the response returns the source with
+        status `syncing` (202 — accepted, sync enqueued; 200 if the source was
+        already syncing and this is a no-op). Owner-gated: a non-owner or
+        cross-tenant source is **404** (INV-1/INV-2). Emits an audit event.
+      tags: [sources]
+      responses:
+        "200":
+          description: Already syncing — no new sync enqueued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "202":
+          description: Accepted; a re-sync was enqueued (status syncing).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -653,6 +764,11 @@ components:
       schema: { type: string, format: uuid }
     SessionId:
       name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SourceId:
+      name: sourceId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1251,6 +1367,103 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RiskTier" }
 
+    # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
+    SourceType:
+      type: string
+      description: >
+        The connector kind. `web` is the first connector (ADR-0009 §2): paste a
+        public URL, we ingest it — zero source-side setup. Future connectors
+        (Drive, Slack, Confluence…) are additive via the auto-discovered registry
+        and add their own values here, each behind its own ADR.
+      enum: [web]
+
+    WebSourceMode:
+      type: string
+      description: >
+        How a `web` source's URL is interpreted (ADR-0009 §2). `page` = one URL →
+        one document; `feed` = an RSS/Atom feed → many documents (bounded);
+        `sitemap` = a sitemap.xml → many documents (bounded). The server detects
+        the mode from the fetched content.
+      enum: [page, feed, sitemap]
+
+    SourceStatus:
+      type: string
+      description: >
+        Sync lifecycle for the connector health grid (ADR-0009 §4). `pending` =
+        added, first sync not yet run; `syncing` = a sync is in flight; `ready` =
+        last sync succeeded and content is indexed; `error` = the last sync failed
+        (see `last_error`).
+      enum: [pending, syncing, ready, error]
+
+    SourceConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        Connector configuration (ADR-0009 §4 `config` jsonb). For the `web`
+        connector this is the fetched `url` and the detected `mode`.
+      required: [url, mode]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The public URL this source ingests (http/https only; SSRF-checked).
+        mode: { $ref: "#/components/schemas/WebSourceMode" }
+
+    Source:
+      type: object
+      additionalProperties: false
+      description: >
+        One connected source, tenant- and owner-scoped (ADR-0009 §4/§5, spec 0004
+        INV-1/INV-2). Ingested content links back to this source and is retrievable
+        only by the owner within their tenant.
+      required: [id, type, config, status, indexed_count, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/SourceType" }
+        config: { $ref: "#/components/schemas/SourceConfig" }
+        status: { $ref: "#/components/schemas/SourceStatus" }
+        indexed_count:
+          type: integer
+          minimum: 0
+          description: Number of documents this source has ingested (0 until the first sync completes).
+        last_synced_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last successful sync finished (null before the first sync).
+        last_error:
+          type: string
+          description: Failure reason when status is error.
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SourceList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    SourceCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Connect a source. For the `web` connector: `{type: web, url}`. The server
+        validates + SSRF-checks the URL (ADR-0009 §3); an invalid or blocked URL is
+        rejected with 422 (INV-8).
+      required: [type, url]
+      properties:
+        type: { $ref: "#/components/schemas/SourceType" }
+        url:
+          type: string
+          format: uri
+          description: The public URL to ingest (http/https only).
+
     # Single problem model for ALL errors (RFC-9457 application/problem+json).
     # Every endpoint's error responses reference this; both tiers depend on it.
     Problem:
@@ -1347,3 +1560,5 @@ tags:
     description: The append-only audit trail with provenance (admin / security only).
   - name: admin
     description: Read-only tenant governance — members, model governance, risk tiers (admin only).
+  - name: sources
+    description: Connected sources — the connector grid (add / sync / remove a Web URL source).
