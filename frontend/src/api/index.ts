@@ -30,6 +30,9 @@ export {
 } from './chat';
 export type { PageParams } from './chat';
 export { listModels } from './models';
+export { search } from './search';
+export { listAuditEvents } from './audit';
+export { listMembers, getModelGovernance, getRiskTiers } from './admin';
 export {
   getAccessToken,
   hasAccessToken,
