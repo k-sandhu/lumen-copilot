@@ -7,6 +7,6 @@ endpoint.** Callers receive domain types (``app.domain.llm``), never a LiteLLM
 object, so swapping the provider is a change confined to this module.
 """
 
-from app.llm.gateway import LLMGateway
+from app.llm.gateway import LLMGateway, aclose_litellm_clients
 
-__all__ = ["LLMGateway"]
+__all__ = ["LLMGateway", "aclose_litellm_clients"]
