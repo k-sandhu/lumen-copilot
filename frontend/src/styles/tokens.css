@@ -1,0 +1,161 @@
+/* ============================================================================
+   Lumen Copilot — Design-System Tokens (ported from docs/wireframes/assets/tokens.css)
+   ADR-0007 §2 (curated): the FULL token architecture lands; only the *UI to
+   switch* the deferred axes (7-theme picker, accent override, density/font) is
+   out of scope for v1. The architecture below is laid out so those axes are
+   additive later — adding a theme is one `[data-theme="x"][data-mode]` block
+   pair; adding density is setting --fs/--space/--radius on <html>.
+
+   AXES
+     • THEME  [data-theme]  → color identity. v1 ships ONLY "aurora".
+     • MODE   [data-mode]   → light | dark. Semantics/shadows live here.
+   OVERRIDES (inline style on <html>, deferred UI):
+     • --accent              user accent override (derived shades follow)
+     • --fs --space --radius  text / spacing / roundness multipliers (density)
+
+   Accent shades are DERIVED from --accent via color-mix, so a theme default and
+   a future user override behave identically in both modes. Component CSS in
+   ui-kit.css expresses sizes as calc(px * var(--fs|--space)) so the deferred
+   density axis moves the whole kit at once.
+
+   This layer is ADDITIVE to styles/index.css (the existing Tailwind RGB-triple
+   tokens that current screens depend on). The two coexist: index.css keeps the
+   existing screens working; this file powers the opt-in `ui/` trust kit. The
+   mode provider in ui/ keeps `.dark` (Tailwind) and [data-mode] (this layer) in
+   lock-step so a single toggle drives both.
+   ============================================================================ */
+
+:root {
+  --ds-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  --ds-font-mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+  --ds-font-display: var(--ds-font-sans);
+
+  /* scale multipliers — the density axis (deferred UI, architecture present) */
+  --fs: 1;
+  --space: 1;
+  --radius: 1;
+
+  --r-xs: calc(5px * var(--radius));
+  --r-sm: calc(7px * var(--radius));
+  --r-md: calc(10px * var(--radius));
+  --r-lg: calc(14px * var(--radius));
+  --r-xl: calc(20px * var(--radius));
+  --r-full: 999px;
+
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-1: 0.12s;
+  --dur-2: 0.2s;
+  --dur-3: 0.34s;
+  --ring-w: 2px;
+
+  /* accent fallback + DERIVED shades (recompute from whatever --accent is) */
+  --accent: #4f46e5;
+  --accent-strong: color-mix(in srgb, var(--accent), var(--text) 22%);
+  --accent-weak: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  --accent-line: color-mix(in srgb, var(--accent) 38%, var(--surface));
+  --accent-contrast: #ffffff;
+  --accent-grad: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent), #fff 14%) 0%,
+    var(--accent) 55%,
+    color-mix(in srgb, var(--accent), #000 16%) 120%
+  );
+  --ring: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ═══ MODE: semantics, shadows, backdrop ════════════════════════════════ */
+[data-mode='light'] {
+  color-scheme: light;
+  --ok: #15a34a;
+  --ok-weak: #e7f6ec;
+  --warn: #b7791f;
+  --warn-weak: #fbf2dd;
+  --danger: #dc2626;
+  --danger-weak: #fdecec;
+  --info: #2563eb;
+  --info-weak: #e8f0fe;
+  --shadow-sm: 0 1px 2px rgba(17, 19, 24, 0.06), 0 1px 1px rgba(17, 19, 24, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(17, 19, 24, 0.1), 0 2px 4px -2px rgba(17, 19, 24, 0.06);
+  --shadow-lg: 0 18px 40px -12px rgba(17, 19, 24, 0.2), 0 6px 14px -8px rgba(17, 19, 24, 0.1);
+  --shadow-pop: 0 12px 32px -8px rgba(17, 19, 24, 0.22);
+  --backdrop: rgba(17, 19, 24, 0.34);
+}
+[data-mode='dark'] {
+  color-scheme: dark;
+  --ok: #4ade80;
+  --ok-weak: rgba(74, 222, 128, 0.14);
+  --warn: #fbbf24;
+  --warn-weak: rgba(251, 191, 36, 0.14);
+  --danger: #f87171;
+  --danger-weak: rgba(248, 113, 113, 0.15);
+  --info: #60a5fa;
+  --info-weak: rgba(96, 165, 250, 0.15);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 6px 18px -6px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 50px -16px rgba(0, 0, 0, 0.72);
+  --shadow-pop: 0 18px 44px -12px rgba(0, 0, 0, 0.7);
+  --backdrop: rgba(4, 6, 12, 0.62);
+}
+
+/* ═══ THEME × MODE: neutrals + default accent ═══════════════════════════ */
+/* AURORA — indigo→violet, cool neutrals. The single v1 theme (ADR-0007 §2).
+   Additional themes drop in here as `[data-theme="x"][data-mode]` block pairs
+   that set ONLY neutrals + --accent; the derived shades above follow. */
+[data-theme='aurora'][data-mode='light'] {
+  --bg: #eef1f8;
+  --surface: #ffffff;
+  --surface-2: #f8f9fd;
+  --surface-3: #eff2f8;
+  --surface-inset: #f4f6fb;
+  --border: #e5e8f0;
+  --border-strong: #d3d8e6;
+  --text: #14161f;
+  --text-muted: #5a6378;
+  --text-subtle: #8b93a7;
+  --accent: #4f46e5;
+}
+[data-theme='aurora'][data-mode='dark'] {
+  --bg: #0c0e16;
+  --surface: #161a27;
+  --surface-2: #1b2031;
+  --surface-3: #232a3e;
+  --surface-inset: #10131e;
+  --border: #272d42;
+  --border-strong: #394063;
+  --text: #e9ebf6;
+  --text-muted: #9aa1bd;
+  --text-subtle: #6b7193;
+  --accent: #818cf8;
+  --accent-contrast: #0c0e16;
+}
+
+/* boot fallback before the mode provider sets [data-mode] (avoids a flash of
+   unstyled tokens on the very first paint). */
+[data-theme='aurora']:not([data-mode]) {
+  --bg: #eef1f8;
+  --surface: #fff;
+  --surface-2: #f8f9fd;
+  --surface-3: #eff2f8;
+  --surface-inset: #f4f6fb;
+  --border: #e5e8f0;
+  --border-strong: #d3d8e6;
+  --text: #14161f;
+  --text-muted: #5a6378;
+  --text-subtle: #8b93a7;
+  --accent: #4f46e5;
+  color-scheme: light;
+  --ok: #15a34a;
+  --ok-weak: #e7f6ec;
+  --warn: #b7791f;
+  --warn-weak: #fbf2dd;
+  --danger: #dc2626;
+  --danger-weak: #fdecec;
+  --info: #2563eb;
+  --info-weak: #e8f0fe;
+  --shadow-sm: 0 1px 2px rgba(17, 19, 24, 0.06), 0 1px 1px rgba(17, 19, 24, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(17, 19, 24, 0.1), 0 2px 4px -2px rgba(17, 19, 24, 0.06);
+  --shadow-lg: 0 18px 40px -12px rgba(17, 19, 24, 0.2), 0 6px 14px -8px rgba(17, 19, 24, 0.1);
+  --shadow-pop: 0 12px 32px -8px rgba(17, 19, 24, 0.22);
+  --backdrop: rgba(17, 19, 24, 0.34);
+}
