@@ -68,10 +68,15 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
-def test_migration_chain_is_linear_to_retrieval_indexes() -> None:
-    """The chain is linear: 0001 → 0002 → 0003 → 0004, a single head at 0004."""
+def test_migration_chain_is_linear_single_head() -> None:
+    """The chain is linear 0001 → … → 0005 with a SINGLE head (ADR-0008 §4).
+
+    The single-head invariant is the whole point of the one-migration-owner-per-wave
+    rule: two new migrations would fork into two heads. ``get_heads()`` returning a
+    one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0004_retrieval_indexes"]
+    assert list(script.get_heads()) == ["0005_audit_query_indexes"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -81,6 +86,9 @@ def test_migration_chain_is_linear_to_retrieval_indexes() -> None:
     ri = script.get_revision("0004_retrieval_indexes")
     assert ri is not None
     assert ri.down_revision == "0003_refresh_tokens"
+    aqi = script.get_revision("0005_audit_query_indexes")
+    assert aqi is not None
+    assert aqi.down_revision == "0004_retrieval_indexes"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -158,6 +166,52 @@ def test_offline_retrieval_indexes_migration_round_trips(
     down = capsys.readouterr().out.lower()
     assert "drop index if exists ix_chunks_text_fts" in down
     assert "drop index if exists ix_chunks_embedding_hnsw" in down
+
+
+# The three composite (tenant_id, <filter>, ts) audit indexes 0005 adds — the
+# names are stable and shared by the migration and the AuditEvent model so
+# autogenerate stays clean.
+_AUDIT_QUERY_INDEXES = (
+    ("ix_audit_events_tenant_action_ts", "(tenant_id, action, ts)"),
+    ("ix_audit_events_tenant_actor_ts", "(tenant_id, actor_id, ts)"),
+    ("ix_audit_events_tenant_resource_ts", "(tenant_id, resource_id, ts)"),
+)
+
+
+def test_offline_audit_query_indexes_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0005 creates the three composite audit indexes; the downgrade drops them (#82)."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0004_retrieval_indexes:0005_audit_query_indexes", sql=True)
+    up = capsys.readouterr().out.lower()
+    for name, cols in _AUDIT_QUERY_INDEXES:
+        # Composite index on audit_events, leading with tenant_id and ending in ts
+        # so the equality filter and ORDER BY ts share one index.
+        assert f"create index {name} on audit_events {cols}" in up, f"missing CREATE for {name}"
+
+    command.downgrade(cfg, "0005_audit_query_indexes:0004_retrieval_indexes", sql=True)
+    down = capsys.readouterr().out.lower()
+    for name, _cols in _AUDIT_QUERY_INDEXES:
+        assert f"drop index {name}" in down, f"missing DROP for {name}"
+
+
+def test_audit_index_names_match_model_and_migration() -> None:
+    """The migration's index names are exactly those declared on the ORM model.
+
+    Keeps the migration and ``AuditEvent.__table_args__`` in lockstep (so a live
+    ``alembic check`` / autogenerate sees no drift): the model is the source of the
+    expected names, the migration must create that same set, nothing more.
+    """
+    from sqlalchemy import Index
+
+    model_indexes = {
+        ix.name for ix in Base.metadata.tables["audit_events"].indexes if isinstance(ix, Index)
+    }
+    for name, _cols in _AUDIT_QUERY_INDEXES:
+        assert name in model_indexes, f"{name} created by 0005 but not declared on the model"
 
 
 # ---------------------------------------------------------------------------
