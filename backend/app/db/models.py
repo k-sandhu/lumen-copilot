@@ -10,8 +10,9 @@ Tenancy & ownership invariants baked into the schema (spec 0004 §2.1/§2.2):
 * **Every tenant-scoped table** carries a non-null ``tenant_id`` FK → ``tenants``,
   indexed, so the repository tenant predicate (INV-1) is always cheap and the
   RLS backstop (a follow-up, §2.1) has a column to key off.
-* **Ownership-bearing tables** (``collections``, ``documents``, ``chat_sessions``)
-  carry ``owner_id`` FK → ``users`` — the "user sees only their own" default.
+* **Ownership-bearing tables** (``collections``, ``documents``, ``chat_sessions``,
+  ``sources``) carry ``owner_id`` FK → ``users`` — the "user sees only their own"
+  default.
 * ``chunks`` keeps the embedding **in-row** beside ``tenant_id`` + the document
   FK so permission-aware retrieval is one ``WHERE`` clause (spec 0004 §4).
 * ``audit_events`` is append-only (the app DB role gets no UPDATE/DELETE on it —
@@ -163,12 +164,47 @@ class Collection(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class Source(TenantScopedMixin, TimestampMixin, Base):
+    """A connected external source ingested by a connector (ADR-0009 §4).
+
+    Tenant- and owner-scoped, deny-by-default: only the adding user (within
+    their tenant) can retrieve what a source ingests (INV-1/INV-2). ``type`` is
+    the connector name (e.g. ``web``); ``config`` is the connector's opaque,
+    portable JSON (e.g. ``{"url": ..., "mode": ...}``). ``status`` tracks the
+    sync lifecycle (``pending|syncing|ready|error``); ``indexed_count`` is how
+    many documents the last sync produced, ``last_error`` the failure detail.
+    Ingested ``documents`` link back via ``source_id`` and CASCADE on delete, so
+    removing a source removes its docs (ADR-0009 §5).
+    """
+
+    __tablename__ = "sources"
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    type: Mapped[str] = mapped_column(String(50), nullable=False)
+    config: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    indexed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    documents: Mapped[list[Document]] = relationship(back_populates="source")
+
+
 class Document(TenantScopedMixin, TimestampMixin, Base):
     """An uploaded file; ingested into ``chunks`` async (#21). Ownership-bearing."""
 
     __tablename__ = "documents"
     __table_args__ = (
         Index("ix_documents_collection_id", "collection_id"),
+        Index("ix_documents_source_id", "source_id"),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
     )
 
@@ -184,6 +220,13 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
         ForeignKey("collections.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # The source this doc was ingested from; null for direct uploads (ADR-0009
+    # §4). CASCADE so deleting a source removes the docs it produced (§5).
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("sources.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -193,6 +236,7 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     collection: Mapped[Collection] = relationship(back_populates="documents")
+    source: Mapped[Source | None] = relationship(back_populates="documents")
     chunks: Mapped[list[Chunk]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
