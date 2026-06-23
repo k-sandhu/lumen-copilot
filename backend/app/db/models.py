@@ -322,6 +322,12 @@ class AuditEvent(TenantScopedMixin, Base):
     __table_args__ = (
         Index("ix_audit_events_tenant_ts", "tenant_id", "ts"),
         Index("ix_audit_events_actor_id", "actor_id"),
+        # Composite indexes for the filtered, time-ordered GET /audit reads (#82):
+        # each leads with tenant_id (INV-1) and ends with ts so one index serves
+        # both the equality filter and the `ORDER BY ts DESC` the read uses.
+        Index("ix_audit_events_tenant_action_ts", "tenant_id", "action", "ts"),
+        Index("ix_audit_events_tenant_actor_ts", "tenant_id", "actor_id", "ts"),
+        Index("ix_audit_events_tenant_resource_ts", "tenant_id", "resource_id", "ts"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
