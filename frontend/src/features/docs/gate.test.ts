@@ -1,25 +1,31 @@
 /**
- * Dev-page gate semantics (issue #40), proven without re-evaluating the route
- * modules (the flag is fixed per vitest process). Two facts make the OFF path
- * safe:
+ * Dev-page gate semantics (issue #40). Two facts make the OFF path safe:
  *
- *   1. `parseBoolFlag` (the gate's truth source, api/env.ts) treats an unset /
- *      empty / "false" / "0" `VITE_ENABLE_DEV_PAGES` as OFF — so the production
- *      default (no env var) keeps the dev pages off.
- *   2. When OFF, each dev feature exports `route: undefined` / `navItem:
- *      undefined`. `routes/discovery.ts` registers a feature only when its export
- *      is a non-null OBJECT, so an `undefined` export is dropped from BOTH the
- *      router manifest and the nav overlay — `/docs` and `/features` become
- *      unroutable (404) and disappear from the nav, with no edit to the shared
- *      discovery/router seam.
+ *   1. The gate is a BUILD-TIME literal. Each dev feature's `route.tsx`/`nav.ts`
+ *      gates its `lazy(() => import(...))` on the `define`-injected literal
+ *      `__DEV_PAGES_ENABLED__` (vite.config.ts, from `VITE_ENABLE_DEV_PAGES`).
+ *      Because it folds to a literal, Rollup dead-code-eliminates the whole
+ *      `false ? buildRoute() : undefined` branch when OFF — so the dev-page
+ *      chunks, and the internal docs the docs viewer inlines via
+ *      `import.meta.glob`, are NOT emitted at all. That artifact-level guarantee
+ *      is proven by `src/buildguards/dist-no-dev-pages.test.ts` (a real flag-OFF
+ *      `vite build` + a leak grep). A runtime gate alone would still ship the
+ *      bytes, which are fetchable by direct URL regardless of auth.
  *
- * The discovery predicate is replicated here (it is not exported) to lock the
- * contract the gate relies on; `routes/discovery.test.ts` covers the live glob.
- * A final block re-imports the actual dev-feature modules with the flag forced
- * OFF (production env) and asserts they export `undefined` — the direct proof of
- * "flag off ⇒ /docs & /features absent from nav and not routable".
+ *   2. When the gate is OFF, each dev feature exports `route: undefined` /
+ *      `navItem: undefined`. `routes/discovery.ts` registers a feature only when
+ *      its export is a non-null OBJECT, so an `undefined` export is dropped from
+ *      BOTH the router manifest and the nav overlay — `/docs` and `/features`
+ *      become unroutable (404) and disappear from the nav, with no edit to the
+ *      shared discovery/router seam.
+ *
+ * This file locks fact (2)'s contract — the discovery predicate and the flag
+ * truth-table — at the unit level. The vitest process is built with the flag ON
+ * (vite.config.ts defaults `mode === 'test'` to ON, since env files are
+ * git-ignored), so the live `route`/`navItem` exports are exercised on the ON
+ * path here and in `route.test.tsx`; the OFF artifact is fact (1)'s build test.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { parseBoolFlag } from '@/api';
 
 /** Same shape `routes/discovery.ts` requires before it registers a route/nav. */
@@ -60,49 +66,5 @@ describe('discovery drops an undefined descriptor (the OFF export)', () => {
   it('a real descriptor object IS discoverable (the ON export)', () => {
     expect(isDiscoverableDescriptor({ path: '/docs/*' })).toBe(true);
     expect(isDiscoverableDescriptor({ to: '/docs' })).toBe(true);
-  });
-});
-
-describe('flag OFF (production env) drops every dev route + nav export', () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.resetModules();
-  });
-
-  it('docs & feature-catalog export undefined when the flag is off', async () => {
-    // Production mode (so the test-mode default does not apply) with the flag
-    // unset — exactly the production default. Re-import the modules fresh so the
-    // module-level gate re-evaluates against the stubbed env.
-    vi.resetModules();
-    vi.stubEnv('MODE', 'production');
-    vi.stubEnv('VITE_ENABLE_DEV_PAGES', '');
-
-    const [docsRoute, docsNav, fcRoute, fcNav] = await Promise.all([
-      import('./route'),
-      import('./nav'),
-      import('../feature-catalog/route'),
-      import('../feature-catalog/nav'),
-    ]);
-
-    // Undefined exports ⇒ auto-discovery drops them ⇒ /docs & /features are
-    // absent from the nav and unroutable (404).
-    expect(docsRoute.route).toBeUndefined();
-    expect(docsNav.navItem).toBeUndefined();
-    expect(fcRoute.route).toBeUndefined();
-    expect(fcNav.navItem).toBeUndefined();
-  });
-
-  it('the same modules register again when the flag is on', async () => {
-    vi.resetModules();
-    vi.stubEnv('MODE', 'production');
-    vi.stubEnv('VITE_ENABLE_DEV_PAGES', 'true');
-
-    const [docsRoute, fcRoute] = await Promise.all([
-      import('./route'),
-      import('../feature-catalog/route'),
-    ]);
-
-    expect(docsRoute.route?.path).toBe('/docs/*');
-    expect(fcRoute.route?.path).toBe('/features');
   });
 });

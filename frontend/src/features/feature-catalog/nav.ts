@@ -6,10 +6,14 @@
  * production default) this exports `navItem: undefined`, which auto-discovery
  * filters out — so the "Features built" link never appears in the nav overlay.
  */
-import { DEV_PAGES_ENABLED } from '@/api';
 import type { FeatureNavItem } from '@/routes/types';
 
-export const navItem: FeatureNavItem | undefined = DEV_PAGES_ENABLED
+// Gated on the same `define`-injected build-time literal as the route
+// (`__DEV_PAGES_ENABLED__`, vite.config.ts from VITE_ENABLE_DEV_PAGES) — issue
+// #40. OFF (the production default) ⇒ `undefined`, which auto-discovery drops,
+// so the "Features built" link never appears in the nav overlay and the branch
+// is dead-code-eliminated.
+export const navItem: FeatureNavItem | undefined = __DEV_PAGES_ENABLED__
   ? {
       to: '/features',
       label: 'Features built',

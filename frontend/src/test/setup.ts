@@ -8,8 +8,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// A handful of suites run in the `node` environment (e.g. the build-artifact
+// guard `src/build/*.test.ts`), where `window` and the browser globals below do
+// not exist. This setup file runs for EVERY suite, so guard the DOM stubs behind
+// a window check — they're only meaningful under jsdom.
+const hasWindow = typeof window !== 'undefined';
+
 // jsdom lacks matchMedia (used by the theme store). Provide a no-op stub.
-if (!window.matchMedia) {
+if (hasWindow && !window.matchMedia) {
   window.matchMedia = (query: string): MediaQueryList =>
     ({
       matches: false,
