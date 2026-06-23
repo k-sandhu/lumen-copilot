@@ -21,6 +21,7 @@ skipped when no key is present (the default in dev).
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ from app.domain.llm import (
     Role,
     TokenUsage,
 )
-from app.llm.gateway import LLMGateway
+from app.llm.gateway import LLMGateway, aclose_litellm_clients
 
 # --- Test settings ---------------------------------------------------------
 
@@ -529,18 +530,51 @@ def test_litellm_imported_only_under_app_llm() -> None:
 
 
 # --- Key-gated live smoke ---------------------------------------------------
+#
+# These open a REAL outbound socket to OpenRouter, so they are gated twice and
+# skipped by default (issue #94): (1) an explicit opt-in env flag ``RUN_LIVE=1``,
+# AND (2) an ``OPENROUTER_API_KEY`` present. The default offline ``uv run pytest``
+# (no flag, no key) therefore opens no external socket — collected-but-skipped.
+#
+# Even when they DO run, the ``_live_gateway`` fixture closes LiteLLM's reusable
+# process-global async clients in teardown, so no socket leaks into a later test
+# (the leak that ``filterwarnings = error`` used to mis-blame on the next test —
+# the rotating failure characterized in issue #94's root-cause comment).
 
+_RUN_LIVE = os.environ.get("RUN_LIVE", "").strip() not in ("", "0", "false", "False")
+_HAS_KEY = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY", "").strip(),
-    reason="no OPENROUTER_API_KEY set (blank in dev) — live smoke skipped",
+live = pytest.mark.skipif(
+    not (_RUN_LIVE and _HAS_KEY),
+    reason=(
+        "live smoke opted out: needs RUN_LIVE=1 AND OPENROUTER_API_KEY "
+        f"(RUN_LIVE={'set' if _RUN_LIVE else 'unset'}, "
+        f"key={'set' if _HAS_KEY else 'unset'}) — skipped (offline-safe, #94)."
+    ),
 )
-async def test_live_openrouter_chat_smoke() -> None:
-    """One tiny real OpenRouter call end-to-end (skipped without a key)."""
-    settings = Settings()  # type: ignore[call-arg]  # reads real env / .env
-    gw = LLMGateway(settings)
 
-    result = await gw.chat(
+
+@pytest.fixture
+async def _live_gateway() -> AsyncIterator[LLMGateway]:
+    """A gateway whose LiteLLM clients are closed in teardown (#94).
+
+    The finalizer runs ``aclose_litellm_clients`` so the real sockets opened by
+    the live call are released deterministically — not on late GC, which under
+    ``filterwarnings = error`` would raise ``PytestUnraisableExceptionWarning:
+    ResourceWarning: unclosed socket`` against a subsequent test.
+    """
+    settings = Settings()  # type: ignore[call-arg]  # reads real env / .env
+    try:
+        yield LLMGateway(settings)
+    finally:
+        await aclose_litellm_clients()
+
+
+@live
+@pytest.mark.live
+async def test_live_openrouter_chat_smoke(_live_gateway: LLMGateway) -> None:
+    """One tiny real OpenRouter call end-to-end (skipped unless opted in)."""
+    result = await _live_gateway.chat(
         [ChatMessage(role=Role.USER, content="Reply with the single word: pong")]
     )
     assert isinstance(result, Completion)
@@ -548,12 +582,10 @@ async def test_live_openrouter_chat_smoke() -> None:
     assert result.usage.total_tokens >= 0
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY", "").strip(),
-    reason="no OPENROUTER_API_KEY set (blank in dev) — live smoke skipped",
-)
-async def test_live_embed_smoke() -> None:
-    """One tiny real embedding call (skipped without a key).
+@live
+@pytest.mark.live
+async def test_live_embed_smoke(_live_gateway: LLMGateway) -> None:
+    """One tiny real embedding call (skipped unless opted in).
 
     OpenRouter serves embeddings on an OpenAI-compatible endpoint (issue #32);
     the gateway routes ``LLM_EMBEDDING_MODEL`` (default ``openai/baai/bge-m3``)
@@ -562,8 +594,56 @@ async def test_live_embed_smoke() -> None:
     not deep in ingestion.
     """
     settings = Settings()  # type: ignore[call-arg]
-    gw = LLMGateway(settings)
-
-    embeddings = await gw.embed(["lumen copilot smoke test"])
+    embeddings = await _live_gateway.embed(["lumen copilot smoke test"])
     assert len(embeddings) == 1
     assert len(embeddings[0].vector) == settings.llm_embedding_dimensions
+
+
+# --- #94 regression: the gateway's client-close teardown is real ------------
+
+
+async def test_aclose_litellm_clients_closes_module_client_and_clears_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``aclose_litellm_clients`` releases LiteLLM's reusable async clients (#94).
+
+    Proves the teardown hook the live fixture relies on actually closes the
+    process-global ``module_level_aclient`` and clears the per-model client
+    cache — so the live test cannot leak an unclosed socket into the next test,
+    regardless of ordering. Uses fakes so it runs offline (no real socket).
+    """
+    import litellm
+
+    from app.llm.gateway import aclose_litellm_clients
+
+    closed: list[str] = []
+
+    class _FakeHandler:
+        def __init__(self, tag: str) -> None:
+            self._tag = tag
+
+        async def close(self) -> None:
+            closed.append(self._tag)
+
+    class _FakeCache:
+        def __init__(self) -> None:
+            self.cache_dict: dict[str, _FakeHandler] = {
+                "model-a": _FakeHandler("model-a"),
+                "model-b": _FakeHandler("model-b"),
+            }
+
+    monkeypatch.setattr(litellm, "module_level_aclient", _FakeHandler("module"))
+    fake_cache = _FakeCache()
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", fake_cache)
+
+    await aclose_litellm_clients()
+
+    # The module-level client and every cached per-model client were closed...
+    assert set(closed) == {"module", "model-a", "model-b"}
+    # ...and the cache was cleared so a later call rebuilds fresh clients.
+    assert fake_cache.cache_dict == {}
+
+    # Idempotent: a second call against the now-empty cache is a safe no-op.
+    closed.clear()
+    await aclose_litellm_clients()
+    assert closed == ["module"]

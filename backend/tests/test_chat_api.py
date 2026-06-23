@@ -397,10 +397,10 @@ async def test_send_returns_202_with_user_message_and_stream_id(
 
 
 def test_ws_rejects_missing_token(app: FastAPI) -> None:
-    client = TestClient(app)
-    with pytest.raises(Exception):  # noqa: B017 — starlette raises on policy close
-        with client.websocket_connect("/ws/chat/some-stream"):
-            pass
+    with TestClient(app) as client:
+        with pytest.raises(Exception):  # noqa: B017 — starlette raises on policy close
+            with client.websocket_connect("/ws/chat/some-stream"):
+                pass
 
 
 def _fill_replay(backplane: InMemoryBackplane, envs: list[dict[str, object]]) -> None:
@@ -455,12 +455,12 @@ def test_ws_relays_published_envelopes(
         ],
     )
 
-    client = TestClient(app)
-    token = client.post(
-        "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
-    ).json()["access_token"]
-    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
-        received = [ws.receive_json(), ws.receive_json(), ws.receive_json()]
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
+        ).json()["access_token"]
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            received = [ws.receive_json(), ws.receive_json(), ws.receive_json()]
 
     assert [e["type"] for e in received] == ["start", "delta", "done"]
     assert received[-1]["data"]["citationCount"] == 0
@@ -481,13 +481,13 @@ def test_ws_terminal_error_is_terminal(
         ],
     )
 
-    client = TestClient(app)
-    token = client.post(
-        "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
-    ).json()["access_token"]
-    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
-        start = ws.receive_json()
-        err = ws.receive_json()
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
+        ).json()["access_token"]
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            start = ws.receive_json()
+            err = ws.receive_json()
 
     assert start["type"] == "start"
     assert err["type"] == "error"
@@ -535,11 +535,11 @@ def test_ws_denies_same_tenant_other_owner(
         ],
     )
 
-    client = TestClient(app)
-    bob_token = client.post(
-        "/api/v1/auth/login", json={"email": seeded.bob_email, "password": _PASSWORD}
-    ).json()["access_token"]
-    _assert_ws_denied_no_leak(client, stream_id, bob_token)
+    with TestClient(app) as client:
+        bob_token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.bob_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        _assert_ws_denied_no_leak(client, stream_id, bob_token)
 
 
 def test_ws_denies_cross_tenant_subscriber(
@@ -560,11 +560,11 @@ def test_ws_denies_cross_tenant_subscriber(
         ],
     )
 
-    client = TestClient(app)
-    carol_token = client.post(
-        "/api/v1/auth/login", json={"email": seeded.carol_email, "password": _PASSWORD}
-    ).json()["access_token"]
-    _assert_ws_denied_no_leak(client, stream_id, carol_token)
+    with TestClient(app) as client:
+        carol_token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.carol_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        _assert_ws_denied_no_leak(client, stream_id, carol_token)
 
 
 def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _Seeded) -> None:
@@ -573,41 +573,43 @@ def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _
     # to the backplane and persists the assistant message + citation — then the WS
     # relays the lifecycle and GET .../messages reloads the assistant turn WITH
     # its citation (CC-11).
-    client = TestClient(app)
-    token = client.post(
-        "/api/v1/auth/login", json={"email": seeded.alice_email, "password": _PASSWORD}
-    ).json()["access_token"]
-    headers = {"Authorization": f"Bearer {token}"}
-    sid = client.post("/api/v1/chat/sessions", headers=headers, json={"title": "s"}).json()["id"]
-    sent = client.post(
-        f"/api/v1/chat/sessions/{sid}/messages",
-        headers=headers,
-        json={"content": "What is the 2024 standard deduction?"},
-    )
-    assert sent.status_code == 202, sent.text
-    stream_id = sent.json()["stream_id"]
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.alice_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        sid = client.post(
+            "/api/v1/chat/sessions", headers=headers, json={"title": "s"}
+        ).json()["id"]
+        sent = client.post(
+            f"/api/v1/chat/sessions/{sid}/messages",
+            headers=headers,
+            json={"content": "What is the 2024 standard deduction?"},
+        )
+        assert sent.status_code == 202, sent.text
+        stream_id = sent.json()["stream_id"]
 
-    # The background task published the full stream into the replay buffer; relay
-    # it over the WS and assert the lifecycle + a citation event.
-    with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
-        events: list[dict[str, object]] = []
-        for _ in range(50):
-            env = ws.receive_json()
-            events.append(env)
-            if env["type"] in ("done", "error"):
-                break
-    types = [e["type"] for e in events]
-    assert types[0] == "start"
-    assert types[-1] == "done"
-    assert "citation" in [e.get("name") for e in events if e["type"] == "event"]
+        # The background task published the full stream into the replay buffer; relay
+        # it over the WS and assert the lifecycle + a citation event.
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            events: list[dict[str, object]] = []
+            for _ in range(50):
+                env = ws.receive_json()
+                events.append(env)
+                if env["type"] in ("done", "error"):
+                    break
+        types = [e["type"] for e in events]
+        assert types[0] == "start"
+        assert types[-1] == "done"
+        assert "citation" in [e.get("name") for e in events if e["type"] == "event"]
 
-    # History reloads the assistant message WITH its citation (CC-11).
-    history = client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=headers)
-    assert history.status_code == 200
-    items = history.json()["items"]
-    assistant = [m for m in items if m["role"] == "assistant"]
-    assert len(assistant) == 1
-    citations = assistant[0]["citations"]
-    assert len(citations) == 1
-    assert citations[0]["document_name"] == "taxes.pdf"
-    assert citations[0]["chunk_id"] == str(seeded.alice_chunk)
+        # History reloads the assistant message WITH its citation (CC-11).
+        history = client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=headers)
+        assert history.status_code == 200
+        items = history.json()["items"]
+        assistant = [m for m in items if m["role"] == "assistant"]
+        assert len(assistant) == 1
+        citations = assistant[0]["citations"]
+        assert len(citations) == 1
+        assert citations[0]["document_name"] == "taxes.pdf"
+        assert citations[0]["chunk_id"] == str(seeded.alice_chunk)

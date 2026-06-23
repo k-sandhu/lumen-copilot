@@ -9,8 +9,10 @@ Redis, or MinIO is required to import the app or hit ``/health``.
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import sys
+from collections.abc import Iterator
 
 import pytest
 
@@ -65,3 +67,37 @@ def _test_environment() -> None:
     from app.core.config import get_settings
 
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _close_orphan_event_loops() -> Iterator[None]:
+    """Close per-test/-fixture asyncio loops eagerly so no socket leaks (#94).
+
+    Each asyncio event loop on Windows (``SelectorEventLoop``, forced above) owns
+    a wakeup **self-pipe socketpair** (two ``127.0.0.1`` loopback sockets). When a
+    loop is dropped without ``close()`` — which pytest-asyncio does for some
+    scoped-fixture loops under ``asyncio_mode = "auto"`` — that socketpair is only
+    released on a *later* cyclic GC pass. If that pass fires mid-test, CPython's
+    unraisable hook raises ``PytestUnraisableExceptionWarning: ResourceWarning:
+    unclosed socket`` against **whatever test is running then** — the rotating,
+    order-dependent flake characterized in issue #94 (every module passes in
+    isolation; only the full suite, and only on whatever happens to run next,
+    fails).
+
+    Closing orphaned (non-running, non-closed) loops in teardown releases those
+    self-pipe sockets at a deterministic point — bounded to this fixture's own
+    teardown window — so the suite is order-independent. ``gc.collect()`` first
+    makes any just-dropped loop reachable for the sweep. This is a test-runtime
+    concern only; production loops are owned by uvicorn. (See also the live-socket
+    leg of #94: the LLM live smokes are skipped by default and close LiteLLM's
+    HTTP clients in their own teardown — ``app.llm.aclose_litellm_clients``.)
+    """
+    yield
+    gc.collect()
+    for obj in gc.get_objects():
+        if isinstance(obj, asyncio.AbstractEventLoop):
+            try:
+                if not obj.is_running() and not obj.is_closed():
+                    obj.close()
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                pass
