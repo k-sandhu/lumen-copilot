@@ -25,7 +25,13 @@ from app.domain.entities import AuditOutcome
 
 
 def test_taxonomy_is_exactly_spec_0004_set() -> None:
-    """The action enum is precisely the spec 0004 §2.4 taxonomy — no more, no less."""
+    """The action enum is the spec 0004 §2.4 taxonomy + the ADR-0009 source events.
+
+    Spec 0004 §2.4 pins the MVP taxonomy; ADR-0009 §5 (the connector framework,
+    accepted after spec 0004) requires an audit event on every source add / sync /
+    delete, so the ``source.*`` trio extends the set additively (deny-by-default is
+    preserved — the set only grows).
+    """
     assert {a.value for a in AuditAction} == {
         "auth.login",
         "auth.login_failed",
@@ -35,6 +41,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "document.viewed",
         "document.downloaded",
         "document.deleted",
+        # Connector sources (ADR-0009 §5) — additive to the spec 0004 MVP set.
+        "source.added",
+        "source.synced",
+        "source.deleted",
         "retrieval.query",
         "answer.generated",
         "permission.denied",
