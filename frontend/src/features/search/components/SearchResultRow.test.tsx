@@ -1,0 +1,63 @@
+/**
+ * SearchResultRow (#84): a ranked result row carries the trust signals — the
+ * matched snippet is <mark>-highlighted from match_spans, the why-it-matched
+ * rationale, owner, freshness, and a permission pill all render. A `restricted`
+ * result shows the restricted pill (content withheld) rather than the granted one.
+ */
+import { describe, it, expect } from 'vitest';
+import { render, screen, within } from '@testing-library/react';
+import type { SearchResult } from '@/api';
+import { SearchResultRow } from './SearchResultRow';
+
+const base: SearchResult = {
+  id: 'r1',
+  title: 'PTO Policy 2026',
+  snippet: 'Employees accrue 20 days of paid time off per year.',
+  match_spans: [{ start: 0, end: 9 }], // "Employees"
+  why_matched: 'semantic + title',
+  source: 'upload',
+  type: 'document',
+  owner: 'Dana Ruiz',
+  last_indexed: new Date().toISOString(),
+  permission: 'allowed',
+};
+
+describe('SearchResultRow', () => {
+  it('renders the title, type, owner and why-it-matched rationale', () => {
+    render(<SearchResultRow result={base} />);
+    const row = screen.getByRole('article', { name: /PTO Policy 2026/i });
+    expect(within(row).getByRole('heading', { name: 'PTO Policy 2026' })).toBeInTheDocument();
+    expect(within(row).getByText('document')).toBeInTheDocument();
+    expect(within(row).getByText('Dana Ruiz')).toBeInTheDocument();
+    expect(within(row).getByText(/why it matched/i)).toBeInTheDocument();
+    expect(within(row).getByText(/semantic \+ title/i)).toBeInTheDocument();
+  });
+
+  it('highlights the matched span with <mark>', () => {
+    const { container } = render(<SearchResultRow result={base} />);
+    const marks = container.querySelectorAll('mark');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]?.textContent).toBe('Employees');
+  });
+
+  it('shows a granted permission pill for an allowed result', () => {
+    render(<SearchResultRow result={base} />);
+    expect(screen.getByText(/you have access/i)).toBeInTheDocument();
+  });
+
+  it('shows a restricted permission pill (content withheld) for a restricted result', () => {
+    render(<SearchResultRow result={{ ...base, permission: 'restricted' }} />);
+    expect(screen.getByText(/withheld/i)).toBeInTheDocument();
+  });
+
+  it('marks a stale result as past its freshness window', () => {
+    const old = new Date(Date.now() - 200 * 24 * 3600_000).toISOString();
+    const { container } = render(<SearchResultRow result={{ ...base, last_indexed: old }} />);
+    expect(container.querySelector('.lc-fresh--stale')).toBeTruthy();
+  });
+
+  it('omits the owner line when the result has no owner', () => {
+    render(<SearchResultRow result={{ ...base, owner: null }} />);
+    expect(screen.queryByText('Dana Ruiz')).not.toBeInTheDocument();
+  });
+});
