@@ -488,6 +488,73 @@ export interface RiskTierList {
   items: RiskTier[];
 }
 
+// --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
+
+/**
+ * The connector kind. `web` is the first connector (ADR-0009 §2): paste a public
+ * URL, we ingest it — zero source-side setup. Future connectors add their own
+ * values here, each behind its own ADR.
+ */
+export type SourceType = 'web';
+
+/**
+ * How a `web` source's URL is interpreted (ADR-0009 §2). `page` = one URL → one
+ * document; `feed` = an RSS/Atom feed → many; `sitemap` = a sitemap.xml → many.
+ * The server detects the mode from the fetched content.
+ */
+export type WebSourceMode = 'page' | 'feed' | 'sitemap';
+
+/**
+ * Sync lifecycle for the connector health grid (ADR-0009 §4). `pending` = added,
+ * not yet synced; `syncing` = a sync is in flight; `ready` = last sync succeeded;
+ * `error` = the last sync failed (see `last_error`).
+ */
+export type SourceStatus = 'pending' | 'syncing' | 'ready' | 'error';
+
+/** Connector configuration. For the `web` connector: the fetched url + detected mode. */
+export interface SourceConfig {
+  /** The public URL this source ingests (http/https only; SSRF-checked). */
+  url: string;
+  mode: WebSourceMode;
+}
+
+/**
+ * One connected source, tenant- and owner-scoped (ADR-0009 §4/§5, spec 0004
+ * INV-1/INV-2). Ingested content is retrievable only by the owner within tenant.
+ */
+export interface Source {
+  id: string;
+  type: SourceType;
+  config: SourceConfig;
+  status: SourceStatus;
+  /** Documents this source has ingested (0 until the first sync completes). */
+  indexed_count: number;
+  /** When the last successful sync finished (null before the first sync). */
+  last_synced_at?: string | null;
+  /** Failure reason when status is error. */
+  last_error?: string;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /sources — a cursor page of sources. */
+export interface SourceList {
+  items: Source[];
+  next_cursor?: string | null;
+}
+
+/**
+ * POST /sources body. For the `web` connector: `{type: 'web', url}`. The server
+ * validates + SSRF-checks the URL; an invalid or blocked URL → 422 (INV-8,
+ * ADR-0009 §3).
+ */
+export interface SourceCreate {
+  type: SourceType;
+  /** The public URL to ingest (http/https only). */
+  url: string;
+}
+
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
 // Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
 export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';
