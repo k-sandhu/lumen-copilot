@@ -33,6 +33,9 @@ export { listModels } from './models';
 export { search } from './search';
 export { listAuditEvents } from './audit';
 export { listMembers, getModelGovernance, getRiskTiers } from './admin';
+// Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
+// public one is already re-exported above, so we expose only the functions here.
+export { listSources, createSource, syncSource, deleteSource } from './sources';
 export {
   getAccessToken,
   hasAccessToken,
