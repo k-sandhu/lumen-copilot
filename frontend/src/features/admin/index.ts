@@ -4,9 +4,13 @@
  * deep imports). The whole slice is read-only governance (ADR-0007 §4).
  */
 export { AdminPage } from './components/AdminPage';
+export { AdminHeader } from './components/AdminHeader';
+export { AdminTabs, type AdminTab } from './components/AdminTabs';
+export { adminTabIds } from './components/tabIds';
 export { MembersPanel } from './components/MembersPanel';
 export { ModelGovernancePanel } from './components/ModelGovernancePanel';
 export { RiskTierPanel } from './components/RiskTierPanel';
+export { DataMinimizationPanel } from './components/DataMinimizationPanel';
 export {
   useMembers,
   useModelGovernance,
