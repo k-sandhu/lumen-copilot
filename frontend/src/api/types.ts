@@ -260,6 +260,234 @@ export interface SendMessageResponse {
   stream_id: string;
 }
 
+// --- Search (contracts/openapi.yaml §search, M2 #80) ---
+
+/** Where a result originated (`connector` reserved; framework is post-MVP). */
+export type ResultSource = 'upload' | 'chat' | 'connector';
+
+/**
+ * Per-result permission outcome. Trimmed results are normally `allowed`;
+ * `restricted` is metadata-only (exists, but content withheld). Passages the
+ * caller may not see at all are never returned — counted in `hidden_count`
+ * (spec 0004 INV-2).
+ */
+export type PermissionState = 'allowed' | 'restricted';
+
+/** A character span within a snippet that matched the query (for highlighting). */
+export interface MatchSpan {
+  start: number;
+  end: number;
+}
+
+/** One permission-trimmed ranked search result (spec 0004 INV-1/INV-2). */
+export interface SearchResult {
+  id: string;
+  title: string;
+  /** Excerpt of the matched passage. */
+  snippet: string;
+  /** Character spans within `snippet` that matched the query. */
+  match_spans: MatchSpan[];
+  /** Human-readable explanation of why this result ranked. */
+  why_matched: string;
+  source: ResultSource;
+  /** Content type of the result (e.g. document, message). */
+  type: string;
+  /** Owning principal id, when known (null for system/connector content). */
+  owner?: string | null;
+  /** Freshness — when this result was last indexed. */
+  last_indexed: string;
+  permission: PermissionState;
+  /** Source document id when the result resolves to a document (click-through). */
+  document_id?: string;
+  /** Optional retrieval/rerank score. */
+  score?: number;
+}
+
+/**
+ * A citation backing the direct answer — references a passage present in this
+ * response's `results` (by `result_id`), so an answer can never cite a passage
+ * the caller could not retrieve (spec 0004 INV-3).
+ */
+export interface SearchCitation {
+  /** Id of the SearchResult this citation refers to. */
+  result_id: string;
+  /** The specific cited passage text (a substring of the result snippet). */
+  snippet?: string;
+  char_start?: number;
+  char_end?: number;
+}
+
+/**
+ * An optional synthesized answer. Present only when the permitted results
+ * support it; every claim is backed by `citations` (spec 0004 INV-3).
+ */
+export interface DirectAnswer {
+  /** The synthesized answer (rendered as sanitized markdown). */
+  text: string;
+  citations: SearchCitation[];
+}
+
+/** 200 from GET /search — a page of permission-trimmed ranked results. */
+export interface SearchResponse {
+  /** The query that produced this page (echoed back). */
+  query: string;
+  results: SearchResult[];
+  /** Optional cited answer; omitted when nothing permitted answers the query. */
+  direct_answer?: DirectAnswer;
+  /**
+   * How many otherwise-matching results were withheld because they are outside
+   * the caller's permissions (spec 0004 INV-2).
+   */
+  hidden_count: number;
+  next_cursor?: string | null;
+}
+
+/** Query filters for GET /search (`q` required). */
+export interface SearchQuery {
+  q: string;
+  collection_id?: string;
+  source?: ResultSource;
+  /** Restrict to one content type (e.g. document, message). */
+  type?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+// --- Audit (contracts/openapi.yaml §audit, M2 #80) ---
+
+/** Audit event taxonomy (spec 0004 §2.4). */
+export type AuditEventType =
+  | 'auth.login'
+  | 'auth.login_failed'
+  | 'auth.logout'
+  | 'collection.created'
+  | 'document.uploaded'
+  | 'document.viewed'
+  | 'document.downloaded'
+  | 'document.deleted'
+  | 'retrieval.query'
+  | 'answer.generated'
+  | 'permission.denied'
+  | 'action.requested'
+  | 'action.approved'
+  | 'action.executed';
+
+/** The outcome recorded for an audit event (spec 0004 §2.4). */
+export type AuditDecision = 'allowed' | 'denied' | 'error';
+
+/** Whether a retrieval candidate was allowed into the result set or excluded. */
+export type AuditCandidateDisposition = 'allow' | 'exclude';
+
+/**
+ * One retrieval candidate considered for a decision, and whether it was allowed
+ * or excluded — with the reason. The provenance that makes a permission/answer
+ * decision reviewable (spec 0004 §2.4).
+ */
+export interface AuditCandidate {
+  resource_id: string;
+  disposition: AuditCandidateDisposition;
+  /** Why it was allowed or excluded (e.g. "in allow-set", "owner mismatch"). */
+  reason: string;
+  score?: number;
+}
+
+/** Why a decision was made — candidate dispositions plus the raw recorded payload. */
+export interface AuditProvenance {
+  candidates: AuditCandidate[];
+  /** The raw recorded metadata payload (model id, query hash, etc.). */
+  raw?: Record<string, unknown>;
+}
+
+/** One append-only audit event (spec 0004 §2.4). */
+export interface AuditEvent {
+  id: string;
+  /** Event time (UTC ISO-8601). */
+  ts: string;
+  /** The acting principal — a user id, or `system` / `anonymous`. */
+  actor: string;
+  tenant_id: string;
+  event_type: AuditEventType;
+  /** The resource the event touched, when applicable. */
+  resource_id?: string | null;
+  decision: AuditDecision;
+  provenance: AuditProvenance;
+}
+
+/** 200 from GET /audit — a cursor page of audit events (newest → oldest). */
+export interface AuditEventList {
+  items: AuditEvent[];
+  next_cursor?: string | null;
+}
+
+/** Query filters for GET /audit (admin / security only). */
+export interface AuditQuery {
+  /** One actor (user id, or `system`/`anonymous`). */
+  actor?: string;
+  event_type?: AuditEventType;
+  resource_id?: string;
+  /** Inclusive lower bound on event timestamp (UTC ISO-8601). */
+  from?: string;
+  /** Exclusive upper bound on event timestamp (UTC ISO-8601). */
+  to?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+// --- Admin (contracts/openapi.yaml §admin, M2 #80) ---
+
+/** A tenant member and their role(s) for the admin roster. */
+export interface Member {
+  id: string;
+  email: string;
+  /** The member's tenant roles (MVP RBAC, spec 0004 §2.3). */
+  role: UserRole[];
+}
+
+/** 200 from GET /admin/members — a cursor page of members. */
+export interface MemberList {
+  items: Member[];
+  next_cursor?: string | null;
+}
+
+/** One allowed model and the governance tier it maps to. */
+export interface ModelGovernanceEntry {
+  /** A model id (e.g. anthropic/claude-opus-4.8). */
+  model_id: string;
+  /** The governance tier this model is approved at. */
+  tier: string;
+  /** Display name for the admin console. */
+  label?: string;
+}
+
+/** A governance tier referenced by allowed models. */
+export interface ModelGovernanceTier {
+  id: string;
+  description: string;
+}
+
+/** 200 from GET /admin/model-governance — read-only model governance. */
+export interface ModelGovernance {
+  allowed_models: ModelGovernanceEntry[];
+  tiers: ModelGovernanceTier[];
+}
+
+/** Read-before-write tier identifiers (spec 0004 §2.5). */
+export type RiskTierId = 'T0' | 'T1' | 'T2' | 'T3';
+
+/** One read-before-write risk tier (spec 0004 §2.5). */
+export interface RiskTier {
+  tier: RiskTierId;
+  /** What this tier means / example actions. */
+  description: string;
+  /** The approval this tier requires. */
+  approval: string;
+}
+
+/** 200 from GET /admin/risk-tiers — the risk-tier reference (T0–T3). */
+export interface RiskTierList {
+  items: RiskTier[];
+}
+
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
 // Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
 export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';

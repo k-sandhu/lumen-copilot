@@ -1,16 +1,26 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.1.0
+  version: 0.2.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
 
 
-    This revision (0.1.0) freezes the **grounded-chat MVP wire** (issue #37,
+    Revision 0.1.0 froze the **grounded-chat MVP wire** (issue #37,
     ADR-0006 Phase 0): auth, collections, documents, chat, and the model
     picker. Streaming assistant answers ride the WebSocket envelope
     (`websocket-envelopes.schema.json`); request/response stays REST (ADR-0003).
+
+
+    This revision (0.2.0) **additively** freezes the **M2 Trust-Surfaces wire**
+    (issue #80, ADR-0006 Phase 0 / ADR-0008 wave 0): `GET /search`
+    (permission-trimmed, cited grounded search), `GET /audit` (the append-only
+    audit trail with provenance), and the read-only `/admin/*` governance
+    surfaces (members, model governance, risk tiers). These are the frozen
+    hand-off artifact that gates the parallel M2 build slices; no shape from
+    0.1.0 changed. All three are REST request/response — no new WebSocket
+    envelope shapes were required.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -452,6 +462,171 @@ paths:
               schema: { $ref: "#/components/schemas/ModelList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  # --- Search (M2: grounded, permission-trimmed, cited) : #80 ----------------
+  /search:
+    get:
+      operationId: search
+      summary: Permission-trimmed ranked search, with an optional cited answer.
+      description: >
+        Runs the query through the `retrieval/` chokepoint (spec 0004 §2.2): the
+        ranked results contain ONLY passages in the caller's effective allow-set
+        (INV-2) within their tenant (INV-1). Passages the caller may not see are
+        never returned; they are counted in `hidden_count` so the UI can disclose
+        "N results hidden by your permissions" without leaking their content.
+
+
+        When the query is answerable from the permitted results the response MAY
+        include a `direct_answer` — a short synthesized answer whose every claim
+        is backed by `citations[]` that reference passages present in `results`
+        (INV-3, citation integrity). When nothing answers it, `direct_answer` is
+        omitted (prefer "no answer" over an unsourced claim, mission filter #2).
+      tags: [search]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+          description: The search query (lexical + semantic; ranked).
+        - name: collection_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Restrict to one collection.
+        - name: source
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/ResultSource" }
+          description: Restrict to results from one source kind.
+        - name: type
+          in: query
+          required: false
+          schema: { type: string }
+          description: Restrict to one content type (e.g. document, message).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of permission-trimmed ranked results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # --- Audit trail (M2: provenance-rich, admin/security only) : #80 ----------
+  /audit:
+    get:
+      operationId: listAuditEvents
+      summary: The append-only audit trail (admin / security only).
+      description: >
+        Reads the one append-only audit sink (spec 0004 §2.4). Restricted to the
+        `admin` and `security` roles; any other role (incl. `member`) receives
+        **403** (INV-5). Events are tenant-scoped — a caller only ever sees their
+        own tenant's events (INV-1). Each event carries `provenance` so a reviewer
+        can see WHY a retrieval/answer decision was made, including the candidate
+        passages that were allowed vs. excluded and the reason for each.
+
+
+        Default ordering is newest → oldest; `from`/`to` bound the time window.
+      tags: [audit]
+      parameters:
+        - name: actor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter to one actor (user id, or `system`/`anonymous`).
+        - name: event_type
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/AuditEventType" }
+          description: Filter to one event type.
+        - name: resource_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter to events touching one resource.
+        - name: from
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: Inclusive lower bound on event timestamp (UTC ISO-8601).
+        - name: to
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: Exclusive upper bound on event timestamp (UTC ISO-8601).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of audit events (newest → oldest).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditEventList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # --- Admin (M2: read-only governance surfaces, admin only) : #80 -----------
+  /admin/members:
+    get:
+      operationId: listMembers
+      summary: The tenant's members and their roles (admin only).
+      description: >
+        Read-only roster for the admin console. Restricted to the `admin` role;
+        any other role receives **403** (INV-5). Tenant-scoped (INV-1): only the
+        caller's own tenant's members are returned.
+      tags: [admin]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of members.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/model-governance:
+    get:
+      operationId: getModelGovernance
+      summary: Which models are allowed, by governance tier (admin only).
+      description: >
+        Read-only view of model governance for the admin console: the set of
+        models permitted for this tenant and the governance tiers they map to.
+        Restricted to the `admin` role; otherwise **403** (INV-5).
+      tags: [admin]
+      responses:
+        "200":
+          description: Model governance configuration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelGovernance" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/risk-tiers:
+    get:
+      operationId: getRiskTiers
+      summary: The read-before-write risk tiers T0–T3 (admin only).
+      description: >
+        Read-only reference of the action risk tiers (spec 0004 §2.5): T0
+        (read-only) through T3 (destructive/irreversible external), each with its
+        description and the approval it requires. Restricted to the `admin` role;
+        otherwise **403** (INV-5).
+      tags: [admin]
+      responses:
+        "200":
+          description: The risk-tier reference (T0–T3).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RiskTierList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   parameters:
     Cursor:
@@ -777,6 +952,305 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ChatModelInfo" }
 
+    # --- Search (M2, #80) ---------------------------------------------------
+    ResultSource:
+      type: string
+      description: >
+        Where a result originated. `upload` = a user-uploaded document; `chat` =
+        a prior chat message; `connector` = an external connected source (the
+        connector framework is post-MVP, spec 0004 §2.2 — the value is reserved).
+      enum: [upload, chat, connector]
+
+    PermissionState:
+      type: string
+      description: >
+        Per-result permission outcome. Permission-trimmed results are normally
+        `allowed`; `restricted` is for results surfaced as metadata-only (the
+        caller may see that it exists but not its full content). Passages the
+        caller may not see at all are never returned — they are counted in
+        `hidden_count` instead (spec 0004 INV-2).
+      enum: [allowed, restricted]
+
+    MatchSpan:
+      type: object
+      additionalProperties: false
+      description: A character span within `snippet` that matched the query (for highlighting).
+      required: [start, end]
+      properties:
+        start: { type: integer, minimum: 0 }
+        end: { type: integer, minimum: 0 }
+
+    SearchResult:
+      type: object
+      additionalProperties: false
+      description: >
+        One permission-trimmed ranked result. Always within the caller's tenant
+        and effective allow-set (spec 0004 INV-1/INV-2).
+      required:
+        [id, title, snippet, match_spans, why_matched, source, type, permission, last_indexed]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        snippet: { type: string, description: Excerpt of the matched passage. }
+        match_spans:
+          type: array
+          description: Character spans within `snippet` that matched the query.
+          items: { $ref: "#/components/schemas/MatchSpan" }
+        why_matched:
+          type: string
+          description: Human-readable explanation of why this result ranked (e.g. "semantic + title").
+        source: { $ref: "#/components/schemas/ResultSource" }
+        type:
+          type: string
+          description: Content type of the result (e.g. document, message).
+        owner:
+          type: [string, "null"]
+          format: uuid
+          description: Owning principal id, when known (null for system/connector content).
+        last_indexed:
+          type: string
+          format: date-time
+          description: Freshness — when this result was last indexed.
+        permission: { $ref: "#/components/schemas/PermissionState" }
+        document_id:
+          type: string
+          format: uuid
+          description: Source document id when the result resolves to a document (for click-through).
+        score:
+          type: number
+          description: Optional retrieval/rerank score.
+
+    SearchCitation:
+      type: object
+      additionalProperties: false
+      description: >
+        A citation backing the direct answer. References a passage that is present
+        in this response's `results` (by `result_id`) so the answer can never cite
+        a passage the caller could not retrieve (spec 0004 INV-3).
+      required: [result_id]
+      properties:
+        result_id:
+          type: string
+          format: uuid
+          description: Id of the SearchResult this citation refers to.
+        snippet:
+          type: string
+          description: The specific cited passage text (a substring of the result snippet).
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+
+    DirectAnswer:
+      type: object
+      additionalProperties: false
+      description: >
+        An optional synthesized answer. Present only when the permitted results
+        support it; every claim is backed by `citations` (spec 0004 INV-3).
+      required: [text, citations]
+      properties:
+        text: { type: string, description: The synthesized answer (rendered as sanitized markdown). }
+        citations:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/SearchCitation" }
+
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [query, results, hidden_count]
+      properties:
+        query: { type: string, description: The query that produced this page (echoed back). }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/SearchResult" }
+        direct_answer:
+          allOf: [{ $ref: "#/components/schemas/DirectAnswer" }]
+          description: Optional cited answer; omitted when nothing permitted answers the query.
+        hidden_count:
+          type: integer
+          minimum: 0
+          description: >
+            How many otherwise-matching results were withheld because they are
+            outside the caller's permissions (spec 0004 INV-2). Lets the UI
+            disclose the trim without leaking the hidden content.
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    # --- Audit (M2, #80) ----------------------------------------------------
+    AuditEventType:
+      type: string
+      description: Audit event taxonomy (spec 0004 §2.4).
+      enum:
+        - auth.login
+        - auth.login_failed
+        - auth.logout
+        - collection.created
+        - document.uploaded
+        - document.viewed
+        - document.downloaded
+        - document.deleted
+        - retrieval.query
+        - answer.generated
+        - permission.denied
+        - action.requested
+        - action.approved
+        - action.executed
+
+    AuditDecision:
+      type: string
+      description: The outcome recorded for the event (spec 0004 §2.4 `outcome`).
+      enum: [allowed, denied, error]
+
+    AuditCandidate:
+      type: object
+      additionalProperties: false
+      description: >
+        One retrieval candidate considered for a decision, and whether it was
+        allowed into the result set or excluded — with the reason. This is the
+        provenance that makes a permission/answer decision reviewable (spec 0004
+        §2.4: retrieval.query / answer.generated carry retrieved doc ids).
+      required: [resource_id, disposition, reason]
+      properties:
+        resource_id:
+          type: string
+          description: Id of the candidate passage/document/chunk considered.
+        disposition:
+          type: string
+          enum: [allow, exclude]
+          description: Whether the candidate was allowed into the result set or excluded.
+        reason:
+          type: string
+          description: Why it was allowed or excluded (e.g. "in allow-set", "owner mismatch").
+        score:
+          type: number
+          description: Optional retrieval/rerank score for the candidate.
+
+    AuditProvenance:
+      type: object
+      additionalProperties: false
+      description: Why the decision was made — candidate dispositions plus the raw recorded payload.
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          description: The candidates considered, each allowed or excluded with a reason.
+          items: { $ref: "#/components/schemas/AuditCandidate" }
+        raw:
+          type: object
+          additionalProperties: true
+          description: The raw recorded metadata payload for the event (model id, query hash, etc.).
+
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      description: One append-only audit event (spec 0004 §2.4).
+      required: [id, ts, actor, tenant_id, event_type, decision, provenance]
+      properties:
+        id: { type: string, format: uuid }
+        ts: { type: string, format: date-time, description: Event time (UTC ISO-8601). }
+        actor:
+          type: string
+          description: The acting principal — a user id, or `system` / `anonymous`.
+        tenant_id: { type: string, format: uuid }
+        event_type: { $ref: "#/components/schemas/AuditEventType" }
+        resource_id:
+          type: [string, "null"]
+          description: The resource the event touched, when applicable.
+        decision: { $ref: "#/components/schemas/AuditDecision" }
+        provenance: { $ref: "#/components/schemas/AuditProvenance" }
+
+    AuditEventList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        next_cursor:
+          type: [string, "null"]
+
+    # --- Admin (M2, #80) ----------------------------------------------------
+    Member:
+      type: object
+      additionalProperties: false
+      description: A tenant member and their role(s) for the admin roster.
+      required: [id, email, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role:
+          type: array
+          description: The member's tenant roles (MVP RBAC, spec 0004 §2.3).
+          items: { type: string, enum: [member, admin, security] }
+
+    MemberList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
+        next_cursor:
+          type: [string, "null"]
+
+    ModelGovernanceEntry:
+      type: object
+      additionalProperties: false
+      description: One allowed model and the governance tier it maps to.
+      required: [model_id, tier]
+      properties:
+        model_id: { type: string, description: A model id (e.g. anthropic/claude-opus-4.8). }
+        tier:
+          type: string
+          description: The governance tier this model is approved at.
+        label: { type: string, description: Display name for the admin console. }
+
+    ModelGovernance:
+      type: object
+      additionalProperties: false
+      description: Read-only model-governance view for the admin console (#80).
+      required: [allowed_models, tiers]
+      properties:
+        allowed_models:
+          type: array
+          description: The models permitted for this tenant, with their governance tier.
+          items: { $ref: "#/components/schemas/ModelGovernanceEntry" }
+        tiers:
+          type: array
+          description: The governance tiers referenced by allowed_models.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, description]
+            properties:
+              id: { type: string }
+              description: { type: string }
+
+    RiskTier:
+      type: object
+      additionalProperties: false
+      description: One read-before-write risk tier (spec 0004 §2.5).
+      required: [tier, description, approval]
+      properties:
+        tier:
+          type: string
+          enum: [T0, T1, T2, T3]
+        description: { type: string, description: What this tier means / example actions. }
+        approval:
+          type: string
+          description: The approval this tier requires (e.g. "none", "owner", "human approval + risk tier").
+
+    RiskTierList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RiskTier" }
+
     # Single problem model for ALL errors (RFC-9457 application/problem+json).
     # Every endpoint's error responses reference this; both tiers depend on it.
     Problem:
@@ -813,6 +1287,14 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     Unauthorized:
       description: Missing, invalid, or expired credentials (INV-4).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: >
+        Authenticated but not authorized for this action — the caller lacks the
+        required role (e.g. a non-admin on /admin/*, a non-security/admin on
+        /audit). Wrong-role → 403 (INV-5).
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -859,3 +1341,9 @@ tags:
     description: Chat sessions, history, and message send (answer streams over WS).
   - name: models
     description: The selectable chat-model registry (picker).
+  - name: search
+    description: Permission-trimmed, cited grounded search across the caller's sources.
+  - name: audit
+    description: The append-only audit trail with provenance (admin / security only).
+  - name: admin
+    description: Read-only tenant governance — members, model governance, risk tiers (admin only).
