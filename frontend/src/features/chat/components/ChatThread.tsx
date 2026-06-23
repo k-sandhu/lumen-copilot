@@ -4,16 +4,27 @@
  * citations) when one is in flight. Implements every state: loading, empty,
  * error (retry), populated, and streaming-in-progress.
  *
+ * Trust-signal re-skin (#89): for each assistant turn it derives the model-badge
+ * label (from the models registry), the RetrievalTrace summary/steps, and the
+ * per-source freshness — all from data the turn ALREADY has (citations, tools,
+ * model id, timestamps); no contract change.
+ *
  * Autoscroll follows new content but YIELDS to the user when they scroll up
  * (frontend/AGENTS.md "Streaming UX"). On a stream error / disconnect it shows a
  * terminal banner with a Retry affordance (AC-5).
  */
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import { ApiError } from '@/api';
-import type { Message, WsProblem } from '@/api';
+import type { ChatModelInfo, Message, WsProblem } from '@/api';
 import { ScrollArea } from '@/components/ScrollArea';
-import { MessageBubble } from './MessageBubble';
+import { MessageBubble, type SourceMeta } from './MessageBubble';
 import { fromRestCitation, fromWsCitation, type UiCitation } from '../model/citation';
+import {
+  buildRetrievalSummary,
+  isStale,
+  modelBadgeLabel,
+  relativeTime,
+} from '../model/presentation';
 import type { StreamPhase, ToolActivity } from '../model/streamReducer';
 import type { ChatCitation } from '@/api';
 
@@ -28,6 +39,8 @@ export interface LiveAnswer {
 
 export interface ChatThreadProps {
   messages: Message[];
+  /** Model registry, for resolving a model id → friendly badge label. */
+  models?: ChatModelInfo[];
   isLoading: boolean;
   isError: boolean;
   error: unknown;
@@ -36,11 +49,35 @@ export interface ChatThreadProps {
   live: LiveAnswer | null;
   /** Retry the last send after a stream error / disconnect (AC-5). */
   onRetryStream: () => void;
-  onOpenCitation: (citation: UiCitation) => void;
+  onOpenCitation: (citation: UiCitation, meta?: SourceMeta) => void;
+}
+
+/** Friendly model label from the registry, falling back to the id's tail. */
+function labelForModel(
+  modelId: string | undefined,
+  models: ChatModelInfo[] | undefined,
+): string | undefined {
+  const friendly = models?.find((m) => m.id === modelId)?.label;
+  return modelBadgeLabel(modelId, friendly) ?? undefined;
+}
+
+/**
+ * Per-source freshness for a turn. We have no per-citation timestamp on the
+ * wire, so the answer's evidence recency is the message time — surfaced so an
+ * answer's evidence age is never hidden (mission "freshness").
+ */
+function sourceMetaFor(citations: UiCitation[], iso: string | undefined): Record<string, SourceMeta> {
+  const freshness = relativeTime(iso);
+  if (!freshness) return {};
+  const stale = isStale(iso);
+  const meta: Record<string, SourceMeta> = {};
+  for (const c of citations) meta[c.documentId] = { freshness, stale };
+  return meta;
 }
 
 export function ChatThread({
   messages,
+  models,
   isLoading,
   isError,
   error,
@@ -111,49 +148,68 @@ export function ChatThread({
           </p>
         )}
 
-        {messages.map((message) => (
-          <MessageBubble
-            key={message.id}
-            role={message.role}
-            content={message.content}
-            model={message.model}
-            citations={(message.citations ?? []).map(fromRestCitation)}
-            showNoCitationsNotice={message.role === 'assistant' && (message.citations ?? []).length === 0}
-            onOpenCitation={onOpenCitation}
-          />
-        ))}
-
-        {live && (
-          <>
+        {messages.map((message) => {
+          const citations = (message.citations ?? []).map(fromRestCitation);
+          const isAssistant = message.role === 'assistant';
+          const trace = isAssistant
+            ? buildRetrievalSummary(citations, [])
+            : { summary: '', steps: [], hasContent: false };
+          return (
             <MessageBubble
-              role="assistant"
-              content={live.text}
-              model={live.model}
-              citations={live.citations.map(fromWsCitation)}
-              tools={live.tools}
-              streaming={live.phase === 'streaming'}
-              showNoCitationsNotice={live.phase === 'done' && live.citations.length === 0}
+              key={message.id}
+              role={message.role}
+              content={message.content}
+              model={message.model}
+              modelLabel={isAssistant ? labelForModel(message.model, models) : undefined}
+              citations={citations}
+              sourceMeta={isAssistant ? sourceMetaFor(citations, message.created_at) : undefined}
+              traceSummary={isAssistant && trace.hasContent ? trace.summary : undefined}
+              traceSteps={trace.steps}
+              showNoCitationsNotice={isAssistant && citations.length === 0}
               onOpenCitation={onOpenCitation}
             />
-            {live.phase === 'error' && (
-              <div
-                role="alert"
-                className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm"
-              >
-                <p className="text-danger">
-                  {live.problem?.detail ?? live.problem?.title ?? 'The answer stream failed.'}
-                </p>
-                <button
-                  type="button"
-                  onClick={onRetryStream}
-                  className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-          </>
-        )}
+          );
+        })}
+
+        {live &&
+          (() => {
+            const liveCitations = live.citations.map(fromWsCitation);
+            const trace = buildRetrievalSummary(liveCitations, live.tools);
+            return (
+              <>
+                <MessageBubble
+                  role="assistant"
+                  content={live.text}
+                  model={live.model}
+                  modelLabel={labelForModel(live.model, models)}
+                  citations={liveCitations}
+                  traceSummary={trace.hasContent ? trace.summary : undefined}
+                  traceSteps={trace.steps}
+                  tools={live.tools}
+                  streaming={live.phase === 'streaming'}
+                  showNoCitationsNotice={live.phase === 'done' && live.citations.length === 0}
+                  onOpenCitation={onOpenCitation}
+                />
+                {live.phase === 'error' && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm"
+                  >
+                    <p className="text-danger">
+                      {live.problem?.detail ?? live.problem?.title ?? 'The answer stream failed.'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={onRetryStream}
+                      className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
         <div ref={endRef} />
       </div>

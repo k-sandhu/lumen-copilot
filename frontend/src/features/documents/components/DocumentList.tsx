@@ -10,8 +10,15 @@ import { ApiError } from '@/api';
 import type { Document, DocumentStatus } from '@/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ScrollArea } from '@/components/ScrollArea';
+import { StatusDot } from '@/ui';
 import { useDeleteDocument, useDocuments, type DocumentFilters } from '../model/queries';
-import { formatBytes, isIngesting, statusLabel, statusTone } from '../model/presentation';
+import {
+  formatBytes,
+  ingestSteps,
+  isIngesting,
+  statusLabel,
+  statusTone,
+} from '../model/presentation';
 
 const STATUS_FILTERS: { value: DocumentStatus | 'all'; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -145,6 +152,25 @@ function ListBody({
   );
 }
 
+/**
+ * The active ingest-stage label for an in-progress document (#89), e.g.
+ * "Parsing…" / "Chunking…" / "Embedding…" — derived from the parse→chunk→embed
+ * pipeline so the row reflects where ingestion actually is.
+ */
+function ingestStageLabel(doc: Document): string {
+  const active = ingestSteps(doc).find((s) => s.state === 'active' || s.state === 'pending');
+  switch (active?.key) {
+    case 'parse':
+      return 'Parsing…';
+    case 'chunk':
+      return 'Chunking…';
+    case 'embed':
+      return 'Embedding…';
+    default:
+      return 'Processing…';
+  }
+}
+
 function DocumentRow({ doc, onOpen }: { doc: Document; onOpen: () => void }) {
   const remove = useDeleteDocument();
   const ingesting = isIngesting(doc.status);
@@ -155,9 +181,17 @@ function DocumentRow({ doc, onOpen }: { doc: Document; onOpen: () => void }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium">{doc.filename}</span>
-            <StatusBadge tone={statusTone(doc.status)} pulse={ingesting} detail={doc.error}>
-              {statusLabel(doc.status)}
-            </StatusBadge>
+            {ingesting ? (
+              // In-progress: a pulsing sync dot + the live ingest stage (#89).
+              <StatusDot
+                tone={doc.status === 'processing' ? 'sync' : 'muted'}
+                label={ingestStageLabel(doc)}
+              />
+            ) : (
+              <StatusBadge tone={statusTone(doc.status)} detail={doc.error}>
+                {statusLabel(doc.status)}
+              </StatusBadge>
+            )}
           </div>
           <p className="mt-0.5 text-xs text-foreground-muted">
             {formatBytes(doc.size_bytes)}

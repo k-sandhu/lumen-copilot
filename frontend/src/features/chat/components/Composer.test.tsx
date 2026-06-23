@@ -4,7 +4,7 @@
  * picker is embedded.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Composer } from './Composer';
 import type { ChatModelInfo } from '@/api';
@@ -72,5 +72,15 @@ describe('Composer', () => {
     expect(input).toBeDisabled();
     await user.type(input, 'hi{Enter}');
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the knowledge-mode chips, "Company sources" active by default (#89)', () => {
+    setup();
+    const group = screen.getByRole('group', { name: /knowledge mode/i });
+    const company = within(group).getByRole('button', { name: /company sources/i });
+    expect(company).toHaveAttribute('aria-pressed', 'true');
+    // "Selected sources" is offered but disabled until a collection scope exists
+    // (we never imply a capability that isn't wired).
+    expect(within(group).getByRole('button', { name: /selected sources/i })).toBeDisabled();
   });
 });

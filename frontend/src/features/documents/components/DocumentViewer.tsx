@@ -1,25 +1,41 @@
 /**
- * Document viewer (#49 AC-3) — resolves the original file via
- * `GET /documents/{id}/content`, following a 302 to a short-TTL presigned URL,
- * and renders it in an isolated sandboxed iframe. Modeled as a modal overlay
- * with managed focus and Escape-to-close. Loading / error / success states are
- * all handled; a not-permitted document (INV-2 → 404) shows a clear message.
+ * Document viewer (#49 AC-3, re-skinned for #89) — a right-side drawer that
+ * surfaces the document's trust signals before its bytes: a metadata grid, the
+ * parse → chunk → embed → ready INGESTION TRACE (so a user can see exactly how a
+ * file became answerable), and — when opened on a cited passage — the cited
+ * SourceInspector passage. It then resolves the original file via
+ * `GET /documents/{id}/content` (following a 302 to a short-TTL presigned URL)
+ * and renders it in an isolated sandboxed iframe.
  *
- * NOTE (in-document citation highlight is explicitly OUT of scope for #49 — it
- * lands with the chat citations UI).
+ * A11y: role="dialog" aria-modal, focus moves into the drawer on open and is
+ * restored on close, Escape and a backdrop click dismiss. Loading / error /
+ * success states are all handled; a not-permitted document (INV-2 → 404) shows a
+ * clear message.
  */
 import { useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, resolveDocumentContentUrl } from '@/api';
 import type { Document } from '@/api';
+import { SourceInspector, StatusDot, type SourcePassage } from '@/ui';
+import { formatBytes, fileKind, ingestSteps, type IngestStep } from '../model/presentation';
 
 interface DocumentViewerProps {
   doc: Document;
+  /** When opened from a citation, the cited passage to surface (#89). */
+  citedPassage?: SourcePassage;
   onClose: () => void;
 }
 
-export function DocumentViewer({ doc, onClose }: DocumentViewerProps) {
+const INGEST_TONE: Record<IngestStep['state'], 'ok' | 'sync' | 'muted' | 'danger'> = {
+  done: 'ok',
+  active: 'sync',
+  pending: 'muted',
+  failed: 'danger',
+};
+
+export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const lastFocused = useRef<HTMLElement | null>(null);
 
   const query = useQuery<string>({
     queryKey: ['document-content', doc.id],
@@ -28,65 +44,167 @@ export function DocumentViewer({ doc, onClose }: DocumentViewerProps) {
     staleTime: 0,
     gcTime: 0,
     retry: false,
+    // Only the iframe preview needs the bytes; a failed-ingest doc has none.
+    enabled: doc.status === 'ready',
   });
 
-  // Manage focus + Escape-to-close for the modal.
+  // Manage focus + Escape-to-close for the drawer; restore focus on close.
   useEffect(() => {
+    lastFocused.current = (document.activeElement as HTMLElement) ?? null;
     closeRef.current?.focus();
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose();
     }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      lastFocused.current?.focus?.();
+    };
   }, [onClose]);
+
+  const steps = ingestSteps(doc);
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label={`Document: ${doc.filename}`}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex justify-end bg-black/50"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex h-full max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-xl">
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <h2 className="truncate text-sm font-semibold">{doc.filename}</h2>
-          <div className="flex items-center gap-2">
-            {query.isSuccess && (
-              <a
-                href={query.data}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-surface-muted"
-              >
-                Open in new tab
-              </a>
-            )}
-            <button
-              ref={closeRef}
-              type="button"
-              onClick={onClose}
-              aria-label="Close viewer"
-              className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-surface-muted"
-            >
-              Close
-            </button>
+      <div className="flex h-full w-full max-w-[34rem] flex-col overflow-hidden border-l border-border bg-surface shadow-xl">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-3">
+          <span className="rounded bg-surface-muted px-1.5 py-0.5 text-[10px] font-semibold text-foreground-muted">
+            {fileKind(doc)}
+          </span>
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold">{doc.filename}</h2>
+            <p className="text-[11px] text-foreground-muted">
+              {fileKind(doc)} · {formatBytes(doc.size_bytes)}
+            </p>
           </div>
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close viewer"
+            className="ml-auto shrink-0 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Close
+          </button>
         </header>
 
-        <div className="min-h-0 flex-1 bg-surface-muted/40">
-          <ViewerBody doc={doc} query={query} />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {/* Metadata grid */}
+          <dl className="grid grid-cols-2 gap-3 border-b border-border p-4 text-sm">
+            <Meta label="Type" value={fileKind(doc)} />
+            <Meta label="Size" value={formatBytes(doc.size_bytes)} />
+            <Meta label="Chunks" value={doc.status === 'ready' ? String(doc.chunk_count) : '—'} />
+            <Meta label="Status" value={<StatusLine doc={doc} />} />
+          </dl>
+
+          {/* Ingestion trace (parse → chunk → embed → ready) */}
+          <section aria-label="Ingestion" className="border-b border-border p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
+              Ingestion
+            </p>
+            <ul className="flex flex-col gap-1.5">
+              {steps.map((step) => (
+                <li key={step.key} className="flex items-center gap-2 text-sm">
+                  <StatusDot
+                    tone={INGEST_TONE[step.state]}
+                    title={`${step.label}: ${step.state}`}
+                  />
+                  <span
+                    className={
+                      step.state === 'pending'
+                        ? 'text-foreground-muted'
+                        : step.state === 'failed'
+                          ? 'text-danger'
+                          : 'text-foreground'
+                    }
+                  >
+                    {step.label}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {doc.status === 'failed' && doc.error && (
+              <p role="alert" className="mt-2 rounded bg-danger/10 px-2 py-1 text-xs text-danger">
+                {doc.error}
+              </p>
+            )}
+          </section>
+
+          {/* Cited passage, when opened from a citation */}
+          {citedPassage && (
+            <section aria-label="Cited passage" className="border-b border-border p-4">
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
+                Cited passage
+              </p>
+              <SourceInspector title={doc.filename} passage={citedPassage} />
+            </section>
+          )}
+
+          {/* Preview (bytes in a sandboxed iframe) */}
+          <section aria-label="Preview" className="p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
+              Preview
+            </p>
+            <div className="h-[28rem] overflow-hidden rounded-md border border-border bg-surface-muted/40">
+              <ViewerBody doc={doc} query={query} />
+            </div>
+          </section>
         </div>
       </div>
     </div>
   );
 }
 
+function Meta({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div>
+      <dt className="text-[11px] uppercase tracking-wide text-foreground-muted">{label}</dt>
+      <dd className="mt-0.5 text-sm">{value}</dd>
+    </div>
+  );
+}
+
+function StatusLine({ doc }: { doc: Document }) {
+  const tone =
+    doc.status === 'ready'
+      ? ('ok' as const)
+      : doc.status === 'failed'
+        ? ('danger' as const)
+        : doc.status === 'processing'
+          ? ('sync' as const)
+          : ('muted' as const);
+  const label =
+    doc.status === 'ready'
+      ? 'Indexed'
+      : doc.status === 'failed'
+        ? 'Failed'
+        : doc.status === 'processing'
+          ? 'Processing…'
+          : 'Queued';
+  return <StatusDot tone={tone} label={label} />;
+}
+
 type ContentQuery = ReturnType<typeof useQuery<string>>;
 
 function ViewerBody({ doc, query }: { doc: Document; query: ContentQuery }) {
+  if (doc.status !== 'ready') {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-center">
+        <span className="text-sm text-foreground-muted">
+          Preview is available once ingestion completes.
+        </span>
+      </div>
+    );
+  }
+
   if (query.isPending) {
     return (
       <div role="status" aria-live="polite" className="flex h-full items-center justify-center">

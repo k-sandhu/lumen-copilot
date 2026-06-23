@@ -1,19 +1,15 @@
 /**
- * MessageBubble (AC-2/AC-5): assistant content rendered through the sanitized
- * markdown pipeline (never raw), citations as clickable references, and an
- * honest zero-citation notice (no fabricated refs). User input rendered as plain
- * text.
+ * MessageBubble (AC-2/AC-5 + #89 trust-signal re-skin): assistant content
+ * rendered through the sanitized markdown pipeline (never raw); inline citation
+ * chips (kit CitationChip) that open the SourceInspector; a per-source
+ * FreshnessPill; a model badge; a collapsible RetrievalTrace; and an honest
+ * zero-citation notice (no fabricated refs). User input rendered as plain text.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TooltipProvider } from '@/components/Tooltip';
 import { MessageBubble } from './MessageBubble';
 import type { UiCitation } from '../model/citation';
-
-function renderBubble(ui: React.ReactElement) {
-  return render(<TooltipProvider>{ui}</TooltipProvider>);
-}
 
 const CITATION: UiCitation = {
   id: 'c1',
@@ -27,7 +23,7 @@ const CITATION: UiCitation = {
 
 describe('MessageBubble', () => {
   it('renders assistant markdown (rendered, not raw)', () => {
-    renderBubble(
+    render(
       <MessageBubble
         role="assistant"
         content="**bold answer** with a `code` span"
@@ -40,10 +36,10 @@ describe('MessageBubble', () => {
     expect(screen.getByText('code').tagName).toBe('CODE');
   });
 
-  it('renders clickable citation references that open the viewer (AC-2)', async () => {
+  it('renders clickable citation chips that open the inspector (AC-2)', async () => {
     const onOpen = vi.fn();
     const user = userEvent.setup();
-    renderBubble(
+    render(
       <MessageBubble
         role="assistant"
         content="Per the strategy doc, revenue rose."
@@ -51,14 +47,50 @@ describe('MessageBubble', () => {
         onOpenCitation={onOpen}
       />,
     );
-    // Numbered chip + the document name are both clickable affordances.
-    const chip = screen.getByRole('button', { name: /citation 1: open Q4 strategy\.pdf/i });
+    // The kit CitationChip is a real button named "Citation 1: <source>".
+    const chip = screen.getByRole('button', { name: /citation 1: Q4 strategy\.pdf/i });
     await user.click(chip);
-    expect(onOpen).toHaveBeenCalledWith(CITATION);
+    // The chip opens the inspector with the citation (and optional source meta).
+    expect(onOpen).toHaveBeenCalledWith(CITATION, undefined);
+  });
+
+  it('shows a FreshnessPill on a cited source when freshness is known (#89)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={[CITATION]}
+        sourceMeta={{ 'doc-9': { freshness: '2d ago', stale: false } }}
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.getByText('2d ago')).toBeInTheDocument();
+  });
+
+  it('renders a model badge and a collapsible retrieval trace (#89)', async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        model="anthropic/claude-opus-4.8"
+        modelLabel="Claude Opus 4.8"
+        citations={[CITATION]}
+        traceSummary="Looked at 1 source · 412 passages"
+        traceSteps={[{ label: 'Searched sources — 412 passages' }]}
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.getByText('Claude Opus 4.8')).toBeInTheDocument();
+    // The trace summary shows; the step is hidden until expanded.
+    expect(screen.getByText('Looked at 1 source · 412 passages')).toBeInTheDocument();
+    expect(screen.queryByText('Searched sources — 412 passages')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /retrieval/i }));
+    expect(screen.getByText('Searched sources — 412 passages')).toBeInTheDocument();
   });
 
   it('shows an honest zero-citation notice and NO references (AC-5)', () => {
-    renderBubble(
+    render(
       <MessageBubble
         role="assistant"
         content="I could not find that in your documents."
@@ -73,7 +105,7 @@ describe('MessageBubble', () => {
   });
 
   it('renders user messages as plain text (no markdown interpretation)', () => {
-    renderBubble(
+    render(
       <MessageBubble role="user" content="**not bold**" citations={[]} onOpenCitation={() => {}} />,
     );
     // The asterisks are shown literally; there is no <strong>.

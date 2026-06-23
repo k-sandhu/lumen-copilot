@@ -46,10 +46,31 @@ Feature (`features/chat`):
 - `model/queries.ts` — TanStack Query hooks: sessions, messages, models, and the
   new/rename/delete/send mutations. Server data is **never** mirrored into Zustand.
 - `model/chatStore.ts` — Zustand UI-only state: active session, in-flight stream
-  id, per-turn model, citation viewer target.
+  id, per-turn model, citation viewer target (incl. the source freshness label).
+- `model/presentation.ts` — **pure** trust-signal derivation for the #89 re-skin:
+  the retrieval-trace summary/steps (`buildRetrievalSummary`), relative-time +
+  staleness, the model-badge label, and the SourceInspector passage. No I/O.
 - `components/` — `ChatView` (orchestrator), `ChatThread`, `MessageBubble`,
-  `Composer`, `ModelPicker`, `HistorySidebar`, `CitationRef`, `ToolActivity`,
-  `DocumentViewer`.
+  `Composer`, `ModelPicker`, `HistorySidebar`, `KnowledgeModeChips`,
+  `ToolActivity`, `DocumentViewer`.
+
+## Trust-signal re-skin (#89, ADR-0007 §1 / DESIGN.md §1/§6)
+
+The screens consume the design-system kit (`@/ui`) — **no contract change**, every
+signal derived from data the turn already has:
+
+- **Inline citation chips → SourceInspector:** the kit `CitationChip` opens the
+  cited document; the viewer leads with the kit `SourceInspector` (cited passage
+  `<mark>`-highlighted + freshness).
+- **RetrievalTrace:** a collapsible "Looked at N sources · M passages · K
+  excluded" built from the distinct cited sources, the retrieval-tool hit counts,
+  and any excluded count — excluded candidates render muted (mission filter #4).
+- **FreshnessPill** on cited sources; a **model badge** on assistant answers
+  (friendly label from `GET /models`, falling back to the model id).
+- **Knowledge-mode chips** on the composer surface the grounding scope; "Company
+  sources" (all permitted docs — the existing behavior) is the default. Modes the
+  contract has no backing for (web, model-only) are **not** offered — no invented
+  product behavior (AGENTS.md §8).
 
 ## Invariants honored
 

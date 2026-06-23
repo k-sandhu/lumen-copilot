@@ -1,11 +1,13 @@
 /**
- * DocumentViewer (#49 AC-3): resolves GET /documents/{id}/content, following a
- * 302 to a presigned URL, and renders it in a sandboxed iframe. States: loading,
- * success (iframe src = presigned URL), and the not-permitted 404 negative
- * (INV-2) → a clear "no longer available" message with no retry.
+ * DocumentViewer (#49 AC-3, re-skinned #89): a drawer that surfaces the ingestion
+ * trace (parse → chunk → embed → ready) and an optional cited passage, then
+ * resolves GET /documents/{id}/content, following a 302 to a presigned URL, and
+ * renders it in a sandboxed iframe. States: loading, success (iframe src =
+ * presigned URL), and the not-permitted 404 negative (INV-2) → a clear "no
+ * longer available" message with no retry.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { DocumentViewer } from './DocumentViewer';
@@ -64,5 +66,39 @@ describe('DocumentViewer', () => {
 
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders the parse → chunk → embed → ready ingestion trace (#89)', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    renderWithQuery(<DocumentViewer doc={{ ...doc, chunk_count: 142 }} onClose={() => {}} />);
+
+    const ingestion = screen.getByRole('region', { name: /ingestion/i });
+    expect(within(ingestion).getByText(/parsed/i)).toBeInTheDocument();
+    expect(within(ingestion).getByText('Chunked into 142 passages')).toBeInTheDocument();
+    expect(within(ingestion).getByText(/embedded/i)).toBeInTheDocument();
+    expect(within(ingestion).getByText(/indexed & permission-scoped/i)).toBeInTheDocument();
+  });
+
+  it('surfaces a cited passage when one is supplied (#89 viewer drawer)', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    renderWithQuery(
+      <DocumentViewer
+        doc={doc}
+        citedPassage={{ runs: [{ text: 'terminate for convenience', highlight: true }] }}
+        onClose={() => {}}
+      />,
+    );
+    const cited = screen.getByRole('region', { name: /cited passage/i });
+    expect(within(cited).getByText('terminate for convenience').tagName).toBe('MARK');
+  });
+
+  it('explains a non-ready document has no preview yet (and skips the content fetch)', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    renderWithQuery(
+      <DocumentViewer doc={{ ...doc, status: 'processing', chunk_count: 0 }} onClose={() => {}} />,
+    );
+    expect(screen.getByText(/preview is available once ingestion completes/i)).toBeInTheDocument();
+    // No bytes are requested for a doc that isn't ready.
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
