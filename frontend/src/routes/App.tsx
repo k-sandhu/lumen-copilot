@@ -10,6 +10,7 @@ import { NavOverlay } from '@/components/NavOverlay';
 import { ChatView } from '@/features/chat';
 import { CurrentUserMenu, RouteGuard } from '@/features/auth';
 import { useUiStore } from '@/stores/ui';
+import { featureNavItems } from './discovery';
 
 /**
  * Route root for `/`. The auth guard gates the shell: unauthenticated → login;
@@ -56,14 +57,9 @@ function AppShell() {
         </ErrorBoundary>
       </div>
 
-      {/* Floating links to the standalone developer pages (docs + features). */}
-      <NavOverlay
-        items={[
-          { to: '/documents', label: 'Documents', icon: '📁' },
-          { to: '/docs', label: 'Documentation', icon: '📖' },
-          { to: '/features', label: 'Features built', icon: '✨' },
-        ]}
-      />
+      {/* Floating links to the standalone pages — assembled from each feature's
+          own nav.ts via import.meta.glob (ADR-0008 §3), not a hand-edited list. */}
+      <NavOverlay items={featureNavItems} />
     </div>
   );
 }
