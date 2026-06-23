@@ -1,7 +1,9 @@
 /**
  * Citation click-through target (AC-2): opens the cited document at the passage.
- * Shows the cited span (charStart–charEnd) and snippet prominently, then embeds
- * the document's original bytes from the api/ boundary.
+ * Re-skinned (#89) to lead with the kit SourceInspector — the cited passage with
+ * the matched span highlighted, plus freshness — then embeds the document's
+ * original bytes below it. The SourceInspector makes every answer trace to a
+ * verifiable source passage (mission filter #2).
  *
  * AUTH (INV-4): `GET /documents/{id}/content` is a `bearerAuth` endpoint — it is
  * authorized by the in-memory access JWT, not a cookie. A browser-initiated
@@ -16,10 +18,16 @@
  */
 import { useEffect, useState } from 'react';
 import { fetchDocumentContent } from '@/api';
+import { SourceInspector } from '@/ui';
 import type { UiCitation } from '../model/citation';
+import { passageFromCitation } from '../model/presentation';
 
 export interface DocumentViewerProps {
   citation: UiCitation;
+  /** Optional freshness label for the cited source (e.g. "2d ago"). */
+  freshness?: string | undefined;
+  /** Mark the source as past its freshness window. */
+  stale?: boolean | undefined;
   onClose: () => void;
 }
 
@@ -28,7 +36,7 @@ type ContentState =
   | { status: 'ready'; url: string }
   | { status: 'error'; message: string };
 
-export function DocumentViewer({ citation, onClose }: DocumentViewerProps) {
+export function DocumentViewer({ citation, freshness, stale, onClose }: DocumentViewerProps) {
   const { documentId } = citation;
   const [content, setContent] = useState<ContentState>({ status: 'loading' });
   // Bumping this retries the load (AC-2: errors are actionable, not dead ends).
@@ -87,13 +95,14 @@ export function DocumentViewer({ citation, onClose }: DocumentViewerProps) {
         </button>
       </header>
 
-      <div className="shrink-0 border-b border-border bg-surface-muted px-3 py-2">
-        <p className="text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
-          Cited passage
-        </p>
-        <blockquote className="mt-1 border-l-2 border-accent pl-2 text-sm italic text-foreground">
-          {citation.snippet}
-        </blockquote>
+      {/* The kit SourceInspector surfaces the cited passage + freshness. */}
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <SourceInspector
+          title={citation.documentName}
+          passage={passageFromCitation(citation)}
+          {...(freshness ? { freshness } : {})}
+          {...(stale !== undefined ? { stale } : {})}
+        />
         {content.status === 'ready' && (
           <a
             href={content.url}

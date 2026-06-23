@@ -13,6 +13,10 @@ export interface ViewerTarget {
   charStart: number;
   charEnd: number;
   snippet: string;
+  /** Source freshness label for the inspector (#89), e.g. "2d ago". */
+  freshness?: string;
+  /** Whether the source is past its freshness window. */
+  stale?: boolean;
 }
 
 interface ChatUiState {

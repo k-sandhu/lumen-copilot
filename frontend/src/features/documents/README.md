@@ -33,14 +33,21 @@ Feature (`features/documents`):
   (server state), which is NOT mirrored here (frontend/AGENTS.md).
 - `model/useUploadDocuments.ts` — bridges `uploadDocument` to the store; maps a
   413/415/422/404/network failure to a clear, user-facing message.
-- `model/presentation.ts` — pure status→tone/label and byte-formatting helpers.
+- `model/presentation.ts` — pure status→tone/label and byte-formatting helpers,
+  plus the #89 trust-signal derivation: `ingestSteps` (the parse → chunk → embed →
+  ready pipeline projected from `status` + `chunk_count`), `statusDotTone`, and
+  `fileKind`. No I/O — unit-tested directly.
 - `components/CollectionsSidebar.tsx` — list / create / rename / delete (AC-1).
 - `components/DocumentUpload.tsx` — drag-drop + picker, concurrent uploads, live
   progress, per-file success/error (AC-2 / AC-4).
 - `components/DocumentList.tsx` — per-collection list filtered by status / filename
   `q`, status badges, open, delete; a `failed` row shows its error inline (AC-3 / AC-4).
-- `components/DocumentViewer.tsx` — modal that resolves `GET /documents/{id}/content`
-  (following a 302) and renders the file in a sandboxed iframe (AC-3).
+- `components/DocumentViewer.tsx` — a right-side **drawer** (#89 re-skin) that
+  surfaces the metadata grid, the parse → chunk → embed → ready **ingestion trace**
+  (kit `StatusDot`), and — when opened on a citation — the cited passage (kit
+  `SourceInspector`), then resolves `GET /documents/{id}/content` (following a 302)
+  and renders the file in a sandboxed iframe (AC-3). A non-ready document explains
+  it has no preview yet and skips the content fetch.
 - `components/DocumentsPanel.tsx` — the feature root; the `/documents` route
   ([`routes/DocumentsRoute.tsx`](../../routes/DocumentsRoute.tsx)) wraps it in the
   auth guard + app chrome, reachable from the chat shell's Pages overlay.
