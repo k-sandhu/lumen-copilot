@@ -100,13 +100,14 @@ describe('AppShell', () => {
     expect(within(rail).queryByText('Features built')).not.toBeInTheDocument();
   });
 
-  it('renders Sources as a disabled "coming soon" entry (no route yet)', () => {
+  it('renders Sources as an active rail link now that the /sources route exists (#27)', () => {
     renderShell();
     const rail = screen.getByRole('navigation', { name: /primary/i });
-    // not a link (no dead link), and marked aria-disabled
-    expect(within(rail).queryByRole('link', { name: /sources/i })).not.toBeInTheDocument();
-    const sources = within(rail).getByText('Sources').closest('.lc-navlink');
-    expect(sources).toHaveAttribute('aria-disabled', 'true');
+    // The Sources screen (#27) is now backed by a discovered route, so the rail
+    // resolves it to a real link rather than a disabled "coming soon" entry.
+    const link = within(rail).getByRole('link', { name: /sources/i });
+    expect(link).toHaveAttribute('href', '/sources');
+    expect(link).not.toHaveAttribute('aria-disabled');
   });
 
   it('opens the command palette from the omni bar', async () => {
