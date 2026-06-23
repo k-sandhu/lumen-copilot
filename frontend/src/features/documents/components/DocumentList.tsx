@@ -1,23 +1,34 @@
 /**
- * Document list per collection (#49 AC-3) — filter by status and filename (`q`),
- * watch ingestion status (pending→processing→ready→failed, polled while
- * unsettled), open the viewer, delete. Every state is handled: loading, error
- * (retry), empty (vs. empty-because-filtered), and a `failed` row shows its
- * error inline (AC-4).
+ * Document list per collection (#49 AC-3 · re-laid-out to the documents.html
+ * wireframe in #119) — a TABLE whose columns are all backed by REAL document
+ * fields: Name + file-type badge, Collection, Visibility (kit PermissionPill,
+ * derived from the INV-2 owner-only invariant), Owner (from `owner_id`, "You" for
+ * the current user), Updated (kit FreshnessPill, from `updated_at`), Status.
+ *
+ * Keeps every prior behavior: filter by status + filename (`q`), poll ingestion
+ * while unsettled, open the viewer (row click / keyboard), delete (confirm), and
+ * a `failed` row's error inline (AC-4). Every state is handled: loading, error
+ * (retry), empty vs. filtered-empty.
  */
 import { useState } from 'react';
 import { ApiError } from '@/api';
 import type { Document, DocumentStatus } from '@/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ScrollArea } from '@/components/ScrollArea';
-import { StatusDot } from '@/ui';
+import { FreshnessPill, PermissionPill, StatusDot } from '@/ui';
+import { cn } from '@/lib/cn';
 import { useDeleteDocument, useDocuments, type DocumentFilters } from '../model/queries';
 import {
-  formatBytes,
+  documentFreshness,
+  fileKind,
+  fileKindTone,
   ingestSteps,
   isIngesting,
+  ownerLabel,
   statusLabel,
   statusTone,
+  visibility,
+  type FileKindTone,
 } from '../model/presentation';
 
 const STATUS_FILTERS: { value: DocumentStatus | 'all'; label: string }[] = [
@@ -28,12 +39,36 @@ const STATUS_FILTERS: { value: DocumentStatus | 'all'; label: string }[] = [
   { value: 'failed', label: 'Failed' },
 ];
 
+/**
+ * Token-driven tint for the file-type badge — only the semantic colors the
+ * frontend exposes as Tailwind utilities (no wireframe gradients, no invented
+ * `info` color the theme doesn't define).
+ */
+const KIND_TONE: Record<FileKindTone, string> = {
+  pdf: 'bg-danger/15 text-danger',
+  doc: 'bg-accent/15 text-accent',
+  sheet: 'bg-ok/15 text-ok',
+  slide: 'bg-warn/15 text-warn',
+  image: 'bg-accent/15 text-accent',
+  text: 'bg-foreground-muted/15 text-foreground-muted',
+  default: 'bg-surface-muted text-foreground-muted',
+};
+
 interface DocumentListProps {
   collectionId: string;
+  /** Name of the selected collection (for the Collection column). */
+  collectionName?: string;
+  /** The signed-in user's id, to label the Owner column ("You"). */
+  currentUserId?: string;
   onOpen: (doc: Document) => void;
 }
 
-export function DocumentList({ collectionId, onOpen }: DocumentListProps) {
+export function DocumentList({
+  collectionId,
+  collectionName,
+  currentUserId,
+  onOpen,
+}: DocumentListProps) {
   const [status, setStatus] = useState<DocumentStatus | 'all'>('all');
   const [q, setQ] = useState('');
 
@@ -83,8 +118,14 @@ export function DocumentList({ collectionId, onOpen }: DocumentListProps) {
       </div>
 
       <div className="min-h-0 flex-1">
-        <ScrollArea viewportClassName="px-2 py-2">
-          <ListBody query={query} filtered={filtered} onOpen={onOpen} />
+        <ScrollArea viewportClassName="p-4">
+          <ListBody
+            query={query}
+            filtered={filtered}
+            collectionName={collectionName}
+            currentUserId={currentUserId}
+            onOpen={onOpen}
+          />
         </ScrollArea>
       </div>
     </div>
@@ -96,15 +137,19 @@ type DocsQuery = ReturnType<typeof useDocuments>;
 function ListBody({
   query,
   filtered,
+  collectionName,
+  currentUserId,
   onOpen,
 }: {
   query: DocsQuery;
   filtered: boolean;
+  collectionName?: string;
+  currentUserId?: string;
   onOpen: (doc: Document) => void;
 }) {
   if (query.isPending) {
     return (
-      <div role="status" aria-live="polite" aria-busy="true" className="space-y-2 px-1">
+      <div role="status" aria-live="polite" aria-busy="true" className="space-y-2">
         <span className="sr-only">Loading documents…</span>
         {[0, 1, 2, 3].map((i) => (
           <div key={i} className="h-12 animate-pulse rounded bg-surface-muted" aria-hidden="true" />
@@ -117,7 +162,7 @@ function ListBody({
     const message =
       query.error instanceof ApiError ? query.error.displayMessage : 'Could not load documents.';
     return (
-      <div role="alert" className="space-y-2 px-1 py-2 text-sm">
+      <div role="alert" className="space-y-2 py-2 text-sm">
         <p className="font-medium text-danger">Couldn’t load documents</p>
         <p className="text-foreground-muted">{message}</p>
         <button
@@ -135,7 +180,7 @@ function ListBody({
   const docs = query.data.items;
   if (docs.length === 0) {
     return (
-      <p className="px-2 py-10 text-center text-sm text-foreground-muted">
+      <p className="py-10 text-center text-sm text-foreground-muted">
         {filtered
           ? 'No documents match these filters.'
           : 'This collection is empty. Upload files above to get started.'}
@@ -144,11 +189,47 @@ function ListBody({
   }
 
   return (
-    <ul aria-label="Documents" className="space-y-1">
-      {docs.map((doc) => (
-        <DocumentRow key={doc.id} doc={doc} onOpen={() => onOpen(doc)} />
-      ))}
-    </ul>
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full border-collapse text-left text-sm">
+        <caption className="sr-only">Documents in this collection</caption>
+        <thead>
+          <tr className="border-b border-border bg-surface-muted/50 text-xs uppercase tracking-wide text-foreground-muted">
+            <th scope="col" className="px-3 py-2 font-medium">
+              Name
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              Collection
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              Visibility
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              Owner
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              Updated
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              Status
+            </th>
+            <th scope="col" className="px-3 py-2 text-right font-medium">
+              <span className="sr-only">Actions</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody aria-label="Documents">
+          {docs.map((doc) => (
+            <DocumentRow
+              key={doc.id}
+              doc={doc}
+              collectionName={collectionName}
+              currentUserId={currentUserId}
+              onOpen={() => onOpen(doc)}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -171,53 +252,112 @@ function ingestStageLabel(doc: Document): string {
   }
 }
 
-function DocumentRow({ doc, onOpen }: { doc: Document; onOpen: () => void }) {
+function StatusCell({ doc }: { doc: Document }) {
+  if (isIngesting(doc.status)) {
+    return (
+      <StatusDot
+        tone={doc.status === 'processing' ? 'sync' : 'muted'}
+        label={ingestStageLabel(doc)}
+      />
+    );
+  }
+  return (
+    <StatusBadge tone={statusTone(doc.status)} detail={doc.error}>
+      {statusLabel(doc.status)}
+    </StatusBadge>
+  );
+}
+
+function DocumentRow({
+  doc,
+  collectionName,
+  currentUserId,
+  onOpen,
+}: {
+  doc: Document;
+  collectionName?: string;
+  currentUserId?: string;
+  onOpen: () => void;
+}) {
   const remove = useDeleteDocument();
-  const ingesting = isIngesting(doc.status);
+  const ready = doc.status === 'ready';
+  const kind = fileKind(doc);
+  const fresh = documentFreshness(doc);
+  const vis = visibility(doc, currentUserId);
 
   return (
-    <li className="rounded-md border border-border px-3 py-2">
-      <div className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{doc.filename}</span>
-            {ingesting ? (
-              // In-progress: a pulsing sync dot + the live ingest stage (#89).
-              <StatusDot
-                tone={doc.status === 'processing' ? 'sync' : 'muted'}
-                label={ingestStageLabel(doc)}
-              />
-            ) : (
-              <StatusBadge tone={statusTone(doc.status)} detail={doc.error}>
-                {statusLabel(doc.status)}
-              </StatusBadge>
-            )}
+    <>
+      <tr
+        className={cn(
+          'border-b border-border/60 transition-colors last:border-0',
+          ready ? 'cursor-pointer hover:bg-surface-muted/60' : 'opacity-90',
+        )}
+        // Whole-row opens the viewer (the wireframe's `data-drawer-open`), but only
+        // once the document is ready (no bytes to preview before then). Keyboard
+        // users get the same affordance.
+        onClick={ready ? onOpen : undefined}
+        onKeyDown={
+          ready
+            ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onOpen();
+                }
+              }
+            : undefined
+        }
+        tabIndex={ready ? 0 : undefined}
+        role={ready ? 'button' : undefined}
+        aria-label={ready ? `Open ${doc.filename}` : undefined}
+      >
+        <td className="px-3 py-2.5 align-middle">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span
+              aria-hidden="true"
+              className={cn(
+                'grid h-7 w-9 shrink-0 place-items-center rounded text-[10px] font-bold',
+                KIND_TONE[fileKindTone(doc)],
+              )}
+            >
+              {kind.slice(0, 4)}
+            </span>
+            <div className="min-w-0">
+              <div className="truncate font-medium text-foreground" title={doc.filename}>
+                {doc.filename}
+              </div>
+              <div className="text-[11px] text-foreground-muted">
+                {kind}
+                {ready && doc.chunk_count > 0 && <span> · {doc.chunk_count} chunks</span>}
+              </div>
+            </div>
           </div>
-          <p className="mt-0.5 text-xs text-foreground-muted">
-            {formatBytes(doc.size_bytes)}
-            {doc.status === 'ready' && doc.chunk_count > 0 && (
-              <span> · {doc.chunk_count} chunks</span>
-            )}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            onClick={onOpen}
-            disabled={doc.status !== 'ready'}
-            title={doc.status === 'ready' ? 'Open document' : 'Available once ingestion completes'}
-            className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-surface-muted disabled:opacity-50"
-          >
-            Open
-          </button>
+        </td>
+        <td className="px-3 py-2.5 align-middle text-foreground-muted">
+          {collectionName ?? '—'}
+        </td>
+        <td className="px-3 py-2.5 align-middle">
+          <PermissionPill level={vis.level} label={vis.label} title={vis.title} />
+        </td>
+        <td className="px-3 py-2.5 align-middle text-foreground-muted">
+          {ownerLabel(doc, currentUserId)}
+        </td>
+        <td className="px-3 py-2.5 align-middle">
+          {fresh ? (
+            <FreshnessPill label={fresh.label} stale={fresh.stale} title={fresh.title} />
+          ) : (
+            <span className="text-foreground-muted">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2.5 align-middle">
+          <StatusCell doc={doc} />
+        </td>
+        <td className="px-3 py-2.5 text-right align-middle">
           <button
             type="button"
             disabled={remove.isPending}
-            onClick={() => {
-              if (
-                typeof window !== 'undefined' &&
-                !window.confirm(`Delete “${doc.filename}”?`)
-              ) {
+            onClick={(e) => {
+              e.stopPropagation();
+              if (typeof window !== 'undefined' && !window.confirm(`Delete “${doc.filename}”?`)) {
                 return;
               }
               remove.mutate(doc.id);
@@ -227,19 +367,25 @@ function DocumentRow({ doc, onOpen }: { doc: Document; onOpen: () => void }) {
           >
             Delete
           </button>
-        </div>
-      </div>
+        </td>
+      </tr>
 
-      {doc.status === 'failed' && (
-        <p role="alert" className="mt-1.5 rounded bg-danger/10 px-2 py-1 text-xs text-danger">
-          {doc.error ?? 'Ingestion failed for this document.'}
-        </p>
+      {(doc.status === 'failed' || remove.isError) && (
+        <tr>
+          <td colSpan={7} className="px-3 pb-2">
+            {doc.status === 'failed' && (
+              <p role="alert" className="rounded bg-danger/10 px-2 py-1 text-xs text-danger">
+                {doc.error ?? 'Ingestion failed for this document.'}
+              </p>
+            )}
+            {remove.isError && (
+              <p role="alert" className="mt-1 text-xs text-danger">
+                {remove.error instanceof ApiError ? remove.error.displayMessage : 'Delete failed.'}
+              </p>
+            )}
+          </td>
+        </tr>
       )}
-      {remove.isError && (
-        <p role="alert" className="mt-1.5 text-xs text-danger">
-          {remove.error instanceof ApiError ? remove.error.displayMessage : 'Delete failed.'}
-        </p>
-      )}
-    </li>
+    </>
   );
 }

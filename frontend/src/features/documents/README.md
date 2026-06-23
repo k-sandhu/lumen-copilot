@@ -36,12 +36,21 @@ Feature (`features/documents`):
 - `model/presentation.ts` — pure status→tone/label and byte-formatting helpers,
   plus the #89 trust-signal derivation: `ingestSteps` (the parse → chunk → embed →
   ready pipeline projected from `status` + `chunk_count`), `statusDotTone`, and
-  `fileKind`. No I/O — unit-tested directly.
+  `fileKind`. The #119 table polish adds `fileKindTone` (type-badge family),
+  `relativeTime`/`documentFreshness` (the Updated column, from `updated_at`),
+  `ownerLabel` ("You" vs. an honest short id — there is NO display-name field on the
+  wire), and `visibility` (the Visibility column, derived from the **real** INV-2
+  owner-only invariant — the MVP backend carries no Confidential/Team/Org taxonomy,
+  so we never fabricate one). No I/O — unit-tested directly.
 - `components/CollectionsSidebar.tsx` — list / create / rename / delete (AC-1).
 - `components/DocumentUpload.tsx` — drag-drop + picker, concurrent uploads, live
   progress, per-file success/error (AC-2 / AC-4).
-- `components/DocumentList.tsx` — per-collection list filtered by status / filename
-  `q`, status badges, open, delete; a `failed` row shows its error inline (AC-3 / AC-4).
+- `components/DocumentList.tsx` — per-collection **table** to the documents.html
+  wireframe (#119): columns Name + file-type badge, Collection, Visibility (kit
+  `PermissionPill`), Owner, Updated (kit `FreshnessPill`), Status — every column
+  backed by a real document field. Filters by status / filename `q`, opens the
+  viewer on a (ready) row click or keyboard, deletes; a `failed` row shows its error
+  inline (AC-3 / AC-4). A non-ready row is not openable (no bytes to preview yet).
 - `components/DocumentViewer.tsx` — a right-side **drawer** (#89 re-skin) that
   surfaces the metadata grid, the parse → chunk → embed → ready **ingestion trace**
   (kit `StatusDot`), and — when opened on a citation — the cited passage (kit
