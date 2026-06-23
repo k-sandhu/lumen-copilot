@@ -7,9 +7,11 @@ parallel with the backend (ADR-0006): conform to the contract, mock the response
 in dev and tests, so a contract match is an integration match.
 
 This slice **consumes, never edits**, `frontend/src/ui/**` (the trust kit) and
-`frontend/src/api/**` (the only backend caller). It reuses the auth `RouteGuard`,
-the app chrome, and the shared `ScrollArea` / `ErrorBoundary` / markdown pipeline —
-it re-scaffolds none of them.
+`frontend/src/api/**` (the only backend caller). The app shell (issue #110) owns
+the chrome (brand + top bar + nav rail + theme + account) and the auth gate (the
+layout route's `RouteGuard`); the screen reuses the shared shell-aware `PageChrome`
+plus `ScrollArea` / `ErrorBoundary` / the markdown pipeline — it re-scaffolds none
+of them and renders **no** chrome of its own (no duplicate top bar inside the shell).
 
 ## Where the pieces live
 
@@ -38,9 +40,12 @@ Feature (`features/search`):
 - `components/SearchScreen.tsx` — the feature root; composes the above and
   implements **every** state: initial / loading / error (actionable retry) /
   empty / success. The composer is pinned; the results pane scrolls independently.
-- `components/SearchPage.tsx` — the guarded, chromed `/search` page (auth
-  `RouteGuard` + app chrome), kept INSIDE the slice so the route is self-contained
-  (ADR-0008 §1 — a feature edits only its own files).
+- `components/SearchPage.tsx` — the `/search` screen body. The app shell (#110)
+  owns the chrome and the layout route owns the auth gate, so this just nests the
+  `SearchScreen` through the shared shell-aware `PageChrome` (like Audit/Admin) —
+  no bespoke header, back-link, theme toggle, account menu, or nested `RouteGuard`.
+  Kept INSIDE the slice so the route is self-contained (ADR-0008 §1 — a feature
+  edits only its own files).
 - `route.tsx` (`/search`, lazy) + `nav.ts` — auto-discovered via
   `import.meta.glob` (ADR-0008 §3); no edit to `routes/router.tsx`.
 

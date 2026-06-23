@@ -1,0 +1,452 @@
+/* ============================================================================
+   App shell (issue #110) — the chrome that wraps every authenticated screen.
+   Structure/feel matches docs/wireframes (buildChrome + app.css) but is built on
+   the PRODUCTION token system (styles/tokens.css, loaded via @/ui) — no wireframe
+   CSS is copied verbatim. Grid: brand cell + top bar + left rail + main, with the
+   chrome pinned and main independently scrollable.
+   ============================================================================ */
+
+.lc-shell {
+  --lc-rail-w: 248px;
+  --lc-rail-w-collapsed: 64px;
+  --lc-topbar-h: 56px;
+  display: grid;
+  grid-template-columns: var(--lc-rail-w) 1fr;
+  grid-template-rows: var(--lc-topbar-h) 1fr;
+  grid-template-areas:
+    'brand topbar'
+    'rail main';
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+.lc-shell[data-rail='collapsed'] {
+  grid-template-columns: var(--lc-rail-w-collapsed) 1fr;
+}
+
+/* ---- brand cell ------------------------------------------------------- */
+.lc-shell__brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  min-width: 0;
+}
+.lc-brand__logo {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-md);
+  background: var(--accent-grad);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+  flex: none;
+}
+.lc-brand__logo .lc-icon {
+  width: 18px;
+  height: 18px;
+  color: #fff;
+}
+.lc-brand__text {
+  min-width: 0;
+  line-height: 1.05;
+}
+.lc-brand__name {
+  font-weight: 680;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.lc-brand__sub {
+  font-size: 10.5px;
+  color: var(--text-subtle);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.lc-shell[data-rail='collapsed'] .lc-brand__text {
+  display: none;
+}
+
+/* ---- top bar ---------------------------------------------------------- */
+.lc-shell__topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px 0 8px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+  z-index: 30;
+}
+.lc-shell__spacer {
+  flex: 1;
+}
+.lc-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* generic icon button used across the chrome */
+.lc-iconbtn--ghost {
+  height: 34px;
+  width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.lc-iconbtn--ghost:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* ---- omni bar (opens the command palette) ----------------------------- */
+.lc-omni {
+  flex: 1;
+  max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  cursor: text;
+  font-size: 13px;
+  text-align: left;
+  transition:
+    border-color var(--dur-2),
+    background var(--dur-2);
+}
+.lc-omni:hover {
+  border-color: var(--border-strong);
+}
+.lc-omni__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-omni .lc-kbd {
+  margin-left: auto;
+}
+
+/* ---- topbar trigger buttons (appearance, tenant, account) ------------- */
+.lc-pillbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-pillbtn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+/* tenant pill */
+.lc-tenant__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+
+/* account avatar */
+.lc-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 650;
+  font-size: 12px;
+  color: var(--accent-contrast);
+  background: var(--accent-grad);
+  border: none;
+  flex: none;
+  cursor: pointer;
+}
+
+/* ---- left nav rail ---------------------------------------------------- */
+.lc-shell__rail {
+  grid-area: rail;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 12px 14px;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.lc-rail__group-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 650;
+  color: var(--text-subtle);
+  padding: 14px 10px 6px;
+}
+.lc-shell[data-rail='collapsed'] .lc-rail__group-label {
+  height: 1px;
+  padding: 10px 0 6px;
+  overflow: hidden;
+  text-indent: -9999px;
+}
+.lc-navlink {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  font-weight: 530;
+  font-size: 13.5px;
+  cursor: pointer;
+  position: relative;
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  transition:
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.lc-navlink:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-navlink .lc-icon {
+  color: var(--text-subtle);
+  flex: none;
+  transition: color var(--dur-1);
+}
+.lc-navlink:hover .lc-icon {
+  color: var(--text-muted);
+}
+.lc-navlink__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-navlink.is-active {
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+}
+.lc-navlink.is-active .lc-icon {
+  color: var(--accent);
+}
+.lc-navlink.is-active::before {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+.lc-navlink.is-disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.lc-navlink.is-disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+.lc-navlink__soon {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  padding: 1px 7px;
+}
+.lc-shell[data-rail='collapsed'] .lc-navlink__label,
+.lc-shell[data-rail='collapsed'] .lc-navlink__soon {
+  display: none;
+}
+.lc-shell[data-rail='collapsed'] .lc-navlink {
+  justify-content: center;
+  padding: 8px;
+}
+
+/* ---- main scroll region ----------------------------------------------- */
+.lc-shell__main {
+  grid-area: main;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- popover menus (appearance, account) ------------------------------ */
+.lc-menu {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+  padding: 6px;
+  min-width: 240px;
+  z-index: 60;
+}
+.lc-menu__head {
+  padding: 8px 10px 6px;
+}
+.lc-menu__name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.lc-menu__meta {
+  font-size: 11.5px;
+  color: var(--text-subtle);
+  margin-top: 2px;
+  word-break: break-word;
+}
+.lc-menu__sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+.lc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.lc-menu__item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.lc-menu__item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.lc-menu__item .lc-icon {
+  color: var(--text-subtle);
+  flex: none;
+}
+.lc-menu__label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 650;
+  color: var(--text-subtle);
+  padding: 8px 10px 4px;
+}
+.lc-menu__error {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* ---- mobile / narrow: rail becomes an overlay ------------------------- */
+@media (max-width: 880px) {
+  .lc-shell {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'topbar'
+      'main';
+    grid-template-rows: var(--lc-topbar-h) 1fr;
+  }
+  .lc-shell__brand {
+    display: none;
+  }
+  .lc-shell__rail {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(82vw, var(--lc-rail-w));
+    z-index: 50;
+    background: var(--surface);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    transition: transform var(--dur-2) var(--ease);
+  }
+  .lc-shell[data-rail='open'] .lc-shell__rail {
+    transform: translateX(0);
+  }
+  /* on mobile the collapsed-vs-full distinction is irrelevant: always show labels */
+  .lc-shell[data-rail='collapsed'] .lc-navlink__label,
+  .lc-shell[data-rail='collapsed'] .lc-navlink__soon,
+  .lc-shell[data-rail='collapsed'] .lc-rail__group-label {
+    display: revert;
+  }
+  .lc-shell[data-rail='collapsed'] .lc-rail__group-label {
+    height: auto;
+    text-indent: 0;
+    padding: 14px 10px 6px;
+  }
+  .lc-shell[data-rail='collapsed'] .lc-navlink {
+    justify-content: flex-start;
+    padding: 8px 10px;
+  }
+  .lc-shell__scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: var(--backdrop);
+    border: none;
+  }
+  .lc-omni__label {
+    display: none;
+  }
+  .lc-omni {
+    flex: none;
+    width: 40px;
+    padding: 0;
+    justify-content: center;
+  }
+  .lc-omni .lc-kbd {
+    display: none;
+  }
+  .lc-tenant__name {
+    display: none;
+  }
+}

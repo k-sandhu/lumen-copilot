@@ -1,8 +1,11 @@
 # Developer pages — docs viewer + features catalog
 
-Two standalone, developer-facing pages in the SPA, linked from the main app by the
-floating `NavOverlay` ("🧭 Pages", reveals on hover/focus). They're separate
-top-level routes (not nested under the chat shell) and lazy-loaded.
+Two developer-facing pages in the SPA. They are **excluded from the app-shell nav
+rail** (issue #110) — the shell's `routes/shell/navModel.ts` maps only the product
+surfaces into the Workspace/Administration groups, so `/docs` and `/features` are
+reachable by URL but never listed. They render inside the shared app shell like any
+other authenticated route (the previous floating `NavOverlay` was removed in #110),
+and are lazy-loaded.
 
 ## `/docs/*` — documentation viewer (`features/docs`)
 
@@ -51,8 +54,8 @@ nav gate, and the docs viewer inlines every repo markdown file into its chunk.
   the inlined docs are **not emitted at all**, and the modules export
   `route`/`navItem` = `undefined`, which `routes/discovery.ts` drops (so `/docs`
   and `/features` are absent from the nav and unroutable → 404).
-- When ON, each page is wrapped in the same auth `RouteGuard` as `/documents`, so
-  it still requires an authenticated session.
+- When ON, each page sits behind the shell's auth `RouteGuard` like `/documents`,
+  so it still requires an authenticated session.
 - `src/buildguards/dist-no-dev-pages.test.ts` runs a real flag-OFF `vite build` and
   greps the output for internal-doc strings + dev-page markers — it fails if the
   gate ever regresses to a runtime read (e.g. dynamic `import.meta.env[key]`),

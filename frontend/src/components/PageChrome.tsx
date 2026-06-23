@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useUiStore } from '@/stores/ui';
+import { useInAppShell } from '@/routes/shell/ShellContext';
 
 interface PageChromeProps {
   /** Page title shown in the slim top bar. */
@@ -14,14 +15,25 @@ interface PageChromeProps {
 }
 
 /**
- * Full-screen chrome for the standalone developer pages (`/docs`, `/features`) —
- * deliberately separate from the chat shell in App.tsx (the user asked for these
- * as pages "separate from the rest of the application"). Pinned top bar with a
- * back-to-app link + theme toggle; the body fills and scrolls within each page.
+ * Chrome for standalone pages. When rendered INSIDE the app shell (issue #110)
+ * the shell already provides brand + top bar + nav rail, so this suppresses its
+ * own header/back-link/theme-toggle and renders just the scrollable body — screens
+ * nest cleanly with no duplicate chrome. Standalone (a dev page `/docs`/`/features`
+ * reached directly, outside the shell) it keeps the full pinned top bar with a
+ * back-to-app link + theme toggle, as before.
  */
 export function PageChrome({ title, actions, onToggleNav, navOpen, children }: PageChromeProps) {
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const inShell = useInAppShell();
+
+  // Inside the shell the chrome is redundant — render only the body, filling the
+  // shell's main and owning its own scroll (min-h-0 contained overflow).
+  if (inShell) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-surface text-foreground">{children}</div>
+    );
+  }
 
   return (
     <div className="flex h-screen flex-col bg-surface text-foreground">
