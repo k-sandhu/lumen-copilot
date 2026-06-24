@@ -7,8 +7,9 @@ edit. The router validates in → calls **one** service → shapes out (ADR-0004
 
 * ``GET /search/suggest`` — permission-trimmed typeahead. Document suggestions run
   through the same ``retrieval/`` chokepoint as ``/search`` (INV-2): a title the
-  caller can't open is never suggested. An all-whitespace ``q`` is **422** (the
-  ``\\S`` pattern, INV-8). It is **not** audited per-keystroke (spec 0005 §5).
+  caller can't open is never suggested, and the lookup emits one ``retrieval.query``
+  audit event so it is provable after the fact (INV-6, spec 0005 §5). An
+  all-whitespace ``q`` is **422** (the ``\\S`` pattern, INV-8).
 * ``GET``/``DELETE /search/recent`` — the caller's own recent queries; per-user
   (one user's recents never appear for another, INV-2).
 
@@ -21,10 +22,16 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel
 
-from app.api.deps import CurrentTenant, CurrentUser, DbSession
+from app.api.deps import (
+    AuditSinkFactory,
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    extract_request_id,
+)
 from app.api.v1.search import RetrievalDep
 from app.services.suggest_service import SuggestionData, SuggestService
 
@@ -83,16 +90,27 @@ def _to_suggestion(data: SuggestionData) -> Suggestion:
 
 @router.get("/search/suggest", response_model=SuggestResponse, response_model_exclude_none=True)
 async def suggest_search(
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     retrieval: RetrievalDep,
+    make_audit_sink: AuditSinkFactory,
     q: Annotated[str, Query(min_length=1, pattern=r"\S", description="The partial query.")],
     limit: Annotated[int, Query(ge=1, le=20)] = 8,
 ) -> SuggestResponse:
-    """Permission-trimmed typeahead suggestions for ``q`` (read-only, no audit)."""
-    service = SuggestService(session, principal=principal, retrieval=retrieval)
+    """Permission-trimmed typeahead for ``q``; emits one retrieval audit event (INV-6)."""
+    service = SuggestService(
+        session,
+        principal=principal,
+        retrieval=retrieval,
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
     suggestions = await service.suggest(q=q, limit=limit)
+    # The audit row flushed within this request transaction — commit it.
+    await session.commit()
     return SuggestResponse(suggestions=[_to_suggestion(s) for s in suggestions])
 
 

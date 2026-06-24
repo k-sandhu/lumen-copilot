@@ -59,9 +59,15 @@ class SavedSearchUpdate(BaseModel):
     type: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
-    def _require_at_least_one_field(self) -> SavedSearchUpdate:
+    def _validate(self) -> SavedSearchUpdate:
         if not self.model_fields_set:
             raise ValueError("At least one field must be provided.")
+        # name/query are non-nullable in the contract; an EXPLICIT null is malformed
+        # (422), distinct from "absent" (unchanged). Only collection_id/source/type
+        # are tri-state nullable (a null clears them).
+        for field in ("name", "query"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null.")
         return self
 
 

@@ -24,9 +24,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -1815,31 +1817,44 @@ class RecentSearchRepository(_TenantScopedRepository):
     async def record(self, user_id: UUID, query: str, *, cap: int = 20) -> None:
         """Record (or bump) a query in the user's recent history (deduped, capped).
 
-        A blank query is ignored. The newest ``cap`` distinct queries are kept;
+        A blank query is ignored. An **atomic upsert** (``INSERT … ON CONFLICT
+        (tenant_id, user_id, normalized_query) DO UPDATE``) rather than
+        select-then-insert, so two concurrent identical ``/search`` requests can't
+        race into a unique-violation that would fail the search — one inserts, the
+        other updates ``last_used_at`` (recent history is only a side effect, it
+        must never break a search). The newest ``cap`` distinct queries are kept;
         older ones are evicted so the list stays bounded per user.
         """
         normalized = normalize_query(query)
         if not normalized:
             return
-        stmt = select(models.RecentSearch).where(
-            models.RecentSearch.tenant_id == self._tenant_id,
-            models.RecentSearch.user_id == user_id,
-            models.RecentSearch.normalized_query == normalized,
-        )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
         now = datetime.now(UTC)
-        if row is not None:
-            row.query = query.strip()
-            row.last_used_at = now
+        display = query.strip()
+        values = {
+            "id": uuid4(),
+            "tenant_id": self._tenant_id,
+            "user_id": user_id,
+            "query": display,
+            "normalized_query": normalized,
+            "last_used_at": now,
+        }
+        conflict = ["tenant_id", "user_id", "normalized_query"]
+        update = {"query": display, "last_used_at": now}
+        # Dialect-aware upsert: Postgres + the offline SQLite both support
+        # ON CONFLICT DO UPDATE on the unique (tenant, user, normalized) target.
+        # Executed per-branch (the two dialect Insert types don't share a variable).
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        if dialect == "postgresql":
+            await self._session.execute(
+                pg_insert(models.RecentSearch)
+                .values(**values)
+                .on_conflict_do_update(index_elements=conflict, set_=update)
+            )
         else:
-            self._session.add(
-                models.RecentSearch(
-                    tenant_id=self._tenant_id,
-                    user_id=user_id,
-                    query=query.strip(),
-                    normalized_query=normalized,
-                    last_used_at=now,
-                )
+            await self._session.execute(
+                sqlite_insert(models.RecentSearch)
+                .values(**values)
+                .on_conflict_do_update(index_elements=conflict, set_=update)
             )
         await self._session.flush()
         await self._evict_beyond_cap(user_id, cap)

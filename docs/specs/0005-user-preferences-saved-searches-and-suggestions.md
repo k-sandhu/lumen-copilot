@@ -94,15 +94,14 @@ the `retrieval/` permission filter; `completion`/`saved_search` suggestions read
 - **INV-4 (auth).** All endpoints are `bearerAuth`; missing/expired token → **401**.
 - **INV-8 (input).** Malformed input → **422** (empty `q` on suggest, unknown
   `default_model_id`, bad cursor, over-long name/query).
-- **INV-6 (auditable).** `suggest` is **not** audited per-keystroke: it is a
-  debounced typeahead over *already-permitted* data, and the actual `/search` on
-  submit records the `retrieval.query` audit event **and** the recent query.
-  Auditing every keystroke would flood the audit log without adding a provable
-  decision beyond what the eventual `/search` records — the meaningful retrieval
-  *decision* is the search, not each hint along the way. The permission-trim is
-  still structural (the suggest document matches run through the same `retrieval/`
-  chokepoint, so the trim holds regardless of auditing). Preferences/saved-search
-  writes are ordinary CRUD and are not retrieval events either.
+- **INV-6 (auditable).** `suggest` is a retrieval surface — its document matches run
+  through the `retrieval/` chokepoint — so it emits **one `retrieval.query` audit
+  event** per call (a non-reversible query hash, the suggestion count, and the
+  permitted document ids surfaced), exactly like `/search`, so the permission-trimmed
+  title lookup is provable after the fact. (Clients debounce the typeahead, so this
+  is not literally per-keystroke.) `/search` separately records its own
+  `retrieval.query` event on submit. Preferences/saved-search writes are ordinary
+  CRUD and are **not** retrieval events (no audit event required).
 
 ## 6. Acceptance criteria
 

@@ -230,6 +230,19 @@ async def test_empty_patch_body_is_422(client: AsyncClient, seeded: _Seeded) -> 
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize("field", ["name", "query"])
+async def test_patch_explicit_null_name_or_query_is_422(
+    client: AsyncClient, seeded: _Seeded, field: str
+) -> None:
+    # name/query are non-nullable in the contract: an EXPLICIT null is malformed
+    # (422), not a silent no-op (only collection_id/source/type are tri-state).
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(_BASE, headers=_auth(token), json={"name": "n", "query": "q"})
+    sid = created.json()["id"]
+    resp = await client.patch(f"{_BASE}/{sid}", headers=_auth(token), json={field: None})
+    assert resp.status_code == 422
+
+
 async def test_requires_auth(client: AsyncClient) -> None:
     assert (await client.get(_BASE)).status_code == 401
     assert (await client.post(_BASE, json={"name": "n", "query": "q"})).status_code == 401

@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -40,7 +41,7 @@ from app.domain.entities import Role
 from app.domain.retrieval import RetrievedPassage
 from app.main import create_app
 
-import app.db.models  # noqa: F401  isort: skip
+import app.db.models as models  # noqa: E402  isort: skip
 
 _PASSWORD = "devpassword"
 
@@ -230,6 +231,50 @@ async def test_blank_query_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.get("/api/v1/search/suggest?q=%20%20%20", headers=_auth(token))
     assert resp.status_code == 422
+
+
+async def test_recording_same_query_dedups(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    # Recording the same normalized query twice upserts ONE row (the atomic
+    # ON CONFLICT DO UPDATE path) rather than racing/duplicating.
+    tenant_a = sessionmaker.lumen_tenant_a  # type: ignore[attr-defined]
+    async with sessionmaker() as s:
+        repo = RecentSearchRepository(s, tenant_a)
+        await repo.record(seeded.alice_id, "Acme Renewal")
+        await repo.record(seeded.alice_id, "  acme   renewal ")  # same normalized form
+        await s.commit()
+    token = await _login(client, seeded.alice_email)
+    items = (await client.get("/api/v1/search/recent", headers=_auth(token))).json()["items"]
+    assert len(items) == 1  # deduped to a single row
+    assert " ".join(items[0]["query"].lower().split()) == "acme renewal"
+
+
+async def test_suggest_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    # A suggest is a retrieval surface (it hits the chokepoint for document
+    # matches), so it must leave one provable audit row (INV-6).
+    token = await _login(client, seeded.alice_email)
+    assert (
+        await client.get("/api/v1/search/suggest?q=acme", headers=_auth(token))
+    ).status_code == 200
+    tenant_a = sessionmaker.lumen_tenant_a  # type: ignore[attr-defined]
+    async with sessionmaker() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(models.AuditEvent).where(
+                        models.AuditEvent.tenant_id == tenant_a,
+                        models.AuditEvent.resource_type == "suggest",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].action == "retrieval.query"
 
 
 async def test_recents_are_per_user(
