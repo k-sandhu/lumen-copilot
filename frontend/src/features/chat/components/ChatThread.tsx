@@ -118,32 +118,28 @@ export function ChatThread({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex flex-col gap-4 p-4"
+        className="lc-thread"
         // The ScrollArea viewport is the scroller; this just lays out content.
       >
         {isLoading && (
-          <p role="status" className="text-sm text-foreground-muted">
+          <p role="status" className="lc-thread__status">
             Loading conversation…
           </p>
         )}
 
         {isError && (
-          <div role="alert" className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm">
-            <p className="text-danger">
+          <div role="alert" className="lc-thread__banner">
+            <p>
               {error instanceof ApiError ? error.displayMessage : 'Could not load this chat.'}
             </p>
-            <button
-              type="button"
-              onClick={onRetryLoad}
-              className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
+            <button type="button" onClick={onRetryLoad} className="lc-confirm__btn self-start">
               Retry
             </button>
           </div>
         )}
 
         {showEmpty && (
-          <p className="text-sm text-foreground-muted">
+          <p className="lc-thread__status">
             Ask a question to start. Answers cite the documents they draw from.
           </p>
         )}
@@ -199,17 +195,14 @@ export function ChatThread({
                   onOpenCitation={onOpenCitation}
                 />
                 {live.phase === 'error' && (
-                  <div
-                    role="alert"
-                    className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm"
-                  >
-                    <p className="text-danger">
+                  <div role="alert" className="lc-thread__banner">
+                    <p>
                       {live.problem?.detail ?? live.problem?.title ?? 'The answer stream failed.'}
                     </p>
                     <button
                       type="button"
                       onClick={onRetryStream}
-                      className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                      className="lc-confirm__btn self-start"
                     >
                       Retry
                     </button>

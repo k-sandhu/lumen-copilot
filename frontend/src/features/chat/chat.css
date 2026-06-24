@@ -1,0 +1,895 @@
+/* ============================================================================
+   Chat feature — enterprise re-skin (issue #136). Brings the product's hero
+   surface up to the same fidelity as the app shell (#110): the canonical chat
+   design (docs/wireframes/chat.html + DESIGN.md §1/§6) ported onto the PRODUCTION
+   token system (styles/tokens.css via @/ui) — no wireframe CSS is copied verbatim.
+
+   Token-driven like the rest of the kit: every size is calc(px * var(--fs|--space))
+   and every color is a --token, so the chat re-skins under any [data-theme]/
+   [data-mode] and moves live with the density axis (--fs/--space/--radius).
+   Class names are `lc-` prefixed so they never collide with Tailwind utilities.
+   ============================================================================ */
+
+/* ---- 3-pane split: history · conversation · inspector ------------------- */
+.lc-chat {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+.lc-chat__subrail {
+  flex: none;
+  width: calc(264px * var(--space));
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+}
+.lc-chat__main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.lc-chat__inspector {
+  flex: none;
+  width: min(92vw, calc(440px * var(--space)));
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+/* tap-away backdrop for the off-canvas inspector — only at narrow width (below),
+   mirroring the shell's .lc-shell__scrim convention. */
+.lc-chat__scrim {
+  display: none;
+}
+
+/* ---- conversation thread (centered reading column) --------------------- */
+.lc-thread {
+  max-width: calc(840px * var(--space));
+  margin: 0 auto;
+  width: 100%;
+  padding: calc(28px * var(--space));
+  display: flex;
+  flex-direction: column;
+  gap: calc(26px * var(--space));
+}
+
+.lc-turn {
+  display: flex;
+  gap: calc(14px * var(--space));
+}
+.lc-turn__who {
+  flex: none;
+  width: calc(30px * var(--fs));
+}
+.lc-turn__body {
+  min-width: 0;
+  flex: 1;
+}
+.lc-turn__name {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--space));
+  font-weight: 650;
+  font-size: calc(13px * var(--fs));
+  margin-bottom: calc(6px * var(--space));
+  color: var(--text);
+}
+/* user turn body is a soft accent card; assistant prose sits flush */
+.lc-turn--user .lc-turn__body {
+  background: var(--accent-weak);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-lg);
+  padding: calc(12px * var(--space)) calc(15px * var(--space));
+}
+.lc-turn--user .lc-turn__text {
+  font-size: calc(14px * var(--fs));
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* round avatar (user initials) + rounded-square brand mark (assistant) */
+.lc-turn__avatar {
+  width: calc(30px * var(--fs));
+  height: calc(30px * var(--fs));
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 650;
+  font-size: calc(11.5px * var(--fs));
+  color: var(--accent-contrast);
+  background: var(--accent-grad);
+  flex: none;
+}
+/* keep the user glyph on the density-scaled kit path, like the assistant mark */
+.lc-turn__avatar .lc-icon {
+  width: calc(14px * var(--fs));
+  height: calc(14px * var(--fs));
+  color: #fff;
+}
+.lc-turn__logo {
+  width: calc(30px * var(--fs));
+  height: calc(30px * var(--fs));
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  background: var(--accent-grad);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+  flex: none;
+}
+.lc-turn__logo .lc-icon {
+  width: calc(18px * var(--fs));
+  height: calc(18px * var(--fs));
+  color: #fff;
+}
+
+/* model badge beside the "Lumen" name */
+.lc-model-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5px * var(--space));
+  height: calc(20px * max(var(--fs), var(--space)));
+  padding: 0 calc(8px * var(--space));
+  border-radius: var(--r-full);
+  font-size: calc(11px * var(--fs));
+  font-weight: 600;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent-line);
+  white-space: nowrap;
+}
+.lc-model-badge .lc-icon {
+  width: calc(12px * var(--fs));
+  height: calc(12px * var(--fs));
+}
+
+/* assistant prose: a touch larger + airier than the default prose-md, matching
+   the wireframe's reading rhythm. Targets the MarkdownView wrapper. */
+.lc-answer.prose-md {
+  font-size: calc(14.5px * var(--fs));
+  line-height: 1.62;
+  color: var(--text);
+}
+.lc-answer.prose-md > :first-child {
+  margin-top: 0;
+}
+.lc-answer.prose-md > :last-child {
+  margin-bottom: 0;
+}
+
+/* streaming caret */
+.lc-caret {
+  display: inline-block;
+  width: calc(7px * var(--fs));
+  height: calc(15px * var(--fs));
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: lc-caret-blink 1s steps(2, start) infinite;
+}
+@keyframes lc-caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* grounded answer meta row (permission-checked · answered · actions) */
+.lc-answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8px * var(--space)) calc(14px * var(--space));
+  margin-top: calc(14px * var(--space));
+  padding-top: calc(12px * var(--space));
+  border-top: 1px dashed var(--border-strong);
+  font-size: calc(12px * var(--fs));
+  color: var(--text-muted);
+}
+.lc-answer-meta__signal {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5px * var(--space));
+}
+.lc-answer-meta__signal--ok {
+  color: var(--ok);
+}
+.lc-answer-meta__signal .lc-icon {
+  width: calc(14px * var(--fs));
+  height: calc(14px * var(--fs));
+}
+.lc-answer-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+.lc-act-btn {
+  display: grid;
+  place-items: center;
+  width: calc(30px * max(var(--fs), var(--space)));
+  height: calc(30px * max(var(--fs), var(--space)));
+  border-radius: var(--r-sm);
+  color: var(--text-subtle);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  transition:
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.lc-act-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-act-btn[aria-pressed='true'] {
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+.lc-act-btn--ok {
+  color: var(--ok);
+}
+.lc-act-btn .lc-icon {
+  width: calc(15px * var(--fs));
+  height: calc(15px * var(--fs));
+}
+
+/* "Sources used" strip */
+.lc-sources__label {
+  font-size: calc(10.5px * var(--fs));
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 650;
+  color: var(--text-subtle);
+  margin: calc(16px * var(--space)) 0 calc(8px * var(--space));
+}
+.lc-sources {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8px * var(--space));
+}
+.lc-source-row {
+  display: flex;
+  align-items: center;
+  gap: calc(11px * var(--space));
+  padding: calc(9px * var(--space)) calc(11px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  transition:
+    border-color var(--dur-1),
+    background var(--dur-1);
+}
+.lc-source-row:hover,
+.lc-source-row:focus-within {
+  border-color: var(--accent-line);
+  background: var(--surface);
+}
+/* the whole row is one button (single tab stop); the permission pill is a
+   non-interactive sibling so it stays outside the button. */
+.lc-source-row__btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: calc(11px * var(--space));
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.lc-source-row__main {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+.lc-source-row__num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: calc(20px * var(--fs));
+  height: calc(20px * var(--fs));
+  border-radius: var(--r-sm);
+  font-family: var(--ds-font-mono);
+  font-size: calc(11px * var(--fs));
+  font-weight: 700;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+}
+.lc-source-row__title {
+  display: block;
+  font-size: calc(13px * var(--fs));
+  font-weight: 540;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-source-row__sub {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--space));
+  margin-top: calc(3px * var(--space));
+}
+
+/* honest zero-citation notice */
+.lc-no-sources {
+  margin-top: calc(14px * var(--space));
+  padding-top: calc(12px * var(--space));
+  border-top: 1px dashed var(--border-strong);
+  font-size: calc(12.5px * var(--fs));
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+/* wide GFM tables scroll within the reading column instead of forcing a
+   thread-wide horizontal scrollbar (code blocks already do via .prose-md pre). */
+.lc-answer table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* in-thread banners (load error / stream error) keep the column's max width */
+.lc-thread__banner {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8px * var(--space));
+  padding: calc(13px * var(--space)) calc(15px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+  background: var(--danger-weak);
+  font-size: calc(13px * var(--fs));
+  color: var(--danger);
+}
+.lc-thread__status {
+  font-size: calc(13px * var(--fs));
+  color: var(--text-muted);
+}
+
+/* ---- composer (elevated, focus glow) ----------------------------------- */
+.lc-composer-wrap {
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  backdrop-filter: saturate(1.2) blur(8px);
+  padding: calc(14px * var(--space)) calc(20px * var(--space)) calc(18px * var(--space));
+}
+.lc-composer {
+  max-width: calc(840px * var(--space));
+  margin: 0 auto;
+}
+.lc-composer__chips {
+  margin-bottom: calc(10px * var(--space));
+}
+.lc-composer__box {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color var(--dur-2),
+    box-shadow var(--dur-2);
+}
+.lc-composer__box:focus-within {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--accent-weak),
+    var(--shadow-md);
+}
+.lc-composer__input {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  resize: none;
+  color: var(--text);
+  padding: calc(13px * var(--space)) calc(15px * var(--space)) calc(4px * var(--space));
+  font-family: var(--ds-font-sans);
+  font-size: calc(14.5px * var(--fs));
+  line-height: 1.5;
+  max-height: calc(180px * var(--fs));
+}
+.lc-composer__input:focus {
+  outline: none;
+}
+.lc-composer__input::placeholder {
+  color: var(--text-subtle);
+}
+.lc-composer__input:disabled {
+  opacity: 0.6;
+}
+.lc-composer__bar {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--space));
+  padding: calc(8px * var(--space)) calc(10px * var(--space)) calc(9px * var(--space));
+}
+.lc-composer__bar-spacer {
+  flex: 1;
+}
+.lc-composer__hint {
+  text-align: center;
+  margin-top: calc(8px * var(--space));
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-muted);
+}
+
+/* native model <select> styled as a subtle bar control */
+.lc-modelpicker {
+  height: calc(30px * max(var(--fs), var(--space)));
+  max-width: calc(190px * var(--fs));
+  padding: 0 calc(8px * var(--space));
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-family: var(--ds-font-sans);
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 540;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1),
+    color var(--dur-1);
+}
+.lc-modelpicker:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-modelpicker:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* round primary send button + neutral stop button */
+.lc-send-btn {
+  display: grid;
+  place-items: center;
+  width: calc(34px * max(var(--fs), var(--space)));
+  height: calc(34px * max(var(--fs), var(--space)));
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  transition:
+    filter var(--dur-1),
+    opacity var(--dur-1);
+}
+.lc-send-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.lc-send-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.lc-send-btn .lc-icon {
+  width: calc(16px * var(--fs));
+  height: calc(16px * var(--fs));
+}
+.lc-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6px * var(--space));
+  height: calc(34px * max(var(--fs), var(--space)));
+  padding: 0 calc(12px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 560;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-stop-btn:hover {
+  background: var(--surface-3);
+}
+.lc-stop-btn .lc-stop-glyph {
+  width: calc(10px * var(--fs));
+  height: calc(10px * var(--fs));
+  border-radius: 2px;
+  background: var(--danger);
+}
+
+/* knowledge-mode chip */
+.lc-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6px * var(--space));
+  height: calc(28px * max(var(--fs), var(--space)));
+  padding: 0 calc(11px * var(--space));
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: calc(12px * var(--fs));
+  font-weight: 540;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1),
+    color var(--dur-1);
+}
+.lc-mode-chip:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-mode-chip[aria-pressed='true'] {
+  border-color: var(--accent-line);
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+}
+.lc-mode-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.lc-mode-chip .lc-icon {
+  width: calc(14px * var(--fs));
+  height: calc(14px * var(--fs));
+}
+
+/* ---- history subrail --------------------------------------------------- */
+.lc-subrail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.lc-subrail__head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: calc(10px * var(--space));
+  padding: calc(14px * var(--space)) calc(14px * var(--space)) calc(10px * var(--space));
+}
+.lc-subrail__scroll-pad {
+  padding: calc(2px * var(--space)) calc(10px * var(--space)) calc(14px * var(--space));
+}
+.lc-newchat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(7px * var(--space));
+  width: 100%;
+  height: calc(36px * max(var(--fs), var(--space)));
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-family: var(--ds-font-sans);
+  font-size: calc(13px * var(--fs));
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter var(--dur-1);
+}
+.lc-newchat:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.lc-newchat:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.lc-newchat .lc-icon {
+  width: calc(15px * var(--fs));
+  height: calc(15px * var(--fs));
+}
+
+/* search field */
+.lc-field {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--space));
+  height: calc(34px * max(var(--fs), var(--space)));
+  padding: 0 calc(10px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  transition: border-color var(--dur-2);
+}
+.lc-field:focus-within {
+  border-color: var(--accent);
+}
+.lc-field .lc-icon {
+  width: calc(15px * var(--fs));
+  height: calc(15px * var(--fs));
+  flex: none;
+}
+.lc-field__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--ds-font-sans);
+  font-size: calc(13px * var(--fs));
+}
+.lc-field__input:focus {
+  outline: none;
+}
+.lc-field__input::placeholder {
+  color: var(--text-subtle);
+}
+
+.lc-histday {
+  font-size: calc(10.5px * var(--fs));
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 650;
+  color: var(--text-subtle);
+  padding: calc(14px * var(--space)) calc(11px * var(--space)) calc(5px * var(--space));
+}
+.lc-histday:first-child {
+  padding-top: calc(6px * var(--space));
+}
+.lc-histitem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-histitem:hover {
+  background: var(--surface-3);
+}
+.lc-histitem.is-active {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.lc-histitem__open {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: calc(9px * var(--space)) calc(11px * var(--space));
+  border-radius: var(--r-md);
+  color: inherit;
+}
+.lc-histitem__title {
+  font-size: calc(13px * var(--fs));
+  font-weight: 540;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-histitem__meta {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-histitem__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: calc(6px * var(--space));
+  opacity: 0;
+  transition: opacity var(--dur-1);
+}
+.lc-histitem:hover .lc-histitem__actions,
+.lc-histitem:focus-within .lc-histitem__actions {
+  opacity: 1;
+}
+.lc-histitem__action {
+  display: grid;
+  place-items: center;
+  width: calc(26px * max(var(--fs), var(--space)));
+  height: calc(26px * max(var(--fs), var(--space)));
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.lc-histitem__action:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-histitem__action--danger:hover {
+  color: var(--danger);
+}
+.lc-histitem__action .lc-icon {
+  width: calc(14px * var(--fs));
+  height: calc(14px * var(--fs));
+}
+.lc-histrename {
+  display: flex;
+  padding: calc(2px * var(--space)) calc(4px * var(--space));
+}
+.lc-histrename__input {
+  flex: 1;
+  min-width: 0;
+  height: calc(34px * max(var(--fs), var(--space)));
+  padding: 0 calc(10px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--ds-font-sans);
+  font-size: calc(13px * var(--fs));
+}
+.lc-histrename__input:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+
+/* delete confirm popover */
+.lc-confirm {
+  margin: calc(4px * var(--space)) calc(2px * var(--space)) 0;
+  padding: calc(10px * var(--space)) calc(11px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+  background: var(--danger-weak);
+  font-size: calc(12px * var(--fs));
+  color: var(--text);
+}
+.lc-confirm__actions {
+  display: flex;
+  gap: calc(8px * var(--space));
+  margin-top: calc(9px * var(--space));
+}
+.lc-confirm__btn {
+  height: calc(28px * max(var(--fs), var(--space)));
+  padding: 0 calc(11px * var(--space));
+  border-radius: var(--r-sm);
+  font-size: calc(12px * var(--fs));
+  font-weight: 560;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+/* destructive action follows the kit's danger convention (tinted, not a solid
+   fill with hardcoded #fff) so contrast holds in dark mode where --danger is a
+   light red — matches .lc-perm--denied / .lc-badge--danger in ui-kit.css. */
+.lc-confirm__btn--danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: var(--danger-weak);
+  color: var(--danger);
+}
+.lc-confirm__btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 16%, var(--surface));
+}
+.lc-confirm__btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* sidebar states (loading / empty / error) */
+.lc-subrail__state {
+  padding: calc(16px * var(--space)) calc(12px * var(--space));
+  font-size: calc(12.5px * var(--fs));
+  color: var(--text-subtle);
+}
+.lc-subrail__state--error {
+  color: var(--danger);
+}
+
+/* ---- empty / no-session hero ------------------------------------------ */
+.lc-chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(14px * var(--space));
+  padding: calc(40px * var(--space));
+  text-align: center;
+}
+.lc-chat-empty__logo {
+  width: calc(52px * var(--fs));
+  height: calc(52px * var(--fs));
+  border-radius: var(--r-lg);
+  display: grid;
+  place-items: center;
+  background: var(--accent-grad);
+  color: #fff;
+  box-shadow: var(--shadow-md);
+}
+.lc-chat-empty__logo .lc-icon {
+  width: calc(26px * var(--fs));
+  height: calc(26px * var(--fs));
+  color: #fff;
+}
+.lc-chat-empty__title {
+  font-size: calc(18px * var(--fs));
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.lc-chat-empty__sub {
+  max-width: calc(360px * var(--fs));
+  font-size: calc(13.5px * var(--fs));
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+/* ---- document-viewer / inspector head ---------------------------------- */
+.lc-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.lc-viewer__head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(10px * var(--space));
+  padding: calc(14px * var(--space)) calc(16px * var(--space));
+  border-bottom: 1px solid var(--border);
+}
+.lc-viewer__title {
+  font-size: calc(14px * var(--fs));
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-viewer__sub {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ---- narrow widths: subrail + inspector collapse off-canvas ------------ */
+@media (max-width: 880px) {
+  .lc-chat__subrail {
+    display: none;
+  }
+  .lc-thread,
+  .lc-composer {
+    max-width: 100%;
+  }
+  .lc-thread {
+    padding: calc(18px * var(--space));
+  }
+  .lc-composer-wrap {
+    padding: calc(12px * var(--space)) calc(14px * var(--space)) calc(14px * var(--space));
+  }
+  .lc-chat__inspector {
+    position: fixed;
+    inset: 0 0 0 auto;
+    z-index: 70;
+    width: min(94vw, calc(440px * var(--space)));
+    box-shadow: var(--shadow-lg);
+  }
+  .lc-chat__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: var(--backdrop);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
+}

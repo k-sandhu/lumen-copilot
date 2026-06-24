@@ -106,6 +106,38 @@ contract change** and **no invented data**:
   source provenance (GUARD #120: never fabricate where a doc was last indexed).
   Each row lights up honestly only if a source ever starts carrying that field.
 
+## Enterprise re-skin (#136, wireframe `chat.html` / DESIGN.md §1/§6)
+
+The chat — the product's hero surface — is brought to the same fidelity as the app
+shell (#110): the canonical layout in `docs/wireframes/chat.html` ported onto the
+**production** token system in a co-located, token-driven stylesheet
+[`chat.css`](../chat.css) (imported by `ChatView`). No wireframe CSS is copied
+verbatim; like the shell, every size is `calc(px * var(--fs|--space))` and every
+color is a `--token`, so the chat re-skins under any `[data-theme]`/`[data-mode]`
+and moves live with the density axis. Class names are `lc-` prefixed.
+
+- **Conversation** is a centered ~840px reading column with an 8px-rhythm — each
+  turn is an **avatar + body row** with a "You"/"Lumen" name (replacing the old
+  right-aligned bubbles). The user turn is a soft accent card; the assistant answer
+  sits flush and reads a touch larger (`.lc-answer`).
+- **Composer** is an elevated rounded card with a focus glow, the knowledge-mode
+  chips above it, and a tidy bar (model picker + round send / Stop). The send/Stop
+  affordance preserves the cancellable-stream behavior and accessible names.
+- **History sidebar** (`HistorySidebar`) gains a **New chat** primary action, a
+  client-side **search** filter (honest "no match" state), sessions **grouped by
+  recency** (Today / Yesterday / Previous 7 days / Older), and a one-line meta
+  (`sessionMeta`) built **only** from fields the session wire carries
+  (`message_count`, `model`, `updated_at`) — never a fabricated "sources" count.
+  `groupSessionsByDay` / `dayBucket` / `sessionMeta` are pure and unit-tested.
+- **Sources-used strip** renders each cited source as a numbered row (kit
+  `CitationChip` → opens the inspector) with a `FreshnessPill` and a
+  `PermissionPill` ("You have access" — honest by construction, INV-2).
+- A calm **empty/no-session hero** replaces the bare prompt.
+
+The re-skin is **presentation-only** — no contract change, no new transport, and
+no invented affordance (no attach/upload/web control that does nothing). All tested
+behavior and accessible names are preserved; new pure helpers carry their own tests.
+
 ## Invariants honored
 
 - **INV-3 Citation integrity** (spec 0004): citations render only from the

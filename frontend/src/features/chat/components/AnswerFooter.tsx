@@ -42,9 +42,11 @@ export interface AnswerFooterProps {
 
 /** Thumb / copy / check glyphs the shared kit Icon set doesn't carry (#120). */
 function FooterGlyph({ name }: { name: 'thumb-up' | 'thumb-down' | 'copy' | 'check' }): ReactNode {
+  // Use the kit `lc-icon` class so these glyphs scale with the --fs density axis
+  // (sized to 15px inside .lc-act-btn), like every other chat icon.
   const common = {
     viewBox: '0 0 24 24',
-    className: 'h-3.5 w-3.5',
+    className: 'lc-icon',
     fill: 'none',
     stroke: 'currentColor',
     strokeWidth: 1.8,
@@ -81,9 +83,6 @@ function FooterGlyph({ name }: { name: 'thumb-up' | 'thumb-down' | 'copy' | 'che
   }
 }
 
-const BTN =
-  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent';
-
 export function AnswerFooter({ answerText, permissionChecked, answeredAt }: AnswerFooterProps) {
   const [vote, setVote] = useState<Vote>(null);
   const [copied, setCopied] = useState(false);
@@ -111,31 +110,34 @@ export function AnswerFooter({ answerText, permissionChecked, answeredAt }: Answ
   if (!permissionChecked && !answeredAt) return null;
 
   return (
-    <footer className="mt-2 flex items-center gap-3 border-t border-border pt-2 text-[11px] text-foreground-muted">
+    <footer className="lc-answer-meta">
       {permissionChecked && (
-        <span className="inline-flex items-center gap-1 text-ok" title="Answered only from sources you can access">
-          <Icon name="shield-check" className="h-3.5 w-3.5" />
+        <span
+          className="lc-answer-meta__signal lc-answer-meta__signal--ok"
+          title="Answered only from sources you can access"
+        >
+          <Icon name="shield-check" />
           Permission-checked
         </span>
       )}
       {answeredAt && (
         <span
-          className="inline-flex items-center gap-1"
+          className="lc-answer-meta__signal"
           title="When this answer was produced (not source freshness)"
         >
-          <Icon name="clock" className="h-3.5 w-3.5" />
+          <Icon name="clock" />
           answered {answeredAt}
         </span>
       )}
 
-      <div className="ml-auto flex items-center gap-0.5">
+      <div className="lc-answer-actions">
         <button
           type="button"
           aria-pressed={vote === 'up'}
           aria-label="Mark this answer helpful"
           title="Helpful"
           onClick={() => toggleVote('up')}
-          className={cn(BTN, vote === 'up' && 'bg-accent/15 text-accent')}
+          className="lc-act-btn"
         >
           <FooterGlyph name="thumb-up" />
         </button>
@@ -145,7 +147,7 @@ export function AnswerFooter({ answerText, permissionChecked, answeredAt }: Answ
           aria-label="Mark this answer not helpful"
           title="Not helpful"
           onClick={() => toggleVote('down')}
-          className={cn(BTN, vote === 'down' && 'bg-danger/15 text-danger')}
+          className="lc-act-btn"
         >
           <FooterGlyph name="thumb-down" />
         </button>
@@ -154,7 +156,7 @@ export function AnswerFooter({ answerText, permissionChecked, answeredAt }: Answ
           aria-label={copied ? 'Answer copied' : 'Copy answer'}
           title={copied ? 'Copied' : 'Copy'}
           onClick={() => void onCopy()}
-          className={cn(BTN, copied && 'text-ok')}
+          className={cn('lc-act-btn', copied && 'lc-act-btn--ok')}
         >
           <FooterGlyph name={copied ? 'check' : 'copy'} />
         </button>

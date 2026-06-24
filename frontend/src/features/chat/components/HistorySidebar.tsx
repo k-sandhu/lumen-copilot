@@ -1,14 +1,21 @@
 /**
- * Chat-history sidebar (AC-4): lists the caller's sessions and supports
- * new / rename / delete. Implements every state (frontend/AGENTS.md): loading,
- * empty, error (with retry), and the populated list. Selecting a session opens
- * it; the active session is highlighted. Rename is inline; delete confirms.
+ * Chat-history sidebar (AC-4) — re-skinned to the canonical design (issue #136,
+ * docs/wireframes/chat.html subrail): a "New chat" primary action, a client-side
+ * search filter, sessions grouped by recency (Today / Yesterday / …) each with an
+ * honest meta line ("N messages · model · updated"), and an elevated active card.
+ *
+ * Implements every state (frontend/AGENTS.md): loading, empty, error (with
+ * retry), no-search-match, and the populated list. Selecting a session opens it;
+ * the active session is highlighted. Rename is inline; delete confirms. Only
+ * fields the session wire carries drive the meta line — no fabricated counts.
  */
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
 import type { ChatSession } from '@/api';
 import { ScrollArea } from '@/components/ScrollArea';
+import { Icon } from '@/ui';
 import { cn } from '@/lib/cn';
+import { groupSessionsByDay, sessionMeta } from '../model/presentation';
 import {
   useChatSessions,
   useCreateSession,
@@ -33,6 +40,7 @@ export function HistorySidebar({
 }: HistorySidebarProps) {
   const sessions = useChatSessions();
   const create = useCreateSession();
+  const [query, setQuery] = useState('');
 
   function handleNew() {
     create.mutate(
@@ -43,33 +51,52 @@ export function HistorySidebar({
     );
   }
 
+  const items = sessions.data?.items;
+  const total = items?.length ?? 0;
+  const filtered = useMemo(() => {
+    const list = items ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((s) => (s.title || 'Untitled chat').toLowerCase().includes(q));
+  }, [items, query]);
+  const groups = useMemo(() => groupSessionsByDay(filtered), [filtered]);
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">
-          Chats
-        </h2>
+    <div className="lc-subrail">
+      <div className="lc-subrail__head">
         <button
           type="button"
           onClick={handleNew}
           disabled={create.isPending}
-          className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-surface-muted disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="lc-newchat"
         >
-          {create.isPending ? 'Creating…' : '+ New'}
+          <Icon name="plus" />
+          {create.isPending ? 'Creating…' : 'New chat'}
         </button>
+        <div className="lc-field">
+          <Icon name="search" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chats"
+            aria-label="Search chats"
+            className="lc-field__input"
+          />
+        </div>
       </div>
 
       <div className="min-h-0 flex-1">
-        <ScrollArea viewportClassName="p-2">
+        <ScrollArea viewportClassName="lc-subrail__scroll-pad">
           {sessions.isLoading && (
-            <p role="status" className="px-2 py-4 text-xs text-foreground-muted">
+            <p role="status" className="lc-subrail__state">
               Loading chats…
             </p>
           )}
 
           {sessions.isError && (
-            <div role="alert" className="px-2 py-4 text-xs">
-              <p className="text-danger">
+            <div role="alert" className="lc-subrail__state lc-subrail__state--error">
+              <p>
                 {sessions.error instanceof ApiError
                   ? sessions.error.displayMessage
                   : 'Could not load chats.'}
@@ -77,29 +104,38 @@ export function HistorySidebar({
               <button
                 type="button"
                 onClick={() => void sessions.refetch()}
-                className="mt-2 rounded-md border border-border px-2 py-1 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="lc-confirm__btn mt-2"
               >
                 Retry
               </button>
             </div>
           )}
 
-          {sessions.isSuccess && sessions.data.items.length === 0 && (
-            <p className="px-2 py-4 text-xs text-foreground-muted">
-              No chats yet. Start one with “+ New”.
-            </p>
+          {sessions.isSuccess && total === 0 && (
+            <p className="lc-subrail__state">No chats yet. Start one with “New chat”.</p>
           )}
 
-          {sessions.isSuccess && sessions.data.items.length > 0 && (
-            <ul className="flex flex-col gap-0.5" aria-label="Chat history">
-              {sessions.data.items.map((session) => (
-                <SessionRow
-                  key={session.id}
-                  session={session}
-                  active={session.id === activeSessionId}
-                  onSelect={() => onSelect(session.id)}
-                  onDeleted={() => onDeleted(session.id)}
-                />
+          {sessions.isSuccess && total > 0 && filtered.length === 0 && (
+            <p className="lc-subrail__state">No chats match “{query.trim()}”.</p>
+          )}
+
+          {groups.length > 0 && (
+            <ul aria-label="Chat history">
+              {groups.map((group) => (
+                <li key={group.label}>
+                  <div className="lc-histday">{group.label}</div>
+                  <ul>
+                    {group.sessions.map((session) => (
+                      <SessionRow
+                        key={session.id}
+                        session={session}
+                        active={session.id === activeSessionId}
+                        onSelect={() => onSelect(session.id)}
+                        onDeleted={() => onDeleted(session.id)}
+                      />
+                    ))}
+                  </ul>
+                </li>
               ))}
             </ul>
           )}
@@ -125,6 +161,20 @@ function SessionRow({
   const [confirming, setConfirming] = useState(false);
   const rename = useUpdateSession();
   const remove = useDeleteSession();
+  // The delete confirm is role="alertdialog": move focus into it on open, close on
+  // Escape, and restore focus to the trigger on cancel (a11y — the role promises
+  // dialog-like behavior).
+  const deleteBtnRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+  }, [confirming]);
+
+  function cancelDelete() {
+    setConfirming(false);
+    deleteBtnRef.current?.focus();
+  }
 
   function commitRename() {
     const next = title.trim();
@@ -143,6 +193,8 @@ function SessionRow({
     remove.mutate(session.id, { onSuccess: onDeleted });
   }
 
+  const label = session.title || 'Untitled chat';
+
   if (editing) {
     return (
       <li>
@@ -151,7 +203,7 @@ function SessionRow({
             e.preventDefault();
             commitRename();
           }}
-          className="flex items-center gap-1 px-1 py-0.5"
+          className="lc-histrename"
         >
           <input
             autoFocus
@@ -159,7 +211,7 @@ function SessionRow({
             onChange={(e) => setTitle(e.target.value)}
             onBlur={commitRename}
             aria-label="Rename chat"
-            className="min-w-0 flex-1 rounded border border-border bg-surface px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="lc-histrename__input"
           />
         </form>
       </li>
@@ -167,65 +219,64 @@ function SessionRow({
   }
 
   return (
-    <li className="group relative">
-      <div
-        className={cn(
-          'flex items-center gap-1 rounded-md',
-          active ? 'bg-surface-muted' : 'hover:bg-surface-muted',
-        )}
-      >
+    <li>
+      <div className={cn('lc-histitem', active && 'is-active')}>
         <button
           type="button"
           onClick={onSelect}
           aria-current={active ? 'true' : undefined}
-          className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          aria-label={label}
+          className="lc-histitem__open"
         >
-          {session.title || 'Untitled chat'}
+          <div className="lc-histitem__title">{label}</div>
+          <div className="lc-histitem__meta">{sessionMeta(session)}</div>
         </button>
-        <div className="flex shrink-0 items-center gap-0.5 pr-1 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+        <div className="lc-histitem__actions">
           <button
             type="button"
             onClick={() => {
               setTitle(session.title);
               setEditing(true);
             }}
-            aria-label={`Rename ${session.title || 'chat'}`}
-            className="rounded px-1 py-0.5 text-xs text-foreground-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            aria-label={`Rename ${label}`}
+            className="lc-histitem__action"
           >
-            Rename
+            <Icon name="pencil" />
           </button>
           <button
+            ref={deleteBtnRef}
             type="button"
             onClick={() => setConfirming(true)}
-            aria-label={`Delete ${session.title || 'chat'}`}
-            className="rounded px-1 py-0.5 text-xs text-foreground-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            aria-label={`Delete ${label}`}
+            className="lc-histitem__action lc-histitem__action--danger"
           >
-            Delete
+            <Icon name="trash" />
           </button>
         </div>
       </div>
 
       {confirming && (
         <div
+          ref={confirmRef}
           role="alertdialog"
           aria-label="Confirm delete"
-          className="mt-1 rounded-md border border-danger/40 bg-danger/10 p-2 text-xs"
+          tabIndex={-1}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') cancelDelete();
+          }}
+          className="lc-confirm"
         >
           <p>Delete this chat and its messages?</p>
-          <div className="mt-2 flex gap-2">
+          <div className="lc-confirm__actions">
             <button
               type="button"
               onClick={commitDelete}
               disabled={remove.isPending}
-              className="rounded-md border border-danger/60 px-2 py-1 text-danger hover:bg-danger/20 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+              className="lc-confirm__btn lc-confirm__btn--danger"
             >
               {remove.isPending ? 'Deleting…' : 'Delete'}
             </button>
-            <button
-              type="button"
-              onClick={() => setConfirming(false)}
-              className="rounded-md border border-border px-2 py-1 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
+            <button type="button" onClick={cancelDelete} className="lc-confirm__btn">
               Cancel
             </button>
           </div>

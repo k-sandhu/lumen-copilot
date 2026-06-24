@@ -31,14 +31,14 @@ export function ModelPicker({ models, value, onChange, disabled = false }: Model
   })).filter((g) => g.items.length > 0);
 
   return (
-    <label className="flex items-center gap-2 text-xs text-foreground-muted">
+    <label className="flex min-w-0 items-center">
       <span className="sr-only">Model</span>
       <select
         aria-label="Model"
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+        className="lc-modelpicker"
       >
         {byTier.map((group) => (
           <optgroup key={group.tier} label={TIER_LABEL[group.tier]}>

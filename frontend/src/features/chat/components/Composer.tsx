@@ -10,6 +10,7 @@
  */
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { ChatModelInfo } from '@/api';
+import { Icon } from '@/ui';
 import { ModelPicker } from './ModelPicker';
 import { KnowledgeModeChips, type KnowledgeMode } from './KnowledgeModeChips';
 
@@ -63,56 +64,59 @@ export function Composer({
   }
 
   return (
-    <form
-      className="flex flex-col gap-2"
-      onSubmit={submit}
-      aria-label="Message composer"
-    >
-      <KnowledgeModeChips
-        value={knowledgeMode}
-        onChange={setKnowledgeMode}
-        disabled={disabled || streaming}
-      />
-      <div className="flex items-end gap-2">
+    <form className="lc-composer" onSubmit={submit} aria-label="Message composer">
+      <div className="lc-composer__chips">
+        <KnowledgeModeChips
+          value={knowledgeMode}
+          onChange={setKnowledgeMode}
+          disabled={disabled || streaming}
+        />
+      </div>
+
+      <div className="lc-composer__box">
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
           disabled={disabled}
           rows={1}
-          placeholder={disabled ? 'Start or pick a chat to begin' : 'Ask about your documents…'}
+          placeholder={
+            disabled
+              ? 'Start or pick a chat to begin'
+              : 'Ask anything about your work…  (Enter to send, Shift+Enter for a new line)'
+          }
           aria-label="Message"
-          className="max-h-40 min-h-[2.5rem] min-w-0 flex-1 resize-y rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+          className="lc-composer__input"
         />
-        {streaming ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="shrink-0 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-foreground hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            Stop
-          </button>
-        ) : (
-          <button
-            type="submit"
-            disabled={!canSend}
-            className="shrink-0 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            {busy ? 'Sending…' : 'Send'}
-          </button>
-        )}
+        <div className="lc-composer__bar">
+          <ModelPicker
+            models={models}
+            value={model}
+            onChange={onModelChange}
+            disabled={disabled || streaming}
+          />
+          <div className="lc-composer__bar-spacer" />
+          {streaming ? (
+            <button type="button" onClick={onStop} aria-label="Stop generating" className="lc-stop-btn">
+              <span className="lc-stop-glyph" aria-hidden="true" />
+              Stop
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!canSend}
+              aria-label={busy ? 'Sending message' : 'Send message'}
+              className="lc-send-btn"
+            >
+              <Icon name="send" />
+            </button>
+          )}
+        </div>
       </div>
-      <div className="flex items-center justify-between">
-        <ModelPicker
-          models={models}
-          value={model}
-          onChange={onModelChange}
-          disabled={disabled || streaming}
-        />
-        <span className="text-[11px] text-foreground-muted">
-          Enter to send · Shift+Enter for a new line
-        </span>
-      </div>
+
+      <p className="lc-composer__hint">
+        Lumen can be wrong — every answer is grounded and cited so you can verify.
+      </p>
     </form>
   );
 }
