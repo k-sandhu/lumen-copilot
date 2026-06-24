@@ -34,7 +34,11 @@ export type IconName =
   | 'sliders'
   | 'bell'
   | 'sparkles'
-  | 'plug';
+  | 'plug'
+  | 'plus'
+  | 'send'
+  | 'pencil'
+  | 'trash';
 
 const PATHS: Record<IconName, string> = {
   'shield-check': 'M12 3 4 6v6c0 4.5 3.3 7.5 8 9 4.7-1.5 8-4.5 8-9V6l-8-3ZM9 12l2 2 4-4',
@@ -68,6 +72,10 @@ const PATHS: Record<IconName, string> = {
   sparkles:
     'M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4L12 3ZM19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14Z',
   plug: 'M9 3v5m6-5v5M6 8h12v2a6 6 0 0 1-12 0V8ZM12 16v5',
+  plus: 'M12 5v14M5 12h14',
+  send: 'M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z',
+  pencil: 'M4 20h4L19 9l-4-4L4 16v4ZM14 6l4 4',
+  trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6',
 };
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

@@ -1,16 +1,18 @@
 /**
- * One chat turn (user or assistant). Assistant content is ALWAYS rendered
+ * One chat turn (user or assistant), rendered as an avatar + turn-row matching
+ * the canonical chat design (docs/wireframes/chat.html, DESIGN.md §1/§6) on the
+ * production token system (issue #136). Assistant content is ALWAYS rendered
  * through the sanitized markdown pipeline (frontend/AGENTS.md "Rendered, never
  * raw") — never a raw string, never dangerouslySetInnerHTML.
  *
- * Trust-signal re-skin (#89, ADR-0007 §1 / DESIGN.md §1/§6): an assistant turn
- * carries a model badge, a collapsible RetrievalTrace ("Looked at N sources · M
- * passages · K excluded"), and a "Sources used" strip where each cited source
- * shows a FreshnessPill. A zero-citation answer still says so honestly rather
- * than fabricating references (mission filter #2, spec 0004 INV-3). The inline
- * citation markers are the kit CitationChip; clicking any affordance opens the
- * SourceInspector (the viewer pane). All signals are derived from data the turn
- * ALREADY has — no contract change.
+ * Trust-signal layout (#89/#120): an assistant turn carries a model badge, a
+ * collapsible RetrievalTrace ("Looked at N sources · M passages · K excluded"),
+ * a "Sources used" strip where each cited source shows its number (kit
+ * CitationChip → opens the SourceInspector), a FreshnessPill, and a
+ * PermissionPill (honest by construction: the backend only returns sources the
+ * caller may see — spec 0004 INV-2). A zero-citation answer still says so
+ * honestly. All signals are derived from data the turn ALREADY has — no contract
+ * change.
  *
  * Pure/presentational: streaming state, tool activity, citation collection, and
  * trust-signal derivation are owned by the hook/parent; this component renders
@@ -18,8 +20,7 @@
  */
 import { memo } from 'react';
 import { MarkdownView } from '@/lib/markdown';
-import { cn } from '@/lib/cn';
-import { CitationChip, FreshnessPill, Icon, RetrievalTrace, type TraceStep } from '@/ui';
+import { FreshnessPill, Icon, PermissionPill, RetrievalTrace, type TraceStep } from '@/ui';
 import type { MessageRole } from '@/api';
 import type { UiCitation } from '../model/citation';
 import { ToolActivity } from './ToolActivity';
@@ -83,104 +84,107 @@ function MessageBubbleComponent({
 
   return (
     <article
-      className={cn('flex flex-col gap-1', isUser ? 'items-end' : 'items-stretch')}
+      className={`lc-turn ${isUser ? 'lc-turn--user' : 'lc-turn--assistant'}`}
       aria-label={`${role} message`}
     >
-      <div
-        className={cn(
-          'max-w-[85ch] rounded-lg px-3 py-2 text-sm',
-          isUser
-            ? 'bg-accent/15 text-foreground'
-            : 'border border-border bg-surface text-foreground',
+      <div className="lc-turn__who">
+        {isUser ? (
+          <div className="lc-turn__avatar" aria-hidden="true">
+            <Icon name="user" />
+          </div>
+        ) : (
+          <div className="lc-turn__logo" aria-hidden="true">
+            <Icon name="sparkles" />
+          </div>
         )}
-      >
-        {!isUser && badge && (
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <span className="text-xs font-semibold text-foreground">Lumen</span>
-            <span
-              className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent"
-              title={model ? `Answered by ${model}` : undefined}
-            >
-              <Icon name="database" className="h-3 w-3" />
+      </div>
+
+      <div className="lc-turn__body">
+        <div className="lc-turn__name">
+          {isUser ? 'You' : 'Lumen'}
+          {!isUser && badge && (
+            <span className="lc-model-badge" title={model ? `Answered by ${model}` : undefined}>
+              <Icon name="database" />
               {badge}
             </span>
-          </div>
-        )}
-
-        {tools.length > 0 && <ToolActivity tools={tools} />}
-
-        {!isUser && traceSummary && (
-          <div className="mb-2">
-            <RetrievalTrace summary={traceSummary} steps={traceSteps ?? []} />
-          </div>
-        )}
+          )}
+        </div>
 
         {isUser ? (
           // User input is plain text — render literally, no markdown surprises.
-          <p className="whitespace-pre-wrap break-words">{content}</p>
+          <div className="lc-turn__text">{content}</div>
         ) : (
-          <div className="min-w-0 break-words">
-            <MarkdownView>{content}</MarkdownView>
-            {streaming && (
-              <span
-                className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-foreground-muted align-middle"
-                aria-hidden="true"
+          <>
+            {tools.length > 0 && <ToolActivity tools={tools} />}
+
+            {traceSummary && (
+              <div className="mb-2">
+                <RetrievalTrace summary={traceSummary} steps={traceSteps ?? []} />
+              </div>
+            )}
+
+            <div className="min-w-0 break-words">
+              <MarkdownView className="lc-answer">{content}</MarkdownView>
+              {streaming && <span className="lc-caret" aria-hidden="true" />}
+            </div>
+
+            {citations.length > 0 && (
+              <>
+                <p className="lc-sources__label">Sources used</p>
+                <ol className="lc-sources">
+                  {citations.map((citation, i) => {
+                    const meta = sourceMeta?.[citation.documentId];
+                    return (
+                      <li key={citation.id} className="lc-source-row">
+                        {/* One button per source (single tab stop) named like the
+                            kit CitationChip — "Citation N: <source>" — so it reads
+                            as the numbered reference and opens the inspector. */}
+                        <button
+                          type="button"
+                          className="lc-source-row__btn"
+                          aria-label={`Citation ${i + 1}: ${citation.documentName}`}
+                          onClick={() => onOpenCitation(citation, meta)}
+                        >
+                          <span className="lc-source-row__num">{i + 1}</span>
+                          <span className="lc-source-row__main">
+                            <span className="lc-source-row__title">{citation.documentName}</span>
+                            {meta?.freshness && (
+                              <span className="lc-source-row__sub">
+                                <FreshnessPill label={meta.freshness} stale={meta.stale ?? false} />
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                        {/* Honest by construction: the backend only returns sources
+                            the caller may see (spec 0004 INV-2), so a cited source
+                            is one this user has access to. Non-interactive, so it
+                            stays outside the button. */}
+                        <PermissionPill level="granted" />
+                      </li>
+                    );
+                  })}
+                </ol>
+              </>
+            )}
+
+            {showNoCitationsNotice && (
+              <p className="lc-no-sources">No sources were cited for this answer.</p>
+            )}
+
+            {/*
+              Answer-bubble footer (#120) — only on a settled assistant turn (not
+              while streaming, and only once content exists). "Permission-checked"
+              shows when the answer is grounded in ≥1 cited source (honest: never a
+              bare claim).
+            */}
+            {!streaming && content.length > 0 && (
+              <AnswerFooter
+                answerText={content}
+                permissionChecked={citations.length > 0}
+                answeredAt={answeredAt}
               />
             )}
-          </div>
-        )}
-
-        {!isUser && citations.length > 0 && (
-          <footer className="mt-2 border-t border-border pt-2">
-            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
-              Sources
-            </p>
-            <ol className="flex flex-col gap-1.5">
-              {citations.map((citation, i) => {
-                const meta = sourceMeta?.[citation.documentId];
-                return (
-                  <li key={citation.id} className="flex items-start gap-2 text-xs">
-                    <CitationChip
-                      index={i + 1}
-                      sourceTitle={citation.documentName}
-                      onClick={() => onOpenCitation(citation, meta)}
-                    />
-                    <div className="flex min-w-0 flex-col gap-0.5">
-                      <button
-                        type="button"
-                        onClick={() => onOpenCitation(citation, meta)}
-                        className="truncate text-left text-foreground-muted hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                      >
-                        {citation.documentName}
-                      </button>
-                      {meta?.freshness && (
-                        <FreshnessPill label={meta.freshness} stale={meta.stale ?? false} />
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
-          </footer>
-        )}
-
-        {!isUser && showNoCitationsNotice && (
-          <p className="mt-2 border-t border-border pt-2 text-xs italic text-foreground-muted">
-            No sources were cited for this answer.
-          </p>
-        )}
-
-        {/*
-          Answer-bubble footer (#120) — only on a settled assistant turn (not while
-          streaming, and only once content exists). "Permission-checked" shows when
-          the answer is grounded in ≥1 cited source (honest: never a bare claim).
-        */}
-        {!isUser && !streaming && content.length > 0 && (
-          <AnswerFooter
-            answerText={content}
-            permissionChecked={citations.length > 0}
-            answeredAt={answeredAt}
-          />
+          </>
         )}
       </div>
     </article>

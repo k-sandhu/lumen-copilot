@@ -14,9 +14,13 @@ import {
   sourceMetadataRows,
   METADATA_UNKNOWN,
   STALE_AFTER_MS,
+  dayBucket,
+  groupSessionsByDay,
+  sessionMeta,
 } from './presentation';
 import type { UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
+import type { ChatSession } from '@/api';
 
 const NOW = Date.parse('2026-06-19T12:00:00Z');
 
@@ -155,5 +159,73 @@ describe('sourceMetadataRows', () => {
   it('treats blank / whitespace values as unknown', () => {
     const rows = sourceMetadataRows({ owner: '   ', lastIndexed: '' });
     expect(rows.every((r) => r.unknown)).toBe(true);
+  });
+});
+
+// --- history-sidebar presentation (#136) ---------------------------------
+
+function session(over: Partial<ChatSession> = {}): ChatSession {
+  return {
+    id: 's1',
+    title: 'Q3 pricing',
+    model: 'openrouter/gpt-4o',
+    owner_id: 'u1',
+    message_count: 4,
+    created_at: '2026-06-19T09:00:00Z',
+    updated_at: '2026-06-19T09:00:00Z',
+    ...over,
+  };
+}
+
+describe('dayBucket', () => {
+  const noon = Date.parse('2026-06-19T12:00:00Z');
+
+  it('buckets by calendar day, not elapsed hours', () => {
+    // 09:00 same calendar day → Today (even though it's not "just now").
+    expect(dayBucket('2026-06-19T09:00:00Z', noon)).toBe('Today');
+    // 11pm the night before reads as Yesterday, not "13h ago".
+    expect(dayBucket('2026-06-18T23:00:00Z', noon)).toBe('Yesterday');
+    expect(dayBucket('2026-06-15T10:00:00Z', noon)).toBe('Previous 7 days');
+    expect(dayBucket('2026-05-01T10:00:00Z', noon)).toBe('Older');
+  });
+
+  it('falls back to Today for absent / unparseable / future timestamps', () => {
+    expect(dayBucket(undefined, noon)).toBe('Today');
+    expect(dayBucket('not-a-date', noon)).toBe('Today');
+    expect(dayBucket('2026-07-01T10:00:00Z', noon)).toBe('Today');
+  });
+});
+
+describe('groupSessionsByDay', () => {
+  const noon = Date.parse('2026-06-19T12:00:00Z');
+
+  it('groups newest-first, drops empty buckets, sorts within a bucket', () => {
+    const groups = groupSessionsByDay(
+      [
+        session({ id: 'a', updated_at: '2026-06-19T08:00:00Z' }),
+        session({ id: 'b', updated_at: '2026-06-19T10:00:00Z' }),
+        session({ id: 'c', updated_at: '2026-06-15T10:00:00Z' }),
+      ],
+      noon,
+    );
+    expect(groups.map((g) => g.label)).toEqual(['Today', 'Previous 7 days']);
+    // Within Today, the 10:00 session sorts ahead of the 08:00 one.
+    expect(groups[0]?.sessions.map((s) => s.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('sessionMeta', () => {
+  const noon = Date.parse('2026-06-19T12:00:00Z');
+
+  it('builds an honest meta line from wire fields only (no fabricated counts)', () => {
+    const meta = sessionMeta(
+      session({ message_count: 4, model: 'openrouter/gpt-4o', updated_at: '2026-06-19T10:00:00Z' }),
+      noon,
+    );
+    expect(meta).toBe('4 messages · gpt-4o · 2h ago');
+  });
+
+  it('singularises one message', () => {
+    expect(sessionMeta(session({ message_count: 1 }), noon)).toMatch(/^1 message ·/);
   });
 });

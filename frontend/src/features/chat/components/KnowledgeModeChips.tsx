@@ -16,7 +16,6 @@
  * offered — no invented product behavior (AGENTS.md §8).
  */
 import { Icon, type IconName } from '@/ui';
-import { cn } from '@/lib/cn';
 
 export type KnowledgeMode = 'company' | 'selected';
 
@@ -56,11 +55,7 @@ export function KnowledgeModeChips({
   disabled = false,
 }: KnowledgeModeChipsProps) {
   return (
-    <div
-      role="group"
-      aria-label="Knowledge mode"
-      className="flex flex-wrap items-center gap-1.5"
-    >
+    <div role="group" aria-label="Knowledge mode" className="flex flex-wrap items-center gap-2">
       {ORDER.map((mode) => {
         const cfg = MODES[mode];
         const unavailable = mode === 'selected' && !selectedAvailable;
@@ -74,16 +69,9 @@ export function KnowledgeModeChips({
             disabled={isDisabled}
             title={unavailable ? 'Pick a collection to scope sources' : cfg.hint}
             onClick={() => onChange(mode)}
-            className={cn(
-              'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-              active
-                ? 'border-accent/40 bg-accent/15 text-accent'
-                : 'border-border text-foreground-muted hover:bg-surface-muted',
-              isDisabled && 'cursor-not-allowed opacity-50',
-            )}
+            className="lc-mode-chip"
           >
-            <Icon name={cfg.icon} className="h-3.5 w-3.5" />
+            <Icon name={cfg.icon} />
             {cfg.label}
           </button>
         );

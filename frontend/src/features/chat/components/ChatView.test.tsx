@@ -276,6 +276,26 @@ describe('ChatView (critical flow)', () => {
     expect(within(alert).getByRole('button', { name: /retry/i })).toBeInTheDocument();
   });
 
+  it('keeps chat history reachable at narrow widths via the drawer (AC-4, #136)', async () => {
+    installFetch(() => EMPTY_MESSAGES);
+    const user = userEvent.setup();
+    renderView();
+    // The history subrail is an off-canvas drawer at narrow widths; it starts
+    // closed and is opened from the in-pane "Chats" trigger (so a phone user can
+    // still list / create / switch sessions — not stranded on the empty state).
+    const subrail = document.querySelector('.lc-chat__subrail');
+    expect(subrail).toHaveAttribute('data-open', 'false');
+    await user.click(screen.getByRole('button', { name: /open chat history/i }));
+    expect(subrail).toHaveAttribute('data-open', 'true');
+    // The tap-away backdrop closes it again.
+    await user.click(screen.getByRole('button', { name: /close chat history/i }));
+    expect(subrail).toHaveAttribute('data-open', 'false');
+    // Opening a session from the drawer also closes it.
+    await user.click(screen.getByRole('button', { name: /open chat history/i }));
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    expect(subrail).toHaveAttribute('data-open', 'false');
+  });
+
   it('shows a zero-citation answer honestly (AC-5)', async () => {
     installFetch(() => EMPTY_MESSAGES);
     const user = userEvent.setup();

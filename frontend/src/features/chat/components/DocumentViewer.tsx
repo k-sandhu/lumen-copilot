@@ -28,7 +28,7 @@
  */
 import { useEffect, useState } from 'react';
 import { fetchDocumentContent } from '@/api';
-import { SourceInspector } from '@/ui';
+import { Icon, SourceInspector } from '@/ui';
 import { cn } from '@/lib/cn';
 import type { UiCitation } from '../model/citation';
 import { passageFromCitation, sourceMetadataRows } from '../model/presentation';
@@ -113,12 +113,12 @@ export function DocumentViewer({
     <section
       role="region"
       aria-label={`Cited document: ${citation.documentName}`}
-      className="flex h-full min-h-0 flex-col"
+      className="lc-viewer"
     >
-      <header className="flex shrink-0 items-start justify-between gap-2 border-b border-border px-3 py-2">
+      <header className="lc-viewer__head">
         <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold">{citation.documentName}</h2>
-          <p className="text-[11px] text-foreground-muted">
+          <h2 className="lc-viewer__title">{citation.documentName}</h2>
+          <p className="lc-viewer__sub">
             Cited passage · characters {citation.charStart}–{citation.charEnd}
           </p>
         </div>
@@ -126,9 +126,9 @@ export function DocumentViewer({
           type="button"
           onClick={onClose}
           aria-label="Close document viewer"
-          className="shrink-0 rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="lc-iconbtn shrink-0"
         >
-          Close
+          <Icon name="x" />
         </button>
       </header>
 
@@ -138,7 +138,13 @@ export function DocumentViewer({
         time, and labelling that as source freshness/indexing would fabricate
         provenance (#120 GUARD). Owner lights up only if a source carries one.
       */}
-      <div className="shrink-0 border-b border-border px-3 py-2">
+      {/*
+        Cap the passage/metadata block and let it scroll: a long cited passage
+        must never squeeze the document iframe to zero or clip the "Open original"
+        link against the shell's overflow:hidden (the inspector pane itself doesn't
+        scroll). The iframe region below keeps the remaining space.
+      */}
+      <div className="max-h-[45%] shrink-0 overflow-y-auto border-b border-border px-3 py-2">
         <SourceInspector
           title={citation.documentName}
           passage={passageFromCitation(citation)}

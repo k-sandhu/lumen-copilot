@@ -141,7 +141,7 @@ export function AuditPanel() {
       />
 
       <div className="min-h-0 flex-1">
-        <ScrollArea viewportClassName="px-3 py-3">
+        <ScrollArea viewportClassName="px-4 py-3">
           <AuditTableBody
             query={query}
             events={visibleEvents}
