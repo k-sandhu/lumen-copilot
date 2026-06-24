@@ -1,19 +1,19 @@
 /**
- * Shell command-palette items (issue #110) — builds the navigation commands the
- * omni bar's palette runs, from the same shell rail model that drives the nav (so
- * the palette and the rail never drift). "Go to <screen>" for every available
- * rail destination, plus light/dark/system mode commands via the existing theme
- * hook. Consumed by the shell, which renders the existing `ui/CommandPalette`.
+ * Shell command-palette items (issues #110, #134) — builds the navigation
+ * commands the omni bar's palette runs, from the same shell rail model that
+ * drives the nav (so the palette and the rail never drift). Plus appearance
+ * commands — theme, mode, and density — routed through the shared appearance
+ * engine (useAppearance), so they stay in lock-step with the Appearance panel.
  */
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useThemeMode, type CommandItem, type ThemeMode } from '@/ui';
+import { useAppearance, THEMES, DENSITIES, type CommandItem, type ThemeMode } from '@/ui';
 import { featureNavItems, featureRoutes } from '@/routes/discovery';
 import { buildRailGroups } from './navModel';
 
 export function useShellCommands(): CommandItem[] {
   const navigate = useNavigate();
-  const { setMode } = useThemeMode();
+  const { setMode, setTheme, setDensity } = useAppearance();
 
   return useMemo(() => {
     const groups = buildRailGroups(featureNavItems, featureRoutes);
@@ -38,12 +38,30 @@ export function useShellCommands(): CommandItem[] {
     const modeCommands: CommandItem[] = modes.map(({ mode, label }) => ({
       id: `mode:${mode}`,
       label: `Mode: ${label}`,
-      keywords: 'theme appearance dark light',
+      keywords: 'theme appearance dark light mode',
       icon: mode === 'light' ? 'sun' : mode === 'dark' ? 'moon' : 'monitor',
       hint: 'Appearance',
       run: () => setMode(mode),
     }));
 
-    return [...navCommands, ...modeCommands];
-  }, [navigate, setMode]);
+    const themeCommands: CommandItem[] = THEMES.map((t) => ({
+      id: `theme:${t.id}`,
+      label: `Theme: ${t.label}`,
+      keywords: `appearance color ${t.id}`,
+      icon: 'sparkles',
+      hint: 'Appearance',
+      run: () => setTheme(t.id),
+    }));
+
+    const densityCommands: CommandItem[] = DENSITIES.map((d) => ({
+      id: `density:${d.id}`,
+      label: `Density: ${d.label}`,
+      keywords: 'appearance spacing compact comfortable size',
+      icon: 'sliders',
+      hint: 'Appearance',
+      run: () => setDensity(d.id),
+    }));
+
+    return [...navCommands, ...modeCommands, ...themeCommands, ...densityCommands];
+  }, [navigate, setMode, setTheme, setDensity]);
 }

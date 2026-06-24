@@ -47,3 +47,15 @@ So three surfaces exist and run live; four need a **new backend endpoint** (not 
 - `contracts/openapi.yaml` gains `/search`, `/audit`, `/admin/*`; the contract is amended **once**, up front, and frozen for the wave.
 - The wireframes stay as living reference; drift between them and `frontend/` is a reviewable defect, not silent.
 - Deferred dependencies (connectors, write-side governance) are named here so they don't surprise the build.
+
+## Amendment — 2026-06-24: un-defer the appearance switcher (theme / mode / accent / density)
+
+**Status:** Accepted (sponsor-confirmed in-session). Amends Decision §2's "Appearance scope for v1".
+
+**What changes.** §2 deferred the *switcher UI* for the 7-theme picker, accent override, and density/font axes (only the token architecture was to land). That deferral is **lifted** for **theme, mode, accent, and density**: a user-controllable **Appearance & preferences** panel ships (issue #134), matching the wireframe (DESIGN.md §4). The token architecture this rides on was completed in **#130** — the prerequisite, see below.
+
+**Why now.** The trust signals that justified the original deferral have shipped (M2 polish: chat/search/admin/documents/audit/sources to wireframe fidelity). With those in place, the multi-theme appearance system is the next visible step toward wireframe parity, and the sponsor asked for it directly. It is **additive and conflict-free** — it touches the design-system layer (`styles/`, `ui/theme/`, `routes/shell/`), not any feature slice.
+
+**Coherence prerequisite (#130).** Un-deferring exposed a latent bug: `frontend/` carried *two* token layers that defined the same names (`--surface`/`--accent`/…) in incompatible formats (Tailwind RGB-triple vs kit hex). They collided, so Tailwind's `rgb(var(--accent)/α)` went invalid and the primary Sign-in button rendered invisible. #130 unifies them on a single source of truth — RGB-triple `--c-*` feed Tailwind; the kit's full-color vars derive via `rgb(var(--c-*))` — and lands all 7 theme token sets. Theme/accent changes therefore re-skin **every** screen (Tailwind + kit), which is what makes a real switcher honest.
+
+**Still deferred (named, not defaulted).** The **interface-font** axis (Inter/System/Rounded) and the **centered nav layout** remain out of scope: the font axis needs cross-layer plumbing (a single `--app-font` consumed by both Tailwind base and the kit) and the centered layout is a shell rework. They are tracked as a follow-up to #134, consistent with §8 (no invented behavior; named before built).
