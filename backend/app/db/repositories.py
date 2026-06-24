@@ -50,6 +50,7 @@ from app.domain.entities import (
     SourceStatus,
     Tenant,
     User,
+    UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
 
@@ -152,6 +153,17 @@ def _to_chat_session(row: models.ChatSession) -> ChatSessionEntity:
         owner_id=row.owner_id,
         title=row.title,
         model=row.model,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_user_preferences(row: models.UserPreference) -> UserPreferences:
+    return UserPreferences(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        user_id=row.user_id,
+        default_model=row.default_model,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -311,6 +323,51 @@ class UserRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
+
+
+class UserPreferenceRepository(_TenantScopedRepository):
+    """A user's account preferences within one tenant (spec 0005, epic #144).
+
+    A per-user singleton keyed by ``(tenant_id, user_id)``. ``get`` returns
+    ``None`` for a user who has never set a preference — the service maps that to
+    the implicit server-default state **without** writing (read-before-write).
+    ``set_default_model`` is the lazy upsert: it creates the row on first write,
+    else updates it. Tenant-scoped (INV-1): a foreign-tenant/other-user row is
+    invisible, so one user can never read or clobber another's preferences.
+    """
+
+    async def get(self, user_id: UUID) -> UserPreferences | None:
+        stmt = select(models.UserPreference).where(
+            models.UserPreference.tenant_id == self._tenant_id,
+            models.UserPreference.user_id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_user_preferences(row) if row is not None else None
+
+    async def set_default_model(self, user_id: UUID, default_model: str | None) -> UserPreferences:
+        """Upsert the user's default-model override (``None`` clears it).
+
+        Creates the row on first write (lazy), else updates the existing one, and
+        returns the persisted state. Tenant-scoped (INV-1); the ``(tenant_id,
+        user_id)`` singleton is the upsert target.
+        """
+        stmt = select(models.UserPreference).where(
+            models.UserPreference.tenant_id == self._tenant_id,
+            models.UserPreference.user_id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            row = models.UserPreference(
+                tenant_id=self._tenant_id,
+                user_id=user_id,
+                default_model=default_model,
+            )
+            self._session.add(row)
+        else:
+            row.default_model = default_model
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_user_preferences(row)
 
 
 class RefreshTokenRepository(_TenantScopedRepository):

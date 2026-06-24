@@ -254,6 +254,20 @@ class ChatSession:
 
 
 @dataclass(frozen=True, slots=True)
+class UserPreferences:
+    """A user's account preferences (spec 0005). One row per user, created lazily
+    on the first write — a fresh user has none, and the service then returns the
+    implicit server-default state (``default_model`` ``None``). Tenant-scoped."""
+
+    id: UUID
+    tenant_id: UUID
+    user_id: UUID
+    default_model: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """One turn in a chat session. Assistant turns may carry citations."""
 

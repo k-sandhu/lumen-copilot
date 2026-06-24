@@ -302,6 +302,33 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class UserPreference(TenantScopedMixin, TimestampMixin, Base):
+    """A user's account preferences — one row per user (spec 0005, epic #144).
+
+    Created lazily on the first ``PATCH /preferences``: a fresh user has no row,
+    and ``GET /preferences`` returns the implicit server-default state without
+    writing (read-before-write). ``default_model`` is an override stored as a
+    plain string id from the ``/models`` registry — validated at write time and
+    fail-closed at chat time (a model later removed from the registry falls back
+    to the server default). Tenant-scoped (INV-1); the unique ``(tenant_id,
+    user_id)`` makes the row a per-user singleton (the upsert target).
+    """
+
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_preferences_tenant_user"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    default_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class Message(TenantScopedMixin, TimestampMixin, Base):
     """One turn in a chat session (oldest → newest by ``created_at``)."""
 
