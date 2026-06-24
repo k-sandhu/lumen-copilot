@@ -37,7 +37,6 @@ it threads the system actor only where an audit event is appropriate.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -53,6 +52,7 @@ from app.ingestion import DocumentParseError, chunk_text, parse_document
 from app.llm import LLMGateway
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
+from app.tasks.runner import run_task
 
 
 class IngestionError(Exception):
@@ -223,7 +223,9 @@ def ingest_document(self: object, tenant_id: str, document_id: str) -> dict[str,
     """Celery entrypoint: ingest one uploaded document (the sync wrapper).
 
     Resolves config + adapters, runs :func:`ingest_document_async` on a fresh
-    event loop, and translates its outcome to Celery's retry/terminal semantics:
+    event loop via :func:`app.tasks.runner.run_task` (which disposes the DB engine
+    after each run so no pooled connection outlives its loop, #140), and translates
+    its outcome to Celery's retry/terminal semantics:
 
     * **success** → return the result dict (status ``ready``, chunk count);
     * **transient fault** (``IngestionError``/``DependencyError``) → ``self.retry``
@@ -244,7 +246,7 @@ def ingest_document(self: object, tenant_id: str, document_id: str) -> dict[str,
     gateway = LLMGateway(settings)
 
     try:
-        result = asyncio.run(
+        result = run_task(
             ingest_document_async(
                 tid,
                 did,
@@ -260,9 +262,7 @@ def ingest_document(self: object, tenant_id: str, document_id: str) -> dict[str,
         if retries >= settings.ingestion_max_retries:
             # Retries exhausted → dead-letter: record a permanent failed status
             # and acknowledge the message (return) rather than looping forever.
-            result = asyncio.run(
-                _fail(tid, did, f"ingestion failed after {retries} retries: {exc}")
-            )
+            result = run_task(_fail(tid, did, f"ingestion failed after {retries} retries: {exc}"))
             return _as_dict(result)
         # Exponential backoff: base * 2**retries.
         countdown = settings.ingestion_retry_backoff_seconds * (2**retries)
