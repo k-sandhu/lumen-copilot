@@ -648,8 +648,8 @@ class SourceRepository(_TenantScopedRepository):
 
         Returns ``False`` when no row matches in this tenant (the service maps
         that to 404). Ownership is enforced one layer up. This removes only the
-        ``sources`` row: the source's ingested documents (+ chunks) and its
-        auto-created backing collection are removed by
+        ``sources`` row: the source's ingested documents (+ chunks), and the
+        auto-created backing collection when it holds nothing else, are removed by
         :meth:`~app.services.sources_service.SourcesService.delete` *before* this
         call. They are **not** left to the ``documents.source_id`` FK ``ON DELETE
         CASCADE`` — an ORM parent delete nulls that nullable child FK before the

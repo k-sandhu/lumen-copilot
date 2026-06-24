@@ -299,41 +299,78 @@ class SourcesService:
 
         Visibility (tenant + ownership) is established before any write so a
         non-owner's source is never touched and is reported as 404 (INV-1/INV-2),
-        not 403. On success everything the source created is removed in the same
-        transaction:
+        not 403. On success, in one transaction:
 
-        * the **documents it ingested** (and their chunks, via the document →
-          chunks delete-orphan cascade) — deleted explicitly by ``source_id``
-          rather than left to the ``documents.source_id`` FK ``ON DELETE
-          CASCADE``: a plain ORM delete of the parent *nulls* that nullable child
-          FK (SQLAlchemy disassociates) before the DB cascade can fire, which
-          would orphan the rows in the backing collection;
-        * the **auto-created backing collection** that homed them — it has no FK
-          to the source (only ``config['collection_id']`` links the two), so
-          nothing else would ever reclaim it.
+        * the **documents the source ingested** (and their chunks, via the
+          document → chunks delete-orphan cascade) are removed and each is audited
+          ``document.deleted`` (spec 0004 §2.4, mirroring ``CollectionsService``).
+          They are deleted explicitly by ``source_id`` rather than left to the
+          ``documents.source_id`` FK ``ON DELETE CASCADE``: a plain ORM delete of
+          the parent *nulls* that nullable child FK (SQLAlchemy disassociates)
+          before the DB cascade can fire, which would orphan the rows.
+        * the **auto-created backing collection** is removed **only if it holds
+          nothing but this source's documents**. That collection is an ordinary
+          caller-owned, user-visible collection (uploads accept any owned
+          ``collection_id``), so a user may have uploaded unrelated documents into
+          it; those (and their chunks) are **preserved** — the collection is kept
+          whenever any non-source document remains, and reclaimed only in the
+          common case where removing the source's documents empties it. It is
+          linked solely by ``config['collection_id']`` (no FK), so nothing else
+          would reclaim it.
 
         Audits ``source.deleted`` (INV-6). Returns ``False`` when not visible.
 
-        Note: the source's ingested **object-store** bytes are not swept here —
-        the cascade removes the document rows and their chunks (the retrievable
-        content); orphaned objects are content-addressed and tenant-scoped, and a
-        storage sweep is a separate concern (out of this issue's scope).
+        Note: ingested **object-store** bytes are not swept here (consistent with
+        ``CollectionsService.delete``) — removing the rows + chunks clears the
+        retrievable content; the content-addressed, tenant-scoped objects are a
+        separate storage-sweep concern (out of this issue's scope).
         """
         source = await self._visible(source_id)
         if source is None:
             return False
 
-        # Remove the documents the source ingested (+ their chunks). Explicit,
-        # not via the documents.source_id FK cascade — see the docstring: an ORM
-        # parent delete nulls the nullable child FK before the DB cascade fires.
-        for document in await self._documents.list_for_source(source_id):
-            await self._documents.delete(document.id)
-
-        # Remove the auto-created backing collection (now empty). Linked only by
-        # the id stored on the source config; best-effort if a legacy row lacks it.
+        # Snapshot — taken before any delete so the backing-collection emptiness
+        # check below reads a stable pre-delete view regardless of autoflush.
+        source_documents = await self._documents.list_for_source(source_id)
         collection_id = self._backing_collection_id(source.config)
+        collection_documents = (
+            await self._documents.list_in_collection(collection_id)
+            if collection_id is not None
+            else []
+        )
+
+        # Remove the source's documents (+ their chunks), auditing each
+        # ``document.deleted`` (mirrors CollectionsService.delete). Explicit, not
+        # via the documents.source_id FK cascade — an ORM parent delete nulls the
+        # nullable child FK before the DB cascade fires.
+        for document in source_documents:
+            await self._documents.delete(document.id)
+            await self._audit.emit(
+                action=AuditAction.DOCUMENT_DELETED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="document",
+                resource_id=str(document.id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "collection_id": str(document.collection_id),
+                    "filename": document.filename,
+                    "source_id": str(source_id),
+                },
+            )
+
+        # Reclaim the auto-created backing collection only when it held nothing
+        # but this source's documents — otherwise the user uploaded their own
+        # documents into the visible collection and deleting it wholesale would
+        # destroy them (and their chunks). Preserve the collection in that case.
         if collection_id is not None:
-            await self._collections.delete(collection_id)
+            source_document_ids = {d.id for d in source_documents}
+            has_unrelated_documents = any(
+                d.id not in source_document_ids for d in collection_documents
+            )
+            if not has_unrelated_documents:
+                await self._collections.delete(collection_id)
 
         deleted = await self._sources.delete(source_id)
         if not deleted:  # pragma: no cover — visibility already established

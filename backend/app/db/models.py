@@ -174,7 +174,8 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     sync lifecycle (``pending|syncing|ready|error``); ``indexed_count`` is how
     many documents the last sync produced, ``last_error`` the failure detail.
     Ingested ``documents`` link back via ``source_id``; removing a source removes
-    its docs + their backing collection (ADR-0009 §5). That cleanup is driven by
+    its docs and — when it then holds nothing else — the auto-created backing
+    collection (ADR-0009 §5). That cleanup is driven by
     :meth:`~app.services.sources_service.SourcesService.delete`, **not** the
     ``documents.source_id`` FK ``ON DELETE CASCADE``: an ORM parent delete nulls
     the nullable child FK before the DB cascade fires (the #139 orphan bug), so
