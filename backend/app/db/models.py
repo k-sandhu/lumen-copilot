@@ -173,8 +173,14 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     portable JSON (e.g. ``{"url": ..., "mode": ...}``). ``status`` tracks the
     sync lifecycle (``pending|syncing|ready|error``); ``indexed_count`` is how
     many documents the last sync produced, ``last_error`` the failure detail.
-    Ingested ``documents`` link back via ``source_id`` and CASCADE on delete, so
-    removing a source removes its docs (ADR-0009 §5).
+    Ingested ``documents`` link back via ``source_id``; removing a source removes
+    its docs and — when it then holds nothing else — the auto-created backing
+    collection (ADR-0009 §5). That cleanup is driven by
+    :meth:`~app.services.sources_service.SourcesService.delete`, **not** the
+    ``documents.source_id`` FK ``ON DELETE CASCADE``: an ORM parent delete nulls
+    the nullable child FK before the DB cascade fires (the #139 orphan bug), so
+    the service deletes the documents explicitly. The FK cascade stays as a
+    DB-level backstop for non-ORM deletes.
     """
 
     __tablename__ = "sources"
@@ -219,7 +225,9 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
         nullable=False,
     )
     # The source this doc was ingested from; null for direct uploads (ADR-0009
-    # §4). CASCADE so deleting a source removes the docs it produced (§5).
+    # §4). ON DELETE CASCADE is a DB-level backstop only: the app path deletes a
+    # source's docs explicitly in the sources service (an ORM parent delete nulls
+    # this nullable FK before the cascade fires — the #139 orphan bug), §5.
     source_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("sources.id", ondelete="CASCADE"),
