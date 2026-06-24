@@ -281,3 +281,67 @@ async def test_redirect_without_location_is_refused() -> None:
 
     with pytest.raises(UrlBlockedError):
         await _fetch(handler)
+
+
+# --- Non-2xx status gate + outbound User-Agent (regression: issue #138) ------
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429, 500, 502, 503])
+async def test_non_2xx_final_response_is_a_fetch_failure(status: int) -> None:
+    """A non-2xx final response is a fetch fault, never ingestible content (#138).
+
+    Wikimedia serves a 403 *HTML* page to UA-less requests; without a status gate
+    that error page was decoded and returned as ``FetchResult.text`` and indexed
+    as if it were the article. The chokepoint must instead raise
+    ``ConnectorError(code="fetch_failed")`` so the sync is marked failed and the
+    error body is never ingested.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text="<html><body><p>Please set a user-agent.</p></body></html>",
+        )
+
+    with pytest.raises(ConnectorError) as exc:
+        await _fetch(handler)
+    assert exc.value.code == "fetch_failed"
+
+
+@pytest.mark.parametrize("status", [200, 201, 203])
+async def test_2xx_response_is_returned_as_content(status: int) -> None:
+    """A 2xx response with a real body is still ingested (the status gate is not over-broad)."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status, headers={"content-type": "text/html"}, text="<p>Real body.</p>"
+        )
+
+    result = await _fetch(handler)
+    assert "Real body." in result.text
+
+
+async def test_outbound_request_sends_configured_user_agent() -> None:
+    """The fetch carries the supplied descriptive User-Agent on every hop (#138)."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers.get("user-agent", "")
+        return _ok_html(request)
+
+    await _fetch(handler, user_agent="LumenCopilot/9.9 (+https://example.test/bot)")
+    assert seen["ua"] == "LumenCopilot/9.9 (+https://example.test/bot)"
+
+
+async def test_outbound_request_defaults_to_descriptive_user_agent() -> None:
+    """With no explicit UA the chokepoint still sends a descriptive (non-httpx) UA."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers.get("user-agent", "")
+        return _ok_html(request)
+
+    await _fetch(handler)
+    assert "LumenCopilot" in seen["ua"]
+    assert "python-httpx" not in seen["ua"].lower()

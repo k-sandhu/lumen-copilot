@@ -23,6 +23,8 @@
    - allow only `http`/`https` schemes;
    - **resolve the host and reject** loopback, private (RFC-1918), link-local, CGNAT, and cloud-metadata ranges (e.g. `169.254.169.254`), incl. on **every redirect hop** (re-validate after each redirect; do not follow to a blocked target);
    - cap response **size** and **time**, and allowlist content types;
+   - **require a `2xx` final status** — a non-2xx response (e.g. a UA-gated `403` *page*) is a failed fetch surfaced as `fetch_failed`, never decoded and ingested as content (#138);
+   - send a **descriptive `User-Agent`** (`WEB_USER_AGENT`, version-stamped by default) — a UA-less fetch is rejected by many sites (e.g. Wikimedia) with an error page (#138);
    - apply a per-tenant fetch **rate limit**.
    These checks live in one `connectors/web/fetch.py` chokepoint with explicit negative tests. A bypass is a blocking defect.
 
