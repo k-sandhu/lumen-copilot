@@ -148,6 +148,24 @@ class SourcesService:
             return None
         return source
 
+    @staticmethod
+    def _backing_collection_id(config: dict[str, object]) -> UUID | None:
+        """The backing collection id ``add`` stored on the source config (or ``None``).
+
+        Mirrors ``app.tasks.sync_source._resolve_collection_id``: the id is
+        persisted as a string on the connector config. A legacy/partial row that
+        lacks it — or carries a malformed value — yields ``None`` (delete then
+        removes the source and its documents, just not a collection it cannot
+        identify).
+        """
+        raw = config.get("collection_id")
+        if not isinstance(raw, str):
+            return None
+        try:
+            return UUID(raw)
+        except ValueError:
+            return None
+
     # --- use-cases ----------------------------------------------------------
 
     async def add(self, *, source_type: str, url: str) -> Source:
@@ -277,12 +295,23 @@ class SourcesService:
         return updated, True
 
     async def delete(self, source_id: UUID) -> bool:
-        """Delete one of the caller's sources (cascades its documents, ADR-0009 §5).
+        """Delete one of the caller's sources, leaving no orphans (ADR-0009 §5).
 
         Visibility (tenant + ownership) is established before any write so a
         non-owner's source is never touched and is reported as 404 (INV-1/INV-2),
-        not 403. On success the row is deleted; the FK ``ON DELETE CASCADE`` on
-        ``documents.source_id`` removes the source's documents (and their chunks).
+        not 403. On success everything the source created is removed in the same
+        transaction:
+
+        * the **documents it ingested** (and their chunks, via the document →
+          chunks delete-orphan cascade) — deleted explicitly by ``source_id``
+          rather than left to the ``documents.source_id`` FK ``ON DELETE
+          CASCADE``: a plain ORM delete of the parent *nulls* that nullable child
+          FK (SQLAlchemy disassociates) before the DB cascade can fire, which
+          would orphan the rows in the backing collection;
+        * the **auto-created backing collection** that homed them — it has no FK
+          to the source (only ``config['collection_id']`` links the two), so
+          nothing else would ever reclaim it.
+
         Audits ``source.deleted`` (INV-6). Returns ``False`` when not visible.
 
         Note: the source's ingested **object-store** bytes are not swept here —
@@ -293,6 +322,19 @@ class SourcesService:
         source = await self._visible(source_id)
         if source is None:
             return False
+
+        # Remove the documents the source ingested (+ their chunks). Explicit,
+        # not via the documents.source_id FK cascade — see the docstring: an ORM
+        # parent delete nulls the nullable child FK before the DB cascade fires.
+        for document in await self._documents.list_for_source(source_id):
+            await self._documents.delete(document.id)
+
+        # Remove the auto-created backing collection (now empty). Linked only by
+        # the id stored on the source config; best-effort if a legacy row lacks it.
+        collection_id = self._backing_collection_id(source.config)
+        if collection_id is not None:
+            await self._collections.delete(collection_id)
+
         deleted = await self._sources.delete(source_id)
         if not deleted:  # pragma: no cover — visibility already established
             return False

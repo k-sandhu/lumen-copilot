@@ -200,7 +200,9 @@ class Source:
     portable JSON (e.g. ``{"url": ..., "mode": ...}``). ``status`` tracks the
     sync lifecycle; ``indexed_count`` is how many documents the last sync
     produced, ``last_error`` the failure detail. Ingested ``documents`` link
-    back via ``source_id`` and CASCADE on delete.
+    back via ``source_id``; deleting a source removes them (and its auto-created
+    backing collection) via the sources service — see
+    :meth:`~app.services.sources_service.SourcesService.delete`.
     """
 
     id: UUID

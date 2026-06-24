@@ -644,12 +644,18 @@ class SourceRepository(_TenantScopedRepository):
         return _to_source(row)
 
     async def delete(self, source_id: UUID) -> bool:
-        """Delete a source (tenant-scoped); cascades its documents (ADR-0009 §5).
+        """Delete the source **row** (tenant-scoped); ADR-0009 §5.
 
         Returns ``False`` when no row matches in this tenant (the service maps
-        that to 404). Ownership is enforced one layer up. The FK ``ON DELETE
-        CASCADE`` on ``documents.source_id`` removes the source's documents (and
-        their chunks) in the same transaction (INV-1: same-tenant rows only).
+        that to 404). Ownership is enforced one layer up. This removes only the
+        ``sources`` row: the source's ingested documents (+ chunks) and its
+        auto-created backing collection are removed by
+        :meth:`~app.services.sources_service.SourcesService.delete` *before* this
+        call. They are **not** left to the ``documents.source_id`` FK ``ON DELETE
+        CASCADE`` — an ORM parent delete nulls that nullable child FK before the
+        DB cascade can fire (the #139 orphan bug), so the service deletes them
+        explicitly. The FK cascade remains a DB-level backstop for non-ORM
+        deletes.
         """
         stmt = select(models.Source).where(
             models.Source.tenant_id == self._tenant_id,

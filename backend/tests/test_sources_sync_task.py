@@ -34,6 +34,7 @@ from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkRepository,
+    CollectionRepository,
     DocumentRepository,
     SourceRepository,
     TenantRepository,
@@ -321,3 +322,81 @@ async def test_sync_missing_source_is_noop(
     )
     assert result.status is SourceStatus.ERROR
     assert result.error == "source not found"
+
+
+# --- delete cleanup (regression for #139) -----------------------------------
+
+
+async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: uuid.UUID) -> bool:
+    """Delete a source via the service (mirrors the request path), then commit."""
+    async with db_session.session_scope() as session:
+        svc = SourcesService(
+            session,
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            request_id="r",
+            source_ip="203.0.113.1",
+        )
+        ok = await svc.delete(source_id)
+        await session.commit()
+    return ok
+
+
+async def test_delete_source_leaves_no_orphans(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a source removes its docs, chunks, and backing collection (#139).
+
+    Reported live: ``DELETE /sources/{id}`` removed the source row but left its
+    auto-created ``web: <url>`` backing collection *and* the documents the sync
+    ingested into it — junk that had to be cleared by hand. A source delete must
+    cascade: source → its documents (+ chunks) → its backing collection.
+
+    The assertions deliberately probe by **document id** and by **collection
+    contents**, never by ``source_id``: the pre-fix ORM nulls ``documents.source_id``
+    on the parent delete, so a ``list_for_source`` check would read empty (0 rows)
+    even though the documents survive orphaned in the collection — a false pass.
+    """
+    tenant_id, source_id = await _seed_source()
+    body = "The quick brown fox jumps over the lazy dog. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Page One", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Page Two", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    # Capture the owner + backing collection the sync populated (preconditions).
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        owner_id = source.owner_id
+        collection_id = uuid.UUID(str(source.config["collection_id"]))
+
+        documents = DocumentRepository(session, tenant_id)
+        doc_ids = [d.id for d in await documents.list_for_source(source_id)]
+        assert len(doc_ids) == 2  # the sync ingested into the backing collection
+        collections = CollectionRepository(session, tenant_id)
+        assert await collections.get(collection_id) is not None
+        assert await collections.count_documents(collection_id) == 2
+        chunks = ChunkRepository(session, tenant_id)
+        assert all([await chunks.list_for_document(doc_id) for doc_id in doc_ids])
+
+    assert await _delete_source(tenant_id, owner_id, source_id) is True
+
+    # No orphans: source gone, every ingested document + its chunks gone, and the
+    # auto-created backing collection gone.
+    async with db_session.session_scope() as session:
+        assert await SourceRepository(session, tenant_id).get(source_id) is None
+        documents = DocumentRepository(session, tenant_id)
+        for doc_id in doc_ids:
+            assert await documents.get(doc_id) is None
+        collections = CollectionRepository(session, tenant_id)
+        assert await collections.get(collection_id) is None
+        assert await collections.count_documents(collection_id) == 0
+        chunks = ChunkRepository(session, tenant_id)
+        for doc_id in doc_ids:
+            assert await chunks.list_for_document(doc_id) == []
