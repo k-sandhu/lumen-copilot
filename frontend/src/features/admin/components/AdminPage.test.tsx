@@ -1,13 +1,19 @@
 /**
- * AdminPage integration (#88): the read-only console composes all three
- * governance panels (Members, Model governance, Risk tiers) under the page
- * chrome, and each panel resolves its own data. Wrapped in a Router (PageChrome
- * renders a back-to-app Link) + a fresh QueryClient. Asserts the three section
- * headings render and the panels surface their fetched content.
+ * AdminPage integration (#88/#122): the read-only console wraps four governance
+ * surfaces in a segmented tab bar (Members & roles / Model governance / Approvals
+ * & risk / Data minimization) under a tenant-scoped header. Only the active tab's
+ * panel renders; switching tabs swaps the panel. Wrapped in a Router (PageChrome
+ * renders a back-to-app Link) + a fresh QueryClient. Each panel resolves its own
+ * data through the mocked api/ boundary.
+ *
+ * No access token is seeded, so `useCurrentUser` stays disabled (no /auth/me
+ * call) and the header shows the honest "tenant unavailable" fallback — never a
+ * fabricated tenant name.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type { MemberList, ModelGovernance, RiskTierList } from '@/api';
 import { AdminPage } from './AdminPage';
@@ -52,27 +58,60 @@ beforeEach(() => {
 });
 
 describe('AdminPage', () => {
-  it('renders the three governance sections', () => {
+  it('renders a tenant-scoped header (honest tenant, no fabricated name)', () => {
     renderAdmin();
-    expect(screen.getByRole('heading', { name: /members & roles/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /model governance/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /approvals & risk tiers/i })).toBeInTheDocument();
+    // The content header carries the tenant-scoped subtitle (the PageChrome bar
+    // also titles the page "Admin" when rendered standalone — that's the shell's).
+    expect(screen.getByText(/governance, models, and data controls/i)).toBeInTheDocument();
+    // No token seeded → the header falls back honestly, never inventing a company.
+    expect(screen.getByText(/tenant unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/northwind/i)).not.toBeInTheDocument();
   });
 
-  it('resolves each panel with its fetched content', async () => {
+  it('exposes the four governance tabs', () => {
     renderAdmin();
+    const tablist = screen.getByRole('tablist', { name: /admin sections/i });
+    expect(tablist).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /members & roles/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /model governance/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /approvals & risk/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /data minimization/i })).toBeInTheDocument();
+  });
+
+  it('shows the Members panel first and resolves its content', async () => {
+    renderAdmin();
+    expect(screen.getByRole('tab', { name: /members & roles/i })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
     expect(await screen.findByText('admin@acme.test')).toBeInTheDocument();
-    expect(await screen.findByText('anthropic/claude-opus-4.8')).toBeInTheDocument();
-    expect(await screen.findByText('Read-only retrieval.')).toBeInTheDocument();
   });
 
-  it('states the read-only scope and offers no page-level mutating controls', async () => {
+  it('switches panels when a tab is selected', async () => {
     renderAdmin();
     await screen.findByText('admin@acme.test');
-    expect(screen.getByText(/not available here in v1/i)).toBeInTheDocument();
-    // Only chrome affordances exist (back-to-app + theme toggle); no admin
-    // mutation buttons anywhere on the page.
-    const buttons = screen.queryAllByRole('button');
-    expect(buttons.length).toBeLessThanOrEqual(1);
+
+    await userEvent.click(screen.getByRole('tab', { name: /model governance/i }));
+    expect(await screen.findByText('anthropic/claude-opus-4.8')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('tab', { name: /approvals & risk/i }));
+    expect(await screen.findByText('Read-only retrieval.')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('tab', { name: /data minimization/i }));
+    expect(
+      await screen.findByRole('heading', { name: /^data minimization$/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers no page-level mutating controls — only tab + chrome affordances', async () => {
+    renderAdmin();
+    await screen.findByText('admin@acme.test');
+    expect(screen.getByText(/not available here/i)).toBeInTheDocument();
+    // The only buttons are the four tabs + the chrome back/theme affordances —
+    // no admin mutation control (invite / switch / toggle / approve) renders.
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs).toHaveLength(4);
+    expect(screen.queryAllByRole('switch')).toHaveLength(0);
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
 });

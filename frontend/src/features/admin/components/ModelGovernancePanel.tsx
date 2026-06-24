@@ -1,91 +1,98 @@
 /**
- * ModelGovernancePanel — the read-only Model-governance view (#88, ADR-0007 §4):
- * which models are allowed for this tenant and the governance tier each maps to.
- * No mutating controls — an admin views governance here but does not edit it in
- * v1 (read-before-write, mission filter #3). Admin-only; 403/401 render via
- * PanelBody as actionable errors.
+ * ModelGovernancePanel — the read-only Model-governance view (#88/#122, ADR-0007
+ * §4): which models are allowed for this tenant and the governance tier each maps
+ * to. Rendered as a styled READ-ONLY table (allowed models + tiers). There are NO
+ * mutating controls — and specifically NONE of the wireframe's enable / default
+ * switches: an admin views governance here but does not edit it in v1
+ * (read-before-write, mission filter #3). Admin-only; 403/401 render via PanelBody
+ * as actionable errors.
  *
- * Models are grouped under their tier so the policy is legible: each tier shows
- * its description (when known) and the allowed models beneath it. A model whose
- * tier has no declared description still renders under its tier id.
+ * Columns are limited to what the contract serves. The frozen `ModelGovernance`
+ * shape carries `allowed_models` ({ model_id, tier, label? }) and tier
+ * descriptions — so the wireframe's "Capability" and "Speed & cost" columns are
+ * OMITTED (no backing data; AGENTS.md scope guard: never fake fields). Every
+ * allowed model is shown even when its tier isn't declared in `tiers` (never drop
+ * a model the backend reports as allowed).
  */
 import { useMemo } from 'react';
 import type { ModelGovernance, ModelGovernanceEntry } from '@/api';
 import { useModelGovernance } from '../model/queries';
 import { PanelBody } from './PanelState';
 
-interface TierGroup {
-  id: string;
-  description?: string;
-  models: ModelGovernanceEntry[];
+interface GovernanceRow extends ModelGovernanceEntry {
+  /** The tier's human description, when the contract declared one. */
+  tierDescription?: string;
 }
 
-/** Group allowed models by tier, preserving the contract's tier order first,
- *  then appending any tier referenced by a model but absent from `tiers`. */
-function groupByTier(governance: ModelGovernance): TierGroup[] {
-  const byTier = new Map<string, ModelGovernanceEntry[]>();
-  for (const model of governance.allowed_models) {
-    const bucket = byTier.get(model.tier) ?? [];
-    bucket.push(model);
-    byTier.set(model.tier, bucket);
-  }
+/** Flatten allowed models into table rows, attaching each tier's description when
+ *  the contract declared one. Order: declared-tier order first (so the table
+ *  reads tier-by-tier), then any models on a tier not present in `tiers` — never
+ *  dropping a model the backend reports as allowed. */
+function toRows(governance: ModelGovernance): GovernanceRow[] {
+  const description = new Map(governance.tiers.map((t) => [t.id, t.description]));
+  const order = new Map(governance.tiers.map((t, i) => [t.id, i]));
+  const undeclared = governance.tiers.length; // sorts after every declared tier
 
-  const ordered: TierGroup[] = [];
-  const seen = new Set<string>();
-  for (const tier of governance.tiers) {
-    ordered.push({ id: tier.id, description: tier.description, models: byTier.get(tier.id) ?? [] });
-    seen.add(tier.id);
-  }
-  // Tiers referenced by a model but not declared in `tiers` — never drop a model.
-  for (const tier of byTier.keys()) {
-    if (!seen.has(tier)) {
-      ordered.push({ id: tier, models: byTier.get(tier) ?? [] });
-    }
-  }
-  return ordered;
+  return governance.allowed_models
+    .map((model) => ({ ...model, tierDescription: description.get(model.tier) }))
+    .sort((a, b) => (order.get(a.tier) ?? undeclared) - (order.get(b.tier) ?? undeclared));
 }
 
-function TierBlock({ group }: { group: TierGroup }) {
+function GovernanceTable({ rows }: { rows: GovernanceRow[] }) {
   return (
-    <div className="rounded-md border border-border/60 p-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-sm font-semibold text-foreground">
-          <span className="lc-mono rounded bg-surface-muted px-1.5 py-0.5 text-xs uppercase">
-            {group.id}
-          </span>
-        </h3>
-        <span className="text-xs text-foreground-muted">
-          {group.models.length} model{group.models.length === 1 ? '' : 's'}
-        </span>
-      </div>
-      {group.description ? (
-        <p className="mt-1 text-xs text-foreground-muted">{group.description}</p>
-      ) : null}
-      {group.models.length > 0 ? (
-        <ul className="mt-2 space-y-1">
-          {group.models.map((model) => (
-            <li key={model.model_id} className="flex items-baseline justify-between gap-3 text-sm">
-              <span className="font-medium text-foreground">{model.label ?? model.model_id}</span>
-              {/* Show the raw wire id only when a friendlier label is present —
-                  otherwise the name already IS the id (don't print it twice). */}
-              {model.label ? (
-                <span className="lc-mono truncate text-xs text-foreground-muted">
-                  {model.model_id}
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-left text-sm">
+        <caption className="sr-only">Models allowed for this tenant and their governance tier</caption>
+        <thead>
+          <tr className="border-b border-border text-xs uppercase tracking-wide text-foreground-muted">
+            <th scope="col" className="px-4 py-2 font-medium">
+              Model
+            </th>
+            <th scope="col" className="px-4 py-2 font-medium">
+              Model ID
+            </th>
+            <th scope="col" className="px-4 py-2 font-medium">
+              Governance tier
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.model_id} className="border-b border-border/60 last:border-0">
+              <td className="px-4 py-3 align-middle font-medium text-foreground">
+                {row.label ?? row.model_id}
+              </td>
+              <td className="px-4 py-3 align-middle">
+                {/* Show the raw wire id only when a friendlier label exists —
+                    otherwise the name already IS the id (don't print it twice). */}
+                {row.label ? (
+                  <span className="lc-mono text-xs text-foreground-muted">{row.model_id}</span>
+                ) : (
+                  <span className="text-foreground-muted">—</span>
+                )}
+              </td>
+              <td className="px-4 py-3 align-middle">
+                <span
+                  className="lc-mono rounded bg-surface-muted px-1.5 py-0.5 text-xs uppercase text-foreground"
+                  title={row.tierDescription}
+                >
+                  {row.tier}
                 </span>
-              ) : null}
-            </li>
+                {row.tierDescription ? (
+                  <span className="ml-2 text-xs text-foreground-muted">{row.tierDescription}</span>
+                ) : null}
+              </td>
+            </tr>
           ))}
-        </ul>
-      ) : (
-        <p className="mt-2 text-xs text-foreground-muted">No models approved at this tier.</p>
-      )}
+        </tbody>
+      </table>
     </div>
   );
 }
 
 export function ModelGovernancePanel() {
   const query = useModelGovernance();
-  const groups = useMemo(() => (query.data ? groupByTier(query.data) : []), [query.data]);
+  const rows = useMemo(() => (query.data ? toRows(query.data) : []), [query.data]);
   const isEmpty =
     (query.data?.allowed_models.length ?? 0) === 0 && (query.data?.tiers.length ?? 0) === 0;
 
@@ -96,7 +103,8 @@ export function ModelGovernancePanel() {
           Model governance
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Read-only view of the models allowed for this tenant, grouped by governance tier.
+          Read-only view of the models allowed for this tenant and the governance tier each maps to.
+          All model calls route through the gateway.
         </p>
       </header>
       <PanelBody
@@ -108,11 +116,7 @@ export function ModelGovernancePanel() {
         onRetry={() => void query.refetch()}
         loadingRows={3}
       >
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          {groups.map((group) => (
-            <TierBlock key={group.id} group={group} />
-          ))}
-        </div>
+        <GovernanceTable rows={rows} />
       </PanelBody>
     </section>
   );

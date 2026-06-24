@@ -1,15 +1,32 @@
 /**
- * MembersPanel — the read-only Members & roles roster (#88, ADR-0007 §4). Lists
- * the tenant's members and the RBAC roles each holds (member / admin / security,
- * spec 0004 §2.3). There are NO mutating controls: no invite, no role edit, no
- * remove — admin is read-mostly for v1. The roster is tenant-scoped (INV-1) and
- * admin-only; a non-admin (403, INV-5) or expired session (401, INV-4) renders as
- * an actionable error via PanelBody.
+ * MembersPanel — the read-only Members & roles roster (#88/#122, ADR-0007 §4).
+ * Lists the tenant's members and the RBAC roles each holds (member / admin /
+ * security, spec 0004 §2.3). There are NO mutating controls: no invite, no role
+ * edit, no remove — admin is read-mostly for v1. The roster is tenant-scoped
+ * (INV-1) and admin-only; a non-admin (403, INV-5) or expired session (401,
+ * INV-4) renders as an actionable error via PanelBody.
+ *
+ * Columns are limited to what the contract serves. The frozen `Member` shape is
+ * `{ id, email, role[] }` only — so the wireframe's "Status" and "Last active"
+ * columns are deliberately OMITTED (no backing data; AGENTS.md scope guard: never
+ * fake backend-unsupported fields). The avatar initials are derived client-side
+ * from the email purely for legibility — honest derivation, not invented data.
  */
 import { StatusDot, type StatusTone } from '@/ui';
 import type { Member, UserRole } from '@/api';
 import { useMembers } from '../model/queries';
 import { PanelBody } from './PanelState';
+
+/** Two-letter avatar initials derived from the email local part (e.g.
+ *  "avery.madison@…" → "AM"). Purely presentational; no data is invented. */
+function initialsFromEmail(email: string): string {
+  const local = email.split('@')[0] ?? email;
+  const parts = local.split(/[.\-_+]/).filter(Boolean);
+  const first = parts[0]?.[0];
+  const second = parts[1]?.[0];
+  const letters = first && second ? `${first}${second}` : local.slice(0, 2) || '?';
+  return letters.toUpperCase();
+}
 
 /** Map a role to a status tone so the table reads at a glance. */
 const ROLE_TONE: Record<UserRole, StatusTone> = {
@@ -37,6 +54,20 @@ function RoleBadges({ roles }: { roles: UserRole[] }) {
   );
 }
 
+function MemberCell({ member }: { member: Member }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span
+        aria-hidden="true"
+        className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-surface-muted text-xs font-semibold text-foreground-muted"
+      >
+        {initialsFromEmail(member.email)}
+      </span>
+      <span className="font-medium text-foreground">{member.email}</span>
+    </div>
+  );
+}
+
 function MembersTable({ members }: { members: Member[] }) {
   return (
     <div className="overflow-x-auto">
@@ -55,10 +86,10 @@ function MembersTable({ members }: { members: Member[] }) {
         <tbody>
           {members.map((member) => (
             <tr key={member.id} className="border-b border-border/60 last:border-0">
-              <td className="px-4 py-3 align-top">
-                <span className="font-medium text-foreground">{member.email}</span>
+              <td className="px-4 py-3 align-middle">
+                <MemberCell member={member} />
               </td>
-              <td className="px-4 py-3 align-top">
+              <td className="px-4 py-3 align-middle">
                 <RoleBadges roles={member.role} />
               </td>
             </tr>
