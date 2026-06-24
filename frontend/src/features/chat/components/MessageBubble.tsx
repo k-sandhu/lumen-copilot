@@ -23,6 +23,7 @@ import { CitationChip, FreshnessPill, Icon, RetrievalTrace, type TraceStep } fro
 import type { MessageRole } from '@/api';
 import type { UiCitation } from '../model/citation';
 import { ToolActivity } from './ToolActivity';
+import { AnswerFooter } from './AnswerFooter';
 import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
@@ -50,6 +51,12 @@ export interface MessageBubbleProps {
   tools?: ToolActivityItem[];
   /** True while this assistant turn is still streaming (shows a caret). */
   streaming?: boolean;
+  /**
+   * When the answer was produced (e.g. "2d ago"), for the footer's
+   * "answered <ago>" signal. Derived from the message timestamp; omitted if none.
+   * This is the ANSWER time, not source freshness/last-indexed (#120 GUARD).
+   */
+  answeredAt?: string | undefined;
   /** True once a completed assistant turn produced zero citations (AC-5). */
   showNoCitationsNotice?: boolean;
   /** Open the citation in the inspector; `meta` carries the source's freshness. */
@@ -67,6 +74,7 @@ function MessageBubbleComponent({
   traceSteps,
   tools = [],
   streaming = false,
+  answeredAt,
   showNoCitationsNotice = false,
   onOpenCitation,
 }: MessageBubbleProps) {
@@ -160,6 +168,19 @@ function MessageBubbleComponent({
           <p className="mt-2 border-t border-border pt-2 text-xs italic text-foreground-muted">
             No sources were cited for this answer.
           </p>
+        )}
+
+        {/*
+          Answer-bubble footer (#120) — only on a settled assistant turn (not while
+          streaming, and only once content exists). "Permission-checked" shows when
+          the answer is grounded in ≥1 cited source (honest: never a bare claim).
+        */}
+        {!isUser && !streaming && content.length > 0 && (
+          <AnswerFooter
+            answerText={content}
+            permissionChecked={citations.length > 0}
+            answeredAt={answeredAt}
+          />
         )}
       </div>
     </article>

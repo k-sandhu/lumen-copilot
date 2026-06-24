@@ -13,6 +13,8 @@ export {
   relativeTime,
   isStale,
   modelBadgeLabel,
+  sourceMetadataRows,
+  type MetadataRow,
 } from './model/presentation';
 export {
   useChatSessions,

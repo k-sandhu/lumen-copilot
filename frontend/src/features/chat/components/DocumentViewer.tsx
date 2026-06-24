@@ -1,9 +1,19 @@
 /**
  * Citation click-through target (AC-2): opens the cited document at the passage.
  * Re-skinned (#89) to lead with the kit SourceInspector — the cited passage with
- * the matched span highlighted, plus freshness — then embeds the document's
- * original bytes below it. The SourceInspector makes every answer trace to a
- * verifiable source passage (mission filter #2).
+ * the matched span highlighted — then embeds the document's original bytes below
+ * it. The SourceInspector makes every answer trace to a verifiable source passage
+ * (mission filter #2).
+ *
+ * SOURCE PROVENANCE (#120 GUARD): the chat/citation wire (Citation /
+ * ChatCitation) carries NO source-provenance fields — no owner, no last-modified,
+ * no last-indexed timestamp. The only timestamp a chat turn has is the
+ * answer/message time, which is the answer's age, NOT when the source was indexed
+ * or modified. So the metadata grid (owner / last-modified / last-indexed) and
+ * the inspector freshness pill render "Not available" / nothing rather than
+ * present the answer time as source provenance — never fabricate where a doc was
+ * last indexed. A field lights up honestly only when a source actually carries
+ * it (e.g. the `owner` prop, wired through if a source ever starts providing one).
  *
  * AUTH (INV-4): `GET /documents/{id}/content` is a `bearerAuth` endpoint — it is
  * authorized by the in-memory access JWT, not a cookie. A browser-initiated
@@ -19,15 +29,30 @@
 import { useEffect, useState } from 'react';
 import { fetchDocumentContent } from '@/api';
 import { SourceInspector } from '@/ui';
+import { cn } from '@/lib/cn';
 import type { UiCitation } from '../model/citation';
-import { passageFromCitation } from '../model/presentation';
+import { passageFromCitation, sourceMetadataRows } from '../model/presentation';
 
 export interface DocumentViewerProps {
   citation: UiCitation;
-  /** Optional freshness label for the cited source (e.g. "2d ago"). */
-  freshness?: string | undefined;
-  /** Mark the source as past its freshness window. */
-  stale?: boolean | undefined;
+  /**
+   * Source owner for the metadata grid (#120), when known. The chat/citation
+   * wire doesn't carry it today, so the grid shows "Not available" rather than
+   * fabricate a name — this prop lets it light up honestly once a source has one.
+   */
+  owner?: string | undefined;
+  /**
+   * Last-modified label for the metadata grid (#120), when known. Not on the
+   * chat wire today → "Not available"; wired so a source can light it up.
+   */
+  lastModified?: string | undefined;
+  /**
+   * Last-indexed label for the metadata grid (#120), when known. Not on the
+   * chat wire today (the citation contract carries no indexing timestamp) →
+   * "Not available". Do NOT pass the answer/message time here: that is when the
+   * answer was produced, not when the source was indexed (#120 GUARD).
+   */
+  lastIndexed?: string | undefined;
   onClose: () => void;
 }
 
@@ -36,8 +61,20 @@ type ContentState =
   | { status: 'ready'; url: string }
   | { status: 'error'; message: string };
 
-export function DocumentViewer({ citation, freshness, stale, onClose }: DocumentViewerProps) {
+export function DocumentViewer({
+  citation,
+  owner,
+  lastModified,
+  lastIndexed,
+  onClose,
+}: DocumentViewerProps) {
   const { documentId } = citation;
+  // The inspector metadata grid (#120). NONE of owner / last-modified /
+  // last-indexed are on the chat/citation wire — and the answer/message time is
+  // the answer's age, not source provenance — so each renders "Not available"
+  // unless a source actually carries it. We never present the answer time as a
+  // source-indexing timestamp (#120 GUARD against fabricated provenance).
+  const metadataRows = sourceMetadataRows({ owner, lastModified, lastIndexed });
   const [content, setContent] = useState<ContentState>({ status: 'loading' });
   // Bumping this retries the load (AC-2: errors are actionable, not dead ends).
   const [attempt, setAttempt] = useState(0);
@@ -95,14 +132,40 @@ export function DocumentViewer({ citation, freshness, stale, onClose }: Document
         </button>
       </header>
 
-      {/* The kit SourceInspector surfaces the cited passage + freshness. */}
+      {/*
+        The kit SourceInspector surfaces the cited passage. We do NOT pass a
+        `freshness` here: the only timestamp a chat turn carries is the answer
+        time, and labelling that as source freshness/indexing would fabricate
+        provenance (#120 GUARD). Owner lights up only if a source carries one.
+      */}
       <div className="shrink-0 border-b border-border px-3 py-2">
         <SourceInspector
           title={citation.documentName}
           passage={passageFromCitation(citation)}
-          {...(freshness ? { freshness } : {})}
-          {...(stale !== undefined ? { stale } : {})}
+          {...(owner ? { owner } : {})}
         />
+
+        {/* Source-inspector metadata grid (#120): owner / last-modified / last-indexed. */}
+        <dl
+          role="group"
+          aria-label="Source metadata"
+          className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs"
+        >
+          {metadataRows.map((row) => (
+            <div key={row.label} className="contents">
+              <dt className="text-foreground-muted">{row.label}</dt>
+              <dd
+                className={cn(
+                  'min-w-0 truncate text-right',
+                  row.unknown ? 'italic text-foreground-muted' : 'text-foreground',
+                )}
+              >
+                {row.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+
         {content.status === 'ready' && (
           <a
             href={content.url}

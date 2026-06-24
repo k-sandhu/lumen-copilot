@@ -104,6 +104,72 @@ describe('MessageBubble', () => {
     expect(screen.queryByText(/^sources$/i)).not.toBeInTheDocument();
   });
 
+  it('renders the answer footer on a settled grounded assistant turn (#120)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Revenue rose in Q4."
+        citations={[CITATION]}
+        answeredAt="2d ago"
+        onOpenCitation={() => {}}
+      />,
+    );
+    // Permission-checked status (grounded answer), the answer time, and actions.
+    expect(screen.getByText(/permission-checked/i)).toBeInTheDocument();
+    expect(screen.getByText(/answered 2d ago/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /copy answer/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /mark this answer helpful/i })).toBeInTheDocument();
+  });
+
+  it('labels the footer timestamp as the ANSWER time, never source freshness (#120 GUARD)', () => {
+    // The message timestamp is when the ANSWER was produced, not when any cited
+    // source was indexed — so the footer must say "answered", never "freshest" /
+    // "last indexed" (which would fabricate source provenance).
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Revenue rose in Q4."
+        citations={[CITATION]}
+        answeredAt="2d ago"
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.getByText(/answered 2d ago/i)).toBeInTheDocument();
+    expect(screen.queryByText(/freshest/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/last indexed/i)).not.toBeInTheDocument();
+  });
+
+  it('omits the answer footer while the turn is still streaming (#120)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Partial answer so f"
+        citations={[]}
+        streaming
+        answeredAt="Just now"
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /copy answer/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/permission-checked/i)).not.toBeInTheDocument();
+  });
+
+  it('does not claim "Permission-checked" on an ungrounded answer (#120, honest)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="I could not find that in your documents."
+        citations={[]}
+        answeredAt="Just now"
+        showNoCitationsNotice
+        onOpenCitation={() => {}}
+      />,
+    );
+    // The footer still renders (the answer time) but makes no permission claim.
+    expect(screen.queryByText(/permission-checked/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/answered just now/i)).toBeInTheDocument();
+  });
+
   it('renders user messages as plain text (no markdown interpretation)', () => {
     render(
       <MessageBubble role="user" content="**not bold**" citations={[]} onOpenCitation={() => {}} />,

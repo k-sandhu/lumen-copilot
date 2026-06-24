@@ -9,7 +9,7 @@
  * target the raw content endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { setAccessToken, clearAccessToken } from '@/api';
 import { DocumentViewer } from './DocumentViewer';
 import type { UiCitation } from '../model/citation';
@@ -107,5 +107,61 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
 
     unmount();
     expect(revokeSpy).toHaveBeenCalled();
+  });
+
+  describe('source metadata grid (#120)', () => {
+    beforeEach(() => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(bytesResponse());
+    });
+
+    it('renders owner / last-modified / last-indexed rows', () => {
+      render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('Owner')).toBeInTheDocument();
+      expect(within(grid).getByText('Last modified')).toBeInTheDocument();
+      expect(within(grid).getByText('Last indexed')).toBeInTheDocument();
+    });
+
+    it('shows ALL rows as "Not available" — the chat wire carries no source metadata (GUARD #120)', () => {
+      // Owner, last-modified, AND last-indexed are all absent from the chat/
+      // citation wire, so the grid shows honest placeholders for every one of them.
+      render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getAllByText(/not available/i)).toHaveLength(3);
+    });
+
+    it('does NOT present a message/answer timestamp as "Last indexed" (GUARD #120 — no fabricated provenance)', () => {
+      // The viewer is given no source-indexing timestamp (none exists on the chat
+      // wire). Even though the answer was just produced, "Last indexed" must read
+      // "Not available" — a doc indexed months ago must never show "Just now".
+      render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      // The "Last indexed" label maps to a "Not available" value, not a recency.
+      const labels = within(grid).getAllByRole('term').map((el) => el.textContent);
+      const values = within(grid).getAllByRole('definition').map((el) => el.textContent);
+      const indexedIdx = labels.indexOf('Last indexed');
+      expect(indexedIdx).toBeGreaterThanOrEqual(0);
+      expect(values[indexedIdx]).toMatch(/not available/i);
+      // No relative-time recency leaked into the grid as source provenance.
+      expect(within(grid).queryByText(/ago$/i)).not.toBeInTheDocument();
+      expect(within(grid).queryByText(/^just now$/i)).not.toBeInTheDocument();
+    });
+
+    it('lights up the last-indexed row only when a REAL source-indexing value is supplied', () => {
+      // A genuine source-indexing label (not the answer time) lights the row up.
+      render(
+        <DocumentViewer citation={CITATION} lastIndexed="Indexed 2d ago" onClose={() => {}} />,
+      );
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('Indexed 2d ago')).toBeInTheDocument();
+      // Owner + last-modified remain honest placeholders.
+      expect(within(grid).getAllByText(/not available/i)).toHaveLength(2);
+    });
+
+    it('lights up the owner row when a source actually carries one', () => {
+      render(<DocumentViewer citation={CITATION} owner="Priya Shah" onClose={() => {}} />);
+      const grid = screen.getByRole('group', { name: /source metadata/i });
+      expect(within(grid).getByText('Priya Shah')).toBeInTheDocument();
+    });
   });
 });
