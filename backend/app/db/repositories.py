@@ -42,6 +42,8 @@ from app.domain.entities import (
     MessageRole,
     RefreshToken,
     Role,
+    Source,
+    SourceStatus,
     Tenant,
     User,
 )
@@ -87,6 +89,22 @@ def _to_collection(row: models.Collection) -> Collection:
         owner_id=row.owner_id,
         name=row.name,
         description=row.description,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_source(row: models.Source) -> Source:
+    return Source(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        type=row.type,
+        config=dict(row.config),
+        status=SourceStatus(row.status),
+        indexed_count=row.indexed_count,
+        last_synced_at=row.last_synced_at,
+        last_error=row.last_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -484,6 +502,148 @@ class CollectionRepository(_TenantScopedRepository):
         return True
 
 
+class SourceRepository(_TenantScopedRepository):
+    """Connected sources within one tenant (ADR-0009 §4).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``source_id``
+    resolves to ``None``/no rows, so the existence-non-disclosure 404 is enforced
+    one layer up off the ``None`` return. Ownership is layered in
+    ``services.sources_service`` (deny-by-default, spec 0004 §2.2).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        type: str,
+        config: dict[str, object],
+        status: SourceStatus = SourceStatus.PENDING,
+    ) -> Source:
+        row = models.Source(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            type=type,
+            config=config,
+            status=status.value,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_source(row)
+
+    async def get(self, source_id: UUID) -> Source | None:
+        stmt = select(models.Source).where(
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.id == source_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_source(row) if row is not None else None
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[Source]:
+        """A keyset page of an owner's sources (newest first).
+
+        Owner- *and* tenant-scoped (deny-by-default ownership, spec 0004 §2.2 +
+        INV-1): a caller only ever sees their own sources. Ordered by
+        ``(created_at, id)`` **descending** with ``id`` the stable tiebreaker.
+        ``after_id`` is the decoded cursor (previous page's last id); rows
+        strictly after it are returned, capped at ``limit``. The boundary's
+        ``created_at`` is resolved by a correlated scalar subquery so the
+        comparison is exact on Postgres + the offline SQLite (mirrors the
+        documents/collections keyset).
+        """
+        conditions = [
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Source.created_at)
+                .where(
+                    models.Source.tenant_id == self._tenant_id,
+                    models.Source.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Source.created_at < boundary_created_at,
+                    and_(
+                        models.Source.created_at == boundary_created_at,
+                        models.Source.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Source)
+            .where(*conditions)
+            .order_by(models.Source.created_at.desc(), models.Source.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_source(r) for r in rows]
+
+    async def update_status(
+        self,
+        source_id: UUID,
+        *,
+        status: SourceStatus,
+        indexed_count: int | None = None,
+        last_error: str | None = None,
+        set_last_error: bool = False,
+        last_synced_at: datetime | None = None,
+        set_last_synced_at: bool = False,
+    ) -> Source | None:
+        """Advance a source's sync state (tenant-scoped, INV-1).
+
+        Only supplied fields are touched. ``status`` is always set. ``indexed_count``
+        is written when non-``None``. ``last_error``/``last_synced_at`` are
+        tri-state: written (possibly to ``None`` to clear) only when the
+        corresponding ``set_*`` flag is true. Returns the updated entity, or
+        ``None`` if no row matches in this tenant. Ownership is enforced one layer
+        up — this only guarantees tenancy.
+        """
+        stmt = select(models.Source).where(
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.id == source_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = status.value
+        if indexed_count is not None:
+            row.indexed_count = indexed_count
+        if set_last_error:
+            row.last_error = last_error
+        if set_last_synced_at:
+            row.last_synced_at = last_synced_at
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_source(row)
+
+    async def delete(self, source_id: UUID) -> bool:
+        """Delete a source (tenant-scoped); cascades its documents (ADR-0009 §5).
+
+        Returns ``False`` when no row matches in this tenant (the service maps
+        that to 404). Ownership is enforced one layer up. The FK ``ON DELETE
+        CASCADE`` on ``documents.source_id`` removes the source's documents (and
+        their chunks) in the same transaction (INV-1: same-tenant rows only).
+        """
+        stmt = select(models.Source).where(
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.id == source_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
+
 class DocumentRepository(_TenantScopedRepository):
     """Documents within one tenant."""
 
@@ -497,6 +657,7 @@ class DocumentRepository(_TenantScopedRepository):
         size_bytes: int,
         storage_key: str,
         status: DocumentStatus = DocumentStatus.PENDING,
+        source_id: UUID | None = None,
     ) -> Document:
         row = models.Document(
             tenant_id=self._tenant_id,
@@ -507,10 +668,29 @@ class DocumentRepository(_TenantScopedRepository):
             size_bytes=size_bytes,
             storage_key=storage_key,
             status=status.value,
+            source_id=source_id,
         )
         self._session.add(row)
         await self._session.flush()
         return _to_document(row)
+
+    async def list_for_source(self, source_id: UUID) -> list[Document]:
+        """List the documents a source ingested (tenant-scoped, INV-1).
+
+        Used by the connector sync task to reconcile a re-sync: documents the
+        previous sync produced for this source, so a re-fetch can replace rather
+        than duplicate them. A foreign-tenant ``source_id`` returns no rows.
+        """
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.source_id == source_id,
+            )
+            .order_by(models.Document.created_at.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_document(r) for r in rows]
 
     async def get(self, document_id: UUID) -> Document | None:
         stmt = select(models.Document).where(

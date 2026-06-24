@@ -38,6 +38,13 @@ class AuditAction(str, enum.Enum):
     DOCUMENT_VIEWED = "document.viewed"
     DOCUMENT_DOWNLOADED = "document.downloaded"
     DOCUMENT_DELETED = "document.deleted"
+    # Connector sources (ADR-0009 §5: every add/sync/delete emits an audit event).
+    # Additive to the spec 0004 §2.4 MVP taxonomy — deny-by-default is preserved
+    # (the set only grows; no action is relaxed). The connector framework landed
+    # after spec 0004, so its source lifecycle events extend the taxonomy here.
+    SOURCE_ADDED = "source.added"
+    SOURCE_SYNCED = "source.synced"
+    SOURCE_DELETED = "source.deleted"
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
     PERMISSION_DENIED = "permission.denied"

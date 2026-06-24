@@ -35,8 +35,9 @@ celery_app.conf.update(
     enable_utc=True,
     # Modules the worker imports to register tasks. Explicit so the worker
     # entrypoint (``-A app.tasks.celery_app``) discovers the ingestion task (#21)
-    # regardless of package ``__init__`` side effects.
-    imports=("app.tasks.ingest",),
+    # and the connector sync task (#20) regardless of package ``__init__`` side
+    # effects.
+    imports=("app.tasks.ingest", "app.tasks.sync_source"),
     # Fail fast when publishing to an unreachable broker rather than looping
     # through a long reconnect cycle: a producer (the API after-commit enqueue)
     # must not block the response on a transient broker outage. The single
