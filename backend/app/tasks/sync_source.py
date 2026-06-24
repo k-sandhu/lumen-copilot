@@ -49,6 +49,7 @@ from app.llm import LLMGateway
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.ingest import ingest_document_async
+from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 
 # A fetched web document is stored as plain text for the ingestion pipeline (its
 # parser handles text/plain natively, no library needed).
@@ -124,7 +125,7 @@ async def sync_source_async(
         return await _fail(tenant_id, source_id, f"fetch failed: {exc.detail}")
 
     # --- Phase 3: reconcile (replace prior docs) then ingest each fetched doc. -
-    detected_mode = _detect_mode(source_type, fetched)
+    detected_mode = _detect_mode(source_type, fetched, config)
     indexed = 0
     async with session_scope() as session:
         documents = DocumentRepository(session, tenant_id)
@@ -244,16 +245,31 @@ def _resolve_collection_id(config: dict[str, object]) -> UUID | None:
         return None
 
 
-def _detect_mode(source_type: str, fetched: list[FetchedDoc]) -> WebSourceMode | None:
-    """Best-effort mode label for the grid: many docs ⇒ feed/sitemap, else page.
+def _detect_mode(
+    source_type: str, fetched: list[FetchedDoc], config: dict[str, object]
+) -> WebSourceMode | None:
+    """Refine the source ``mode`` from the sync result (ADR-0009 §2, contract).
 
-    The connector already resolved the concrete documents; we record a coarse
-    page/feed mode from the count (the web connector's own detector is exercised
-    in its tests). Non-web connectors record no mode.
+    The creation-time heuristic (``mode_from_url``) gave the source a non-null
+    ``mode`` before any fetch; this **refines** it from the actual fan-out:
+
+    * a single fetched doc ⇒ ``page``;
+    * many docs ⇒ a multi-document fan-out, i.e. ``feed`` or ``sitemap``. We keep
+      the creation-time guess when it already said ``sitemap`` (a ``.xml`` /
+      sitemap URL), otherwise label it ``feed``.
+
+    Non-web connectors record no mode (``None``). The connector's content-based
+    :func:`app.connectors.web.connector.detect_mode` is exercised in its own
+    tests; here we only need the coarse grid label without a second fetch.
     """
     if source_type != "web":
         return None
-    return WebSourceMode.PAGE if len(fetched) <= 1 else WebSourceMode.FEED
+    if len(fetched) <= 1:
+        return WebSourceMode.PAGE
+    prior = config.get("mode")
+    if prior == WebSourceMode.SITEMAP.value:
+        return WebSourceMode.SITEMAP
+    return WebSourceMode.FEED
 
 
 async def _record_mode(
@@ -322,7 +338,24 @@ def _as_dict(result: SyncResult) -> dict[str, object]:
     }
 
 
-def enqueue_source_sync(tenant_id: UUID, source_id: UUID) -> None:
+def _build_rate_limiter(settings: Settings) -> RateLimiter:
+    """Construct the Redis-backed per-tenant fetch rate limiter from settings.
+
+    Factory seam so a test can substitute a deterministic fake (no Redis).
+    """
+    return RedisFixedWindowRateLimiter(
+        settings.redis_url,
+        max_per_window=settings.source_sync_rate_max_per_window,
+        window_seconds=settings.source_sync_rate_window_seconds,
+    )
+
+
+def enqueue_source_sync(
+    tenant_id: UUID,
+    source_id: UUID,
+    *,
+    rate_limiter: RateLimiter | None = None,
+) -> None:
     """Enqueue a sync for a source (the seam the sources service calls after commit).
 
     The single enqueue point for source syncs (ADR-0004: tasks are enqueued only
@@ -331,10 +364,34 @@ def enqueue_source_sync(tenant_id: UUID, source_id: UUID) -> None:
     nor blocks it — an unreachable broker raises ``kombu.OperationalError`` in
     seconds, which is logged and swallowed (the source stays ``pending``; a
     re-drive is out of scope). Ids are passed as strings (Celery's JSON serializer).
+
+    **Per-tenant fetch rate limit (ADR-0009 §3, load-bearing).** Before the
+    message is published the tenant's fixed-window fetch budget is checked
+    (Redis-backed). When the window is exhausted the sync is **deferred** — the
+    task is re-enqueued with a ``countdown`` backoff rather than published
+    immediately — so a single tenant cannot make the worker fan out unbounded
+    outbound fetches, and the frozen ``/sources`` contract needs no 429 (the HTTP
+    response already returned ``pending``/``syncing``; the deferral is invisible
+    to the wire). ``rate_limiter`` is injectable for tests; production builds the
+    Redis limiter from settings.
     """
     from kombu.exceptions import OperationalError
 
     log = structlog.get_logger(__name__)
+
+    limiter = rate_limiter if rate_limiter is not None else _build_rate_limiter(get_settings())
+    countdown = 0
+    if not limiter.try_acquire(tenant_id):
+        # Window exhausted — defer (re-enqueue with backoff), never drop and never
+        # surface an HTTP error (ADR-0009 §3; the /sources contract is frozen).
+        countdown = get_settings().source_sync_rate_backoff_seconds
+        log.info(
+            "source_sync.rate_limited_deferred",
+            source_id=str(source_id),
+            tenant_id=str(tenant_id),
+            countdown_seconds=countdown,
+        )
+
     try:
         with celery_app.connection_for_write() as connection:
             connection.ensure_connection(max_retries=1, timeout=2)
@@ -342,6 +399,7 @@ def enqueue_source_sync(tenant_id: UUID, source_id: UUID) -> None:
                 args=(str(tenant_id), str(source_id)),
                 connection=connection,
                 retry=False,
+                countdown=countdown,
             )
     except OperationalError as exc:
         log.warning(

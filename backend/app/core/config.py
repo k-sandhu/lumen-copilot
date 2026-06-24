@@ -246,6 +246,44 @@ class Settings(BaseSettings):
             raise ValueError("INGESTION_CHUNK_SIZE must be positive")
         return value
 
+    # --- Connector sync rate limit (ADR-0009 §3, issue #20) -----------------
+    # Per-tenant fetch rate limit, enforced at the sync-enqueue boundary
+    # (Redis-backed fixed window) so a single tenant cannot make the server fan
+    # out unbounded outbound fetches. A sync that would exceed the window is
+    # **deferred** (re-enqueued with backoff), never dropped and never surfaced
+    # as an HTTP error (the /sources contract is frozen — no 429). The window is
+    # ``source_sync_rate_max_per_window`` syncs per ``source_sync_rate_window_seconds``
+    # seconds per tenant; a deferred sync re-enqueues after
+    # ``source_sync_rate_backoff_seconds`` (bounded by the window).
+    source_sync_rate_max_per_window: int = Field(
+        default=30, alias="SOURCE_SYNC_RATE_MAX_PER_WINDOW"
+    )
+    source_sync_rate_window_seconds: int = Field(
+        default=60, alias="SOURCE_SYNC_RATE_WINDOW_SECONDS"
+    )
+    source_sync_rate_backoff_seconds: int = Field(
+        default=30, alias="SOURCE_SYNC_RATE_BACKOFF_SECONDS"
+    )
+
+    @field_validator(
+        "source_sync_rate_max_per_window",
+        "source_sync_rate_window_seconds",
+        "source_sync_rate_backoff_seconds",
+    )
+    @classmethod
+    def _source_sync_rate_positive(cls, value: int) -> int:
+        """A non-positive rate window/limit/backoff would disable bounding — reject.
+
+        The per-tenant fetch rate limit is load-bearing (ADR-0009 §3); a zero or
+        negative value would either divide-by-window-zero or make every sync
+        defer forever, so misconfiguration must fail fast at startup.
+        """
+        if value <= 0:
+            raise ValueError(
+                "SOURCE_SYNC_RATE_* (max/window/backoff) must be positive (ADR-0009 §3)"
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_chunk_overlap(self) -> Settings:
         """Enforce ``0 <= overlap < size`` so chunking always makes progress."""

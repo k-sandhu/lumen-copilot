@@ -19,6 +19,7 @@ the server. Domain types only (ADR-0004): nothing here leaks ``httpx`` /
 from __future__ import annotations
 
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -50,13 +51,21 @@ class WebConnector:
     name = "web"
 
     def validate_config(self, config: dict[str, object]) -> dict[str, object]:
-        """Validate the ``{url}`` config; return the normalised config to store.
+        """Validate the ``{url}`` config; return the normalised ``{url, mode}``.
 
         The URL's scheme + host are validated synchronously (no network) via the
-        SSRF guard's URL check; a blocked URL raises :class:`UrlBlockedError`
-        (→ 422 ``url_blocked``). ``mode`` is left unset here — it is detected and
-        recorded by the first ``sync`` once the content is fetched. A missing or
-        non-string ``url`` is an invalid config (422).
+        SSRF guard's **bounded** syntactic check; a blocked URL raises
+        :class:`UrlBlockedError` (→ 422 ``url_blocked``). DNS resolution is **not**
+        done here — it is deferred to the Celery sync path (which re-validates via
+        the full per-hop SSRF guard), so the request path never blocks on
+        ``getaddrinfo`` (ADR-0009 §3). A missing or non-string ``url`` is an
+        invalid config (422).
+
+        ``mode`` is populated from a cheap URL **heuristic** here (page | feed |
+        sitemap) so every stored config — and therefore every ``/sources``
+        response — carries a non-null ``mode`` (the frozen contract marks it
+        required). The first ``sync`` **refines** the mode from the fetched
+        content, overwriting this estimate.
         """
         url = config.get("url")
         if not isinstance(url, str) or not url.strip():
@@ -64,13 +73,13 @@ class WebConnector:
                 "a web source requires a non-empty 'url'", code="invalid_url"
             )
         normalized = url.strip()
-        # Synchronous scheme/host SSRF pre-check (no network): rejects a non-http(s)
-        # scheme or an IP-literal in a blocked range before a row is written. DNS
-        # resolution + the full per-hop guard run again at fetch time (sync).
-        from app.connectors.web.fetch import _validate_url
+        # Bounded, non-blocking pre-check (scheme/IP-literal SSRF, no DNS): rejects
+        # a non-http(s) scheme or an IP-literal in a blocked range before a row is
+        # written. DNS resolution + the full per-hop guard run again at fetch time.
+        from app.connectors.web.fetch import validate_url_syntactic
 
-        _validate_url(normalized)
-        return {"url": normalized}
+        validate_url_syntactic(normalized)
+        return {"url": normalized, "mode": mode_from_url(normalized).value}
 
     async def sync(self, source: Source) -> Iterable[FetchedDoc]:
         """Fetch the source URL, detect the mode, and yield its documents.
@@ -178,4 +187,32 @@ def detect_mode(text: str, content_type: str) -> WebSourceMode:
     return WebSourceMode.PAGE
 
 
-__all__ = ["CONNECTOR", "WebConnector", "detect_mode"]
+def mode_from_url(url: str) -> WebSourceMode:
+    """Cheap URL **heuristic** for the initial ``mode`` (ADR-0009 §2, contract).
+
+    Used at source creation so a pending source's config carries a non-null
+    ``mode`` (the frozen ``SourceConfig`` marks it required) *before* any fetch.
+    The first ``sync`` refines this from the fetched content — this is only a
+    best-effort guess from the path/extension:
+
+    * ``.xml`` path or ``sitemap`` in the path → ``sitemap``;
+    * ``rss`` / ``atom`` / ``feed`` in the path → ``feed``;
+    * otherwise → ``page`` (the safe default for an ordinary link).
+
+    The query string + path are lower-cased for the substring checks; the host is
+    ignored (a host literally named ``feed.example.com`` is still a page until a
+    sync proves otherwise).
+    """
+    parts = urlsplit(url)
+    path = parts.path.lower()
+    query = parts.query.lower()
+    # Sitemap first: an .xml file or a path mentioning "sitemap" is a strong hint.
+    if path.endswith(".xml") or "sitemap" in path:
+        return WebSourceMode.SITEMAP
+    haystack = f"{path}?{query}"
+    if any(token in haystack for token in ("rss", "atom", "feed")):
+        return WebSourceMode.FEED
+    return WebSourceMode.PAGE
+
+
+__all__ = ["CONNECTOR", "WebConnector", "detect_mode", "mode_from_url"]

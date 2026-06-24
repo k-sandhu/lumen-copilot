@@ -201,6 +201,62 @@ async def test_sync_ingests_fetched_docs_into_chunks(
             assert all(c.embedding is not None and len(c.embedding) == _DIM for c in chunks)
 
 
+async def test_sync_refines_mode_from_fanout(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The creation-time URL heuristic mode is **refined** during sync (ADR-0009 §2).
+
+    The seed URL (``.../page``) gets ``mode=page`` at creation; a multi-doc sync
+    refines it to ``feed`` (a fan-out). Regression guard for the review finding
+    that ``mode`` is populated at creation and refined during sync.
+    """
+    tenant_id, source_id = await _seed_source(url="http://93.184.216.34/page")
+    # Confirm the creation-time heuristic seeded a non-null mode.
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None and source.config.get("mode") == "page"
+
+    body = "Sphinx of black quartz, judge my vow. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Item A", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Item B", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.config.get("mode") == "feed"  # refined from the fan-out
+
+
+async def test_sync_preserves_sitemap_mode_for_xml_url(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``.xml`` source seeded ``sitemap`` keeps ``sitemap`` after a multi-doc sync."""
+    tenant_id, source_id = await _seed_source(url="http://93.184.216.34/sitemap.xml")
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None and source.config.get("mode") == "sitemap"
+
+    body = "Lorem ipsum dolor sit amet. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="P1", text=body, url="http://93.184.216.34/p1"),
+            FetchedDoc(title="P2", text=body, url="http://93.184.216.34/p2"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.config.get("mode") == "sitemap"  # sitemap preserved, not feed
+
+
 async def test_resync_replaces_prior_docs(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

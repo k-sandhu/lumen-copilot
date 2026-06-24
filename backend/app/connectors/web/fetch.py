@@ -152,13 +152,20 @@ def _resolve_safe_ip(host: str) -> str:
     return resolved[0]
 
 
-def _validate_url(url: str) -> tuple[str, str, str]:
-    """Validate scheme + host of ``url`` and resolve a safe IP.
+def validate_url_syntactic(url: str) -> str:
+    """Bounded, **non-blocking** SSRF pre-check (no DNS) — safe on the request path.
 
-    Returns ``(safe_ip, host, port)`` for pinning the connection. Raises
-    :class:`UrlBlockedError` for a non-http(s) scheme, a missing host, or a host
-    that resolves into a blocked range. An IP-literal host is range-checked
-    directly (no DNS).
+    Validates the cheap, synchronous parts of the SSRF guard only: the scheme is
+    ``http``/``https``, a host is present, and — if the host is an **IP literal** —
+    its range is checked directly (loopback/private/link-local/metadata refused).
+    A *hostname* is left for fetch-time resolution: this function does **no**
+    ``getaddrinfo`` so it never blocks the event loop (ADR-0009 §3 — keep
+    request-path validation bounded; the full per-redirect DNS guard runs in the
+    Celery sync path). Returns the host on success.
+
+    Raises:
+        UrlBlockedError: a non-http(s) scheme, a missing host, or an IP-literal
+            host in a blocked range.
     """
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -170,16 +177,39 @@ def _validate_url(url: str) -> tuple[str, str, str]:
     if not host:
         raise UrlBlockedError("URL has no host")
 
-    # An IP-literal host skips DNS but is still range-checked.
+    # An IP-literal host is range-checked synchronously (no DNS). A hostname is
+    # left for fetch-time resolution (off the event loop / in the worker).
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
+        return host
+    if _is_blocked_ip(literal):
+        raise UrlBlockedError(
+            f"address {host} is in a blocked range " "(loopback/private/link-local/metadata)"
+        )
+    return host
+
+
+def _validate_url(url: str) -> tuple[str, str, str]:
+    """Validate scheme + host of ``url`` and resolve a safe IP (fetch-time, DNS).
+
+    Returns ``(safe_ip, host, port)`` for pinning the connection. Runs the
+    bounded syntactic checks (:func:`validate_url_syntactic`) and then — for a
+    hostname — resolves it, rejecting the host if *any* resolved address is in a
+    blocked range. An IP-literal host needs no DNS (already range-checked). Used
+    only inside the connector's fetch path (the Celery worker), never the request
+    path. Raises :class:`UrlBlockedError` on any guard failure.
+    """
+    host = validate_url_syntactic(url)
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+
+    # An IP-literal host skips DNS (already validated); a hostname is resolved.
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
         safe_ip = _resolve_safe_ip(host)
     else:
-        if _is_blocked_ip(literal):
-            raise UrlBlockedError(
-                f"address {host} is in a blocked range " "(loopback/private/link-local/metadata)"
-            )
         safe_ip = host
 
     port = str(parts.port) if parts.port else ("443" if scheme == "https" else "80")
@@ -318,4 +348,5 @@ __all__ = [
     "FetchResult",
     "UrlBlockedError",
     "fetch_url",
+    "validate_url_syntactic",
 ]

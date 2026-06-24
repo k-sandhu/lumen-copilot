@@ -24,6 +24,7 @@ from app.connectors.web.fetch import (
     _is_blocked_ip,
     _validate_url,
     fetch_url,
+    validate_url_syntactic,
 )
 
 # A public IP literal so the URL check passes the host stage without DNS — the
@@ -86,6 +87,61 @@ def test_public_ip_literal_passes_validation() -> None:
     assert safe_ip == _PUBLIC_IP
     assert host == _PUBLIC_IP
     assert port == "80"
+
+
+# --- Bounded, non-blocking request-path pre-check (no DNS) -------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/x",  # IPv4 loopback literal
+        "http://169.254.169.254/latest/meta-data/",  # metadata link-local literal
+        "http://10.0.0.5/x",  # RFC-1918 literal
+        "http://[::1]/x",  # IPv6 loopback literal
+        "ftp://example.com/x",  # bad scheme
+        "http:///nohost",  # no host
+    ],
+)
+def test_validate_url_syntactic_refuses_literals_and_schemes(url: str) -> None:
+    """The bounded pre-check refuses IP-literal SSRF + bad schemes synchronously."""
+    with pytest.raises(UrlBlockedError):
+        validate_url_syntactic(url)
+
+
+def test_validate_url_syntactic_does_no_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (review finding 3): the pre-check never calls ``getaddrinfo``.
+
+    A *hostname* (not an IP literal) is admitted by the bounded check without any
+    resolution — DNS is deferred to the fetch path so the request thread never
+    blocks on ``socket.getaddrinfo`` (ADR-0009 §3).
+    """
+    import socket
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("validate_url_syntactic must not resolve DNS")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    host = validate_url_syntactic("https://example.com/path")
+    assert host == "example.com"
+
+
+def test_validate_url_does_dns_at_fetch_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The authoritative fetch-time guard still resolves the host (DNS, off-request).
+
+    Confirms the split keeps DNS on the fetch path: ``_validate_url`` (the
+    fetch-time guard) resolves a hostname and rejects it when it maps to a blocked
+    address — here a stubbed ``getaddrinfo`` returns loopback for a public-looking
+    host (the DNS-rebind class), which must be refused.
+    """
+    import socket
+
+    def _resolve_loopback(*_args: object, **_kwargs: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _resolve_loopback)
+    with pytest.raises(UrlBlockedError):
+        _validate_url("https://rebind.example.com/x")
 
 
 @pytest.mark.parametrize(

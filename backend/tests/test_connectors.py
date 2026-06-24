@@ -71,9 +71,38 @@ def test_get_unknown_connector_raises() -> None:
 # --- validate_config (the request-path SSRF pre-check) ----------------------
 
 
-def test_validate_config_normalizes_url() -> None:
+def test_validate_config_normalizes_url_and_seeds_mode() -> None:
+    """The stored config is the trimmed ``{url, mode}`` — mode is contract-required.
+
+    Regression for the review finding that ``mode`` was omitted from the
+    pending-source response (the frozen SourceConfig marks it required). The
+    plain page URL seeds ``mode=page`` (refined later during sync).
+    """
     out = WebConnector().validate_config({"url": "  https://example.com/a  "})
-    assert out == {"url": "https://example.com/a"}
+    assert out == {"url": "https://example.com/a", "mode": "page"}
+
+
+@pytest.mark.parametrize(
+    "url,expected_mode",
+    [
+        ("https://example.com/blog/post", "page"),  # ordinary page
+        ("https://example.com/sitemap.xml", "sitemap"),  # .xml file
+        ("https://example.com/news/sitemap_index.xml", "sitemap"),  # sitemap in path + .xml
+        ("https://example.com/feeds/all.atom.xml", "sitemap"),  # any .xml → sitemap first
+        ("https://example.com/blog/rss", "feed"),  # rss in path
+        ("https://example.com/atom", "feed"),  # atom in path
+        ("https://example.com/feed/", "feed"),  # feed in path
+        ("https://example.com/posts?format=rss", "feed"),  # rss in query
+    ],
+)
+def test_validate_config_seeds_mode_from_url_heuristic(url: str, expected_mode: str) -> None:
+    """``mode`` is populated at creation from a cheap URL heuristic (ADR-0009 §2).
+
+    Every stored web-source config carries a non-null ``mode`` *before* any fetch,
+    so every ``/sources`` response is contract-valid. The first sync refines it.
+    """
+    out = WebConnector().validate_config({"url": url})
+    assert out["mode"] == expected_mode
 
 
 @pytest.mark.parametrize("bad", [{}, {"url": ""}, {"url": "   "}, {"url": 123}])
@@ -87,9 +116,30 @@ def test_validate_config_rejects_missing_url(bad: dict[str, object]) -> None:
     ["http://127.0.0.1/x", "ftp://example.com/x", "http://169.254.169.254/x"],
 )
 def test_validate_config_rejects_ssrf_url(url: str) -> None:
+    """The request-path pre-check rejects IP-literal SSRF + bad schemes (no DNS)."""
     with pytest.raises(ConnectorConfigError) as exc:
         WebConnector().validate_config({"url": url})
     assert exc.value.code == "url_blocked"
+
+
+def test_validate_config_does_no_dns_on_request_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: ``validate_config`` must not call ``getaddrinfo`` (no blocking DNS).
+
+    The review flagged synchronous DNS on the POST /sources path (a blocking
+    ``socket.getaddrinfo`` with no timeout). The request-path pre-check is now
+    bounded + non-blocking — DNS is deferred to the Celery fetch path. We assert
+    no resolution happens here by exploding if ``getaddrinfo`` is ever called.
+    """
+    import socket
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("validate_config must not resolve DNS on the request path")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    # A hostname (not an IP literal) would historically have triggered DNS here.
+    out = WebConnector().validate_config({"url": "https://example.com/some/page"})
+    assert out["url"] == "https://example.com/some/page"
+    assert out["mode"] == "page"
 
 
 # --- HTML / feed / sitemap extraction (pure) --------------------------------

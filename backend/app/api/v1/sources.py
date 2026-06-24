@@ -55,13 +55,15 @@ class SourceConfigResponse(BaseModel):
 
     ``additionalProperties: false`` in the contract: the internal ``collection_id``
     the service stores on the source config is **not** exposed — only ``url`` and
-    ``mode`` are projected onto the wire.
+    ``mode`` are projected onto the wire. The frozen contract marks **both**
+    ``url`` and ``mode`` required, so ``mode`` is non-null on every response: it is
+    populated from a URL heuristic at creation and refined during sync.
     """
 
     model_config = {"extra": "forbid"}
 
     url: str
-    mode: WebSourceMode | None = None
+    mode: WebSourceMode
 
 
 class SourceResponse(BaseModel):
@@ -103,10 +105,19 @@ class SourceCreateRequest(BaseModel):
 
 
 def _config_response(config: dict[str, object]) -> SourceConfigResponse:
-    """Project the stored config to the wire ``{url, mode}`` (drops internal keys)."""
+    """Project the stored config to the wire ``{url, mode}`` (drops internal keys).
+
+    ``mode`` is contract-required (non-null): every stored web-source config gets
+    a ``mode`` at creation (URL heuristic, refined during sync). As defence in
+    depth — so a legacy/partial row can never emit a contract-invalid response —
+    a missing or unrecognised ``mode`` falls back to ``page`` (the safe default).
+    """
     url = config.get("url")
     mode_raw = config.get("mode")
-    mode = WebSourceMode(mode_raw) if isinstance(mode_raw, str) else None
+    try:
+        mode = WebSourceMode(mode_raw) if isinstance(mode_raw, str) else WebSourceMode.PAGE
+    except ValueError:
+        mode = WebSourceMode.PAGE
     return SourceConfigResponse(url=str(url) if url is not None else "", mode=mode)
 
 

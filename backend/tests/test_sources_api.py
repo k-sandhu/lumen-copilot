@@ -149,9 +149,12 @@ async def test_add_list_sync_delete_round_trip(client: AsyncClient, seeded: _See
     body = resp.json()
     assert body["type"] == "web"
     assert body["status"] == "pending"
-    assert body["config"]["url"] == f"http://{_PUBLIC}/page"
-    # The internal collection_id is NOT exposed (SourceConfig additionalProperties false).
-    assert set(body["config"]).issubset({"url", "mode"})
+    # The frozen SourceConfig marks BOTH url and mode required: the 201 response
+    # carries the exact {url, mode} shape — mode is non-null (seeded from a URL
+    # heuristic at creation), and the internal collection_id is NOT exposed
+    # (SourceConfig additionalProperties: false). Regression for the review
+    # finding that `mode` was omitted (response_model_exclude_none dropped it).
+    assert body["config"] == {"url": f"http://{_PUBLIC}/page", "mode": "page"}
     source_id = body["id"]
 
     # list → the one source
@@ -176,6 +179,14 @@ async def test_add_list_sync_delete_round_trip(client: AsyncClient, seeded: _See
     # gone from the list
     resp = await client.get("/api/v1/sources", headers=_auth(token))
     assert resp.json()["items"] == []
+
+
+async def test_add_feed_url_seeds_mode_feed(client: AsyncClient, seeded: _Seeded) -> None:
+    """A feed-like URL seeds ``mode=feed`` at creation (contract-required, non-null)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await _add(client, token, f"http://{_PUBLIC}/blog/rss")
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["config"] == {"url": f"http://{_PUBLIC}/blog/rss", "mode": "feed"}
 
 
 # --- SSRF / validation negatives (422) --------------------------------------
