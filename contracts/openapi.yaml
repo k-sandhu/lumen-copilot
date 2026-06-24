@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.3.0
+  version: 0.4.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -30,6 +30,17 @@ info:
     (re-sync), and `DELETE /sources/{id}` (remove, cascading the source's
     documents). Sources are tenant- and owner-scoped (INV-1/INV-2). No shape from
     0.1.0 or 0.2.0 changed; these are REST request/response only.
+
+
+    This revision (0.4.0) **additively** freezes the **preferences, saved-searches
+    & search-suggestions wire** (spec 0005, epic #144, ADR-0006 Phase 0):
+    `GET`/`PATCH /preferences` (the caller's account preferences — a default chat
+    model validated against `/models`), `GET`/`POST`/`GET`/`PATCH`/`DELETE
+    /saved-searches` (save a query + filters and re-run it), `GET /search/suggest`
+    (permission-trimmed typeahead through the `retrieval/` chokepoint), and
+    `GET`/`DELETE /search/recent` (recent-query history; `/search` records the
+    executed query). All per-user and tenant-scoped (INV-1/INV-2). No shape from
+    0.1.0–0.3.0 changed; REST request/response only.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -738,6 +749,200 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # --- User preferences (spec 0005 §3; epic #144) ----------------------------
+  /preferences:
+    get:
+      operationId: getPreferences
+      summary: The caller's account preferences.
+      description: >
+        Per-user, tenant-scoped settings (spec 0005). A fresh user has
+        `default_model_id: null` (meaning "use the server default"). Always the
+        CALLER's row — there is no id in the path and no way to read another user's
+        preferences (INV-2).
+      tags: [preferences]
+      responses:
+        "200":
+          description: The caller's preferences.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      operationId: updatePreferences
+      summary: Update the caller's account preferences.
+      description: >
+        Sets the caller's preferences. `default_model_id` must be an id from
+        `/models` (else 422 `unknown_model`); send `null` to clear the override and
+        fall back to the server default. Stored as an override, validated
+        fail-closed at chat time (a model later removed from the registry falls back
+        to the server default rather than erroring a chat — spec 0005 §2).
+      tags: [preferences]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserPreferencesUpdate" }
+      responses:
+        "200":
+          description: Updated preferences.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # --- Saved searches (spec 0005 §3; epic #144) ------------------------------
+  /saved-searches:
+    get:
+      operationId: listSavedSearches
+      summary: List the caller's saved searches (newest first).
+      tags: [saved-searches]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of saved searches.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedSearchList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createSavedSearch
+      summary: Save a search (query + optional filters) under a name.
+      description: >
+        Captures exactly what `/search` accepts — `query` plus the optional
+        `collection_id` / `source` / `type` filters — so applying a saved search is
+        re-running `/search` with those params (spec 0005 §2). Per-user and
+        tenant-scoped.
+      tags: [saved-searches]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SavedSearchCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedSearch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /saved-searches/{savedSearchId}:
+    parameters:
+      - { $ref: "#/components/parameters/SavedSearchId" }
+    get:
+      operationId: getSavedSearch
+      summary: Get one saved search.
+      tags: [saved-searches]
+      responses:
+        "200":
+          description: The saved search.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedSearch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateSavedSearch
+      summary: Rename a saved search or change its query/filters.
+      tags: [saved-searches]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SavedSearchUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedSearch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteSavedSearch
+      summary: Delete a saved search.
+      tags: [saved-searches]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Search typeahead + recent history (spec 0005 §3; epic #144) -----------
+  /search/suggest:
+    get:
+      operationId: suggestSearch
+      summary: Typeahead suggestions as the user types (permission-trimmed).
+      description: >
+        Returns up to `limit` suggestions for a partial query, ranked by relevance
+        and mixing kinds (spec 0005 §3): `completion` (from the caller's own recent
+        and saved searches), `document` (matching document titles the caller may
+        open), and `saved_search` (a matching saved search). Document matches run
+        through the SAME `retrieval/` permission chokepoint as `/search` (CC-1): a
+        title the caller cannot open is never suggested (INV-2), within their tenant
+        (INV-1). Empty/whitespace `q` → 422 (INV-8). This is a retrieval surface, so
+        like `/search` it emits a retrieval audit event (INV-6).
+      tags: [search]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, pattern: "\\S" }
+          description: >
+            The partial query typed so far. Must contain a non-whitespace character
+            (the `\S` pattern makes an all-whitespace `q` a 422 in the contract,
+            matching spec 0005 AC-G3 — no FE/BE divergence); the server trims it
+            before use.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 20, default: 8 }
+          description: Max suggestions to return.
+      responses:
+        "200":
+          description: Ranked, permission-trimmed suggestions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuggestResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /search/recent:
+    get:
+      operationId: listRecentSearches
+      summary: The caller's recent search queries (newest first).
+      description: >
+        Recent queries the caller actually ran via `/search`, de-duplicated by
+        normalized query and capped server-side (spec 0005 §2). Per-user — one
+        user's recents never appear for another (INV-2).
+      tags: [search]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+          description: Max recent queries to return.
+      responses:
+        "200":
+          description: Recent queries, newest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecentSearchList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: clearRecentSearches
+      summary: Clear the caller's recent search history.
+      description: Idempotent — clears all of the caller's recent queries (spec 0005 AC-R2).
+      tags: [search]
+      responses:
+        "204": { description: Cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
 components:
   parameters:
     Cursor:
@@ -769,6 +974,11 @@ components:
       schema: { type: string, format: uuid }
     SourceId:
       name: sourceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SavedSearchId:
+      name: savedSearchId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1492,6 +1702,165 @@ components:
               field: { type: string }
               message: { type: string }
 
+    # --- User preferences (spec 0005) ---------------------------------------
+    UserPreferences:
+      type: object
+      additionalProperties: false
+      required: [default_model_id, updated_at]
+      properties:
+        default_model_id:
+          type: [string, "null"]
+          description: >
+            The caller's preferred default chat model — an id from `/models`, or
+            null to use the server default. New chat sessions with no explicit model
+            start from this.
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            When the caller last changed their preferences, or **null** if they
+            never have (the implicit server-default state). `GET /preferences`
+            returns `{ default_model_id: null, updated_at: null }` for a fresh user
+            and performs no write — the row is created on the first `PATCH` (so a
+            read never mutates state; "read before write", spec 0005 §2/§4).
+
+    UserPreferencesUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        default_model_id:
+          type: [string, "null"]
+          description: >
+            A `/models` id to set as the default, or null to clear the override
+            (fall back to the server default). An unknown id → 422 `unknown_model`.
+
+    # --- Saved searches (spec 0005) -----------------------------------------
+    SavedSearch:
+      type: object
+      additionalProperties: false
+      required: [id, name, query, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        query:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: The saved `/search` query (the `q` parameter).
+        collection_id:
+          type: [string, "null"]
+          format: uuid
+          description: Optional collection filter (the `/search` collection_id).
+        source:
+          oneOf:
+            - { $ref: "#/components/schemas/ResultSource" }
+            - { type: "null" }
+          description: Optional source-kind filter (the `/search` source).
+        type:
+          type: [string, "null"]
+          description: Optional content-type filter (the `/search` type).
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SavedSearchCreate:
+      type: object
+      additionalProperties: false
+      required: [name, query]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        collection_id: { type: string, format: uuid }
+        source: { $ref: "#/components/schemas/ResultSource" }
+        type: { type: string, maxLength: 100 }
+
+    SavedSearchUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        collection_id: { type: [string, "null"], format: uuid }
+        source:
+          oneOf:
+            - { $ref: "#/components/schemas/ResultSource" }
+            - { type: "null" }
+        type: { type: [string, "null"], maxLength: 100 }
+
+    SavedSearchList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SavedSearch" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    # --- Search typeahead suggestions (spec 0005) ---------------------------
+    SuggestionKind:
+      type: string
+      description: >
+        What a suggestion represents. `completion` = a query the caller can run
+        (from their recents/saved); `document` = a permitted document whose title
+        matches; `saved_search` = one of the caller's saved searches.
+      enum: [completion, document, saved_search]
+
+    Suggestion:
+      type: object
+      additionalProperties: false
+      required: [kind, text]
+      properties:
+        kind: { $ref: "#/components/schemas/SuggestionKind" }
+        text:
+          type: string
+          description: The display label / the query to run when chosen.
+        document_id:
+          type: [string, "null"]
+          format: uuid
+          description: The matched document, when kind is `document` (permitted, INV-2).
+        source:
+          oneOf:
+            - { $ref: "#/components/schemas/ResultSource" }
+            - { type: "null" }
+          description: The document's source kind, when kind is `document`.
+        saved_search_id:
+          type: [string, "null"]
+          format: uuid
+          description: The matched saved search, when kind is `saved_search`.
+
+    SuggestResponse:
+      type: object
+      additionalProperties: false
+      required: [suggestions]
+      properties:
+        suggestions:
+          type: array
+          maxItems: 20
+          items: { $ref: "#/components/schemas/Suggestion" }
+
+    # --- Recent search history (spec 0005) ----------------------------------
+    RecentSearch:
+      type: object
+      additionalProperties: false
+      required: [query, last_used_at]
+      properties:
+        query: { type: string }
+        last_used_at: { type: string, format: date-time }
+
+    RecentSearchList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RecentSearch" }
+
   responses:
     Problem:
       description: Error (problem+json).
@@ -1554,8 +1923,12 @@ tags:
     description: Chat sessions, history, and message send (answer streams over WS).
   - name: models
     description: The selectable chat-model registry (picker).
+  - name: preferences
+    description: The caller's account preferences (e.g. default chat model).
   - name: search
     description: Permission-trimmed, cited grounded search across the caller's sources.
+  - name: saved-searches
+    description: The caller's saved searches — save a query + filters and re-run it.
   - name: audit
     description: The append-only audit trail with provenance (admin / security only).
   - name: admin
