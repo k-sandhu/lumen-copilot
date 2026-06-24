@@ -12,9 +12,13 @@
  *   success  → direct answer (if any) + trim notice + ranked rows
  *
  * Filters (#118) are backed by the REAL `/search` contract only: a collection
- * scope (`collection_id`) and a source-kind scope (`source`, the frozen
- * `ResultSource` enum) drive the server query; a content-type facet narrows the
- * returned rows client-side. No invented connectors.
+ * scope (`collection_id`), a source-kind scope (`source`, the frozen
+ * `ResultSource` enum) AND a content-type scope (`type`) ALL drive the server
+ * query. Routing every facet through the server keeps `results`, `direct_answer`
+ * and `hidden_count` coherent: a visible direct answer always cites passages that
+ * are present in `results` (spec 0004 INV-3) — a client-only type filter could
+ * hide a cited row and leave the answer with dropped/literal citations, so it is
+ * deliberately not used. No invented connectors.
  *
  * The draft query, the submitted query and the filter state are the only
  * client-side state and live here; the results are server state via `useSearch`
@@ -49,33 +53,31 @@ export function SearchScreen() {
   const [submitted, setSubmitted] = useState('');
   const [filters, setFilters] = useState<SearchFilterState>({});
 
-  // Collection + source are server params (they change the result set and the
-  // permission-trim count); the content-type facet narrows client-side.
+  // Collection, source AND content-type are ALL server params: routing every
+  // facet through `/search` keeps results + direct_answer + hidden_count coherent
+  // (the server re-derives the answer over the filtered, permission-trimmed set),
+  // so a visible answer's citations always resolve to a row in `results` (INV-3).
   const query = useSearch({
     q: submitted,
     collection_id: filters.collectionId,
     source: filters.source,
+    type: filters.type,
   });
   const collections = useSearchCollections();
   const data = query.data;
 
-  const allResults = useMemo(() => data?.results ?? [], [data]);
+  const results = useMemo(() => data?.results ?? [], [data]);
 
-  // Content-type facet is applied client-side over the permitted results.
-  const visibleResults = useMemo(
-    () => (filters.type ? allResults.filter((r) => r.type === filters.type) : allResults),
-    [allResults, filters.type],
-  );
-
-  // Index VISIBLE results by id so the direct answer's citations resolve to a
-  // source the user can still see in the list.
+  // Index the server-returned (already type-filtered) results by id so each of
+  // the direct answer's citations resolves to a source the user can see.
   const resultsById = useMemo(() => {
     const map = new Map<string, SearchResult>();
-    for (const r of visibleResults) map.set(r.id, r);
+    for (const r of results) map.set(r.id, r);
     return map;
-  }, [visibleResults]);
+  }, [results]);
 
   const hasQuery = submitted.trim().length > 0;
+  const hasFilter = Boolean(filters.collectionId || filters.source || filters.type);
   const isLoading = hasQuery && query.isLoading;
   const isError = hasQuery && query.isError;
   const isEmpty =
@@ -110,11 +112,14 @@ export function SearchScreen() {
             <LoadingState />
           ) : isError ? (
             <ErrorState message={errorMessage(query.error)} onRetry={() => void query.refetch()} />
-          ) : isEmpty ? (
+          ) : isEmpty && !hasFilter ? (
+            // Truly nothing matched (no active scope) — a plain empty state.
             <EmptyState query={data?.query ?? submitted} />
           ) : data ? (
             <div className="flex flex-col gap-6 md:flex-row">
-              {/* LEFT: filter sidebar — backed by the real contract only. */}
+              {/* LEFT: filter sidebar — backed by the real contract only. Kept
+                  visible even on a filtered-empty result so the active scope is
+                  always visible and clearable. */}
               <aside className="shrink-0 md:w-60">
                 <div className="rounded-lg border border-border bg-surface p-4 md:sticky md:top-0">
                   <SearchFilters
@@ -122,31 +127,39 @@ export function SearchScreen() {
                     onChange={setFilters}
                     collections={collections.data?.items ?? []}
                     collectionsLoading={collections.isLoading}
-                    results={allResults}
+                    results={results}
                   />
                 </div>
               </aside>
 
               {/* RIGHT: direct answer + ranked results. */}
               <div className="min-w-0 flex-1 space-y-4">
-                {data.direct_answer ? (
-                  <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
-                ) : null}
-
-                <ResultsToolbar count={visibleResults.length} filtered={Boolean(filters.type)} />
-
-                <TrimNotice hiddenCount={data.hidden_count} />
-
-                {visibleResults.length === 0 ? (
-                  <FacetEmptyState onClear={() => setFilters((f) => ({ ...f, type: undefined }))} />
+                {results.length === 0 ? (
+                  // The active scope filtered every row away. Keep the sidebar
+                  // (above) so the user can see and clear the scope, and offer a
+                  // one-click reset here.
+                  <FilteredEmptyState
+                    query={data.query}
+                    onClear={() => setFilters({})}
+                  />
                 ) : (
-                  <ul className="space-y-3" aria-label="Search results">
-                    {visibleResults.map((result) => (
-                      <li key={result.id}>
-                        <SearchResultRow result={result} />
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    {data.direct_answer ? (
+                      <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
+                    ) : null}
+
+                    <ResultsToolbar count={results.length} filtered={hasFilter} />
+
+                    <TrimNotice hiddenCount={data.hidden_count} />
+
+                    <ul className="space-y-3" aria-label="Search results">
+                      {results.map((result) => (
+                        <li key={result.id}>
+                          <SearchResultRow result={result} />
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </div>
             </div>
@@ -226,17 +239,27 @@ function EmptyState({ query }: { query: string }) {
   );
 }
 
-/** When the content-type facet trims every visible row, offer to clear it. */
-function FacetEmptyState({ onClear }: { onClear: () => void }) {
+/**
+ * When the active scope filters (collection / source / type) leave no results,
+ * keep the sidebar (rendered alongside) and offer a one-click reset of the scope
+ * so the user is never stranded with an empty pane and an invisible filter.
+ */
+function FilteredEmptyState({ query, onClear }: { query: string; onClear: () => void }) {
   return (
-    <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-foreground-muted">
-      <p>No results of this content type on this page.</p>
+    <div
+      role="status"
+      className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-foreground-muted"
+    >
+      <p>
+        No results for <span className="font-medium text-foreground">“{query}”</span> under the
+        active filters.
+      </p>
       <button
         type="button"
         onClick={onClear}
         className="mt-2 rounded-md border border-border bg-surface px-3 py-1.5 text-foreground hover:bg-surface-muted"
       >
-        Clear the type filter
+        Clear filters
       </button>
     </div>
   );

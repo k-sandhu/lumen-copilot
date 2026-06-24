@@ -35,13 +35,18 @@ function urlOf(input: RequestInfo | URL): string {
 /**
  * Route `/collections` (the filter sidebar) vs `/search` so the search response
  * under test is never swallowed by the collections fetch. `searchResponse` is the
- * Response (or thrown error) the `/search` call resolves to.
+ * Response (or a factory) the `/search` call resolves to; the factory receives the
+ * request URL so a test can assert / honor the server-side filter params (the
+ * content-type facet is a server `type` param — spec 0004 INV-3, #118).
  */
-function mockSearch(searchResponse: Response | (() => Response | Promise<Response>)) {
+function mockSearch(
+  searchResponse: Response | ((url: string) => Response | Promise<Response>),
+) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-    if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+    const url = urlOf(input);
+    if (url.includes('/collections')) return Promise.resolve(json(emptyCollections));
     return Promise.resolve(
-      typeof searchResponse === 'function' ? searchResponse() : searchResponse,
+      typeof searchResponse === 'function' ? searchResponse(url) : searchResponse,
     );
   });
 }
@@ -204,7 +209,17 @@ describe('SearchScreen', () => {
   });
 
   it('filters the source facet and the result count from the data, never an invented connector', async () => {
-    mockSearch(json(multiSourceResponse));
+    // The content-type facet is a SERVER `type` param (#118): honor it in the mock
+    // so the narrowed query returns only the matching rows (the server re-derives
+    // results/direct_answer/hidden_count over the narrowed set).
+    const spy = mockSearch((url) => {
+      const type = new URL(url, 'http://localhost').searchParams.get('type');
+      if (!type) return json(multiSourceResponse);
+      return json({
+        ...multiSourceResponse,
+        results: multiSourceResponse.results.filter((r) => r.type === type),
+      } satisfies SearchResponse);
+    });
     renderWithQuery(<SearchScreen />);
     await runSearch();
 
@@ -215,10 +230,99 @@ describe('SearchScreen', () => {
     expect(within(filters).getByText('Chat messages')).toBeInTheDocument();
     expect(within(filters).queryByText(/slack|jira|tickets|github|salesforce|people/i)).toBeNull();
 
-    // Narrow to the "message" content type → only the chat result remains.
+    // Narrow to the "message" content type → the server query carries `type=message`
+    // and only the chat result remains.
     await userEvent.setup().click(within(filters).getByRole('checkbox', { name: /^message/i }));
+    expect(
+      await screen.findByRole('heading', { name: /pricing thread/i }),
+    ).toBeInTheDocument();
     const list = screen.getByRole('list', { name: /search results/i });
-    expect(within(list).getByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
     expect(within(list).queryByRole('heading', { name: /PTO Policy/i })).toBeNull();
+
+    // The narrowing rode the SERVER param, not a client-only filter.
+    const typedCall = spy.mock.calls
+      .map(([input]) => urlOf(input))
+      .some((u) => u.includes('/search') && u.includes('type=message'));
+    expect(typedCall).toBe(true);
+  });
+
+  it('keeps the answer coherent under a content-type filter — never a visible answer with dropped citations (INV-3, #118)', async () => {
+    // A cited answer whose ONLY citation points at the document row. Selecting the
+    // "message" content type must NOT leave that answer visible with its citation
+    // un-resolvable: the server re-derives the response over the narrowed set, so
+    // the chat-only page carries no document-citing answer.
+    const citedDocResponse: SearchResponse = {
+      query: 'pricing',
+      results: multiSourceResponse.results,
+      direct_answer: {
+        text: 'The PTO policy grants 20 days [1].',
+        citations: [{ result_id: 'r1', snippet: 'accrue 20 days' }],
+      },
+      hidden_count: 0,
+    };
+    // The server returns ONLY the chat row (and no doc-citing answer) once `type`
+    // narrows to "message" — modelling a coherent server re-derivation.
+    const narrowedResponse: SearchResponse = {
+      query: 'pricing',
+      results: multiSourceResponse.results.filter((r) => r.type === 'message'),
+      hidden_count: 0,
+    };
+    mockSearch((url) => {
+      const type = new URL(url, 'http://localhost').searchParams.get('type');
+      return json(type === 'message' ? narrowedResponse : citedDocResponse);
+    });
+    renderWithQuery(<SearchScreen />);
+    await runSearch('pricing');
+
+    // Baseline: the cited answer is present and its [1] citation resolves.
+    const answer = await screen.findByRole('region', { name: /direct answer/i });
+    expect(within(answer).getByText(/PTO policy grants/i)).toBeInTheDocument();
+    expect(within(answer).getByRole('button', { name: /citation 1/i })).toBeInTheDocument();
+
+    // Narrow to "message": the document row (and its citation) is gone — so the
+    // answer must NOT linger with a dropped/literal citation. The server returned
+    // no answer for the narrowed set, so the direct-answer region is gone too.
+    const filters = await screen.findByRole('navigation', { name: /search filters/i });
+    await userEvent.setup().click(within(filters).getByRole('checkbox', { name: /^message/i }));
+
+    expect(await screen.findByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /direct answer/i })).toBeNull();
+    // No literal "[1]" left dangling in the body either.
+    expect(screen.queryByText(/PTO policy grants/i)).toBeNull();
+  });
+
+  it('keeps the filter sidebar visible (and clearable) on a filter-empty result', async () => {
+    // A scoped query that narrows to zero rows must still show the sidebar so the
+    // active scope is visible and resettable — not a bare empty state.
+    mockSearch((url) => {
+      const source = new URL(url, 'http://localhost').searchParams.get('source');
+      // The "upload" source returns nothing for this query; unfiltered returns both
+      // source kinds so the "Uploaded documents" facet is available to click.
+      if (source === 'upload') return json({ query: 'pricing', results: [], hidden_count: 0 });
+      if (source) {
+        return json({
+          ...multiSourceResponse,
+          results: multiSourceResponse.results.filter((r) => r.source === source),
+        } satisfies SearchResponse);
+      }
+      return json(multiSourceResponse);
+    });
+    renderWithQuery(<SearchScreen />);
+    await runSearch('pricing');
+
+    const filters = await screen.findByRole('navigation', { name: /search filters/i });
+    await userEvent.setup().click(
+      within(filters).getByRole('checkbox', { name: /uploaded documents/i }),
+    );
+
+    // Filtered-empty: a status (not the bare "no results for" empty) AND the sidebar
+    // is still on screen so the scope can be cleared.
+    expect(await screen.findByText(/under the active filters/i)).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: /search filters/i })).toBeInTheDocument();
+    const clear = screen.getByRole('button', { name: /clear filters/i });
+    await userEvent.setup().click(clear);
+
+    // Clearing the scope brings the chat result back.
+    expect(await screen.findByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
   });
 });

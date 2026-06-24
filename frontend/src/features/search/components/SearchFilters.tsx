@@ -8,14 +8,15 @@
  *   • Source     — the FROZEN `ResultSource` enum (upload | chat | connector),
  *                  i.e. uploaded documents / chat messages / connected sources.
  *                  No Slack/Jira/Tickets/Code/People — those aren't in the contract.
- *   • Content type — derived CLIENT-SIDE from the `type` strings the server
- *                  actually returned (never a hardcoded list the backend may not
- *                  serve), so the counts are honest.
+ *   • Content type — the `type` query param. Its facet VALUES are derived from the
+ *                  `type` strings the server actually returned (never a hardcoded
+ *                  list the backend may not serve), so the counts are honest.
  *
- * Collection + source drive the server query (they change the result set + counts);
- * the content-type facet narrows the returned rows client-side. Presentational —
- * all state is owned by the parent and all wire→facet mapping lives in
- * `model/presentation.ts`.
+ * All three facets drive the SERVER query (they change the result set + the
+ * permission-trim count, and the server re-derives the cited direct answer over the
+ * narrowed set — so a visible answer's citations always resolve, spec 0004 INV-3).
+ * Presentational — all state is owned by the parent and all wire→facet mapping lives
+ * in `model/presentation.ts`.
  */
 import type { Collection, ResultSource, SearchResult } from '@/api';
 import { Icon } from '@/ui';
@@ -111,7 +112,7 @@ export function SearchFilters({
         )}
       </FilterGroup>
 
-      {/* --- Content type (client-side facet, derived from the data) --- */}
+      {/* --- Content type (server param: type — facet values derived from data) --- */}
       {types.length > 0 ? (
         <FilterGroup title="Content type">
           <FilterRow

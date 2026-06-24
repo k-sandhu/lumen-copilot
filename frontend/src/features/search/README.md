@@ -37,10 +37,10 @@ Feature (`features/search`):
   layout. Every facet is backed by the REAL `/search` contract + data: a
   **collection** scope (`collection_id`), a **source** scope (the frozen
   `ResultSource` enum — uploaded docs / chat messages / connected sources), and a
-  **content-type** facet derived client-side from the `type` strings the server
-  actually returned. No invented connectors (Slack/Jira/Tickets/Code/People).
-  Collection + source drive the server query; the content-type facet narrows the
-  returned rows client-side.
+  **content-type** scope (`type`) whose facet values are derived from the `type`
+  strings the server actually returned. No invented connectors
+  (Slack/Jira/Tickets/Code/People). All three facets drive the **server** query, so
+  `results`, `direct_answer` and `hidden_count` stay coherent (see "Filters" below).
 - `components/DirectAnswerBlock.tsx` — the optional cited direct answer, rendered
   through the sanitizing markdown pipeline (never raw). Polished in **#118**: a
   "Cited" badge + an "Evidence: N sources" badge, a "Permission-checked" pill and
@@ -86,15 +86,23 @@ Feature (`features/search`):
 ## Filters — backed by the real contract only (#118)
 
 The `/search` contract supports exactly three narrowing params (`collection_id`,
-`source`, `type`) plus paging. The sidebar honors that envelope and nothing more:
+`source`, `type`) plus paging. The sidebar honors that envelope and nothing more —
+**all three are sent as server query params** so the response stays internally
+coherent:
 
-- **Collection** and **source** are sent as server query params — they change the
-  result set and therefore the permission-trim (`hidden_count`) count.
-- **Content type** is applied **client-side** over the returned (already
-  permission-trimmed) rows, and its facet values are derived from the data rather
-  than hardcoded, so a faceted type can never imply the backend serves content it
-  doesn't. (A server-side `type` round-trip is available in the contract if a
-  future change wants the trim count to reflect the type filter too.)
+- **Collection**, **source** AND **content type** are sent to `/search`. The server
+  re-runs retrieval over the narrowed, permission-trimmed set and re-derives the
+  `direct_answer` and `hidden_count` against exactly the `results` it returns.
+- **Why the type facet is server-side, not client-side (the INV-3 fix):** a client
+  -only type filter narrows the rendered rows but leaves `direct_answer` and
+  `hidden_count` untouched — so selecting a type that hides a row the answer cites
+  would leave a **visible answer with dropped / literal citations** (an uncited
+  answer — spec 0004 INV-3, #118). Routing `type` through the server keeps the
+  answer's citations always resolvable to a present, visible row.
+- The type facet's *values* are still derived from the data (never a hardcoded list
+  the backend can't serve), so a faceted type can never imply content the MVP
+  doesn't index. As with the source facet, selecting a type collapses the facet to
+  that type; the always-present "Any type" reset row clears it.
 
 The wireframe's connector list (Slack / Jira / Tickets / GitHub / Salesforce /
 People / Code) is intentionally **not** reproduced — those source kinds aren't in
@@ -105,8 +113,6 @@ the `ResultSource` enum and the MVP backend can't serve them.
 Pagination UI (the contract exposes `next_cursor`; an infinite/"load more" affordance
 lands when result volume warrants it), and click-through navigation into a result's
 source document (the `document_id` deep link lands with the documents-viewer wiring).
-A server-side content-type narrow (the type facet is honest client-side filtering
-today; see above).
 
 ## Wiring up with the live BE
 
