@@ -48,7 +48,8 @@ describe('design tokens — single source of truth (#130)', () => {
     // Every --c-<color> definition must be three space-separated integers.
     const defs = [...tokensCss.matchAll(/--c-[a-z-]+:\s*([^;]+);/g)];
     expect(defs.length).toBeGreaterThan(0);
-    for (const [, value] of defs) {
+    for (const match of defs) {
+      const value = match[1] ?? '';
       expect(value.trim()).toMatch(/^\d{1,3} \d{1,3} \d{1,3}$/);
     }
   });
