@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings, get_settings
+from app.db.tenant_context import bind_tenant
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
@@ -60,10 +62,36 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
     Commits on success, rolls back on exception, always closes. Used outside
     the request path (e.g. tasks, startup checks); request handlers get a
     session from the FastAPI dependency in ``app.api.deps`` instead.
+
+    Binds **no** tenant GUC: a caller doing tenant-scoped work must use
+    :func:`tenant_session_scope` (or set the bypass sentinel itself) so the RLS
+    backstop (#17) is armed. Tenant-agnostic/system callers (the seed sets the
+    bypass; ``ping`` issues a non-scoped ``SELECT 1``) use this directly.
     """
     factory = get_sessionmaker()
     async with factory() as session:
         try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+@asynccontextmanager
+async def tenant_session_scope(tenant_id: UUID) -> AsyncIterator[AsyncSession]:
+    """Yield a transactional session with the RLS GUC bound to ``tenant_id`` (#17).
+
+    The off-request analogue of the ``current_tenant`` dependency: opens a
+    session, binds ``app.tenant_id`` for the transaction (so the Postgres RLS
+    backstop permits exactly this tenant's rows — a no-op off Postgres), then
+    commits on success / rolls back on error. Celery tasks doing tenant-scoped
+    DB work use this so they run *as* their tenant, mirroring the request path.
+    """
+    factory = get_sessionmaker()
+    async with factory() as session:
+        try:
+            await bind_tenant(session, tenant_id)
             yield session
             await session.commit()
         except Exception:

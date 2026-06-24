@@ -76,7 +76,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0006_sources"]
+    assert list(script.get_heads()) == ["0007_tenancy_rls"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -92,6 +92,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     src = script.get_revision("0006_sources")
     assert src is not None
     assert src.down_revision == "0005_audit_query_indexes"
+    rls = script.get_revision("0007_tenancy_rls")
+    assert rls is not None
+    assert rls.down_revision == "0006_sources"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -237,6 +240,61 @@ def test_offline_sources_migration_round_trips(
     assert "drop index ix_documents_source_id" in down
     assert "alter table documents drop column source_id" in down
     assert "drop table sources" in down
+
+
+# Every tenant-scoped table 0007 puts under RLS (the parent ``tenants`` is
+# excluded — it has no ``tenant_id``). Kept in lockstep with the migration's
+# ``_SCOPED_TABLES`` and ``app.db.models``' ``TenantScopedMixin`` users.
+_RLS_TABLES = (
+    "users",
+    "refresh_tokens",
+    "collections",
+    "sources",
+    "documents",
+    "chunks",
+    "chat_sessions",
+    "messages",
+    "citations",
+    "audit_events",
+)
+
+
+def test_offline_tenancy_rls_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0007 enables+forces RLS with a per-table policy; the downgrade reverses (#17).
+
+    AC (INV-1 backstop, spec 0004 §2.1): the upgrade renders, for **every**
+    tenant-scoped table, ``ENABLE`` + ``FORCE ROW LEVEL SECURITY`` and a
+    ``CREATE POLICY`` whose predicate is keyed off the ``app.tenant_id`` GUC with
+    the fail-closed ``current_setting(..., true)`` form; ``tenants`` (the
+    isolation root) is left alone. The downgrade drops every policy and disables
+    RLS. Offline DDL render (Postgres dialect) — structural reversibility without
+    a DB (#70 lesson); the behavioural proof is the live RLS negative tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0006_sources:0007_tenancy_rls", sql=True)
+    up = capsys.readouterr().out.lower()
+
+    for table in _RLS_TABLES:
+        assert f"alter table {table} enable row level security" in up, f"no ENABLE for {table}"
+        assert f"alter table {table} force row level security" in up, f"no FORCE for {table}"
+        assert f"create policy rls_{table} on {table}" in up, f"no policy for {table}"
+    # The fail-closed GUC predicate + the explicit bypass sentinel (the only
+    # tenant-agnostic exemption). ``current_setting(..., true)`` → NULL when unset.
+    assert "current_setting('app.tenant_id', true)" in up
+    assert "= 'bypass'" in up
+    assert "with check" in up
+    # The parent tenants table is NOT put under RLS (it carries no tenant_id).
+    assert "alter table tenants enable row level security" not in up
+
+    command.downgrade(cfg, "0007_tenancy_rls:0006_sources", sql=True)
+    down = capsys.readouterr().out.lower()
+    for table in _RLS_TABLES:
+        assert f"drop policy if exists rls_{table} on {table}" in down, f"no DROP POLICY {table}"
+        assert f"alter table {table} disable row level security" in down, f"no DISABLE {table}"
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

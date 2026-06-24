@@ -45,6 +45,7 @@ from app.db.repositories import (
     UserLookupRepository,
     UserRepository,
 )
+from app.db.tenant_context import bind_bypass, bind_tenant
 from app.domain.entities import AuditOutcome, Role, User
 
 
@@ -109,6 +110,13 @@ class AuthService:
             InvalidCredentialsError: no such user OR wrong password — identical
                 401 either way (no account-existence disclosure, spec 0004 §2.3).
         """
+        # Pre-identity: the tenant is not yet known, so the email lookup is
+        # tenant-agnostic by design. Opt this transaction into the RLS bypass
+        # sentinel (#17) — a no-op off Postgres — so the lookup and the
+        # subsequent tenant-scoped writes (refresh token + audit) are permitted
+        # under row-level security. Everything written still carries the
+        # resolved user's tenant_id (the repository sets it explicitly).
+        await bind_bypass(self._session)
         user = await UserLookupRepository(self._session).find_by_email(email)
         if user is None:
             # Burn a verify's worth of CPU so timing does not reveal non-existence.
@@ -119,6 +127,10 @@ class AuthService:
             raise InvalidCredentialsError()
 
         if not verify_password(user.password_hash, password):
+            # Still under the bypass GUC: the failed-login audit row is written
+            # for the resolved user's tenant; re-scope so it lands under exactly
+            # that tenant (defense in depth) before the audit write.
+            await bind_tenant(self._session, user.tenant_id)
             await self._record_login_failed(
                 email=email,
                 request_id=request_id,
@@ -128,6 +140,10 @@ class AuthService:
             )
             raise InvalidCredentialsError()
 
+        # Identity resolved → re-scope the GUC from the bypass sentinel to the
+        # exact tenant, so the token + audit writes below are under that tenant's
+        # RLS scope, not the broad bypass (#17, defense in depth).
+        await bind_tenant(self._session, user.tenant_id)
         tokens = await self._issue_tokens(user)
         await AuditEventRepository(self._session, user.tenant_id).record(
             action="auth.login",
@@ -157,14 +173,21 @@ class AuthService:
             raise InvalidTokenError()
 
         token_hash = hash_refresh_token(raw_refresh_token)
-        # The refresh cookie carries no tenant; resolve the row tenant-agnostically
-        # (the hash is unique across tenants), then scope everything to its tenant.
+        # Pre-identity: the refresh cookie carries no tenant, so resolving the
+        # owning token row is tenant-agnostic. Opt into the RLS bypass sentinel
+        # (#17, a no-op off Postgres) for this lookup; the rotation + re-issue
+        # below stay within the resolved token's tenant.
+        await bind_bypass(self._session)
         token = await UserLookupRepository(self._session).find_refresh_token_owner(token_hash)
         if token is None or token.revoked_at is not None:
             raise InvalidTokenError()
         if _as_utc(token.expires_at) <= datetime.now(UTC):
             raise InvalidTokenError()
 
+        # Identity resolved → re-scope the GUC from the bypass sentinel to the
+        # token's tenant, so the lookups + rotation writes below run under that
+        # tenant's RLS scope (#17, defense in depth).
+        await bind_tenant(self._session, token.tenant_id)
         user = await UserRepository(self._session, token.tenant_id).get(token.user_id)
         if user is None:
             raise InvalidTokenError()
@@ -186,6 +209,11 @@ class AuthService:
         Idempotent: an absent/already-revoked token is not an error (the client
         is logging out regardless). Revocation is tenant-scoped to the caller.
         """
+        # The principal carries the tenant, so bind the RLS GUC to it for the
+        # revoke + audit write (#17; a no-op off Postgres). ``/auth/logout`` does
+        # not depend on ``current_tenant`` (it takes the principal directly), so
+        # the GUC is bound here rather than by the request dependency.
+        await bind_tenant(self._session, principal.tenant_id)
         if raw_refresh_token:
             await RefreshTokenRepository(self._session, principal.tenant_id).revoke(
                 hash_refresh_token(raw_refresh_token)
