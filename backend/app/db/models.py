@@ -189,9 +189,7 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    last_synced_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     indexed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -394,4 +392,62 @@ class AuditEvent(TenantScopedMixin, Base):
     )
     event_metadata: Mapped[dict[str, object]] = mapped_column(
         "metadata", _JSON, nullable=False, default=dict
+    )
+
+
+class Grant(TenantScopedMixin, Base):
+    """An explicit access grant — the sharing seam behind INV-2 (spec 0004 §2.2).
+
+    No ``TimestampMixin``/``updated_at``: a grant is created then revoked
+    (deleted), never re-described — so only ``created_at`` is kept. Each row says
+    a ``principal`` (MVP: a ``user``, by ``principal_id``) may access a
+    ``resource`` (a ``collection`` or ``document``, by ``resource_id``) within
+    this tenant, at ``role`` (MVP: ``viewer``). ``resource_id``/``principal_id``
+    are plain UUID columns rather than FKs because the referent's *table* varies
+    with the type (a document vs a collection; a user vs — later — a group): the
+    grant service validates existence + ownership before inserting.
+
+    The ``UNIQUE(tenant_id, resource_type, resource_id, principal_type,
+    principal_id)`` makes re-granting idempotent; the two composite indexes serve
+    the retrieval filter (by principal) and the grant service (by resource). The
+    ``CheckConstraint``s pin the enum domains at the DB so a bad type can never be
+    stored. Tenant-scoped like every table (INV-1); the ``0008`` migration also
+    puts it under the RLS backstop.
+    """
+
+    __tablename__ = "grants"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "resource_type",
+            "resource_id",
+            "principal_type",
+            "principal_id",
+            name="uq_grants_resource_principal",
+        ),
+        Index("ix_grants_tenant_principal", "tenant_id", "principal_id"),
+        Index("ix_grants_tenant_resource", "tenant_id", "resource_type", "resource_id"),
+        CheckConstraint(
+            "resource_type in ('collection', 'document')",
+            name="ck_grants_resource_type",
+        ),
+        CheckConstraint(
+            "principal_type in ('user', 'group', 'role')",
+            name="ck_grants_principal_type",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    resource_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    principal_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    granted_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

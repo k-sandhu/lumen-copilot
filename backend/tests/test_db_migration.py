@@ -51,8 +51,9 @@ _MVP_TABLES = {
 }
 
 # Every table the ORM registry now carries: the MVP set plus refresh_tokens
-# (0003, issue #19, spec 0004 §2.3) and sources (0006, issue #109, ADR-0009 §4).
-_ALL_TABLES = _MVP_TABLES | {"refresh_tokens", "sources"}
+# (0003, issue #19, spec 0004 §2.3), sources (0006, issue #109, ADR-0009 §4), and
+# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants).
+_ALL_TABLES = _MVP_TABLES | {"refresh_tokens", "sources", "grants"}
 
 
 def _alembic_config(url: str | None = None) -> Config:
@@ -69,14 +70,14 @@ def test_metadata_covers_every_mvp_table() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0006 with a SINGLE head (ADR-0008 §4).
+    """The chain is linear 0001 → … → 0008 with a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0007_tenancy_rls"]
+    assert list(script.get_heads()) == ["0008_grants"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -95,6 +96,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     rls = script.get_revision("0007_tenancy_rls")
     assert rls is not None
     assert rls.down_revision == "0006_sources"
+    grants = script.get_revision("0008_grants")
+    assert grants is not None
+    assert grants.down_revision == "0007_tenancy_rls"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -295,6 +299,54 @@ def test_offline_tenancy_rls_migration_round_trips(
     for table in _RLS_TABLES:
         assert f"drop policy if exists rls_{table} on {table}" in down, f"no DROP POLICY {table}"
         assert f"alter table {table} disable row level security" in down, f"no DISABLE {table}"
+
+
+def test_offline_grants_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0008 creates the tenant/owner-scoped ``grants`` table + RLS; down() reverses (#18).
+
+    AC (spec 0004 §2.2, CC-1): the upgrade renders the ``grants`` table with its
+    ``resource_type``/``resource_id`` + ``principal_type``/``principal_id`` columns,
+    the UNIQUE on the (resource, principal) tuple, the two composite indexes (by
+    principal for the retrieval filter, by resource for the grant service), and the
+    same fail-closed RLS policy the 0007 backstop uses (``grants`` is tenant-scoped,
+    INV-1). The downgrade drops the policy, disables RLS, and drops the table.
+    Offline DDL render (Postgres dialect) — structural reversibility without a DB
+    (#70 lesson); the behavioural proof is the live grant retrieval tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0007_tenancy_rls:0008_grants", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped grants table + its FKs.
+    assert "create table grants" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # granted_by FK
+    assert "resource_type" in up
+    assert "principal_type" in up
+    # The idempotency UNIQUE on (tenant, resource, principal).
+    assert "uq_grants_resource_principal" in up
+    # The two composite indexes (retrieval filter by principal; service by resource).
+    assert "create index ix_grants_tenant_principal on grants (tenant_id, principal_id)" in up
+    assert (
+        "create index ix_grants_tenant_resource on grants "
+        "(tenant_id, resource_type, resource_id)" in up
+    )
+    # The RLS backstop (grants is tenant-scoped) — same fail-closed GUC policy as 0007.
+    assert "alter table grants enable row level security" in up
+    assert "alter table grants force row level security" in up
+    assert "create policy rls_grants on grants" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0008_grants:0007_tenancy_rls", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_grants on grants" in down
+    assert "alter table grants disable row level security" in down
+    assert "drop index ix_grants_tenant_resource" in down
+    assert "drop index ix_grants_tenant_principal" in down
+    assert "drop table grants" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:
