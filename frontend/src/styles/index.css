@@ -2,33 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens as RGB triples so Tailwind's <alpha-value> works.
- * Light is the default; .dark on <html> swaps the palette. */
+/* Design tokens live in styles/tokens.css as a single source of truth: the
+ * RGB-triple --c-* tokens that Tailwind consumes (via tailwind.config.ts) and the
+ * derived full-color vars the @/ui kit uses, keyed by [data-theme]/[data-mode] on
+ * <html>. That file is loaded globally (main.tsx) before first paint. Tokens are
+ * intentionally NOT defined here anymore — doing so reintroduced the collision
+ * that broke every *-accent / *-surface utility (issue #130). */
 @layer base {
-  :root {
-    --surface: 255 255 255;
-    --surface-muted: 244 245 247;
-    --border: 226 228 232;
-    --foreground: 17 24 39;
-    --foreground-muted: 90 99 112;
-    --accent: 79 70 229;
-    --ok: 22 163 74;
-    --warn: 202 138 4;
-    --danger: 220 38 38;
-  }
-
-  .dark {
-    --surface: 17 19 24;
-    --surface-muted: 26 29 36;
-    --border: 42 46 54;
-    --foreground: 237 239 243;
-    --foreground-muted: 156 163 175;
-    --accent: 129 140 248;
-    --ok: 74 222 128;
-    --warn: 250 204 21;
-    --danger: 248 113 113;
-  }
-
   html,
   body,
   #root {
