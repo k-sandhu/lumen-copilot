@@ -37,6 +37,7 @@ from app.connectors.web.extract import (
     parse_sitemap,
 )
 from app.connectors.web.fetch import FetchResult, UrlBlockedError, fetch_url
+from app.core.config import get_settings
 from app.domain.entities import Source, WebSourceMode
 
 
@@ -92,12 +93,14 @@ class WebConnector:
 
         Raises:
             ConnectorConfigError: the **root** URL is SSRF-blocked (url_blocked).
-            ConnectorError: the root fetch failed at the transport level.
+            ConnectorError: the root fetch failed — a transport fault or a non-2xx
+                status (``fetch_failed``); the error page is never ingested (#138).
         """
         url = self._url_of(source)
+        user_agent = get_settings().web_user_agent
         async with httpx.AsyncClient(follow_redirects=False) as client:
-            root = await fetch_url(url, client=client)
-            docs = await self._expand(root, client)
+            root = await fetch_url(url, client=client, user_agent=user_agent)
+            docs = await self._expand(root, client, user_agent)
         return docs
 
     async def health(self, source: Source) -> ConnectorHealth:
@@ -108,9 +111,10 @@ class WebConnector:
         reason rather than raised.
         """
         url = self._url_of(source)
+        user_agent = get_settings().web_user_agent
         try:
             async with httpx.AsyncClient(follow_redirects=False) as client:
-                await fetch_url(url, client=client)
+                await fetch_url(url, client=client, user_agent=user_agent)
         except (ConnectorError, UrlBlockedError) as exc:
             return ConnectorHealth(healthy=False, detail=exc.detail)
         return ConnectorHealth(healthy=True)
@@ -124,15 +128,17 @@ class WebConnector:
             raise ConnectorConfigError("source config has no usable 'url'", code="invalid_url")
         return url.strip()
 
-    async def _expand(self, root: FetchResult, client: httpx.AsyncClient) -> list[FetchedDoc]:
+    async def _expand(
+        self, root: FetchResult, client: httpx.AsyncClient, user_agent: str
+    ) -> list[FetchedDoc]:
         """Expand a fetched root into one or more :class:`FetchedDoc` by mode."""
         feed = parse_feed(root.text)
         if feed is not None and feed:
-            return await self._docs_from_feed(feed, client)
+            return await self._docs_from_feed(feed, client, user_agent)
 
         sitemap = parse_sitemap(root.text)
         if sitemap is not None and sitemap:
-            return await self._docs_from_urls(sitemap, client)
+            return await self._docs_from_urls(sitemap, client, user_agent)
 
         # Single page.
         page = extract_page_text(root.text, content_type=root.content_type)
@@ -140,15 +146,16 @@ class WebConnector:
         return [FetchedDoc(title=title, text=page.text, url=root.final_url)]
 
     async def _docs_from_feed(
-        self, items: list[FeedItem], client: httpx.AsyncClient
+        self, items: list[FeedItem], client: httpx.AsyncClient, user_agent: str
     ) -> list[FetchedDoc]:
         """Fetch each feed item's page (guarded); skip ones that fail."""
         docs: list[FetchedDoc] = []
         for item in items:
             try:
-                fetched = await fetch_url(item.url, client=client)
+                fetched = await fetch_url(item.url, client=client, user_agent=user_agent)
             except (ConnectorError, UrlBlockedError):
-                # A child that is SSRF-blocked or unreachable is skipped, not fatal.
+                # A child that is SSRF-blocked, unreachable, or non-2xx is skipped,
+                # not fatal (best-effort fan-out).
                 continue
             page = extract_page_text(fetched.text, content_type=fetched.content_type)
             title = item.title or page.title or fetched.final_url
@@ -156,12 +163,14 @@ class WebConnector:
             docs.append(FetchedDoc(title=title, text=text, url=fetched.final_url))
         return docs
 
-    async def _docs_from_urls(self, urls: list[str], client: httpx.AsyncClient) -> list[FetchedDoc]:
+    async def _docs_from_urls(
+        self, urls: list[str], client: httpx.AsyncClient, user_agent: str
+    ) -> list[FetchedDoc]:
         """Fetch each sitemap URL's page (guarded); skip ones that fail."""
         docs: list[FetchedDoc] = []
         for child in urls:
             try:
-                fetched = await fetch_url(child, client=client)
+                fetched = await fetch_url(child, client=client, user_agent=user_agent)
             except (ConnectorError, UrlBlockedError):
                 continue
             page = extract_page_text(fetched.text, content_type=fetched.content_type)
