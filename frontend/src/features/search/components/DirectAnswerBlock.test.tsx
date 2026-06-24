@@ -70,4 +70,43 @@ describe('DirectAnswerBlock', () => {
     // Exactly one citation chip — the resolvable one.
     expect(screen.getAllByRole('button', { name: /citation/i })).toHaveLength(1);
   });
+
+  it('renders INLINE [n] markers in place when the answer text carries them (#118)', () => {
+    const second: SearchResult = { ...result, id: 'r2', title: 'Pricing Guardrails' };
+    const answer: DirectAnswer = {
+      text: 'Approved on May 28 [1] after a VP-Finance review [2].',
+      citations: [{ result_id: 'r1' }, { result_id: 'r2' }],
+    };
+    render(<DirectAnswerBlock answer={answer} resultsById={byId(result, second)} />);
+
+    // Two inline citation chips, named for their sources — not a trailing "Sources" row.
+    expect(screen.getByRole('button', { name: /citation 1: PTO Policy 2026/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /citation 2: Pricing Guardrails/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Sources$/)).not.toBeInTheDocument();
+  });
+
+  it('shows the Cited + Evidence-count badges and permission/freshness meta (#118)', () => {
+    const answer: DirectAnswer = {
+      text: 'You accrue 20 days of PTO. [1]',
+      citations: [{ result_id: 'r1' }],
+    };
+    render(<DirectAnswerBlock answer={answer} resultsById={byId(result)} />);
+    expect(screen.getByText('Cited')).toBeInTheDocument();
+    expect(screen.getByText(/Evidence:\s*1\s*source/i)).toBeInTheDocument();
+    expect(screen.getByText(/Permission-checked/i)).toBeInTheDocument();
+    expect(screen.getByText(/Freshest source/i)).toBeInTheDocument();
+  });
+
+  it('renders an out-of-range [n] marker as plain text, never a dead chip (INV-3)', () => {
+    const answer: DirectAnswer = {
+      text: 'Backed by one source [1]; the missing [9] stays literal.',
+      citations: [{ result_id: 'r1' }],
+    };
+    render(<DirectAnswerBlock answer={answer} resultsById={byId(result)} />);
+    // Only citation [1] is a real chip; [9] resolves to nothing → no chip.
+    expect(screen.getAllByRole('button', { name: /citation/i })).toHaveLength(1);
+    expect(screen.getByText(/\[9\] stays literal/)).toBeInTheDocument();
+  });
 });
