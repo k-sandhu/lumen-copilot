@@ -25,12 +25,14 @@ from app.domain.entities import AuditOutcome
 
 
 def test_taxonomy_is_exactly_spec_0004_set() -> None:
-    """The action enum is the spec 0004 §2.4 taxonomy + the ADR-0009 source events.
+    """The action enum is the spec 0004 §2.4 taxonomy + the additive extensions.
 
-    Spec 0004 §2.4 pins the MVP taxonomy; ADR-0009 §5 (the connector framework,
-    accepted after spec 0004) requires an audit event on every source add / sync /
-    delete, so the ``source.*`` trio extends the set additively (deny-by-default is
-    preserved — the set only grows).
+    Spec 0004 §2.4 pins the MVP taxonomy; later-accepted features extend it
+    additively (deny-by-default is preserved — the set only grows, no action is
+    relaxed): ADR-0009 §5 (the connector framework) requires an audit event on
+    every source add / sync / delete (``source.*``), and CC-1 / issue #18 (explicit
+    ACL grants, spec 0004 §2.2) audits every share grant / revoke
+    (``permission.granted`` / ``permission.revoked``).
     """
     assert {a.value for a in AuditAction} == {
         "auth.login",
@@ -48,6 +50,9 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "retrieval.query",
         "answer.generated",
         "permission.denied",
+        # Explicit ACL grants (CC-1 / issue #18, spec 0004 §2.2) — additive.
+        "permission.granted",
+        "permission.revoked",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",

@@ -48,6 +48,13 @@ class AuditAction(str, enum.Enum):
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
     PERMISSION_DENIED = "permission.denied"
+    # Explicit ACL grants (spec 0004 §2.2 / CC-1 / issue #18). Additive to the
+    # §2.4 MVP taxonomy — deny-by-default is preserved (the set only grows; no
+    # action is relaxed). Sharing is an audited event: who granted/revoked which
+    # principal access to which resource. The grant *API*/UI is a follow-up; the
+    # service that emits these is the testable seam landed here.
+    PERMISSION_GRANTED = "permission.granted"
+    PERMISSION_REVOKED = "permission.revoked"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"

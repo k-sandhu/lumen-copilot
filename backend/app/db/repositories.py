@@ -38,6 +38,10 @@ from app.domain.entities import (
     Collection,
     Document,
     DocumentStatus,
+    Grant,
+    GrantPrincipalType,
+    GrantResourceType,
+    GrantRole,
     Message,
     MessageRole,
     RefreshToken,
@@ -174,6 +178,20 @@ def _to_citation(row: models.Citation) -> Citation:
         char_start=row.char_start,
         char_end=row.char_end,
         score=row.score,
+        created_at=row.created_at,
+    )
+
+
+def _to_grant(row: models.Grant) -> Grant:
+    return Grant(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        resource_type=GrantResourceType(row.resource_type),
+        resource_id=row.resource_id,
+        principal_type=GrantPrincipalType(row.principal_type),
+        principal_id=row.principal_id,
+        role=GrantRole(row.role),
+        granted_by=row.granted_by,
         created_at=row.created_at,
     )
 
@@ -1373,6 +1391,141 @@ class CitationRepository(_TenantScopedRepository):
                 )
             )
         return grouped
+
+
+class GrantRepository(_TenantScopedRepository):
+    """Explicit ACL grants within one tenant (spec 0004 §2.2, CC-1, INV-2).
+
+    The persistence seam behind the widened retrieval permission filter: a grant
+    row admits a (resource, principal) pair into the requester's allow-set. Every
+    method is tenant-scoped (INV-1) — a grant minted in tenant A is invisible to a
+    tenant-B repository, so a cross-tenant grant can never widen the filter
+    (asserted by the negative tests). Ownership of the granted *resource* is
+    enforced one layer up, in :class:`~app.services.grants_service.GrantsService`
+    (only the owner/admin may grant). Like the other repositories, writes are
+    flushed not committed — the caller owns the transaction boundary.
+    """
+
+    async def create(
+        self,
+        *,
+        resource_type: GrantResourceType,
+        resource_id: UUID,
+        principal_type: GrantPrincipalType,
+        principal_id: UUID,
+        role: GrantRole,
+        granted_by: UUID | None,
+    ) -> Grant:
+        """Persist a grant (idempotent on the unique (resource, principal) key).
+
+        If a grant for the same ``(resource_type, resource_id, principal_type,
+        principal_id)`` already exists in this tenant it is returned unchanged
+        (re-granting is a no-op, never a duplicate-key error) — so a caller can
+        safely "ensure" a grant. Otherwise a new row is inserted with this
+        repository's tenant.
+        """
+        existing = await self._find(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            principal_type=principal_type,
+            principal_id=principal_id,
+        )
+        if existing is not None:
+            return _to_grant(existing)
+        row = models.Grant(
+            tenant_id=self._tenant_id,
+            resource_type=resource_type.value,
+            resource_id=resource_id,
+            principal_type=principal_type.value,
+            principal_id=principal_id,
+            role=role.value,
+            granted_by=granted_by,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_grant(row)
+
+    async def _find(
+        self,
+        *,
+        resource_type: GrantResourceType,
+        resource_id: UUID,
+        principal_type: GrantPrincipalType,
+        principal_id: UUID,
+    ) -> models.Grant | None:
+        """Locate the unique grant for a (resource, principal) pair, or ``None``."""
+        stmt = select(models.Grant).where(
+            models.Grant.tenant_id == self._tenant_id,
+            models.Grant.resource_type == resource_type.value,
+            models.Grant.resource_id == resource_id,
+            models.Grant.principal_type == principal_type.value,
+            models.Grant.principal_id == principal_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def revoke(
+        self,
+        *,
+        resource_type: GrantResourceType,
+        resource_id: UUID,
+        principal_type: GrantPrincipalType,
+        principal_id: UUID,
+    ) -> bool:
+        """Delete a grant for a (resource, principal) pair (tenant-scoped).
+
+        Returns ``True`` if a grant existed and was removed, ``False`` if none
+        matched in this tenant (idempotent revoke). After this the retrieval
+        filter no longer admits the resource for that principal — a revoked grant
+        excludes the row again (the negative test asserts this).
+        """
+        row = await self._find(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            principal_type=principal_type,
+            principal_id=principal_id,
+        )
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def list_for_resource(
+        self, *, resource_type: GrantResourceType, resource_id: UUID
+    ) -> list[Grant]:
+        """List the grants on one resource (tenant-scoped), oldest first."""
+        stmt = (
+            select(models.Grant)
+            .where(
+                models.Grant.tenant_id == self._tenant_id,
+                models.Grant.resource_type == resource_type.value,
+                models.Grant.resource_id == resource_id,
+            )
+            .order_by(models.Grant.created_at.asc(), models.Grant.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_grant(r) for r in rows]
+
+    async def list_for_principal(
+        self, *, principal_type: GrantPrincipalType, principal_id: UUID
+    ) -> list[Grant]:
+        """List the grants *to* one principal (tenant-scoped), oldest first.
+
+        The read behind the retrieval filter's allow-set (the inverse of
+        :meth:`list_for_resource`): every resource this principal has been granted
+        within the tenant.
+        """
+        stmt = (
+            select(models.Grant)
+            .where(
+                models.Grant.tenant_id == self._tenant_id,
+                models.Grant.principal_type == principal_type.value,
+                models.Grant.principal_id == principal_id,
+            )
+            .order_by(models.Grant.created_at.asc(), models.Grant.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_grant(r) for r in rows]
 
 
 class AuditEventRepository(_TenantScopedRepository):
