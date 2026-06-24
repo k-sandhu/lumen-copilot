@@ -29,7 +29,6 @@ and ``owner_id``. The connector re-runs the full SSRF guard on every fetch hop
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -50,6 +49,7 @@ from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.ingest import ingest_document_async
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
+from app.tasks.runner import run_task
 
 # A fetched web document is stored as plain text for the ingestion pipeline (its
 # parser handles text/plain natively, no library needed).
@@ -305,7 +305,9 @@ def sync_source(self: object, tenant_id: str, source_id: str) -> dict[str, objec
     """Celery entrypoint: sync one connected source (the sync wrapper).
 
     Resolves config + adapters, runs :func:`sync_source_async` on a fresh event
-    loop, and returns the result dict. A fetch/SSRF fault is already recorded as
+    loop via :func:`app.tasks.runner.run_task` (which disposes the DB engine after
+    each run so no pooled connection outlives its loop, #140), and returns the
+    result dict. A fetch/SSRF fault is already recorded as
     ``error`` on the source by the async core (returned, not raised), so the task
     does not retry a permanently-blocked URL. Args are strings (Celery serializes
     JSON, not UUIDs); parsed back to ``UUID`` here.
@@ -316,7 +318,7 @@ def sync_source(self: object, tenant_id: str, source_id: str) -> dict[str, objec
     object_store = ObjectStore(settings)
     gateway = LLMGateway(settings)
 
-    result = asyncio.run(
+    result = run_task(
         sync_source_async(
             tid,
             sid,
