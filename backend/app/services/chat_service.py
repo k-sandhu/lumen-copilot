@@ -43,6 +43,7 @@ from app.db.repositories import (
     CitationRepository,
     CitationView,
     MessageRepository,
+    UserPreferenceRepository,
 )
 from app.domain.entities import ChatSession, Message, MessageRole
 from app.realtime.backplane import Backplane, StreamOwner
@@ -152,6 +153,7 @@ class ChatService:
         self._sessions = ChatSessionRepository(session, tenant_id)
         self._messages = MessageRepository(session, tenant_id)
         self._citations = CitationRepository(session, tenant_id)
+        self._prefs = UserPreferenceRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
@@ -169,14 +171,31 @@ class ChatService:
     def _resolve_model(self, requested: str | None) -> str:
         """Validate the requested model against the allow-list, or use the default.
 
-        ``None`` ⇒ the configured default. A non-empty unknown id is rejected
-        (422, INV-8) before any session is created or message persisted.
+        ``None`` ⇒ the configured server default. A non-empty unknown id is
+        rejected (422, INV-8) before any session is created or message persisted.
         """
         if requested is None:
             return self._default_model()
         if not is_allowed_model(requested, self._settings):
             raise ValidationError(f"Unknown model {requested!r}.", code="unknown_model")
         return requested
+
+    async def _resolved_default_model(self) -> str:
+        """The caller's effective default for a NEW session (spec 0005 AC-P4).
+
+        Their stored preference default if set *and* still in the registry;
+        otherwise the server default. Fail-closed: a stored model that has since
+        left the registry is ignored rather than erroring, so a removed model
+        never strands a new chat.
+        """
+        prefs = await self._prefs.get(self._owner_id)
+        if (
+            prefs is not None
+            and prefs.default_model is not None
+            and is_allowed_model(prefs.default_model, self._settings)
+        ):
+            return prefs.default_model
+        return self._default_model()
 
     # --- ownership ----------------------------------------------------------
 
@@ -190,8 +209,15 @@ class ChatService:
     # --- session use-cases --------------------------------------------------
 
     async def create_session(self, *, title: str | None, model: str | None) -> SessionView:
-        """Create a session owned by the caller (model validated, INV-8)."""
-        resolved = self._resolve_model(model)
+        """Create a session owned by the caller.
+
+        With no explicit ``model`` the caller's saved **default-model preference**
+        seeds it (spec 0005 AC-P4), falling back to the server default; an explicit
+        model is validated against the allow-list (unknown → 422, INV-8).
+        """
+        resolved = (
+            await self._resolved_default_model() if model is None else self._resolve_model(model)
+        )
         session = await self._sessions.create(
             owner_id=self._owner_id, model=resolved, title=title or ""
         )

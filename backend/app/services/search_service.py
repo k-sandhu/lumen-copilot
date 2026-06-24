@@ -58,7 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.principal import Principal
 from app.core.errors import AppError, ValidationError
 from app.core.logging import get_logger
-from app.db.repositories import DocumentRepository
+from app.db.repositories import DocumentRepository, RecentSearchRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome
 from app.domain.llm import ChatMessage, Role
@@ -254,6 +254,7 @@ class SearchService:
         # real adapter built over this request's session + gateway.
         self._retrieval = retrieval or RetrievalService(session, gateway=gateway)
         self._documents = DocumentRepository(session, principal.tenant_id)
+        self._recent = RecentSearchRepository(session, principal.tenant_id)
 
     async def search(
         self,
@@ -296,6 +297,12 @@ class SearchService:
         """
         page_size = _clamp_limit(limit)
         offset = _decode_cursor(cursor) if cursor else 0
+
+        # Record the executed query in the caller's recent history (spec 0005) — a
+        # de-duplicated, capped per-user list that powers the search typeahead.
+        # After the cursor decode so a malformed cursor (422) records nothing;
+        # blank queries are ignored by the repository. Commits with the search.
+        await self._recent.record(self._principal.user_id, query)
 
         # A source/type the MVP corpus cannot satisfy short-circuits to an empty,
         # permission-trimmed page (still audited) — never another corpus.
