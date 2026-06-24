@@ -13,7 +13,7 @@
  * reintroduces the collision (a hex token def, or Tailwind pointing back at the
  * un-prefixed vars). They parse the source files, so no DOM/CSSOM is needed.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -79,5 +79,31 @@ describe('design tokens — single source of truth (#130)', () => {
     expect(indexCss).not.toMatch(/--surface:/);
     expect(indexCss).not.toMatch(/--accent:/);
     expect(indexCss).not.toMatch(/--foreground:/);
+  });
+
+  it('never wraps a full-color token in rgb() across the source (only --c-* triples are valid there)', () => {
+    // After #130 the kit vars (--accent/--surface/…) are FULL colors; only the
+    // --c-* triples may appear inside rgb(). A raw `rgb(var(--accent) …)` expands
+    // to invalid `rgb(rgb(…) …)` and silently drops the color (the LoginScreen
+    // brand-gradient / accent-glow regression the reviewer caught). Guard the
+    // whole tree so it cannot creep back in.
+    const srcRoot = join(here, '..');
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules') continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (/\.(tsx?|css)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+          // Skip test files (they quote the anti-pattern in comments/regexes).
+          // Every `rgb(var(--X` in real source must be `rgb(var(--c-X` (a triple).
+          const matches = readFileSync(full, 'utf8').match(/rgb\(\s*var\(--(?!c-)[\w-]+/g);
+          if (matches) offenders.push(`${entry.name}: ${matches.join(', ')}`);
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(offenders).toEqual([]);
   });
 });
