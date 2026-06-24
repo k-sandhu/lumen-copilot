@@ -1,28 +1,30 @@
 /* ============================================================================
-   Lumen Copilot — Design-System Tokens (ported from docs/wireframes/assets/tokens.css)
-   ADR-0007 §2 (curated): the FULL token architecture lands; only the *UI to
-   switch* the deferred axes (7-theme picker, accent override, density/font) is
-   out of scope for v1. The architecture below is laid out so those axes are
-   additive later — adding a theme is one `[data-theme="x"][data-mode]` block
-   pair; adding density is setting --fs/--space/--radius on <html>.
+   Lumen Copilot — Design-System Tokens (UNIFIED; canonical palette = the
+   wireframe design system, docs/wireframes/assets/tokens.css).
 
-   AXES
-     • THEME  [data-theme]  → color identity. v1 ships ONLY "aurora".
-     • MODE   [data-mode]   → light | dark. Semantics/shadows live here.
+   ONE source of truth per theme×mode. The colors Tailwind consumes (surface,
+   surface-muted, border, foreground, foreground-muted, accent, ok/warn/danger)
+   are RGB-triple --c-* tokens; tailwind.config.ts maps each color key to
+   rgb(var(--c-*) / <alpha-value>). The @/ui kit needs full colors, so its vars
+   are DERIVED: --surface: rgb(var(--c-surface)), etc. This removes the old name
+   collision where hex --surface/--accent here shadowed the Tailwind RGB triples
+   in index.css and broke every *-accent / *-surface utility (issue #130).
+
+   AXES (set on <html>; the switcher UI is a follow-up — ADR-0007 §2):
+     • THEME  [data-theme]  → 7 color identities (aurora graphite meridian
+                              indigo sunset forest slate)
+     • MODE   [data-mode]   → light | dark  (semantics/shadows live here)
    OVERRIDES (inline style on <html>, deferred UI):
-     • --accent              user accent override (derived shades follow)
-     • --fs --space --radius  text / spacing / roundness multipliers (density)
+     • --c-accent            user accent override as an RGB triple (so BOTH the
+                             Tailwind utilities and the derived kit shades follow)
+     • --fs --space --radius text / spacing / roundness multipliers (density)
 
-   Accent shades are DERIVED from --accent via color-mix, so a theme default and
-   a future user override behave identically in both modes. Component CSS in
-   ui-kit.css expresses sizes as calc(px * var(--fs|--space)) so the deferred
-   density axis moves the whole kit at once.
-
-   This layer is ADDITIVE to styles/index.css (the existing Tailwind RGB-triple
-   tokens that current screens depend on). The two coexist: index.css keeps the
-   existing screens working; this file powers the opt-in `ui/` trust kit. The
-   mode provider in ui/ keeps `.dark` (Tailwind) and [data-mode] (this layer) in
-   lock-step so a single toggle drives both.
+   Accent shades are DERIVED from --accent via color-mix in :root, so a theme
+   default and a future override behave identically in both modes. ui-kit.css
+   expresses sizes as calc(px * var(--fs|--space)) so the density axis moves the
+   whole kit at once. To add a theme, copy a [data-theme][data-mode] block pair
+   below and set its neutrals + --c-accent; the derived shades and every screen
+   follow automatically. (src/styles/tokens.test.ts guards the invariants.)
    ============================================================================ */
 
 :root {
@@ -49,12 +51,35 @@
   --dur-3: 0.34s;
   --ring-w: 2px;
 
-  /* accent fallback + DERIVED shades (recompute from whatever --accent is) */
-  --accent: #4f46e5;
+  /* default palette = Aurora light, so the app has a valid theme before the boot
+     script sets [data-theme]/[data-mode] (no flash of unstyled tokens). */
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 248 249 253;
+  --c-border: 229 232 240;
+  --c-foreground: 20 22 31;
+  --c-foreground-muted: 90 99 120;
+  --c-accent: 79 70 229;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #eef1f8;
+  --surface-3: #eff2f8;
+  --surface-inset: #f4f6fb;
+  --border-strong: #d3d8e6;
+  --text-subtle: #8b93a7;
+
+  /* DERIVED accent shades — recompute from whatever --accent resolves to, so a
+     theme default and an inline --c-accent override behave identically. */
+  --accent-contrast: #ffffff;
   --accent-strong: color-mix(in srgb, var(--accent), var(--text) 22%);
   --accent-weak: color-mix(in srgb, var(--accent) 13%, var(--surface));
   --accent-line: color-mix(in srgb, var(--accent) 38%, var(--surface));
-  --accent-contrast: #ffffff;
   --accent-grad: linear-gradient(
     135deg,
     color-mix(in srgb, var(--accent), #fff 14%) 0%,
@@ -62,16 +87,38 @@
     color-mix(in srgb, var(--accent), #000 16%) 120%
   );
   --ring: color-mix(in srgb, var(--accent) 45%, transparent);
+
+  /* default semantics = light (overridden by [data-mode]) */
+  color-scheme: light;
+  --c-ok: 21 163 74;
+  --c-warn: 183 121 31;
+  --c-danger: 220 38 38;
+  --ok: rgb(var(--c-ok));
+  --warn: rgb(var(--c-warn));
+  --danger: rgb(var(--c-danger));
+  --ok-weak: #e7f6ec;
+  --warn-weak: #fbf2dd;
+  --danger-weak: #fdecec;
+  --info: #2563eb;
+  --info-weak: #e8f0fe;
+  --shadow-sm: 0 1px 2px rgba(17, 19, 24, 0.06), 0 1px 1px rgba(17, 19, 24, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(17, 19, 24, 0.1), 0 2px 4px -2px rgba(17, 19, 24, 0.06);
+  --shadow-lg: 0 18px 40px -12px rgba(17, 19, 24, 0.2), 0 6px 14px -8px rgba(17, 19, 24, 0.1);
+  --shadow-pop: 0 12px 32px -8px rgba(17, 19, 24, 0.22);
+  --backdrop: rgba(17, 19, 24, 0.34);
 }
 
 /* ═══ MODE: semantics, shadows, backdrop ════════════════════════════════ */
 [data-mode='light'] {
   color-scheme: light;
-  --ok: #15a34a;
+  --c-ok: 21 163 74;
+  --c-warn: 183 121 31;
+  --c-danger: 220 38 38;
+  --ok: rgb(var(--c-ok));
+  --warn: rgb(var(--c-warn));
+  --danger: rgb(var(--c-danger));
   --ok-weak: #e7f6ec;
-  --warn: #b7791f;
   --warn-weak: #fbf2dd;
-  --danger: #dc2626;
   --danger-weak: #fdecec;
   --info: #2563eb;
   --info-weak: #e8f0fe;
@@ -83,11 +130,14 @@
 }
 [data-mode='dark'] {
   color-scheme: dark;
-  --ok: #4ade80;
+  --c-ok: 74 222 128;
+  --c-warn: 251 191 36;
+  --c-danger: 248 113 113;
+  --ok: rgb(var(--c-ok));
+  --warn: rgb(var(--c-warn));
+  --danger: rgb(var(--c-danger));
   --ok-weak: rgba(74, 222, 128, 0.14);
-  --warn: #fbbf24;
   --warn-weak: rgba(251, 191, 36, 0.14);
-  --danger: #f87171;
   --danger-weak: rgba(248, 113, 113, 0.15);
   --info: #60a5fa;
   --info-weak: rgba(96, 165, 250, 0.15);
@@ -99,63 +149,332 @@
 }
 
 /* ═══ THEME × MODE: neutrals + default accent ═══════════════════════════ */
-/* AURORA — indigo→violet, cool neutrals. The single v1 theme (ADR-0007 §2).
-   Additional themes drop in here as `[data-theme="x"][data-mode]` block pairs
-   that set ONLY neutrals + --accent; the derived shades above follow. */
+
+/* AURORA — indigo→violet, cool neutrals */
 [data-theme='aurora'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 248 249 253;
+  --c-border: 229 232 240;
+  --c-foreground: 20 22 31;
+  --c-foreground-muted: 90 99 120;
+  --c-accent: 79 70 229;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
   --bg: #eef1f8;
-  --surface: #ffffff;
-  --surface-2: #f8f9fd;
   --surface-3: #eff2f8;
   --surface-inset: #f4f6fb;
-  --border: #e5e8f0;
   --border-strong: #d3d8e6;
-  --text: #14161f;
-  --text-muted: #5a6378;
   --text-subtle: #8b93a7;
-  --accent: #4f46e5;
 }
 [data-theme='aurora'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 22 26 39;
+  --c-surface-muted: 27 32 49;
+  --c-border: 39 45 66;
+  --c-foreground: 233 235 246;
+  --c-foreground-muted: 154 161 189;
+  --c-accent: 129 140 248;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
   --bg: #0c0e16;
-  --surface: #161a27;
-  --surface-2: #1b2031;
   --surface-3: #232a3e;
   --surface-inset: #10131e;
-  --border: #272d42;
   --border-strong: #394063;
-  --text: #e9ebf6;
-  --text-muted: #9aa1bd;
   --text-subtle: #6b7193;
-  --accent: #818cf8;
   --accent-contrast: #0c0e16;
 }
 
-/* boot fallback before the mode provider sets [data-mode] (avoids a flash of
-   unstyled tokens on the very first paint). */
-[data-theme='aurora']:not([data-mode]) {
-  --bg: #eef1f8;
-  --surface: #fff;
-  --surface-2: #f8f9fd;
-  --surface-3: #eff2f8;
-  --surface-inset: #f4f6fb;
-  --border: #e5e8f0;
-  --border-strong: #d3d8e6;
-  --text: #14161f;
-  --text-muted: #5a6378;
-  --text-subtle: #8b93a7;
-  --accent: #4f46e5;
-  color-scheme: light;
-  --ok: #15a34a;
-  --ok-weak: #e7f6ec;
-  --warn: #b7791f;
-  --warn-weak: #fbf2dd;
-  --danger: #dc2626;
-  --danger-weak: #fdecec;
-  --info: #2563eb;
-  --info-weak: #e8f0fe;
-  --shadow-sm: 0 1px 2px rgba(17, 19, 24, 0.06), 0 1px 1px rgba(17, 19, 24, 0.04);
-  --shadow-md: 0 4px 12px -2px rgba(17, 19, 24, 0.1), 0 2px 4px -2px rgba(17, 19, 24, 0.06);
-  --shadow-lg: 0 18px 40px -12px rgba(17, 19, 24, 0.2), 0 6px 14px -8px rgba(17, 19, 24, 0.1);
-  --shadow-pop: 0 12px 32px -8px rgba(17, 19, 24, 0.22);
-  --backdrop: rgba(17, 19, 24, 0.34);
+/* GRAPHITE — sky/cyan on pure neutral grays */
+[data-theme='graphite'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 247 248 250;
+  --c-border: 227 229 234;
+  --c-foreground: 21 23 28;
+  --c-foreground-muted: 89 95 107;
+  --c-accent: 2 132 199;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #f3f4f6;
+  --surface-3: #eceef1;
+  --surface-inset: #f2f3f5;
+  --border-strong: #cfd2da;
+  --text-subtle: #888e9a;
+}
+[data-theme='graphite'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 18 21 29;
+  --c-surface-muted: 22 26 35;
+  --c-border: 35 42 54;
+  --c-foreground: 232 235 242;
+  --c-foreground-muted: 153 162 179;
+  --c-accent: 56 189 248;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #0a0c11;
+  --surface-3: #1d222e;
+  --surface-inset: #0e1117;
+  --border-strong: #323b4b;
+  --text-subtle: #69728a;
+  --accent-contrast: #0a0c11;
+}
+
+/* MERIDIAN — green→gold, warm earthy neutrals */
+[data-theme='meridian'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 253 252 248;
+  --c-surface-muted: 243 239 229;
+  --c-border: 228 221 204;
+  --c-foreground: 31 28 20;
+  --c-foreground-muted: 106 100 83;
+  --c-accent: 156 122 30;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #f4f1e9;
+  --surface-3: #eae4d6;
+  --surface-inset: #f1ede2;
+  --border-strong: #d0c6ad;
+  --text-subtle: #968d77;
+}
+[data-theme='meridian'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 28 26 16;
+  --c-surface-muted: 35 32 19;
+  --c-border: 50 45 27;
+  --c-foreground: 239 234 218;
+  --c-foreground-muted: 179 171 143;
+  --c-accent: 226 176 78;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #14130c;
+  --surface-3: #2d2917;
+  --surface-inset: #100f08;
+  --border-strong: #463f27;
+  --text-subtle: #847d63;
+  --accent-contrast: #14130c;
+}
+
+/* INDIGO — deep saturated violet on navy */
+[data-theme='indigo'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 246 246 254;
+  --c-border: 226 227 243;
+  --c-foreground: 22 22 31;
+  --c-foreground-muted: 91 90 114;
+  --c-accent: 109 40 217;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #eeeefa;
+  --surface-3: #ecedfb;
+  --surface-inset: #f3f3fc;
+  --border-strong: #cdcef0;
+  --text-subtle: #8b8aa6;
+}
+[data-theme='indigo'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 23 19 49;
+  --c-surface-muted: 29 24 64;
+  --c-border: 43 35 80;
+  --c-foreground: 235 233 247;
+  --c-foreground-muted: 163 159 196;
+  --c-accent: 167 139 250;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #0d0a1a;
+  --surface-3: #271f52;
+  --surface-inset: #100c22;
+  --border-strong: #3d3470;
+  --text-subtle: #726e9a;
+  --accent-contrast: #0d0a1a;
+}
+
+/* SUNSET — orange→red, warm dark maroon */
+[data-theme='sunset'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 250 246;
+  --c-surface-muted: 251 238 229;
+  --c-border: 240 221 206;
+  --c-foreground: 36 23 18;
+  --c-foreground-muted: 122 92 78;
+  --c-accent: 224 86 31;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #fbf0ea;
+  --surface-3: #f6e0d3;
+  --surface-inset: #fdf2ec;
+  --border-strong: #e2c0a8;
+  --text-subtle: #a98d7c;
+}
+[data-theme='sunset'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 33 18 16;
+  --c-surface-muted: 40 22 19;
+  --c-border: 58 32 26;
+  --c-foreground: 244 228 221;
+  --c-foreground-muted: 192 161 148;
+  --c-accent: 251 122 69;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #170d0a;
+  --surface-3: #341c17;
+  --surface-inset: #110907;
+  --border-strong: #512c22;
+  --text-subtle: #8c7164;
+  --accent-contrast: #170d0a;
+}
+
+/* FOREST — green on deep green */
+[data-theme='forest'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 243 248 243;
+  --c-border: 220 232 220;
+  --c-foreground: 20 25 20;
+  --c-foreground-muted: 86 101 90;
+  --c-accent: 21 128 61;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #ecf2ec;
+  --surface-3: #e6efe6;
+  --surface-inset: #f1f6f1;
+  --border-strong: #c2d6c2;
+  --text-subtle: #86988a;
+}
+[data-theme='forest'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 16 26 19;
+  --c-surface-muted: 21 33 26;
+  --c-border: 33 51 40;
+  --c-foreground: 230 240 233;
+  --c-foreground-muted: 153 179 163;
+  --c-accent: 74 222 128;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #08110b;
+  --surface-3: #1c2c22;
+  --surface-inset: #0b140e;
+  --border-strong: #2f4838;
+  --text-subtle: #6a8576;
+  --accent-contrast: #08110b;
+}
+
+/* SLATE — monochrome gray-blue */
+[data-theme='slate'][data-mode='light'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 255 255 255;
+  --c-surface-muted: 246 247 249;
+  --c-border: 226 228 232;
+  --c-foreground: 22 24 29;
+  --c-foreground-muted: 90 96 107;
+  --c-accent: 71 85 105;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #f1f2f4;
+  --surface-3: #eceef1;
+  --surface-inset: #f3f4f6;
+  --border-strong: #cdd0d6;
+  --text-subtle: #8a909b;
+}
+[data-theme='slate'][data-mode='dark'] {
+  /* Tailwind-consumed colors as RGB triples (single source of truth) */
+  --c-surface: 20 23 28;
+  --c-surface-muted: 24 28 34;
+  --c-border: 37 42 51;
+  --c-foreground: 231 234 239;
+  --c-foreground-muted: 152 160 172;
+  --c-accent: 148 163 184;
+  /* kit full-color vars, derived from the triples above */
+  --surface: rgb(var(--c-surface));
+  --surface-2: rgb(var(--c-surface-muted));
+  --border: rgb(var(--c-border));
+  --text: rgb(var(--c-foreground));
+  --text-muted: rgb(var(--c-foreground-muted));
+  --accent: rgb(var(--c-accent));
+  /* kit-only neutrals (no Tailwind equivalent) */
+  --bg: #0b0d10;
+  --surface-3: #20252d;
+  --surface-inset: #0e1014;
+  --border-strong: #353c47;
+  --text-subtle: #687180;
+  --accent-contrast: #0b0d10;
 }

@@ -67,9 +67,11 @@ export function LoginScreen() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 -z-10"
         style={{
+          // --c-accent is the RGB triple (the kit's --accent is a full color post-#130),
+          // so the alpha syntax stays valid and follows a user accent override.
           background:
-            'radial-gradient(60rem 60rem at 50% -10%, rgb(var(--accent) / 0.16), transparent 60%),' +
-            'radial-gradient(40rem 40rem at 110% 110%, rgb(var(--accent) / 0.10), transparent 55%)',
+            'radial-gradient(60rem 60rem at 50% -10%, rgb(var(--c-accent) / 0.16), transparent 60%),' +
+            'radial-gradient(40rem 40rem at 110% 110%, rgb(var(--c-accent) / 0.10), transparent 55%)',
         }}
       />
 
@@ -78,7 +80,10 @@ export function LoginScreen() {
         <div className="mb-6 flex items-center gap-3">
           <span
             className="grid h-9 w-9 place-items-center rounded-lg text-white shadow-sm"
-            style={{ background: 'linear-gradient(135deg, rgb(var(--accent)), rgb(var(--accent) / 0.78))' }}
+            style={{
+              background:
+                'linear-gradient(135deg, rgb(var(--c-accent)), rgb(var(--c-accent) / 0.78))',
+            }}
           >
             <Icon name="sparkles" className="h-5 w-5" />
           </span>
