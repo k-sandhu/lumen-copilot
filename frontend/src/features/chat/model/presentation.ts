@@ -133,3 +133,65 @@ export function passageFromCitation(citation: UiCitation): SourcePassage {
   if (!text) return { runs: [] };
   return { runs: [{ text, highlight: true }] };
 }
+
+/** One label/value row of the source-inspector metadata grid (#120). */
+export interface MetadataRow {
+  label: string;
+  value: string;
+  /** True when the wire doesn't carry this field — rendered muted, never faked. */
+  unknown: boolean;
+}
+
+/**
+ * The values we genuinely have to drive the inspector metadata grid (#120). The
+ * chat/citation wire (Citation / ChatCitation, spec 0004 INV-3) carries NONE of
+ * these source-provenance fields: not the owner, not a last-modified date, and
+ * not a last-indexed timestamp. The only timestamp the chat turn has is the
+ * ANSWER/message time (`message.created_at`) — which is when the answer was
+ * produced, NOT when the underlying source was indexed or modified. Presenting
+ * it as "Last indexed" would fabricate provenance (a doc indexed months ago
+ * could read "Last indexed: Just now"). So every field here defaults to absent
+ * and `sourceMetadataRows` renders "Not available" rather than invent a value.
+ * A field lights up honestly only if a source ever actually carries it — which
+ * requires it on the wire (a separate search-result contract carries indexing
+ * metadata; the chat citation wire does not). See the regression test in
+ * presentation.test.ts.
+ */
+export interface SourceMetadataInput {
+  /** Source/document owner, when known (currently never on the chat wire). */
+  owner?: string | undefined;
+  /** Last-modified label, when known (currently never on the chat wire). */
+  lastModified?: string | undefined;
+  /**
+   * Last-indexed label, when known (currently never on the chat wire — the
+   * citation contract carries no indexing timestamp, so do NOT pass the
+   * answer/message time here; that is the answer time, not source indexing).
+   */
+  lastIndexed?: string | undefined;
+}
+
+/** Shown for a field the wire doesn't carry — honest, never a fabricated value. */
+export const METADATA_UNKNOWN = 'Not available';
+
+/**
+ * Build the source-inspector metadata grid rows (owner / last-modified /
+ * last-indexed — the wireframe grid, DESIGN.md §6 / chat.html). Each row always
+ * renders so the grid shape is stable; a field with no real data is flagged
+ * `unknown` and shown as "Not available" rather than invented (GUARD #120: never
+ * surface backend-unsupported data).
+ */
+export function sourceMetadataRows({
+  owner,
+  lastModified,
+  lastIndexed,
+}: SourceMetadataInput): MetadataRow[] {
+  const row = (label: string, value: string | undefined): MetadataRow =>
+    value && value.trim()
+      ? { label, value, unknown: false }
+      : { label, value: METADATA_UNKNOWN, unknown: true };
+  return [
+    row('Owner', owner),
+    row('Last modified', lastModified),
+    row('Last indexed', lastIndexed),
+  ];
+}

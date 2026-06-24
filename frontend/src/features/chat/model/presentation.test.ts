@@ -11,6 +11,8 @@ import {
   modelBadgeLabel,
   buildRetrievalSummary,
   passageFromCitation,
+  sourceMetadataRows,
+  METADATA_UNKNOWN,
   STALE_AFTER_MS,
 } from './presentation';
 import type { UiCitation } from './citation';
@@ -116,5 +118,42 @@ describe('passageFromCitation', () => {
 
   it('yields no runs for an empty snippet', () => {
     expect(passageFromCitation(cite({ snippet: '   ' })).runs).toEqual([]);
+  });
+});
+
+describe('sourceMetadataRows', () => {
+  it('always emits the owner / last-modified / last-indexed rows in order', () => {
+    const rows = sourceMetadataRows({});
+    expect(rows.map((r) => r.label)).toEqual(['Owner', 'Last modified', 'Last indexed']);
+  });
+
+  it('marks fields the wire does not carry as unknown (no fabricated values, GUARD #120)', () => {
+    // Owner + last-modified are not on the chat/citation wire → honest "Not available".
+    const rows = sourceMetadataRows({ lastIndexed: '2d ago' });
+    const owner = rows.find((r) => r.label === 'Owner');
+    const modified = rows.find((r) => r.label === 'Last modified');
+    expect(owner).toEqual({ label: 'Owner', value: METADATA_UNKNOWN, unknown: true });
+    expect(modified).toEqual({ label: 'Last modified', value: METADATA_UNKNOWN, unknown: true });
+  });
+
+  it('passes through a REAL source-indexing label as last-indexed', () => {
+    const indexed = sourceMetadataRows({ lastIndexed: 'Indexed 2d ago' }).find(
+      (r) => r.label === 'Last indexed',
+    );
+    expect(indexed).toEqual({ label: 'Last indexed', value: 'Indexed 2d ago', unknown: false });
+  });
+
+  it('marks last-indexed unknown when no source-indexing value is supplied (GUARD #120)', () => {
+    // The chat/citation wire carries no source-indexing timestamp. The only time
+    // a chat turn has is the ANSWER/message time — which is NOT source provenance.
+    // With nothing real supplied, "Last indexed" must be "Not available", so a
+    // doc indexed months ago can never render "Last indexed: Just now".
+    const indexed = sourceMetadataRows({}).find((r) => r.label === 'Last indexed');
+    expect(indexed).toEqual({ label: 'Last indexed', value: METADATA_UNKNOWN, unknown: true });
+  });
+
+  it('treats blank / whitespace values as unknown', () => {
+    const rows = sourceMetadataRows({ owner: '   ', lastIndexed: '' });
+    expect(rows.every((r) => r.unknown)).toBe(true);
   });
 });

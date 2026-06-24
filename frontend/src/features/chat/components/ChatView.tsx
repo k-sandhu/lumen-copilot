@@ -103,8 +103,10 @@ export function ChatView() {
                   charStart: viewer.charStart,
                   charEnd: viewer.charEnd,
                 }}
-                freshness={viewer.freshness}
-                stale={viewer.stale}
+                // No source owner / last-modified / last-indexed is on the chat
+                // wire, and the answer/message time is the answer's age, not the
+                // source's — so the viewer shows "Not available" rather than
+                // present the answer time as source provenance (#120 GUARD).
                 onClose={closeViewer}
               />
             </ErrorBoundary>
@@ -128,8 +130,6 @@ interface ActiveSessionProps {
     charStart: number;
     charEnd: number;
     snippet: string;
-    freshness?: string;
-    stale?: boolean;
   }) => void;
   onDoneReload: () => void;
 }
@@ -249,15 +249,16 @@ function ActiveSession({
           onRetryLoad={() => void messages.refetch()}
           live={live}
           onRetryStream={onRetryStream}
-          onOpenCitation={(c, meta) =>
+          onOpenCitation={(c) =>
+            // The viewer carries only what the citation wire provides about the
+            // source; the answer-time `meta` is NOT a source-provenance signal
+            // and is intentionally not forwarded as freshness/last-indexed (#120).
             openViewer({
               documentId: c.documentId,
               documentName: c.documentName,
               charStart: c.charStart,
               charEnd: c.charEnd,
               snippet: c.snippet,
-              ...(meta?.freshness ? { freshness: meta.freshness } : {}),
-              ...(meta?.stale !== undefined ? { stale: meta.stale } : {}),
             })
           }
         />
