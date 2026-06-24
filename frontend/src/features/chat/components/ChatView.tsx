@@ -50,14 +50,26 @@ export function ChatView() {
   const models = useModels();
   const queryClient = useQueryClient();
 
+  // At narrow widths the subrail is an off-canvas drawer (see chat.css); this
+  // drives it. Selecting/creating a session closes the drawer so the narrow-width
+  // flow lands back on the conversation.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const openAndClose = useCallback(
+    (id: string) => {
+      openSession(id);
+      setHistoryOpen(false);
+    },
+    [openSession],
+  );
+
   return (
     <div className="lc-chat">
-      <aside className="lc-chat__subrail">
+      <aside className="lc-chat__subrail" data-open={historyOpen ? 'true' : 'false'}>
         <ErrorBoundary label="Chat history">
           <HistorySidebar
             activeSessionId={activeSessionId}
-            onSelect={openSession}
-            onCreated={openSession}
+            onSelect={openAndClose}
+            onCreated={openAndClose}
             onDeleted={(id) => {
               if (id === activeSessionId) closeSession();
             }}
@@ -65,7 +77,31 @@ export function ChatView() {
         </ErrorBoundary>
       </aside>
 
+      {historyOpen && (
+        <button
+          type="button"
+          className="lc-chat__subrail-scrim"
+          aria-label="Close chat history"
+          onClick={() => setHistoryOpen(false)}
+        />
+      )}
+
       <div className="lc-chat__main">
+        {/* Narrow-width only (hidden on desktop via chat.css): opens the history
+            drawer so chats stay reachable when the subrail is off-canvas. */}
+        <div className="lc-chat__mobilebar">
+          <button
+            type="button"
+            className="lc-chat__historytrigger"
+            aria-label="Open chat history"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen(true)}
+          >
+            <Icon name="message-square" />
+            Chats
+          </button>
+        </div>
+
         {activeSessionId ? (
           <ErrorBoundary label="Conversation">
             <ActiveSession

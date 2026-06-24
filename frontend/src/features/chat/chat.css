@@ -45,6 +45,46 @@
   display: none;
 }
 
+/* history-drawer affordances — inert on desktop (the subrail is docked), live
+   only at narrow widths (below) where the subrail becomes an off-canvas drawer. */
+.lc-chat__subrail-scrim {
+  display: none;
+}
+.lc-chat__mobilebar {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: calc(10px * var(--space));
+  padding: calc(8px * var(--space)) calc(14px * var(--space));
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.lc-chat__historytrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7px * var(--space));
+  height: calc(34px * max(var(--fs), var(--space)));
+  padding: 0 calc(11px * var(--space));
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 540;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-chat__historytrigger:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+.lc-chat__historytrigger .lc-icon {
+  width: calc(15px * var(--fs));
+  height: calc(15px * var(--fs));
+}
+
 /* ---- conversation thread (centered reading column) --------------------- */
 .lc-thread {
   max-width: calc(840px * var(--space));
@@ -861,8 +901,37 @@
 
 /* ---- narrow widths: subrail + inspector collapse off-canvas ------------ */
 @media (max-width: 880px) {
+  /* The history subrail becomes an off-canvas drawer (mirrors the shell's mobile
+     rail) reachable from the in-pane "Chats" trigger — never hidden with no way
+     back, so list/create/switch (AC-4) stay usable at narrow widths. */
   .lc-chat__subrail {
-    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(86vw, calc(300px * var(--space)));
+    z-index: 75;
+    background: var(--surface);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    transition: transform var(--dur-2) var(--ease);
+  }
+  .lc-chat__subrail[data-open='true'] {
+    transform: translateX(0);
+  }
+  .lc-chat__subrail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 72;
+    background: var(--backdrop);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
+  .lc-chat__mobilebar {
+    display: flex;
   }
   .lc-thread,
   .lc-composer {
