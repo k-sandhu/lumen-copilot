@@ -20,15 +20,16 @@ import { router } from './routes/router';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TooltipProvider } from './components/Tooltip';
 import { syncThemeToDom } from './stores/ui';
-import { applyAppearance, resolveMode, readStoredMode } from './ui';
+import { applyStoredAppearance } from './ui';
 import { installAuthRefresh } from './api';
 
 // Reflect the persisted/system theme onto <html> before first paint.
 syncThemeToDom();
-// Activate the design-token theme (data-theme + data-mode) globally before first
-// paint so BOTH token layers resolve correctly on every screen — including the
-// pre-auth login screen, which previously rendered with no [data-mode] (#130).
-applyAppearance(resolveMode(readStoredMode()));
+// Activate the persisted appearance (theme + mode + accent + density) globally
+// before first paint so BOTH token layers resolve correctly on every screen —
+// including the pre-auth login screen, which previously had no [data-mode] (#130,
+// #134).
+applyStoredAppearance();
 
 // Wire the silent-refresh handler into the api/ client so any 401 triggers one
 // refresh + retry before surfacing (issue #48, AC-2/AC-4). Must run before the

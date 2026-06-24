@@ -15,6 +15,14 @@
     height: 100%;
   }
 
+  /* Density axis (#134): the appearance engine sets --fs on <html>. Tailwind's
+   * spacing/size scale is rem-based, so scaling the root font-size scales every
+   * screen with the chosen density; the kit scales independently via calc(px *
+   * var(--fs)). Default --fs:1 → 16px → no change. Borders stay px (crisp). */
+  html {
+    font-size: calc(16px * var(--fs, 1));
+  }
+
   body {
     @apply bg-surface text-foreground antialiased;
   }
