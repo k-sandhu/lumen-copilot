@@ -255,26 +255,37 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
-        answer_parts: list[str] = []
+        # The answer is the text of exactly ONE turn: the tool-free turn the model
+        # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
+        # text is pre-tool narration ("I'll search…"), not answer content — it is
+        # never streamed as a ``delta`` nor persisted (issue #148). Streaming it
+        # would diverge the live answer from the stored message and re-expose the
+        # narration-as-answer bug for clients that render the stream.
+        answer_chunks: list[str] = []
         usage = _Usage()
         finish_reason = "stop"
         total_hits = 0
 
         # Run the agentic tool loop. ``budget_exhausted`` stays True only if every
         # turn within the budget requested tools — i.e. the model never reached a
-        # tool-free synthesis turn (the loop never ``break``s). That is the case
-        # the forced synthesis below repairs (issue #148).
+        # tool-free answer turn (the loop never ``break``s). That is the case the
+        # forced synthesis below repairs (issue #148).
         budget_exhausted = True
         for _turn in range(max_tool_turns):
-            turn_tool_calls, finish_reason = await self._stream_one_turn(
-                state=state, messages=messages, model=model, answer_parts=answer_parts, usage=usage
+            turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
+                messages=messages, model=model, usage=usage
             )
             if not turn_tool_calls:
+                # Tool-free turn → this is the answer. Only now is its text known
+                # to be answer content (not narration), so stream it now and stop.
+                await self._publish_text(state, turn_text)
+                answer_chunks = turn_text
                 budget_exhausted = False
                 break
 
             # The assistant turn that requested tools must be in the transcript
-            # before its tool results (provider protocol).
+            # before its tool results (provider protocol). Its narration text is
+            # dropped — neither streamed nor persisted.
             messages.append(
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
@@ -303,23 +314,20 @@ class ChatRuntime:
                     citation = GroundedCitation.from_passage(passage)
                     cited[passage.chunk_id] = citation
 
-        answer_text = "".join(answer_parts).strip()
         if budget_exhausted:
-            # The whole budget went to tool turns and the model never volunteered
-            # a tool-free answer (issue #148 — the live empty-answer bug). Force one
+            # The whole budget went to tool turns and the model never volunteered a
+            # tool-free answer (issue #148 — the live empty-answer bug). Force one
             # synthesis turn with tools disabled so the model answers over the
-            # gathered tool context; that synthesis — not the inter-tool narration
-            # accumulated above — becomes the answer of record.
-            synthesis_parts: list[str] = []
-            _, finish_reason = await self._stream_one_turn(
-                state=state,
-                messages=messages,
-                model=model,
-                answer_parts=synthesis_parts,
-                usage=usage,
-                tool_choice="none",
+            # gathered tool context, then stream + persist THAT as the answer. The
+            # narration from the exhausted tool turns was never emitted, so the
+            # live stream and the stored message agree.
+            _, finish_reason, turn_text = await self._stream_one_turn(
+                messages=messages, model=model, usage=usage, tool_choice="none"
             )
-            answer_text = "".join(synthesis_parts).strip()
+            await self._publish_text(state, turn_text)
+            answer_chunks = turn_text
+
+        answer_text = "".join(answer_chunks).strip()
 
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
@@ -382,37 +390,48 @@ class ChatRuntime:
     async def _stream_one_turn(
         self,
         *,
-        state: _StreamState,
         messages: list[ChatMessage],
         model: str,
-        answer_parts: list[str],
         usage: _Usage,
         tool_choice: str | None = None,
-    ) -> tuple[list[ToolCall], str]:
-        """Stream one completion turn; return its ``(tool_calls, finish_reason)``.
+    ) -> tuple[list[ToolCall], str, list[str]]:
+        """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
-        Publishes each streamed ``text`` chunk as a ``delta`` envelope, appends it
-        to ``answer_parts``, and folds token ``usage`` into the running total.
-        ``tool_choice="none"`` forces a tool-free turn — the final synthesis once
-        the tool-turn budget is spent (issue #148).
+        Buffers the turn's text chunks and folds token ``usage`` into the running
+        total, but does **not** publish: only the caller knows whether a turn's
+        text is answer content (a tool-free turn, or the forced synthesis) to be
+        streamed, or pre-tool narration (a tool-calling turn) to be dropped (issue
+        #148). ``tool_choice="none"`` forces a tool-free turn — the final synthesis
+        once the tool-turn budget is spent.
         """
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
+        text_chunks: list[str] = []
         async for ev in self._gateway.stream_tools(
             messages, tools=list(TOOL_SPECS), model=model, tool_choice=tool_choice
         ):
             if ev.text:
-                answer_parts.append(ev.text)
-                await self._publish(
-                    state, envelopes.delta(state.stream_id, state.next_seq(), {"text": ev.text})
-                )
+                text_chunks.append(ev.text)
             if ev.tool_calls:
                 turn_tool_calls = list(ev.tool_calls)
             if ev.finish_reason:
                 finish_reason = ev.finish_reason
             if ev.usage is not None:
                 usage.add(ev.usage)
-        return turn_tool_calls, finish_reason
+        return turn_tool_calls, finish_reason, text_chunks
+
+    async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
+        """Publish answer text as ``delta`` envelopes, preserving chunk granularity.
+
+        Called only for the answer turn's text — the tool-free turn or the forced
+        synthesis — never for a tool-calling turn's pre-tool narration (issue
+        #148), so the streamed answer equals the persisted one.
+        """
+        for chunk in chunks:
+            if chunk:
+                await self._publish(
+                    state, envelopes.delta(state.stream_id, state.next_seq(), {"text": chunk})
+                )
 
     async def _run_one_tool(
         self,

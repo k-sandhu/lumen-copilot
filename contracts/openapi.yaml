@@ -597,7 +597,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
-  # --- Admin (M2: read-only governance surfaces, admin only) : #80 -----------
+  # --- Admin (M2 governance reads #80 + per-tenant settings write #148, admin only) ---
   /admin/members:
     get:
       operationId: listMembers
@@ -2023,6 +2023,9 @@ tags:
   - name: audit
     description: The append-only audit trail with provenance (admin / security only).
   - name: admin
-    description: Read-only tenant governance — members, model governance, risk tiers (admin only).
+    description: >-
+      Tenant administration (admin only) — members, model governance and risk
+      tiers (reads), plus per-tenant settings (`GET`/`PATCH /admin/settings`, the
+      chat tool-turn budget — the one admin write, audited; issue #148).
   - name: sources
     description: Connected sources — the connector grid (add / sync / remove a Web URL source).

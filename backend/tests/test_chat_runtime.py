@@ -490,16 +490,23 @@ async def test_tool_budget_exhaustion_forces_a_synthesized_answer(ctx: _Ctx) -> 
     assert envs[-1]["type"] == "done"
     assert [e["type"] for e in envs].count("done") == 1 and "error" not in [e["type"] for e in envs]
 
+    expected = (
+        "The root cause was a bad index migration; "
+        "action items: add a canary and a rollback runbook."
+    )
+    # Regression (PR #150 review): the LIVE stream must equal the synthesized answer
+    # too. The inter-tool narration is never emitted as a delta, so the streamed
+    # answer and the stored message agree — no live/persisted divergence.
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert streamed == expected
+    assert "I'll search" not in streamed
+    assert "Let me read" not in streamed
+
     async with ctx.sessionmaker() as session:
         msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in msgs if m.role.value == "assistant"][0]
     # The persisted answer is the synthesized answer — not the inter-tool narration.
-    assert assistant.content == (
-        "The root cause was a bad index migration; "
-        "action items: add a canary and a rollback runbook."
-    )
-    assert "I'll search" not in assistant.content
-    assert "Let me read" not in assistant.content
+    assert assistant.content == expected
 
 
 async def test_per_tenant_override_caps_tool_turns(ctx: _Ctx) -> None:
@@ -526,6 +533,11 @@ async def test_per_tenant_override_caps_tool_turns(ctx: _Ctx) -> None:
     runtime = _runtime(
         ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, default_max_tool_turns=20
     )
+
+    import asyncio
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
     await runtime.run(
         stream_id=stream_id,
         session_id=ctx.session_id,
@@ -534,11 +546,17 @@ async def test_per_tenant_override_caps_tool_turns(ctx: _Ctx) -> None:
         history=[],
         collection_ids=None,
     )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
 
     # Exactly one tool turn ran (the override of 1), then the forced synthesis —
     # not the default of 20.
     assert gateway.auto_calls == 1
     assert gateway.synthesis_calls == 1
+    # The streamed answer equals the synthesis (narration suppressed) and matches
+    # the persisted message — no live/stored divergence (PR #150 review).
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert streamed == "Grounded final answer."
+    assert "Searching" not in streamed
     async with ctx.sessionmaker() as session:
         msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in msgs if m.role.value == "assistant"][0]
