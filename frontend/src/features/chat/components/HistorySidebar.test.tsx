@@ -79,6 +79,20 @@ describe('HistorySidebar', () => {
     expect(within(alert).getByRole('button', { name: /retry/i })).toBeInTheDocument();
   });
 
+  it('filters the list with the search box, with an honest no-match state (#136)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(SESSIONS));
+    render();
+    const user = userEvent.setup();
+    await screen.findByText('Budget questions');
+    const search = screen.getByRole('textbox', { name: /search chats/i });
+    await user.type(search, 'budget');
+    expect(screen.getByText('Budget questions')).toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, 'zzz no match');
+    expect(screen.queryByText('Budget questions')).not.toBeInTheDocument();
+    expect(screen.getByText(/no chats match/i)).toBeInTheDocument();
+  });
+
   it('creates a new chat and reports its id (AC-4 new)', async () => {
     const onCreated = vi.fn();
     const fetchSpy = vi
@@ -102,7 +116,7 @@ describe('HistorySidebar', () => {
     render({ onCreated });
     const user = userEvent.setup();
     await screen.findByText('Budget questions');
-    await user.click(screen.getByRole('button', { name: /\+ new/i }));
+    await user.click(screen.getByRole('button', { name: /new chat/i }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith('s-new'));
     const createCall = fetchSpy.mock.calls.find(
       (c) => (c[1] as RequestInit)?.method === 'POST',
@@ -126,6 +140,20 @@ describe('HistorySidebar', () => {
         title: 'Renamed',
       });
     });
+  });
+
+  it('dismisses the delete confirm on Escape without deleting (#136 a11y)', async () => {
+    const onDeleted = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(SESSIONS));
+    render({ onDeleted });
+    const user = userEvent.setup();
+    await screen.findByText('Budget questions');
+    await user.click(screen.getByRole('button', { name: /delete budget questions/i }));
+    await screen.findByRole('alertdialog', { name: /confirm delete/i });
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false);
   });
 
   it('confirms and deletes a session (AC-4 delete)', async () => {

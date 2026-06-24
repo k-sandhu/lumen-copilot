@@ -8,6 +8,7 @@
  */
 import type { TraceStep } from '@/ui';
 import type { SourcePassage } from '@/ui';
+import type { ChatSession } from '@/api';
 import type { UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
 
@@ -194,4 +195,86 @@ export function sourceMetadataRows({
     row('Last modified', lastModified),
     row('Last indexed', lastIndexed),
   ];
+}
+
+/* ── history-sidebar presentation (issue #136) ─────────────────────────────
+ * The chat-history list groups sessions by recency (Today / Yesterday / …) and
+ * shows an honest meta line under each title. Both are derived only from fields
+ * the session wire actually carries (message_count, model, updated_at) — we
+ * never fabricate a "sources" count the chat-session contract doesn't provide. */
+
+/** Recency bucket label for a session, by calendar day. Ordered newest-first. */
+export type DayBucket = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Midnight (local) of the day containing `ms`. */
+function startOfDay(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * Which recency bucket a timestamp falls in, by *calendar* day difference (so a
+ * 9pm message and a 1am message the next morning read as "Yesterday", not "16h
+ * ago"). Absent/unparseable timestamps and future dates fall back to "Today".
+ */
+export function dayBucket(iso: string | undefined, now: number = Date.now()): DayBucket {
+  if (!iso) return 'Today';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return 'Today';
+  const diffDays = Math.round((startOfDay(now) - startOfDay(then)) / DAY_MS);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays <= 7) return 'Previous 7 days';
+  return 'Older';
+}
+
+const BUCKET_ORDER: DayBucket[] = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
+
+export interface SessionGroup {
+  label: DayBucket;
+  sessions: ChatSession[];
+}
+
+/**
+ * Group sessions into recency buckets, newest-first within each bucket and
+ * buckets in newest-first order. Empty buckets are dropped so the sidebar only
+ * shows day headers that have content.
+ */
+export function groupSessionsByDay(
+  sessions: ChatSession[],
+  now: number = Date.now(),
+): SessionGroup[] {
+  const sorted = [...sessions].sort(
+    (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
+  );
+  const byBucket = new Map<DayBucket, ChatSession[]>();
+  for (const s of sorted) {
+    const bucket = dayBucket(s.updated_at, now);
+    const list = byBucket.get(bucket) ?? [];
+    list.push(s);
+    byBucket.set(bucket, list);
+  }
+  return BUCKET_ORDER.filter((b) => byBucket.has(b)).map((label) => ({
+    label,
+    sessions: byBucket.get(label) ?? [],
+  }));
+}
+
+/**
+ * The one-line meta under a session title, e.g. "4 messages · opus · 2h ago".
+ * Only fields the session wire carries are used (message_count, model id tail,
+ * updated_at) — never a fabricated source count. Parts with no value are omitted.
+ */
+export function sessionMeta(session: ChatSession, now: number = Date.now()): string {
+  const parts: string[] = [];
+  const n = session.message_count;
+  parts.push(n === 1 ? '1 message' : `${n} messages`);
+  const model = modelBadgeLabel(session.model);
+  if (model) parts.push(model);
+  const updated = relativeTime(session.updated_at, now);
+  if (updated) parts.push(updated);
+  return parts.join(' · ');
 }

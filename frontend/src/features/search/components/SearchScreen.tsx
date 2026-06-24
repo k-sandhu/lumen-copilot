@@ -86,7 +86,7 @@ export function SearchScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Page head + pinned composer — stay put while results scroll below. */}
-      <div className="shrink-0 border-b border-border bg-surface px-4 pb-4 pt-5">
+      <div className="shrink-0 border-b border-border bg-surface px-6 pb-4 pt-5">
         <div className="mx-auto w-full max-w-5xl">
           <header className="mb-4">
             <h1 className="text-xl font-semibold text-foreground">Search</h1>
@@ -104,7 +104,7 @@ export function SearchScreen() {
       </div>
 
       {/* Independently scrollable results pane. */}
-      <ScrollArea viewportClassName="px-4 py-6">
+      <ScrollArea viewportClassName="px-6 py-6">
         <div className="mx-auto w-full max-w-5xl">
           {!hasQuery ? (
             <InitialState />

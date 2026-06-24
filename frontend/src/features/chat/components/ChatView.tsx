@@ -14,7 +14,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError } from '@/api';
 import type { ChatModelInfo, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { Icon } from '@/ui';
 import { useChatStore } from '../model/chatStore';
+import '../chat.css';
 import {
   useMessages,
   useModels,
@@ -48,14 +50,26 @@ export function ChatView() {
   const models = useModels();
   const queryClient = useQueryClient();
 
+  // At narrow widths the subrail is an off-canvas drawer (see chat.css); this
+  // drives it. Selecting/creating a session closes the drawer so the narrow-width
+  // flow lands back on the conversation.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const openAndClose = useCallback(
+    (id: string) => {
+      openSession(id);
+      setHistoryOpen(false);
+    },
+    [openSession],
+  );
+
   return (
-    <div className="flex h-full min-h-0">
-      <aside className="hidden min-h-0 w-64 shrink-0 border-r border-border md:block">
+    <div className="lc-chat">
+      <aside className="lc-chat__subrail" data-open={historyOpen ? 'true' : 'false'}>
         <ErrorBoundary label="Chat history">
           <HistorySidebar
             activeSessionId={activeSessionId}
-            onSelect={openSession}
-            onCreated={openSession}
+            onSelect={openAndClose}
+            onCreated={openAndClose}
             onDeleted={(id) => {
               if (id === activeSessionId) closeSession();
             }}
@@ -63,7 +77,31 @@ export function ChatView() {
         </ErrorBoundary>
       </aside>
 
-      <main className="flex min-h-0 min-w-0 flex-1">
+      {historyOpen && (
+        <button
+          type="button"
+          className="lc-chat__subrail-scrim"
+          aria-label="Close chat history"
+          onClick={() => setHistoryOpen(false)}
+        />
+      )}
+
+      <div className="lc-chat__main">
+        {/* Narrow-width only (hidden on desktop via chat.css): opens the history
+            drawer so chats stay reachable when the subrail is off-canvas. */}
+        <div className="lc-chat__mobilebar">
+          <button
+            type="button"
+            className="lc-chat__historytrigger"
+            aria-label="Open chat history"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen(true)}
+          >
+            <Icon name="message-square" />
+            Chats
+          </button>
+        </div>
+
         {activeSessionId ? (
           <ErrorBoundary label="Conversation">
             <ActiveSession
@@ -83,36 +121,50 @@ export function ChatView() {
             />
           </ErrorBoundary>
         ) : (
-          <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-center text-sm text-foreground-muted">
-            <p>
-              Pick a chat from the sidebar or start a new one to ask about your documents.
+          <div className="lc-chat-empty">
+            <div className="lc-chat-empty__logo" aria-hidden="true">
+              <Icon name="sparkles" />
+            </div>
+            <h2 className="lc-chat-empty__title">Ask across your work</h2>
+            <p className="lc-chat-empty__sub">
+              Pick a chat from the sidebar or start a new one. Every answer is grounded in your
+              permitted sources and cited so you can verify it.
             </p>
           </div>
         )}
+      </div>
 
-        {viewer && (
-          <aside className="min-h-0 w-full max-w-[28rem] shrink-0 border-l border-border md:w-[28rem]">
-            <ErrorBoundary label="Document viewer">
-              <DocumentViewer
-                citation={{
-                  id: `${viewer.documentId}:${viewer.charStart}`,
-                  documentId: viewer.documentId,
-                  documentName: viewer.documentName,
-                  chunkId: '',
-                  snippet: viewer.snippet,
-                  charStart: viewer.charStart,
-                  charEnd: viewer.charEnd,
-                }}
-                // No source owner / last-modified / last-indexed is on the chat
-                // wire, and the answer/message time is the answer's age, not the
-                // source's — so the viewer shows "Not available" rather than
-                // present the answer time as source provenance (#120 GUARD).
-                onClose={closeViewer}
-              />
-            </ErrorBoundary>
-          </aside>
-        )}
-      </main>
+      {viewer && (
+        <button
+          type="button"
+          className="lc-chat__scrim"
+          aria-label="Close source"
+          onClick={closeViewer}
+        />
+      )}
+
+      {viewer && (
+        <aside className="lc-chat__inspector">
+          <ErrorBoundary label="Document viewer">
+            <DocumentViewer
+              citation={{
+                id: `${viewer.documentId}:${viewer.charStart}`,
+                documentId: viewer.documentId,
+                documentName: viewer.documentName,
+                chunkId: '',
+                snippet: viewer.snippet,
+                charStart: viewer.charStart,
+                charEnd: viewer.charEnd,
+              }}
+              // No source owner / last-modified / last-indexed is on the chat
+              // wire, and the answer/message time is the answer's age, not the
+              // source's — so the viewer shows "Not available" rather than
+              // present the answer time as source provenance (#120 GUARD).
+              onClose={closeViewer}
+            />
+          </ErrorBoundary>
+        </aside>
+      )}
     </div>
   );
 }
@@ -264,9 +316,9 @@ function ActiveSession({
         />
       </div>
 
-      <div className="shrink-0 border-t border-border p-3">
+      <div className="lc-composer-wrap">
         {send.isError && (
-          <p role="alert" className="mb-2 text-xs text-danger">
+          <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
             {send.error instanceof ApiError ? send.error.displayMessage : 'Could not send message.'}
           </p>
         )}
