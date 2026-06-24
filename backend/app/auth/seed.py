@@ -25,6 +25,7 @@ from app.auth import hash_password
 from app.db import models
 from app.db.repositories import TenantRepository, UserRepository
 from app.db.session import dispose_engine, session_scope
+from app.db.tenant_context import bind_bypass
 from app.domain.entities import Role, User
 
 
@@ -41,6 +42,12 @@ async def seed_user(
     returned unchanged — re-running the seed is safe.
     """
     async with session_scope() as session:
+        # The seed is a pre-identity/system path: it creates the first tenant and
+        # a user with no tenant context yet, so it opts into the RLS bypass
+        # sentinel (#17) for this transaction. Without it, the user INSERT and the
+        # tenant-name lookup would be rejected/empty under row-level security. A
+        # no-op off Postgres (the offline tests never run the seed against PG).
+        await bind_bypass(session)
         # Resolve or create the tenant by name (dev convenience; names are not
         # unique in the schema, so we reuse the first match if present).
         tenant_row = (

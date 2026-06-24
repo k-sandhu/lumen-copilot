@@ -21,7 +21,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Cookie, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import CurrentUser, DbSession, SettingsDep, extract_request_id
+from app.api.deps import (
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    SettingsDep,
+    extract_request_id,
+)
 from app.auth import InvalidTokenError
 from app.core.config import Settings
 from app.db.repositories import UserRepository
@@ -180,14 +186,19 @@ async def logout(
 async def get_current_user(
     principal: CurrentUser,
     session: DbSession,
+    tenant_id: CurrentTenant,
 ) -> CurrentUserResponse:
     """The authenticated principal (id, tenant, roles) — from the token, hydrated.
 
     The token carries id/tenant/roles; we read the user row (tenant-scoped) for
     the email + ``created_at`` the contract requires. A token whose subject no
     longer exists is treated as unauthenticated (401).
+
+    Depends on ``CurrentTenant`` (not just the principal's ``tenant_id``) so the
+    RLS GUC is bound on this request session before the tenant-scoped read (#17);
+    the resolved tenant equals ``principal.tenant_id``.
     """
-    user = await UserRepository(session, principal.tenant_id).get(principal.user_id)
+    user = await UserRepository(session, tenant_id).get(principal.user_id)
     if user is None:
         raise InvalidTokenError()
     return CurrentUserResponse(

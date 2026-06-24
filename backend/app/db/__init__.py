@@ -25,7 +25,9 @@ from app.db.session import (
     get_engine,
     get_sessionmaker,
     session_scope,
+    tenant_session_scope,
 )
+from app.db.tenant_context import bind_bypass, bind_tenant
 
 __all__ = [
     "AuditEventRepository",
@@ -38,8 +40,11 @@ __all__ = [
     "MessageRepository",
     "TenantRepository",
     "UserRepository",
+    "bind_bypass",
+    "bind_tenant",
     "dispose_engine",
     "get_engine",
     "get_sessionmaker",
     "session_scope",
+    "tenant_session_scope",
 ]
