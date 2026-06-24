@@ -263,7 +263,7 @@ async def delete_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
 ) -> Response:
-    """Delete one of the caller's sources (cascades its documents); else 404."""
+    """Delete a source; removes its docs (+ the backing collection if otherwise empty), else 404."""
     service = _build_service(
         session=session,
         principal=principal,

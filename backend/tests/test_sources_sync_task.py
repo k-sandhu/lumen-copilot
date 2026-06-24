@@ -34,12 +34,14 @@ from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkRepository,
+    CollectionRepository,
     DocumentRepository,
     SourceRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import Role, Source, SourceStatus
+from app.domain.audit import AuditAction
+from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
@@ -321,3 +323,153 @@ async def test_sync_missing_source_is_noop(
     )
     assert result.status is SourceStatus.ERROR
     assert result.error == "source not found"
+
+
+# --- delete cleanup (regression for #139) -----------------------------------
+
+
+async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: uuid.UUID) -> bool:
+    """Delete a source via the service (mirrors the request path), then commit."""
+    async with db_session.session_scope() as session:
+        svc = SourcesService(
+            session,
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            request_id="r",
+            source_ip="203.0.113.1",
+        )
+        ok = await svc.delete(source_id)
+        await session.commit()
+    return ok
+
+
+async def test_delete_source_leaves_no_orphans(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a source removes its docs, chunks, and backing collection (#139).
+
+    Reported live: ``DELETE /sources/{id}`` removed the source row but left its
+    auto-created ``web: <url>`` backing collection *and* the documents the sync
+    ingested into it — junk that had to be cleared by hand. A source delete must
+    cascade: source → its documents (+ chunks) → its backing collection.
+
+    The assertions deliberately probe by **document id** and by **collection
+    contents**, never by ``source_id``: the pre-fix ORM nulls ``documents.source_id``
+    on the parent delete, so a ``list_for_source`` check would read empty (0 rows)
+    even though the documents survive orphaned in the collection — a false pass.
+    """
+    tenant_id, source_id = await _seed_source()
+    body = "The quick brown fox jumps over the lazy dog. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Page One", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Page Two", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    # Capture the owner + backing collection the sync populated (preconditions).
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        owner_id = source.owner_id
+        collection_id = uuid.UUID(str(source.config["collection_id"]))
+
+        documents = DocumentRepository(session, tenant_id)
+        doc_ids = [d.id for d in await documents.list_for_source(source_id)]
+        assert len(doc_ids) == 2  # the sync ingested into the backing collection
+        collections = CollectionRepository(session, tenant_id)
+        assert await collections.get(collection_id) is not None
+        assert await collections.count_documents(collection_id) == 2
+        chunks = ChunkRepository(session, tenant_id)
+        assert all([await chunks.list_for_document(doc_id) for doc_id in doc_ids])
+
+    assert await _delete_source(tenant_id, owner_id, source_id) is True
+
+    # No orphans: source gone, every ingested document + its chunks gone, and the
+    # auto-created backing collection gone.
+    async with db_session.session_scope() as session:
+        assert await SourceRepository(session, tenant_id).get(source_id) is None
+        documents = DocumentRepository(session, tenant_id)
+        for doc_id in doc_ids:
+            assert await documents.get(doc_id) is None
+        collections = CollectionRepository(session, tenant_id)
+        assert await collections.get(collection_id) is None
+        assert await collections.count_documents(collection_id) == 0
+        chunks = ChunkRepository(session, tenant_id)
+        for doc_id in doc_ids:
+            assert await chunks.list_for_document(doc_id) == []
+
+
+async def test_delete_source_preserves_unrelated_docs_in_backing_collection(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source delete must not destroy a user's own uploads in its collection (#139 review).
+
+    The ``web: <url>`` backing collection is an ordinary caller-owned, visible
+    collection — uploads accept any owned ``collection_id``, so a user can put
+    their own (``source_id = NULL``) documents in it. Deleting the source must
+    remove only what the source ingested and **preserve** those unrelated
+    documents (and the collection that now still holds them); it must not audit
+    the preserved document as deleted.
+    """
+    tenant_id, source_id = await _seed_source()
+    body = "The quick brown fox jumps over the lazy dog. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Page One", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Page Two", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    # Drop an unrelated direct upload (source_id = NULL) into the same caller-owned
+    # backing collection, mirroring a user uploading into the visible collection.
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        owner_id = source.owner_id
+        collection_id = uuid.UUID(str(source.config["collection_id"]))
+        documents = DocumentRepository(session, tenant_id)
+        source_doc_ids = [d.id for d in await documents.list_for_source(source_id)]
+        assert len(source_doc_ids) == 2
+        unrelated = await documents.create(
+            owner_id=owner_id,
+            collection_id=collection_id,
+            filename="my-own-upload.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            storage_key="tenant/abc/my-own-upload.pdf",
+            status=DocumentStatus.READY,
+            source_id=None,
+        )
+        unrelated_id = unrelated.id
+        assert await CollectionRepository(session, tenant_id).count_documents(collection_id) == 3
+        await session.commit()
+
+    assert await _delete_source(tenant_id, owner_id, source_id) is True
+
+    async with db_session.session_scope() as session:
+        # The source and its ingested documents are gone...
+        assert await SourceRepository(session, tenant_id).get(source_id) is None
+        documents = DocumentRepository(session, tenant_id)
+        for doc_id in source_doc_ids:
+            assert await documents.get(doc_id) is None
+        # ...but the user's unrelated upload and its collection are preserved.
+        assert await documents.get(unrelated_id) is not None
+        collections = CollectionRepository(session, tenant_id)
+        assert await collections.get(collection_id) is not None
+        assert await collections.count_documents(collection_id) == 1
+
+        # Audit: each source document is recorded ``document.deleted``; the
+        # preserved upload is not, and ``source.deleted`` is still emitted.
+        events = await AuditEventRepository(session, tenant_id).list_recent()
+        deleted_doc_ids = {
+            e.resource_id for e in events if e.action == AuditAction.DOCUMENT_DELETED.value
+        }
+        assert deleted_doc_ids == {str(d) for d in source_doc_ids}
+        assert str(unrelated_id) not in deleted_doc_ids
+        assert AuditAction.SOURCE_DELETED.value in {e.action for e in events}
