@@ -69,7 +69,11 @@ Three new tenant-scoped tables (each `TenantScopedMixin` + `TimestampMixin`, RLS
 policy added in the same migration following migration 0007's pattern):
 
 - **`user_preferences`** — one row per user: `user_id` (unique within tenant),
-  `default_model` (nullable string). Upserted by `PATCH /preferences`.
+  `default_model` (nullable string). The row is **created lazily on the first
+  `PATCH /preferences`** — a fresh user has **no row**, and `GET /preferences`
+  returns the implicit `{ default_model_id: null, updated_at: null }` **without
+  writing** (a read never mutates state — "read before write"). Subsequent
+  `PATCH`es upsert it and set `updated_at`.
 - **`saved_searches`** — `owner_id`, `name`, `query`, `collection_id?`, `source?`,
   `type?`. Keyset-paginated like `chat_sessions`.
 - **`recent_searches`** — `user_id`, `query`, `last_used_at`; unique
@@ -100,7 +104,8 @@ the `retrieval/` permission filter; `completion`/`saved_search` suggestions read
 
 **Preferences**
 - AC-P1 `GET /preferences` returns the caller's `default_model_id` (or `null` when
-  unset) — a fresh user has `null`.
+  unset) — a fresh user (no row) returns `{ default_model_id: null, updated_at:
+  null }` and the read performs **no write**.
 - AC-P2 `PATCH /preferences { default_model_id }` with a registry id persists it and
   returns the updated row; `null` clears it.
 - AC-P3 An unknown `default_model_id` → 422 `unknown_model`; nothing is persisted.
@@ -123,7 +128,9 @@ the `retrieval/` permission filter; `completion`/`saved_search` suggestions read
 - AC-G2 Negative (the load-bearing one): a `document` suggestion is returned **only**
   if the caller may open that document — a prefix that matches *another* user's
   document yields no `document` suggestion for it.
-- AC-G3 Empty/whitespace `q` → 422; `limit` is bounded (e.g. 1–20).
+- AC-G3 Empty/whitespace `q` → 422 — enforced in the contract by a non-whitespace
+  `pattern` on the `q` parameter (so FE and BE agree, no trim-vs-reject drift); the
+  server trims before use. `limit` is bounded (1–20).
 
 **Recent history**
 - AC-R1 Running `/search` records the (normalized, de-duplicated) query;

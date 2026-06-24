@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.3.0
+  version: 0.4.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -30,6 +30,17 @@ info:
     (re-sync), and `DELETE /sources/{id}` (remove, cascading the source's
     documents). Sources are tenant- and owner-scoped (INV-1/INV-2). No shape from
     0.1.0 or 0.2.0 changed; these are REST request/response only.
+
+
+    This revision (0.4.0) **additively** freezes the **preferences, saved-searches
+    & search-suggestions wire** (spec 0005, epic #144, ADR-0006 Phase 0):
+    `GET`/`PATCH /preferences` (the caller's account preferences — a default chat
+    model validated against `/models`), `GET`/`POST`/`GET`/`PATCH`/`DELETE
+    /saved-searches` (save a query + filters and re-run it), `GET /search/suggest`
+    (permission-trimmed typeahead through the `retrieval/` chokepoint), and
+    `GET`/`DELETE /search/recent` (recent-query history; `/search` records the
+    executed query). All per-user and tenant-scoped (INV-1/INV-2). No shape from
+    0.1.0–0.3.0 changed; REST request/response only.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -880,8 +891,12 @@ paths:
         - name: q
           in: query
           required: true
-          schema: { type: string, minLength: 1 }
-          description: The partial query typed so far.
+          schema: { type: string, minLength: 1, pattern: "\\S" }
+          description: >
+            The partial query typed so far. Must contain a non-whitespace character
+            (the `\S` pattern makes an all-whitespace `q` a 422 in the contract,
+            matching spec 0005 AC-G3 — no FE/BE divergence); the server trims it
+            before use.
         - name: limit
           in: query
           required: false
@@ -1699,7 +1714,15 @@ components:
             The caller's preferred default chat model — an id from `/models`, or
             null to use the server default. New chat sessions with no explicit model
             start from this.
-        updated_at: { type: string, format: date-time }
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            When the caller last changed their preferences, or **null** if they
+            never have (the implicit server-default state). `GET /preferences`
+            returns `{ default_model_id: null, updated_at: null }` for a fresh user
+            and performs no write — the row is created on the first `PATCH` (so a
+            read never mutates state; "read before write", spec 0005 §2/§4).
 
     UserPreferencesUpdate:
       type: object
