@@ -46,6 +46,33 @@ class DocumentStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class SourceStatus(str, enum.Enum):
+    """Connector sync lifecycle (contracts/openapi.yaml SourceStatus, ADR-0009 §4).
+
+    ``pending`` = added, first sync not yet run; ``syncing`` = a sync is in
+    flight; ``ready`` = the last sync succeeded and content is indexed;
+    ``error`` = the last sync failed (see ``last_error``).
+    """
+
+    PENDING = "pending"
+    SYNCING = "syncing"
+    READY = "ready"
+    ERROR = "error"
+
+
+class WebSourceMode(str, enum.Enum):
+    """How a ``web`` source's URL is interpreted (contracts/openapi.yaml, ADR-0009 §2).
+
+    ``page`` = one URL → one document; ``feed`` = an RSS/Atom feed → many
+    documents (bounded); ``sitemap`` = a sitemap.xml → many documents (bounded).
+    The server detects the mode from the fetched content.
+    """
+
+    PAGE = "page"
+    FEED = "feed"
+    SITEMAP = "sitemap"
+
+
 class AuditOutcome(str, enum.Enum):
     """Outcome of an audited action (spec 0004 §2.4)."""
 
@@ -123,6 +150,32 @@ class Document:
     storage_key: str
     status: DocumentStatus
     error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Source:
+    """A connected external source ingested by a connector (ADR-0009 §4).
+
+    Tenant- and owner-scoped, deny-by-default: only the adding user (within
+    their tenant) can retrieve what a source ingests (INV-1/INV-2). ``type`` is
+    the connector name (e.g. ``web``); ``config`` is the connector's opaque,
+    portable JSON (e.g. ``{"url": ..., "mode": ...}``). ``status`` tracks the
+    sync lifecycle; ``indexed_count`` is how many documents the last sync
+    produced, ``last_error`` the failure detail. Ingested ``documents`` link
+    back via ``source_id`` and CASCADE on delete.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    type: str
+    config: dict[str, object]
+    status: SourceStatus
+    indexed_count: int
+    last_synced_at: datetime | None
+    last_error: str | None
     created_at: datetime
     updated_at: datetime
 
