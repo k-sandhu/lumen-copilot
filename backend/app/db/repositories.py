@@ -44,6 +44,7 @@ from app.domain.entities import (
     GrantRole,
     Message,
     MessageRole,
+    RecentSearch,
     RefreshToken,
     Role,
     SavedSearch,
@@ -168,6 +169,10 @@ def _to_user_preferences(row: models.UserPreference) -> UserPreferences:
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _to_recent_search(row: models.RecentSearch) -> RecentSearch:
+    return RecentSearch(query=row.query, last_used_at=row.last_used_at)
 
 
 def _to_saved_search(row: models.SavedSearch) -> SavedSearch:
@@ -1786,3 +1791,97 @@ class AuditEventRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_audit_event(r) for r in rows]
+
+
+def normalize_query(query: str) -> str:
+    """Dedupe key for a recent search — trimmed, lower-cased, whitespace-collapsed.
+
+    So ``"  Acme   Renewal "`` and ``"acme renewal"`` are the same recent entry.
+    Returns ``""`` for a blank query (the caller skips recording it).
+    """
+    return " ".join(query.strip().lower().split())
+
+
+class RecentSearchRepository(_TenantScopedRepository):
+    """A user's recent ``/search`` history within one tenant (spec 0005, epic #144).
+
+    De-duplicated by normalized query (re-running a query bumps one row's
+    ``last_used_at`` rather than inserting a duplicate) and capped per user (oldest
+    evicted). Tenant-scoped (INV-1): a foreign-tenant/other-user row is invisible,
+    so one user's recents never surface for another. Writes are flushed not
+    committed (the caller owns the transaction).
+    """
+
+    async def record(self, user_id: UUID, query: str, *, cap: int = 20) -> None:
+        """Record (or bump) a query in the user's recent history (deduped, capped).
+
+        A blank query is ignored. The newest ``cap`` distinct queries are kept;
+        older ones are evicted so the list stays bounded per user.
+        """
+        normalized = normalize_query(query)
+        if not normalized:
+            return
+        stmt = select(models.RecentSearch).where(
+            models.RecentSearch.tenant_id == self._tenant_id,
+            models.RecentSearch.user_id == user_id,
+            models.RecentSearch.normalized_query == normalized,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        now = datetime.now(UTC)
+        if row is not None:
+            row.query = query.strip()
+            row.last_used_at = now
+        else:
+            self._session.add(
+                models.RecentSearch(
+                    tenant_id=self._tenant_id,
+                    user_id=user_id,
+                    query=query.strip(),
+                    normalized_query=normalized,
+                    last_used_at=now,
+                )
+            )
+        await self._session.flush()
+        await self._evict_beyond_cap(user_id, cap)
+
+    async def _evict_beyond_cap(self, user_id: UUID, cap: int) -> None:
+        """Delete the oldest recents beyond ``cap`` for this user (tenant-scoped)."""
+        stmt = (
+            select(models.RecentSearch)
+            .where(
+                models.RecentSearch.tenant_id == self._tenant_id,
+                models.RecentSearch.user_id == user_id,
+            )
+            .order_by(models.RecentSearch.last_used_at.asc(), models.RecentSearch.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        excess = len(rows) - cap
+        for row in rows[: max(0, excess)]:
+            await self._session.delete(row)
+        if excess > 0:
+            await self._session.flush()
+
+    async def list_for_user(self, user_id: UUID, *, limit: int) -> list[RecentSearch]:
+        """The user's recent queries, newest-used first (capped by ``limit``)."""
+        stmt = (
+            select(models.RecentSearch)
+            .where(
+                models.RecentSearch.tenant_id == self._tenant_id,
+                models.RecentSearch.user_id == user_id,
+            )
+            .order_by(models.RecentSearch.last_used_at.desc(), models.RecentSearch.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_recent_search(r) for r in rows]
+
+    async def clear_for_user(self, user_id: UUID) -> None:
+        """Clear all of the user's recent searches (tenant-scoped; idempotent)."""
+        stmt = select(models.RecentSearch).where(
+            models.RecentSearch.tenant_id == self._tenant_id,
+            models.RecentSearch.user_id == user_id,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        for row in rows:
+            await self._session.delete(row)
+        await self._session.flush()

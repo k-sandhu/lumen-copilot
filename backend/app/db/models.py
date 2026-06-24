@@ -356,6 +356,40 @@ class SavedSearch(TenantScopedMixin, TimestampMixin, Base):
     type: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
+class RecentSearch(TenantScopedMixin, Base):
+    """A recent ``/search`` query, per user (spec 0005, epic #144).
+
+    No ``TimestampMixin``: a recent search is created then *touched* (its
+    ``last_used_at`` bumped when the same normalized query is run again) — there is
+    no separate created/updated pair. De-duplicated by ``(tenant_id, user_id,
+    normalized_query)`` so re-running a query updates one row rather than piling up;
+    the repository caps the count per user (oldest evicted). Tenant-scoped (INV-1)
+    + RLS-backstopped (the 0011 migration). ``query`` keeps the latest display form;
+    ``normalized_query`` (trimmed/lower-cased) is the dedupe key.
+    """
+
+    __tablename__ = "recent_searches"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "normalized_query", name="uq_recent_searches_tenant_user_norm"
+        ),
+        Index("ix_recent_searches_tenant_user_used", "tenant_id", "user_id", "last_used_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    normalized_query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Message(TenantScopedMixin, TimestampMixin, Base):
     """One turn in a chat session (oldest → newest by ``created_at``)."""
 

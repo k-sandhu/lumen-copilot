@@ -289,6 +289,18 @@ class SavedSearch:
 
 
 @dataclass(frozen=True, slots=True)
+class RecentSearch:
+    """A recent ``/search`` query the caller ran (spec 0005, epic #144).
+
+    The wire projection: the display query + when it was last used. De-duplicated
+    per ``(tenant, user, normalized query)`` and capped per user by the repository.
+    """
+
+    query: str
+    last_used_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """One turn in a chat session. Assistant turns may carry citations."""
 
