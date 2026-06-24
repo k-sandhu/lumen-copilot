@@ -27,7 +27,7 @@ export function AppearanceMenu() {
         ref={triggerRef}
         type="button"
         className="lc-pillbtn"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`Appearance — ${themeLabel} theme, ${appearance.mode} mode`}
         onClick={toggle}
@@ -38,9 +38,12 @@ export function AppearanceMenu() {
       </button>
 
       {open ? (
+        // A preferences popover, not a menu: its content is grouped toggle-button
+        // controls (theme/mode/accent/density), not menuitems — so it exposes
+        // role="dialog" (labelled) rather than role="menu" (#134 review).
         <div
           ref={menuRef}
-          role="menu"
+          role="dialog"
           aria-label="Appearance & preferences"
           className="lc-menu"
           style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, minWidth: 'unset' }}
