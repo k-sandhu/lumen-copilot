@@ -24,6 +24,7 @@ from app.auth import InvalidTokenError, Principal, verify_access_token
 from app.core.config import Settings, get_settings
 from app.db.repositories import AuditEventRepository
 from app.db.session import get_sessionmaker
+from app.db.tenant_context import bind_tenant
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.realtime.backplane import Backplane, RedisBackplane
@@ -149,13 +150,23 @@ async def current_user(creds: BearerCreds, settings: SettingsDep) -> Principal:
 CurrentUser = Annotated[Principal, Depends(current_user)]
 
 
-async def current_tenant(principal: CurrentUser) -> UUID:
+async def current_tenant(principal: CurrentUser, session: DbSession) -> UUID:
     """The tenant id bound at the token — the scope for ``db/`` repositories.
 
     A thin projection of ``current_user`` so a router that needs only the tenant
     (e.g. to construct a tenant-scoped repository) does not pass the whole
     principal around. Never sourced from a header or body (INV-1 begins here).
+
+    **It also binds the RLS GUC** (``app.tenant_id``) on the request session for
+    this transaction (``app.db.tenant_context.bind_tenant``, #17): because nearly
+    every tenant-scoped route depends on ``current_tenant``, resolving the tenant
+    here is the single seam that arms the Postgres RLS backstop on the request
+    path. A no-op on the offline SQLite engine the tests use. Tenant-scoped routes
+    that take a ``DbSession`` directly therefore get the GUC bound automatically;
+    the pre-identity auth paths (login/refresh) set the bypass sentinel in the
+    service instead, since the tenant is not yet known there.
     """
+    await bind_tenant(session, principal.tenant_id)
     return principal.tenant_id
 
 

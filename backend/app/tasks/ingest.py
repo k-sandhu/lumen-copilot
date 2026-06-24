@@ -46,7 +46,7 @@ import structlog
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, DependencyError
 from app.db.repositories import ChunkInput, ChunkRepository, DocumentRepository
-from app.db.session import session_scope
+from app.db.session import tenant_session_scope
 from app.domain.entities import DocumentStatus
 from app.domain.llm import Embedding
 from app.ingestion import DocumentParseError, chunk_text, parse_document
@@ -126,7 +126,7 @@ async def ingest_document_async(
             recorded as ``failed`` (returned, not raised) so it never retries.
     """
     # --- Phase 1: claim the document and move it to `processing`. ------------
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
         document = await documents.get(document_id)
         if document is None:
@@ -160,7 +160,7 @@ async def ingest_document_async(
     if not chunks:
         # An empty/blank document parses to nothing — a valid, terminal outcome:
         # ready with zero chunks (idempotently clears any prior chunks).
-        async with session_scope() as session:
+        async with tenant_session_scope(tenant_id) as session:
             await ChunkRepository(session, tenant_id).replace_for_document(document_id, [])
             await DocumentRepository(session, tenant_id).set_status(
                 document_id, DocumentStatus.READY, error=None
@@ -190,7 +190,7 @@ async def ingest_document_async(
         )
         for chunk, embedding in zip(chunks, embeddings, strict=True)
     ]
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         persisted = await ChunkRepository(session, tenant_id).replace_for_document(
             document_id, chunk_inputs
         )
@@ -206,7 +206,7 @@ async def _fail(tenant_id: UUID, document_id: UUID, reason: str) -> IngestionRes
     A permanent failure: the reason is stored on the document row so a parse/embed
     fault is a recorded terminal state, never a silent drop. Tenant-scoped.
     """
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         await DocumentRepository(session, tenant_id).set_status(
             document_id, DocumentStatus.FAILED, error=reason
         )

@@ -49,6 +49,7 @@ from app.db.repositories import (
     CitationRepository,
     MessageRepository,
 )
+from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import GroundedCitation
 from app.domain.entities import AuditOutcome, MessageRole
@@ -156,6 +157,12 @@ class ChatRuntime:
         )
         try:
             async with self._sessionmaker() as session:
+                # Bind the RLS GUC on the runtime's own session for this
+                # transaction (#17): the answer producer runs off the request
+                # path with a fresh session, so it arms the Postgres RLS backstop
+                # itself, keyed off the streaming principal's tenant. No-op off
+                # Postgres (offline tests).
+                await bind_tenant(session, self._principal.tenant_id)
                 result = await self._answer(
                     session=session,
                     state=state,
