@@ -41,8 +41,25 @@ export {
   type ResolvedMode,
   readStoredMode,
   resolveMode,
-  applyAppearance,
 } from './theme/mode';
+// Appearance engine (theme / mode / accent / density) — issue #134.
+export {
+  THEMES,
+  ACCENTS,
+  DENSITIES,
+  readAppearance,
+  storeAppearance,
+  applyAppearance,
+  applyStoredAppearance,
+  type ThemeName,
+  type Density,
+  type AccentValue,
+  type AppearanceState,
+  type ThemeDef,
+  type AccentDef,
+  type DensityDef,
+} from './theme/appearance';
+export { useAppearance, type AppearanceApi } from './theme/useAppearance';
 
 // Primitives
 export { Icon, type IconName } from './Icon';
