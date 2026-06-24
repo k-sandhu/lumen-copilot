@@ -21,13 +21,29 @@ nav.ts                    → nav overlay entry, auto-discovered
 index.ts                  → slice public surface
 components/
   AuditPage.tsx           → RouteGuard + PageChrome shell (auth-gated)
-  AuditPanel.tsx          → table + filters + pagination + drawer; every state
+  AuditPanel.tsx          → subtitle + KPIs + segmented filter + table + export
+                            + pagination + ledger footer + drawer; every state
   AuditFilters.tsx        → actor / event-type / resource / time-window form
+  AuditKpis.tsx           → client-side KPI tiles (events / denied / cited)
+  AuditSegmented.tsx      → client-side segment filter over the fetched page
+  ExportButton.tsx        → client-side CSV export of the visible rows
+  LedgerFooter.tsx        → tamper-evident "Append-only ledger" footer
 model/
   queries.ts              → TanStack Query over api/audit (cursor pagination)
   presentation.ts         → wire AuditEvent → kit AuditRow / ProvenanceDetail
   filterDraft.ts          → form draft ↔ wire filters (datetime-local → ISO-8601)
+  metrics.ts              → client-side KPI/segment/CSV derivation (pure)
 ```
+
+## Wireframe polish (#121)
+
+The KPIs, the segmented type filter, and the CSV export are all derived
+CLIENT-SIDE from the page `useAuditEvents` already returned — **no extra
+backend call, no invented data**. KPIs are scoped honestly to "this page" (the
+unit the cursor contract serves); the wireframe's "Avg latency" tile is
+**omitted** because the frozen `AuditEvent` carries no latency field. The
+footer states only what the contract guarantees (append-only), not a retention
+SLA the MVP backend doesn't enforce.
 
 ## States (frontend/AGENTS.md "every state, not just success")
 
