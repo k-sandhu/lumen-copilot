@@ -362,6 +362,15 @@ function DocumentRow({
               }
               remove.mutate(doc.id);
             }}
+            // The row is itself a button (Enter/Space opens the viewer). The
+            // Delete button's own Enter/Space already fires its click, so we must
+            // also stop the keydown bubbling to the row — otherwise the row's
+            // onKeyDown would open the viewer alongside the delete.
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.stopPropagation();
+              }
+            }}
             aria-label={`Delete ${doc.filename}`}
             className="rounded-md px-2.5 py-1 text-xs text-danger hover:bg-surface-muted disabled:opacity-60"
           >

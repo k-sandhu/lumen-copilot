@@ -51,6 +51,8 @@ Feature (`features/documents`):
   backed by a real document field. Filters by status / filename `q`, opens the
   viewer on a (ready) row click or keyboard, deletes; a `failed` row shows its error
   inline (AC-3 / AC-4). A non-ready row is not openable (no bytes to preview yet).
+  The row is a `role="button"`, so the Delete action stops **both** click and
+  keyboard (Enter/Space) propagation — activating Delete never also opens the viewer.
 - `components/DocumentViewer.tsx` — a right-side **drawer** (#89 re-skin) that
   surfaces the metadata grid, the parse → chunk → embed → ready **ingestion trace**
   (kit `StatusDot`), and — when opened on a citation — the cited passage (kit

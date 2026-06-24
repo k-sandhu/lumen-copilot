@@ -201,6 +201,41 @@ describe('DocumentList', () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
+  // Regression (review #125): the row is a `role="button"` whose onKeyDown opens
+  // the viewer on Enter/Space. The Delete button only stopped CLICK propagation,
+  // so a keyboard activation of Delete bubbled its keydown to the row and opened
+  // the viewer alongside the delete. Keyboard activation of Delete must delete and
+  // NOT open the viewer — for both Enter and Space.
+  it.each([
+    ['Enter', '{Enter}'],
+    ['Space', ' '],
+  ])('does not open the viewer when deleting with the %s key', async (_name, keys) => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({ items: [doc()], next_cursor: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(<DocumentList collectionId="col-1" onOpen={onOpen} />);
+    await screen.findByText('msa.pdf');
+
+    // Focus the Delete button directly (its tab order is after the openable row),
+    // then activate it with the keyboard.
+    const del = screen.getByRole('button', { name: /delete msa.pdf/i });
+    del.focus();
+    expect(del).toHaveFocus();
+    await user.keyboard(keys);
+
+    // The delete fired …
+    await waitFor(() => {
+      const sent = fetchSpy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'DELETE');
+      expect(sent?.[0]).toContain('/documents/doc-1');
+    });
+    // … and the viewer never opened.
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it('shows an actionable error with retry on a list failure', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(500, 'Server Error'));
     renderWithQuery(<DocumentList collectionId="col-1" onOpen={() => {}} />);
