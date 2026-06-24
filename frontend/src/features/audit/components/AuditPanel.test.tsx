@@ -155,3 +155,83 @@ describe('AuditPanel', () => {
     expect(await screen.findByText(/no events match these filters/i)).toBeInTheDocument();
   });
 });
+
+// --- Wireframe polish (#121): subtitle, KPIs, segmented filter, export, footer ---
+
+const ANSWER_EVENT: AuditEvent = {
+  id: 'evt_answer_001',
+  ts: '2026-06-19T10:01:00Z',
+  actor: 'avery@acme',
+  tenant_id: 't1',
+  event_type: 'answer.generated',
+  resource_id: 'doc-memo',
+  decision: 'allowed',
+  provenance: {
+    candidates: [{ resource_id: 'passage-1', disposition: 'allow', reason: 'rank 1', score: 0.95 }],
+  },
+};
+
+const DENIED_EVENT: AuditEvent = {
+  id: 'evt_denied_001',
+  ts: '2026-06-19T10:02:00Z',
+  actor: 'priya@acme',
+  tenant_id: 't1',
+  event_type: 'permission.denied',
+  resource_id: 'board-deck',
+  decision: 'denied',
+  provenance: { candidates: [] },
+};
+
+describe('AuditPanel — #121 polish', () => {
+  beforeEach(() => listAuditEvents.mockReset());
+
+  it('renders the subtitle, the three KPI tiles, and the ledger footer', async () => {
+    listAuditEvents.mockResolvedValue(page([EVENT, ANSWER_EVENT, DENIED_EVENT]));
+    renderWithQuery(<AuditPanel />);
+    await screen.findByRole('list', { name: /audit events/i });
+
+    expect(screen.getByText(/provable after the fact/i)).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /events \(this page\)/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /access denied/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /answers cited/i })).toBeInTheDocument();
+    expect(screen.getByText(/append-only ledger/i)).toBeInTheDocument();
+    // No faked latency tile.
+    expect(screen.queryByText(/latency/i)).not.toBeInTheDocument();
+  });
+
+  it('narrows the table client-side when a segment chip is chosen', async () => {
+    listAuditEvents.mockResolvedValue(page([EVENT, ANSWER_EVENT, DENIED_EVENT]));
+    const user = userEvent.setup();
+    renderWithQuery(<AuditPanel />);
+    const list = await screen.findByRole('list', { name: /audit events/i });
+    // All three rows visible under "All".
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3);
+
+    await user.click(screen.getByRole('button', { name: /^answer/i }));
+
+    const narrowed = await screen.findByRole('list', { name: /audit events/i });
+    expect(within(narrowed).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(narrowed).getByText(/avery@acme/)).toBeInTheDocument();
+    // It did not re-call the backend — segment filtering is client-side.
+    expect(listAuditEvents.mock.calls.length).toBe(1);
+  });
+
+  it('shows the segment-empty copy when the chosen segment matches nothing on the page', async () => {
+    listAuditEvents.mockResolvedValue(page([EVENT])); // a single retrieval event
+    const user = userEvent.setup();
+    renderWithQuery(<AuditPanel />);
+    await screen.findByRole('list', { name: /audit events/i });
+
+    await user.click(screen.getByRole('button', { name: /^answer/i }));
+
+    expect(await screen.findByText(/no events in this segment/i)).toBeInTheDocument();
+    expect(screen.getByText(/no events of this type on this page/i)).toBeInTheDocument();
+  });
+
+  it('offers an enabled Export CSV button when there are rows', async () => {
+    listAuditEvents.mockResolvedValue(page([EVENT]));
+    renderWithQuery(<AuditPanel />);
+    await screen.findByRole('list', { name: /audit events/i });
+    expect(screen.getByRole('button', { name: /export csv/i })).toBeEnabled();
+  });
+});

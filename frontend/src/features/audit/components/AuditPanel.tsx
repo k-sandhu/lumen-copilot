@@ -10,6 +10,13 @@
  * error (actionable retry; 403/401 messaged distinctly per spec 0004 INV-5/4).
  * The table scrolls independently inside a `min-h-0` flex column so long logs
  * never force a whole-page scroll.
+ *
+ * Wireframe polish (#121): a subtitle, three CLIENT-SIDE KPI tiles (events /
+ * access-denied / answers-cited — each scoped honestly to the fetched page;
+ * latency omitted, not faked), a client-side segmented type filter over the
+ * page, a client-side CSV export of the visible rows, and a tamper-evident
+ * "Append-only ledger" footer. None of this adds a backend call — it derives
+ * from the page `useAuditEvents` already returned.
  */
 import { useMemo, useState } from 'react';
 import { ApiError } from '@/api';
@@ -24,7 +31,32 @@ import {
   isEmptyDraft,
   type AuditFilterDraft,
 } from '../model/filterDraft';
+import {
+  summarizeEvents,
+  filterBySegment,
+  type AuditSegment,
+} from '../model/metrics';
 import { AuditFilters } from './AuditFilters';
+import { AuditKpis } from './AuditKpis';
+import { AuditSegmented } from './AuditSegmented';
+import { ExportButton } from './ExportButton';
+import { LedgerFooter } from './LedgerFooter';
+
+const EMPTY_EVENTS: AuditEvent[] = [];
+
+const ALL_SEGMENTS: AuditSegment[] = ['all', 'retrieval', 'answer', 'action', 'access'];
+
+/**
+ * Per-segment counts over the fetched page, derived from `filterBySegment` so
+ * each badge exactly matches what selecting that segment will show.
+ */
+function segmentCounts(events: readonly AuditEvent[]): Record<AuditSegment, number> {
+  const counts = {} as Record<AuditSegment, number>;
+  for (const seg of ALL_SEGMENTS) {
+    counts[seg] = filterBySegment(events, seg).length;
+  }
+  return counts;
+}
 
 export function AuditPanel() {
   // Draft = what's in the form; applied = what's driving the query. Apply copies
@@ -35,6 +67,8 @@ export function AuditPanel() {
   // Cursor stack: each entry is the cursor for a page; lets us page back.
   const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined]);
   const [selected, setSelected] = useState<AuditEvent | null>(null);
+  // Client-side narrowing of the fetched page (issue #121); resets per page.
+  const [segment, setSegment] = useState<AuditSegment>('all');
 
   const cursor = cursorStack[cursorStack.length - 1];
   const filters: WireFilters = useMemo(
@@ -45,33 +79,59 @@ export function AuditPanel() {
   const query = useAuditEvents(filters);
   const hasFilters = !isEmptyDraft(applied);
 
+  const pageEvents = query.data?.items ?? EMPTY_EVENTS;
+  const metrics = useMemo(() => summarizeEvents(pageEvents), [pageEvents]);
+  const counts = useMemo(() => segmentCounts(pageEvents), [pageEvents]);
+  const visibleEvents = useMemo(
+    () => filterBySegment(pageEvents, segment),
+    [pageEvents, segment],
+  );
+
   const apply = (): void => {
     setApplied(draft);
     setCursorStack([undefined]);
+    setSegment('all');
     setSelected(null);
   };
   const clear = (): void => {
     setDraft(EMPTY_DRAFT);
     setApplied(EMPTY_DRAFT);
     setCursorStack([undefined]);
+    setSegment('all');
     setSelected(null);
   };
   const nextPage = (): void => {
     const next = query.data?.next_cursor;
     if (next) {
       setCursorStack((s) => [...s, next]);
+      setSegment('all');
       setSelected(null);
     }
   };
   const prevPage = (): void => {
     setCursorStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+    setSegment('all');
     setSelected(null);
   };
 
   const detail = selected ? toProvenanceDetail(selected) : undefined;
+  // Skeleton tiles only on the first load; keepPreviousData keeps them filled
+  // across paging/filtering so the row never flashes empty.
+  const kpisLoading = query.isPending;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 space-y-4 border-b border-border px-4 pb-4 pt-3">
+        <p className="text-sm text-foreground-muted">
+          Every retrieval, answer, and access decision — provable after the fact.
+        </p>
+        <AuditKpis metrics={metrics} loading={kpisLoading} />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <AuditSegmented value={segment} onChange={setSegment} counts={counts} />
+          <ExportButton events={visibleEvents} />
+        </div>
+      </div>
+
       <AuditFilters
         draft={draft}
         onChange={setDraft}
@@ -84,7 +144,9 @@ export function AuditPanel() {
         <ScrollArea viewportClassName="px-3 py-3">
           <AuditTableBody
             query={query}
+            events={visibleEvents}
             hasFilters={hasFilters}
+            segment={segment}
             onSelect={setSelected}
             selectedId={selected?.id ?? null}
           />
@@ -97,8 +159,10 @@ export function AuditPanel() {
         onPrev={prevPage}
         onNext={nextPage}
         page={cursorStack.length}
-        count={query.data?.items.length ?? 0}
+        count={visibleEvents.length}
       />
+
+      <LedgerFooter shown={visibleEvents.length} />
 
       <ProvenanceDrawer open={selected !== null} detail={detail} onClose={() => setSelected(null)} />
     </div>
@@ -109,12 +173,17 @@ type AuditQueryResult = ReturnType<typeof useAuditEvents>;
 
 function AuditTableBody({
   query,
+  events,
   hasFilters,
+  segment,
   onSelect,
   selectedId,
 }: {
   query: AuditQueryResult;
+  /** The page narrowed by the client-side segment filter (issue #121). */
+  events: AuditEvent[];
   hasFilters: boolean;
+  segment: AuditSegment;
   onSelect: (event: AuditEvent) => void;
   selectedId: string | null;
 }) {
@@ -137,16 +206,22 @@ function AuditTableBody({
     return <AuditError error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />;
   }
 
-  const events = query.data.items;
+  const pageEmpty = query.data.items.length === 0;
   if (events.length === 0) {
+    // Distinguish three empties: a server-filtered page with nothing, a
+    // genuinely empty trail, and a non-empty page narrowed away by the
+    // client-side segment chip (issue #121).
+    const message = !pageEmpty
+      ? 'No events of this type on this page. Pick another segment or page on.'
+      : hasFilters
+        ? 'No events match these filters. Try widening the time window or clearing a filter.'
+        : 'Nothing has been recorded yet. Retrieval, answer, and access decisions will appear here.';
     return (
       <div className="px-2 py-16 text-center">
-        <p className="text-sm font-medium">No audit events</p>
-        <p className="mt-1 text-sm text-foreground-muted">
-          {hasFilters
-            ? 'No events match these filters. Try widening the time window or clearing a filter.'
-            : 'Nothing has been recorded yet. Retrieval, answer, and access decisions will appear here.'}
+        <p className="text-sm font-medium">
+          {segment === 'all' ? 'No audit events' : 'No events in this segment'}
         </p>
+        <p className="mt-1 text-sm text-foreground-muted">{message}</p>
       </div>
     );
   }
