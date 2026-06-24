@@ -136,11 +136,20 @@ describe('sourceMetadataRows', () => {
     expect(modified).toEqual({ label: 'Last modified', value: METADATA_UNKNOWN, unknown: true });
   });
 
-  it('passes through the real derived freshness as last-indexed', () => {
-    const indexed = sourceMetadataRows({ lastIndexed: '2d ago' }).find(
+  it('passes through a REAL source-indexing label as last-indexed', () => {
+    const indexed = sourceMetadataRows({ lastIndexed: 'Indexed 2d ago' }).find(
       (r) => r.label === 'Last indexed',
     );
-    expect(indexed).toEqual({ label: 'Last indexed', value: '2d ago', unknown: false });
+    expect(indexed).toEqual({ label: 'Last indexed', value: 'Indexed 2d ago', unknown: false });
+  });
+
+  it('marks last-indexed unknown when no source-indexing value is supplied (GUARD #120)', () => {
+    // The chat/citation wire carries no source-indexing timestamp. The only time
+    // a chat turn has is the ANSWER/message time — which is NOT source provenance.
+    // With nothing real supplied, "Last indexed" must be "Not available", so a
+    // doc indexed months ago can never render "Last indexed: Just now".
+    const indexed = sourceMetadataRows({}).find((r) => r.label === 'Last indexed');
+    expect(indexed).toEqual({ label: 'Last indexed', value: METADATA_UNKNOWN, unknown: true });
   });
 
   it('treats blank / whitespace values as unknown', () => {

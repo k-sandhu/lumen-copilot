@@ -154,9 +154,11 @@ export function ChatThread({
           const trace = isAssistant
             ? buildRetrievalSummary(citations, [])
             : { summary: '', steps: [], hasContent: false };
-          // The answer-footer freshness (#120) is the same real evidence recency
-          // the per-source pills use — the message timestamp, never invented.
-          const freshness = isAssistant ? (relativeTime(message.created_at) ?? undefined) : undefined;
+          // The footer's "answered <ago>" (#120) is the message/answer time — when
+          // this answer was produced, never presented as source provenance.
+          const answeredAt = isAssistant
+            ? (relativeTime(message.created_at) ?? undefined)
+            : undefined;
           return (
             <MessageBubble
               key={message.id}
@@ -168,7 +170,7 @@ export function ChatThread({
               sourceMeta={isAssistant ? sourceMetaFor(citations, message.created_at) : undefined}
               traceSummary={isAssistant && trace.hasContent ? trace.summary : undefined}
               traceSteps={trace.steps}
-              freshness={freshness}
+              answeredAt={answeredAt}
               showNoCitationsNotice={isAssistant && citations.length === 0}
               onOpenCitation={onOpenCitation}
             />
@@ -191,8 +193,8 @@ export function ChatThread({
                   traceSteps={trace.steps}
                   tools={live.tools}
                   streaming={live.phase === 'streaming'}
-                  // A just-settled live answer's evidence is current → "Just now".
-                  freshness={live.phase === 'done' ? 'Just now' : undefined}
+                  // A just-settled live answer was produced now → "answered Just now".
+                  answeredAt={live.phase === 'done' ? 'Just now' : undefined}
                   showNoCitationsNotice={live.phase === 'done' && live.citations.length === 0}
                   onOpenCitation={onOpenCitation}
                 />

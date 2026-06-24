@@ -52,10 +52,11 @@ export interface MessageBubbleProps {
   /** True while this assistant turn is still streaming (shows a caret). */
   streaming?: boolean;
   /**
-   * Freshness of the answer's evidence (e.g. "2d ago"), for the footer's
-   * "freshest <ago>" signal. Derived from the message timestamp; omitted if none.
+   * When the answer was produced (e.g. "2d ago"), for the footer's
+   * "answered <ago>" signal. Derived from the message timestamp; omitted if none.
+   * This is the ANSWER time, not source freshness/last-indexed (#120 GUARD).
    */
-  freshness?: string | undefined;
+  answeredAt?: string | undefined;
   /** True once a completed assistant turn produced zero citations (AC-5). */
   showNoCitationsNotice?: boolean;
   /** Open the citation in the inspector; `meta` carries the source's freshness. */
@@ -73,7 +74,7 @@ function MessageBubbleComponent({
   traceSteps,
   tools = [],
   streaming = false,
-  freshness,
+  answeredAt,
   showNoCitationsNotice = false,
   onOpenCitation,
 }: MessageBubbleProps) {
@@ -178,7 +179,7 @@ function MessageBubbleComponent({
           <AnswerFooter
             answerText={content}
             permissionChecked={citations.length > 0}
-            freshness={freshness}
+            answeredAt={answeredAt}
           />
         )}
       </div>

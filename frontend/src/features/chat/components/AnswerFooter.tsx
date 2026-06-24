@@ -6,8 +6,11 @@
  *     returns sources the requesting user may see (spec 0004 INV-2/INV-3), so a
  *     grounded answer is permission-checked. Shown only when the answer is
  *     actually grounded in at least one cited source — never as a bare claim.
- *   - A freshness timestamp ("freshest <ago>"), derived from the real message
- *     timestamp (presentation.relativeTime). Omitted when we have no timestamp.
+ *   - When the answer was produced ("answered <ago>"), derived from the real
+ *     message timestamp (presentation.relativeTime). This is the ANSWER time, not
+ *     source freshness/indexing — the chat wire carries no source-provenance
+ *     timestamp, so we label it honestly as the answer time (#120 GUARD) and
+ *     never as "freshest"/"last indexed". Omitted when we have no timestamp.
  *   - Helpful / Not-helpful — LOCAL-ONLY UI (toggle + aria-pressed). There is NO
  *     backend feedback endpoint, so this persists NOTHING and the component never
  *     implies it does (honest per #120). It is a one-of toggle the user can clear.
@@ -29,8 +32,12 @@ export interface AnswerFooterProps {
   answerText: string;
   /** True when the answer is grounded in ≥1 cited source → "Permission-checked". */
   permissionChecked: boolean;
-  /** Freshness label for the answer's evidence, e.g. "2d ago". Omitted if absent. */
-  freshness?: string | undefined;
+  /**
+   * When the answer was produced, as a relative label (e.g. "2d ago"), derived
+   * from the message timestamp. Rendered as "answered <ago>" — this is the ANSWER
+   * time, NOT source freshness/last-indexed (#120 GUARD). Omitted if absent.
+   */
+  answeredAt?: string | undefined;
 }
 
 /** Thumb / copy / check glyphs the shared kit Icon set doesn't carry (#120). */
@@ -77,7 +84,7 @@ function FooterGlyph({ name }: { name: 'thumb-up' | 'thumb-down' | 'copy' | 'che
 const BTN =
   'inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent';
 
-export function AnswerFooter({ answerText, permissionChecked, freshness }: AnswerFooterProps) {
+export function AnswerFooter({ answerText, permissionChecked, answeredAt }: AnswerFooterProps) {
   const [vote, setVote] = useState<Vote>(null);
   const [copied, setCopied] = useState(false);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -101,7 +108,7 @@ export function AnswerFooter({ answerText, permissionChecked, freshness }: Answe
   }, [answerText]);
 
   // Nothing to show? Don't render an empty footer rule.
-  if (!permissionChecked && !freshness) return null;
+  if (!permissionChecked && !answeredAt) return null;
 
   return (
     <footer className="mt-2 flex items-center gap-3 border-t border-border pt-2 text-[11px] text-foreground-muted">
@@ -111,10 +118,13 @@ export function AnswerFooter({ answerText, permissionChecked, freshness }: Answe
           Permission-checked
         </span>
       )}
-      {freshness && (
-        <span className="inline-flex items-center gap-1">
+      {answeredAt && (
+        <span
+          className="inline-flex items-center gap-1"
+          title="When this answer was produced (not source freshness)"
+        >
           <Icon name="clock" className="h-3.5 w-3.5" />
-          freshest {freshness}
+          answered {answeredAt}
         </span>
       )}
 

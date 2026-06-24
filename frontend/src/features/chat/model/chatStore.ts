@@ -6,17 +6,20 @@
  */
 import { create } from 'zustand';
 
-/** What the citation viewer is currently showing (AC-2 click-through). */
+/**
+ * What the citation viewer is currently showing (AC-2 click-through). It carries
+ * only what the chat/citation wire actually provides about the source (its id,
+ * name, and the cited span). It deliberately holds NO freshness/last-indexed
+ * label: the only timestamp a chat turn has is the answer/message time, which is
+ * the answer's age — not when the source was indexed — so the viewer never
+ * presents it as source provenance (#120 GUARD against fabricated provenance).
+ */
 export interface ViewerTarget {
   documentId: string;
   documentName: string;
   charStart: number;
   charEnd: number;
   snippet: string;
-  /** Source freshness label for the inspector (#89), e.g. "2d ago". */
-  freshness?: string;
-  /** Whether the source is past its freshness window. */
-  stale?: boolean;
 }
 
 interface ChatUiState {

@@ -4,7 +4,9 @@
  *
  * Asserts the honest contract:
  *  - "Permission-checked" shows only when the answer is grounded (≥1 source).
- *  - Freshness renders the derived "freshest <ago>" label, omitted when absent.
+ *  - The answer time renders as "answered <ago>" (the ANSWER time, NOT source
+ *    freshness/last-indexed — #120 GUARD), omitted when absent. It must never be
+ *    labelled "freshest"/"last indexed", which would imply source provenance.
  *  - Helpful / Not-helpful are LOCAL-ONLY toggles (aria-pressed, mutually
  *    exclusive, clearable) — they send NOTHING (no backend feedback endpoint).
  *  - Copy writes the answer text to the clipboard, client-side only.
@@ -19,23 +21,32 @@ const ANSWER = 'Northwind approved the Q3 pricing change on May 28.';
 describe('AnswerFooter', () => {
   it('shows "Permission-checked" only when the answer is grounded', () => {
     const { rerender } = render(
-      <AnswerFooter answerText={ANSWER} permissionChecked={false} freshness="2d ago" />,
+      <AnswerFooter answerText={ANSWER} permissionChecked={false} answeredAt="2d ago" />,
     );
     expect(screen.queryByText(/permission-checked/i)).not.toBeInTheDocument();
 
-    rerender(<AnswerFooter answerText={ANSWER} permissionChecked freshness="2d ago" />);
+    rerender(<AnswerFooter answerText={ANSWER} permissionChecked answeredAt="2d ago" />);
     expect(screen.getByText(/permission-checked/i)).toBeInTheDocument();
   });
 
-  it('renders the freshness label and omits it when absent', () => {
+  it('labels the timestamp as the ANSWER time ("answered <ago>"), omitted when absent', () => {
     const { rerender } = render(<AnswerFooter answerText={ANSWER} permissionChecked />);
-    expect(screen.queryByText(/freshest/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/answered/i)).not.toBeInTheDocument();
 
-    rerender(<AnswerFooter answerText={ANSWER} permissionChecked freshness="2d ago" />);
-    expect(screen.getByText(/freshest 2d ago/i)).toBeInTheDocument();
+    rerender(<AnswerFooter answerText={ANSWER} permissionChecked answeredAt="2d ago" />);
+    expect(screen.getByText(/answered 2d ago/i)).toBeInTheDocument();
   });
 
-  it('renders nothing when there is no status and no freshness (no empty rule)', () => {
+  it('NEVER labels the answer time as source freshness/last-indexed (#120 GUARD)', () => {
+    // The message timestamp is the ANSWER time, not the source's indexing time.
+    // Presenting it as "freshest"/"last indexed" would fabricate source provenance.
+    render(<AnswerFooter answerText={ANSWER} permissionChecked answeredAt="Just now" />);
+    expect(screen.getByText(/answered just now/i)).toBeInTheDocument();
+    expect(screen.queryByText(/freshest/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/last indexed/i)).not.toBeInTheDocument();
+  });
+
+  it('renders nothing when there is no status and no answer time (no empty rule)', () => {
     const { container } = render(
       <AnswerFooter answerText={ANSWER} permissionChecked={false} />,
     );
