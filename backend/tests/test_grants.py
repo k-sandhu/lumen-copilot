@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -449,6 +449,121 @@ async def test_grant_on_foreign_tenant_resource_is_404(
         await grants_a.create_grant(
             resource_type=GrantResourceType.DOCUMENT, resource_id=doc_b, principal_id=user_a
         )
+
+
+# ---------------------------------------------------------------------------
+# Grantee validation: the migration has no FK on grants.principal_id, so the
+# service is the only guard. A foreign-tenant / unknown grantee → 404 (+ denied
+# audit, no grant row); an unsupported principal type → rejected (no grant row).
+# ---------------------------------------------------------------------------
+
+
+async def test_grant_to_foreign_tenant_user_is_404_with_denied_audit_and_no_row(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-1/INV-2: granting to a tenant-B user from tenant A → 404, audited denied, no row.
+
+    The owner legitimately owns the resource in their own tenant, but the grantee
+    id belongs to **another tenant**. The tenant-scoped ``UserRepository`` returns
+    ``None`` for that id (indistinguishable from non-existent), so the grant is
+    refused as 404 (existence non-disclosure, never 403), a ``permission.denied``
+    audit event is emitted, and **no grant row** is written — closing the hole
+    where an owner could mint a grant that crosses the tenant boundary.
+    """
+    tenant_a, tenant_b = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    foreign_user = await _make_user(session, tenant_b, "foreign@y.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a.txt", chunk_texts=["a"]
+    )
+    grants_a = _grants_service(session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,))
+    with pytest.raises(NotFoundError):
+        await grants_a.create_grant(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc_a,
+            principal_id=foreign_user,  # a real user, but in tenant B
+        )
+    # No grant row was written.
+    stored = await GrantRepository(session, tenant_a).list_for_resource(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a
+    )
+    assert stored == []
+    # A denied audit was emitted; no success audit.
+    actions = {
+        e.action for e in await AuditEventRepository(session, tenant_a).list_recent(limit=10)
+    }
+    assert AuditAction.PERMISSION_DENIED.value in actions
+    assert AuditAction.PERMISSION_GRANTED.value not in actions
+    # The foreign-tenant user still cannot see A's document (the grant never landed).
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    assert (
+        await svc.get_document(principal=_principal(foreign_user, tenant_b), document_id=doc_a)
+        is None
+    )
+
+
+async def test_grant_to_nonexistent_user_is_404_with_no_row(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """A grant to a random, non-existent user id → 404, ``permission.denied``, no row."""
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a.txt", chunk_texts=["a"]
+    )
+    grants_a = _grants_service(session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,))
+    with pytest.raises(NotFoundError):
+        await grants_a.create_grant(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc_a,
+            principal_id=uuid.uuid4(),  # nobody
+        )
+    stored = await GrantRepository(session, tenant_a).list_for_resource(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a
+    )
+    assert stored == []
+    actions = {
+        e.action for e in await AuditEventRepository(session, tenant_a).list_recent(limit=10)
+    }
+    assert AuditAction.PERMISSION_DENIED.value in actions
+    assert AuditAction.PERMISSION_GRANTED.value not in actions
+
+
+@pytest.mark.parametrize(
+    "principal_type",
+    [GrantPrincipalType.GROUP, GrantPrincipalType.ROLE],
+)
+async def test_grant_with_unsupported_principal_type_is_rejected_no_row(
+    session: AsyncSession,
+    two_tenants: tuple[uuid.UUID, uuid.UUID],
+    principal_type: GrantPrincipalType,
+) -> None:
+    """INV-8: a ``group``/``role`` grant is rejected at the boundary (422), no row.
+
+    The MVP supports ``user`` grants only (spec 0004 §2.2). A ``group``/``role``
+    principal — which the retrieval filter never honors — is refused with a
+    :class:`ValidationError` (422) before anything is persisted, and **no grant
+    row** is written. (A denied audit is not emitted: this is malformed input, not
+    an access denial.)
+    """
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_a, "b@x.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a.txt", chunk_texts=["a"]
+    )
+    grants_a = _grants_service(session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,))
+    with pytest.raises(ValidationError):
+        await grants_a.create_grant(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc_a,
+            principal_id=user_b,
+            principal_type=principal_type,
+        )
+    stored = await GrantRepository(session, tenant_a).list_for_resource(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a
+    )
+    assert stored == []
 
 
 async def test_grant_emits_audit_event(

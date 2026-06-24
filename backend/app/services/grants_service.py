@@ -21,6 +21,19 @@ foreign/unauthorized resource exists). A denied attempt emits a
 ``permission.denied`` audit event; a successful grant/revoke emits
 ``permission.granted`` / ``permission.revoked`` (INV-6).
 
+**Grantee validation (the only guard — spec 0004 §2.2).** The ``grants`` table
+deliberately carries **no FK on ``principal_id``** (the principal namespace is
+modelled to grow to ``group``/``role``), so ``create_grant`` is the single place
+that proves the grantee is real. The MVP issues **``user`` grants only**: any other
+``principal_type`` is rejected at the boundary as a 422
+:class:`~app.core.errors.ValidationError` (no grant, no success audit). The grantee
+user is then looked up through the **tenant-scoped** :class:`UserRepository`, so an
+unknown id and a foreign-tenant user are indistinguishable — both raise 404 (after
+a ``permission.denied`` audit), never 403. Without this an owner could mint a grant
+that crosses the tenant boundary or that the retrieval filter (which admits only an
+in-tenant ``user`` principal) can never honor — reporting a success that does
+nothing.
+
 The ``tenant_id`` and the granting ``owner_id`` come from the resolved principal
 (``auth/``), never from request input (spec 0004 §2.3). The caller owns the
 transaction boundary; the audit write is flushed, not committed, so it commits
@@ -33,11 +46,12 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
     GrantRepository,
+    UserRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
@@ -78,6 +92,7 @@ class GrantsService:
         self._grants = GrantRepository(session, tenant_id)
         self._collections = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
+        self._users = UserRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
@@ -128,6 +143,67 @@ class GrantsService:
             # 404, never 403 — do not reveal a foreign/unauthorized resource exists.
             raise NotFoundError("Resource not found.")
 
+    async def _validate_grantee(
+        self,
+        *,
+        resource_type: GrantResourceType,
+        resource_id: UUID,
+        principal_type: GrantPrincipalType,
+        principal_id: UUID,
+    ) -> None:
+        """Ensure the grantee is a supported, in-tenant principal, or reject.
+
+        The migration deliberately puts **no FK on** ``grants.principal_id`` (the
+        principal namespace is meant to grow to groups/roles), so this service is
+        the *only* guard that the grantee is real and in-tenant. Without it an
+        owner/admin could mint a grant to a foreign-tenant user, a random UUID, or
+        a ``group``/``role`` principal — none of which the retrieval filter honors
+        (it admits only a ``user`` principal in the requester's tenant), so the
+        grant would report success yet never make the resource retrievable, or
+        worse cross the tenant boundary. Two guards (spec 0004 §2.2 — MVP emits
+        ``user`` only):
+
+        1. **Unsupported principal type** (``GROUP``/``ROLE``) → 422
+           :class:`ValidationError` at the boundary (INV-8). The grant is *not*
+           persisted and *no* success audit is emitted. No ``permission.denied``
+           is emitted either — this is a malformed request, not an access denial.
+        2. **Unknown / foreign-tenant grantee** — the user is looked up via the
+           tenant-scoped :class:`UserRepository` (the granting principal's
+           tenant), so a tenant-B user resolves to ``None`` exactly like a
+           non-existent one. Missing ⇒ 404 :class:`NotFoundError` (existence
+           non-disclosure, never 403; INV-1/§2.1) **after** a ``permission.denied``
+           audit event (INV-6). The grant is not persisted.
+        """
+        if principal_type is not GrantPrincipalType.USER:
+            # MVP supports user grants only (spec 0004 §2.2). Reject at the
+            # boundary — do not persist or audit a success for a principal the
+            # retrieval filter can never honor.
+            raise ValidationError(
+                "Only user grants are supported.",
+                code="unsupported_principal_type",
+            )
+
+        grantee = await self._users.get(principal_id)
+        if grantee is None:
+            # Missing, or a user that belongs to another tenant (the tenant-scoped
+            # repository returns None for both) — 404, never 403, and audited as a
+            # denial so the cross-boundary attempt is provable after the fact.
+            await self._audit.emit(
+                action=AuditAction.PERMISSION_DENIED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type=resource_type.value,
+                resource_id=str(resource_id),
+                outcome=AuditOutcome.DENIED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "reason": "grantee_not_in_tenant",
+                    "principal_type": principal_type.value,
+                    "principal_id": str(principal_id),
+                },
+            )
+            raise NotFoundError("Grantee not found.")
+
     # --- use-cases ----------------------------------------------------------
 
     async def create_grant(
@@ -143,14 +219,21 @@ class GrantsService:
 
         Order (fail-closed):
 
-        1. **Authorize** — the resource must exist in this tenant and be owned by
-           the granting principal (or they must be a tenant admin); otherwise 404
-           + a ``permission.denied`` audit event (``_authorize``).
-        2. **Persist** — insert the grant (idempotent on the unique (resource,
+        1. **Authorize the resource** — it must exist in this tenant and be owned
+           by the granting principal (or they must be a tenant admin); otherwise
+           404 + a ``permission.denied`` audit event (``_authorize``).
+        2. **Validate the grantee** (``_validate_grantee``) — the migration puts no
+           FK on ``grants.principal_id``, so this service is the only guard. An
+           unsupported ``principal_type`` (``GROUP``/``ROLE``) is rejected at the
+           boundary (422); a missing or foreign-tenant grantee → 404 + a
+           ``permission.denied`` audit. Neither persists a grant nor emits a
+           success audit.
+        3. **Persist** — insert the grant (idempotent on the unique (resource,
            principal) key — re-granting returns the existing row, never a
            duplicate). The grantee ``principal_id`` and the resource live in the
            granting principal's tenant (INV-1).
-        3. **Audit** — emit ``permission.granted`` (INV-6).
+        4. **Audit** — emit ``permission.granted`` (INV-6), only on a fully-valid
+           grant.
 
         After this the retrieval permission filter admits the resource (and, for a
         collection, its documents — the grant cascade) into the grantee's
@@ -158,9 +241,18 @@ class GrantsService:
 
         Raises:
             NotFoundError: the resource is missing, in another tenant, or not
-                owned by the (non-admin) caller — reported as 404.
+                owned by the (non-admin) caller; or the grantee is unknown / in
+                another tenant — all reported as 404 (existence non-disclosure).
+            ValidationError: ``principal_type`` is not ``user`` (the only MVP
+                principal) — reported as 422.
         """
         await self._authorize(resource_type, resource_id)
+        await self._validate_grantee(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            principal_type=principal_type,
+            principal_id=principal_id,
+        )
         grant = await self._grants.create(
             resource_type=resource_type,
             resource_id=resource_id,
