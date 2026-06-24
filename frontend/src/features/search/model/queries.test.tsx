@@ -10,8 +10,8 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { SearchResponse } from '@/api';
-import { searchKey, useSearch } from './queries';
+import type { CollectionList, SearchResponse } from '@/api';
+import { searchKey, useSearch, useSearchCollections } from './queries';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -90,5 +90,16 @@ describe('useSearch', () => {
     const { result } = renderHook(() => useSearch({ q: 'x' }), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error).toMatchObject({ status: 422 });
+  });
+});
+
+describe('useSearchCollections', () => {
+  it('loads the caller’s collections from GET /collections for the scope filter', async () => {
+    const list: CollectionList = { items: [], next_cursor: null };
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(list));
+    const { result } = renderHook(() => useSearchCollections(), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(String(spy.mock.calls.at(-1)?.[0])).toContain('/collections');
+    expect(result.current.data?.items).toEqual([]);
   });
 });

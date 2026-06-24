@@ -4,17 +4,36 @@
  * once) is asserted here, independent of React.
  */
 import { describe, it, expect } from 'vitest';
-import type { MatchSpan } from '@/api';
+import type { MatchSpan, ResultSource, SearchResult } from '@/api';
 import {
   freshnessLabel,
+  hasInlineCitations,
   isStale,
   permissionLabel,
+  segmentAnswer,
+  sourceFacets,
   sourceGlyph,
+  sourceLabel,
   STALE_AFTER_MS,
   toPassageRuns,
   toPermissionLevel,
   trimNotice,
+  typeFacets,
 } from './presentation';
+
+function res(source: ResultSource, type: string): SearchResult {
+  return {
+    id: `${source}-${type}-${Math.random()}`,
+    title: 't',
+    snippet: 's',
+    match_spans: [],
+    why_matched: 'w',
+    source,
+    type,
+    last_indexed: '2026-06-01T00:00:00Z',
+    permission: 'allowed',
+  };
+}
 
 describe('toPermissionLevel / permissionLabel', () => {
   it('maps allowed → granted and restricted → restricted', () => {
@@ -115,5 +134,69 @@ describe('trimNotice', () => {
   it('discloses the hidden count without leaking content (spec 0004 INV-2)', () => {
     expect(trimNotice(1)).toBe("1 result hidden — you don't have access");
     expect(trimNotice(3)).toBe("3 results hidden — you don't have access");
+  });
+});
+
+describe('sourceLabel', () => {
+  it('labels each REAL source kind from the frozen enum (no invented connectors)', () => {
+    expect(sourceLabel('upload')).toMatch(/uploaded/i);
+    expect(sourceLabel('chat')).toMatch(/chat/i);
+    expect(sourceLabel('connector')).toMatch(/connected/i);
+  });
+});
+
+describe('sourceFacets', () => {
+  it('tallies only the source kinds present in the data, in enum order', () => {
+    const facets = sourceFacets([
+      res('chat', 'message'),
+      res('upload', 'document'),
+      res('upload', 'document'),
+    ]);
+    // upload before chat (enum order), counts honest, connector absent (no data).
+    expect(facets).toEqual([
+      { source: 'upload', count: 2 },
+      { source: 'chat', count: 1 },
+    ]);
+  });
+  it('is empty for no results (never a faked connector row)', () => {
+    expect(sourceFacets([])).toEqual([]);
+  });
+});
+
+describe('typeFacets', () => {
+  it('derives content-type facets from the data, most-frequent first', () => {
+    const facets = typeFacets([
+      res('upload', 'document'),
+      res('chat', 'message'),
+      res('upload', 'document'),
+    ]);
+    expect(facets).toEqual([
+      { type: 'document', count: 2 },
+      { type: 'message', count: 1 },
+    ]);
+  });
+});
+
+describe('segmentAnswer / hasInlineCitations', () => {
+  it('splits text into plain runs and resolvable [n] markers', () => {
+    expect(segmentAnswer('A [1] B [2].', 2)).toEqual([
+      { text: 'A ' },
+      { text: '[1]', cite: 1 },
+      { text: ' B ' },
+      { text: '[2]', cite: 2 },
+      { text: '.' },
+    ]);
+  });
+  it('leaves an out-of-range [n] as plain text (never an un-resolvable citation)', () => {
+    // [9] points past the 1 available citation → stays literal.
+    const segs = segmentAnswer('one [1] nine [9]', 1);
+    expect(segs.some((s) => s.cite === 1)).toBe(true);
+    expect(segs.some((s) => s.cite === 9)).toBe(false);
+    expect(segs.map((s) => s.text).join('')).toBe('one [1] nine [9]');
+  });
+  it('reports whether any resolvable inline marker is present', () => {
+    expect(hasInlineCitations('answer [1]', 1)).toBe(true);
+    expect(hasInlineCitations('answer with no markers', 1)).toBe(false);
+    expect(hasInlineCitations('answer [3]', 1)).toBe(false);
   });
 });

@@ -6,6 +6,7 @@
 export { SearchScreen } from './components/SearchScreen';
 export { SearchComposer } from './components/SearchComposer';
 export { SearchResultRow } from './components/SearchResultRow';
+export { SearchFilters, type SearchFilterState } from './components/SearchFilters';
 export { DirectAnswerBlock } from './components/DirectAnswerBlock';
 export { TrimNotice } from './components/TrimNotice';
-export { useSearch, searchKey } from './model/queries';
+export { useSearch, useSearchCollections, searchKey } from './model/queries';
