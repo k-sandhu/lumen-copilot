@@ -254,6 +254,53 @@ class ChatSession:
 
 
 @dataclass(frozen=True, slots=True)
+class UserPreferences:
+    """A user's account preferences (spec 0005). One row per user, created lazily
+    on the first write — a fresh user has none, and the service then returns the
+    implicit server-default state (``default_model`` ``None``). Tenant-scoped."""
+
+    id: UUID
+    tenant_id: UUID
+    user_id: UUID
+    default_model: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SavedSearch:
+    """A saved ``/search`` query + its optional filters (spec 0005, epic #144).
+
+    Ownership-bearing (spec 0004 §2.2): a caller only ever sees their own.
+    ``query`` + ``collection_id`` / ``source`` / ``type`` capture exactly what
+    ``/search`` accepts, so applying one re-runs the same search.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    query: str
+    collection_id: UUID | None
+    source: str | None
+    type: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecentSearch:
+    """A recent ``/search`` query the caller ran (spec 0005, epic #144).
+
+    The wire projection: the display query + when it was last used. De-duplicated
+    per ``(tenant, user, normalized query)`` and capped per user by the repository.
+    """
+
+    query: str
+    last_used_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """One turn in a chat session. Assistant turns may carry citations."""
 

@@ -302,6 +302,94 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class UserPreference(TenantScopedMixin, TimestampMixin, Base):
+    """A user's account preferences — one row per user (spec 0005, epic #144).
+
+    Created lazily on the first ``PATCH /preferences``: a fresh user has no row,
+    and ``GET /preferences`` returns the implicit server-default state without
+    writing (read-before-write). ``default_model`` is an override stored as a
+    plain string id from the ``/models`` registry — validated at write time and
+    fail-closed at chat time (a model later removed from the registry falls back
+    to the server default). Tenant-scoped (INV-1); the unique ``(tenant_id,
+    user_id)`` makes the row a per-user singleton (the upsert target).
+    """
+
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_preferences_tenant_user"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    default_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class SavedSearch(TenantScopedMixin, TimestampMixin, Base):
+    """A saved ``/search`` query + its filters (spec 0005, epic #144).
+
+    Ownership-bearing: ``owner_id`` scopes it to the saving user (deny-by-default,
+    spec 0004 §2.2). ``query`` + the nullable ``collection_id`` / ``source`` /
+    ``type`` are exactly the ``/search`` parameters, so applying a saved search
+    re-runs the same query. Tenant-scoped (INV-1) + RLS-backstopped (the 0010
+    migration).
+    """
+
+    __tablename__ = "saved_searches"
+    __table_args__ = (Index("ix_saved_searches_tenant_owner", "tenant_id", "owner_id"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class RecentSearch(TenantScopedMixin, Base):
+    """A recent ``/search`` query, per user (spec 0005, epic #144).
+
+    No ``TimestampMixin``: a recent search is created then *touched* (its
+    ``last_used_at`` bumped when the same normalized query is run again) — there is
+    no separate created/updated pair. De-duplicated by ``(tenant_id, user_id,
+    normalized_query)`` so re-running a query updates one row rather than piling up;
+    the repository caps the count per user (oldest evicted). Tenant-scoped (INV-1)
+    + RLS-backstopped (the 0011 migration). ``query`` keeps the latest display form;
+    ``normalized_query`` (trimmed/lower-cased) is the dedupe key.
+    """
+
+    __tablename__ = "recent_searches"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "normalized_query", name="uq_recent_searches_tenant_user_norm"
+        ),
+        Index("ix_recent_searches_tenant_user_used", "tenant_id", "user_id", "last_used_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    normalized_query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Message(TenantScopedMixin, TimestampMixin, Base):
     """One turn in a chat session (oldest → newest by ``created_at``)."""
 

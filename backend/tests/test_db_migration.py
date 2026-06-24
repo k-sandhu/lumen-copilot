@@ -51,9 +51,17 @@ _MVP_TABLES = {
 }
 
 # Every table the ORM registry now carries: the MVP set plus refresh_tokens
-# (0003, issue #19, spec 0004 §2.3), sources (0006, issue #109, ADR-0009 §4), and
-# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants).
-_ALL_TABLES = _MVP_TABLES | {"refresh_tokens", "sources", "grants"}
+# (0003, issue #19, spec 0004 §2.3), sources (0006, issue #109, ADR-0009 §4),
+# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants), and the spec-0005
+# preferences/saved-search/recent tables (0009–0011, epic #144).
+_ALL_TABLES = _MVP_TABLES | {
+    "refresh_tokens",
+    "sources",
+    "grants",
+    "user_preferences",
+    "saved_searches",
+    "recent_searches",
+}
 
 
 def _alembic_config(url: str | None = None) -> Config:
@@ -70,14 +78,14 @@ def test_metadata_covers_every_mvp_table() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0008 with a SINGLE head (ADR-0008 §4).
+    """The chain is linear 0001 → … → 0011 with a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0008_grants"]
+    assert list(script.get_heads()) == ["0011_recent_searches"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -99,6 +107,15 @@ def test_migration_chain_is_linear_single_head() -> None:
     grants = script.get_revision("0008_grants")
     assert grants is not None
     assert grants.down_revision == "0007_tenancy_rls"
+    prefs = script.get_revision("0009_user_preferences")
+    assert prefs is not None
+    assert prefs.down_revision == "0008_grants"
+    saved = script.get_revision("0010_saved_searches")
+    assert saved is not None
+    assert saved.down_revision == "0009_user_preferences"
+    recent = script.get_revision("0011_recent_searches")
+    assert recent is not None
+    assert recent.down_revision == "0010_saved_searches"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
