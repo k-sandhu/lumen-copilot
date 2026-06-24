@@ -93,9 +93,21 @@ class Tenant(TimestampMixin, Base):
     """A customer boundary — the root every ``tenant_id`` references."""
 
     __tablename__ = "tenants"
+    __table_args__ = (
+        # Per-tenant chat tool-use-turn budget override (issue #148): NULL ⇒ use
+        # the system default; when set it must sit in the supported band so a
+        # misconfiguration can neither disable bounding nor explode answer cost.
+        CheckConstraint(
+            "max_tool_turns IS NULL OR (max_tool_turns >= 1 AND max_tool_turns <= 50)",
+            name="ck_tenants_max_tool_turns_range",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _pk()
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Per-tenant override of the agent's tool-use-turn budget; NULL ⇒ the system
+    # default (``Settings.chat_max_tool_turns``). Admin-configurable (issue #148).
+    max_tool_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class User(TenantScopedMixin, TimestampMixin, Base):

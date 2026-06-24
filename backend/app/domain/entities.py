@@ -125,6 +125,11 @@ class Tenant:
     name: str
     created_at: datetime
     updated_at: datetime
+    # Per-tenant override of the chat agent's tool-use-turn budget (issue #148).
+    # ``None`` ⇒ use the system default (``Settings.chat_max_tool_turns``); when
+    # set it caps how many tool-calling turns the answer runtime may take before
+    # it forces a final synthesis (1–50). A tenant admin configures it.
+    max_tool_turns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

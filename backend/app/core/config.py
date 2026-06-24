@@ -220,6 +220,22 @@ class Settings(BaseSettings):
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
+    # How many tool-calling turns the grounded answer runtime may take before it
+    # forces a final, tool-free synthesis (issue #148 — the agent loop bound; a
+    # "turn" is one streamed completion that may request tools). This is the
+    # SYSTEM default; a tenant admin may override it per tenant (``Tenant``
+    # ``max_tool_turns``). Kept config, not a literal (backend/AGENTS.md: LLM
+    # limits are config). Bounded to the same 1–50 band as the per-tenant
+    # override so neither path can disable bounding or explode answer cost.
+    chat_max_tool_turns: int = Field(default=20, alias="CHAT_MAX_TOOL_TURNS")
+
+    @field_validator("chat_max_tool_turns")
+    @classmethod
+    def _chat_max_tool_turns_in_band(cls, value: int) -> int:
+        """Reject a budget outside 1–50: 0/negative disables bounding, >50 risks cost."""
+        if not 1 <= value <= 50:
+            raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
+        return value
 
     # --- Ingestion (CC-5 / issue #21) ---------------------------------------
     # Chunking is config, not a literal at the call site (backend/AGENTS.md): the

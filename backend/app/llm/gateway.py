@@ -252,6 +252,7 @@ class LLMGateway:
         *,
         tools: Sequence[ToolSpec],
         model: str | None = None,
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -265,6 +266,12 @@ class LLMGateway:
         again for the next turn — so multi-step tool use is a loop over single
         turns, each fully streamed.
 
+        ``tool_choice`` is the standard OpenAI/LiteLLM control (``"auto"`` |
+        ``"none"`` | ``"required"``); it is only sent when given. The chat runtime
+        passes ``"none"`` to force a final tool-free synthesis once its tool-turn
+        budget is spent (issue #148), so the model answers from the gathered tool
+        context instead of calling yet another tool.
+
         Like :meth:`stream`, this is a cancellable async generator: breaking out
         of the consumer closes the provider stream in the ``finally`` block.
         """
@@ -272,6 +279,11 @@ class LLMGateway:
         import litellm  # lazy
 
         model_id = model or self._settings.llm_model
+        # ``tool_choice`` is optional: only send it when set so the default turn
+        # (auto tool selection) keeps the exact wire shape it has today.
+        extra: dict[str, Any] = {}
+        if tool_choice is not None:
+            extra["tool_choice"] = tool_choice
         try:
             response = await litellm.acompletion(
                 model=model_id,
@@ -280,6 +292,7 @@ class LLMGateway:
                 stream=True,
                 stream_options={"include_usage": True},
                 timeout=self._settings.llm_timeout_seconds,
+                **extra,
                 **self._credentials(),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError

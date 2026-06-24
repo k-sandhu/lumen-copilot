@@ -20,9 +20,13 @@ path.
 are never returned. Model governance and the risk tiers are tenant-agnostic
 reference data (the same for every tenant), so they need only the role gate.
 
-**Read-before-write (spec 0004 §2.5).** This surface is intentionally read-only:
-there are no POST/PATCH/DELETE routes and no governance mutation — the admin
-console reflects governance, it never changes it (the MVP is entirely T0).
+**Read-before-write (spec 0004 §2.5).** The governance surfaces (members, model
+governance, risk tiers) are read-only — the admin console reflects governance, it
+never changes it. The one write is ``PATCH /admin/settings`` (issue #148): a
+reversible, tenant-scoped **T1** action (spec 0004 §2.5 — "authorized owner;
+audited; no extra approval") that sets a tenant's chat tool-turn budget. It is
+admin-gated like every route here (INV-5) and audited in the service (INV-6); an
+out-of-range value is a **422** (INV-8). No T2+ governance mutation exists.
 """
 
 from __future__ import annotations
@@ -30,16 +34,24 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
 
-from app.api.deps import CurrentTenant, DbSession, SettingsDep, require_roles
+from app.api.deps import (
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    SettingsDep,
+    extract_request_id,
+    require_roles,
+)
 from app.domain.entities import Role
 from app.services.admin_service import (
     AdminService,
     MemberPage,
     ModelGovernanceView,
     RiskTierView,
+    TenantSettingsView,
 )
 
 # The admin-only gate runs for every route on this router (INV-5). It depends on
@@ -120,6 +132,28 @@ class RiskTierListResponse(BaseModel):
     items: list[RiskTierResponse]
 
 
+class TenantSettingsResponse(BaseModel):
+    """``#/components/schemas/TenantSettings`` — the per-tenant admin settings."""
+
+    model_config = {"extra": "forbid"}
+
+    max_tool_turns: int
+    max_tool_turns_is_default: bool
+
+
+class TenantSettingsUpdateRequest(BaseModel):
+    """``#/components/schemas/TenantSettingsUpdate`` — set/clear the budget override.
+
+    ``max_tool_turns`` is required so the intent is explicit: an int (1–50) sets
+    the per-tenant override; ``null`` clears it so the system default applies. An
+    out-of-band value is rejected here as a **422** (INV-8) before the service.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_tool_turns: int | None = Field(ge=1, le=50)
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -149,6 +183,13 @@ def _to_risk_tiers(tiers: list[RiskTierView]) -> RiskTierListResponse:
             RiskTierResponse(tier=t.tier, description=t.description, approval=t.approval)
             for t in tiers
         ]
+    )
+
+
+def _to_tenant_settings(view: TenantSettingsView) -> TenantSettingsResponse:
+    return TenantSettingsResponse(
+        max_tool_turns=view.max_tool_turns,
+        max_tool_turns_is_default=view.max_tool_turns_is_default,
     )
 
 
@@ -202,3 +243,46 @@ async def get_risk_tiers(
     """
     service = AdminService(session, tenant_id=tenant_id, settings=settings)
     return _to_risk_tiers(service.risk_tiers())
+
+
+@router.get("/settings", response_model=TenantSettingsResponse)
+async def get_tenant_settings(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> TenantSettingsResponse:
+    """The caller's tenant's admin-configurable settings (admin only; tenant-scoped).
+
+    The effective chat tool-turn budget — the tenant's override if set, else the
+    system default — plus whether the default is in force (issue #148). Admin-only
+    via the router gate (INV-5); tenant-scoped via ``current_tenant`` (INV-1).
+    """
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    return _to_tenant_settings(await service.get_tenant_settings())
+
+
+@router.patch("/settings", response_model=TenantSettingsResponse)
+async def update_tenant_settings(
+    body: TenantSettingsUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> TenantSettingsResponse:
+    """Set or clear the tenant's chat tool-turn budget (admin only; T1, audited).
+
+    The one /admin write (issue #148): an int (1–50) sets the per-tenant override,
+    ``null`` clears it (system default). Admin-only via the router gate (INV-5);
+    tenant-scoped via ``current_tenant`` (INV-1); the service audits the change
+    (INV-6). An out-of-range value is a **422** at the wire model (INV-8).
+    """
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    view = await service.update_tenant_settings(
+        max_tool_turns=body.max_tool_turns,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_tenant_settings(view)

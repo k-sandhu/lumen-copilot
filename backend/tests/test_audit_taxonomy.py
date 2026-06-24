@@ -53,6 +53,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # Explicit ACL grants (CC-1 / issue #18, spec 0004 §2.2) — additive.
         "permission.granted",
         "permission.revoked",
+        # Admin per-tenant settings write (issue #148) — additive; the first
+        # /admin write, a reversible T1 action audited like every consequential
+        # action (mission filter #4 "auditable").
+        "tenant.settings_updated",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",

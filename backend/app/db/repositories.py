@@ -59,7 +59,13 @@ from app.domain.entities import ChatSession as ChatSessionEntity
 
 
 def _to_tenant(row: models.Tenant) -> Tenant:
-    return Tenant(id=row.id, name=row.name, created_at=row.created_at, updated_at=row.updated_at)
+    return Tenant(
+        id=row.id,
+        name=row.name,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        max_tool_turns=row.max_tool_turns,
+    )
 
 
 def _to_user(row: models.User) -> User:
@@ -249,6 +255,23 @@ class TenantRepository:
     async def get(self, tenant_id: UUID) -> Tenant | None:
         row = await self._session.get(models.Tenant, tenant_id)
         return _to_tenant(row) if row is not None else None
+
+    async def update(self, tenant_id: UUID, *, max_tool_turns: int | None) -> Tenant | None:
+        """Set the tenant's per-tenant chat tool-turn budget override (issue #148).
+
+        ``max_tool_turns`` is written as given: an int sets the per-tenant
+        override (the answer runtime caps its agentic loop at it), ``None`` clears
+        it so the system default (``Settings.chat_max_tool_turns``) applies again.
+        The DB ``ck_tenants_max_tool_turns_range`` check backstops the 1–50 band.
+        Returns the updated entity, or ``None`` if no tenant with that id exists.
+        """
+        row = await self._session.get(models.Tenant, tenant_id)
+        if row is None:
+            return None
+        row.max_tool_turns = max_tool_turns
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant(row)
 
 
 class UserLookupRepository:
