@@ -329,6 +329,33 @@ class UserPreference(TenantScopedMixin, TimestampMixin, Base):
     default_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class SavedSearch(TenantScopedMixin, TimestampMixin, Base):
+    """A saved ``/search`` query + its filters (spec 0005, epic #144).
+
+    Ownership-bearing: ``owner_id`` scopes it to the saving user (deny-by-default,
+    spec 0004 §2.2). ``query`` + the nullable ``collection_id`` / ``source`` /
+    ``type`` are exactly the ``/search`` parameters, so applying a saved search
+    re-runs the same query. Tenant-scoped (INV-1) + RLS-backstopped (the 0010
+    migration).
+    """
+
+    __tablename__ = "saved_searches"
+    __table_args__ = (Index("ix_saved_searches_tenant_owner", "tenant_id", "owner_id"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    query: Mapped[str] = mapped_column(String(1000), nullable=False)
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
 class Message(TenantScopedMixin, TimestampMixin, Base):
     """One turn in a chat session (oldest → newest by ``created_at``)."""
 

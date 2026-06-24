@@ -268,6 +268,27 @@ class UserPreferences:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedSearch:
+    """A saved ``/search`` query + its optional filters (spec 0005, epic #144).
+
+    Ownership-bearing (spec 0004 §2.2): a caller only ever sees their own.
+    ``query`` + ``collection_id`` / ``source`` / ``type`` capture exactly what
+    ``/search`` accepts, so applying one re-runs the same search.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    query: str
+    collection_id: UUID | None
+    source: str | None
+    type: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """One turn in a chat session. Assistant turns may carry citations."""
 

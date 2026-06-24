@@ -46,6 +46,7 @@ from app.domain.entities import (
     MessageRole,
     RefreshToken,
     Role,
+    SavedSearch,
     Source,
     SourceStatus,
     Tenant,
@@ -164,6 +165,21 @@ def _to_user_preferences(row: models.UserPreference) -> UserPreferences:
         tenant_id=row.tenant_id,
         user_id=row.user_id,
         default_model=row.default_model,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_saved_search(row: models.SavedSearch) -> SavedSearch:
+    return SavedSearch(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        name=row.name,
+        query=row.query,
+        collection_id=row.collection_id,
+        source=row.source,
+        type=row.type,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -1171,6 +1187,140 @@ class ChatSessionRepository(_TenantScopedRepository):
         stmt = select(models.ChatSession).where(
             models.ChatSession.tenant_id == self._tenant_id,
             models.ChatSession.id == session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
+
+class SavedSearchRepository(_TenantScopedRepository):
+    """Saved searches within one tenant (spec 0005, epic #144).
+
+    Owner-scoped CRUD mirroring the chat-sessions keyset. Tenant-scoped (INV-1):
+    a foreign-tenant/other-owner id resolves to ``None``/no rows, so the
+    existence-non-disclosure 404 is enforced one layer up off the ``None`` return.
+    Writes are flushed not committed (the caller owns the transaction boundary).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        query: str,
+        collection_id: UUID | None = None,
+        source: str | None = None,
+        type: str | None = None,
+    ) -> SavedSearch:
+        row = models.SavedSearch(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            name=name,
+            query=query,
+            collection_id=collection_id,
+            source=source,
+            type=type,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_saved_search(row)
+
+    async def get(self, saved_search_id: UUID) -> SavedSearch | None:
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_saved_search(row) if row is not None else None
+
+    async def list_for_owner_page(
+        self, owner_id: UUID, *, limit: int, after_id: UUID | None = None
+    ) -> list[SavedSearch]:
+        """A keyset page of an owner's saved searches (newest-updated first).
+
+        Owner- *and* tenant-scoped (spec 0004 §2.2 + INV-1). Ordered by
+        ``(updated_at, id)`` **descending** with ``id`` the stable tiebreaker; the
+        boundary's ``updated_at`` is resolved by a correlated scalar subquery
+        (exact on Postgres + the offline SQLite), mirroring the chat-sessions keyset.
+        """
+        conditions = [
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            boundary_updated_at = (
+                select(models.SavedSearch.updated_at)
+                .where(
+                    models.SavedSearch.tenant_id == self._tenant_id,
+                    models.SavedSearch.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.SavedSearch.updated_at < boundary_updated_at,
+                    and_(
+                        models.SavedSearch.updated_at == boundary_updated_at,
+                        models.SavedSearch.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.SavedSearch)
+            .where(*conditions)
+            .order_by(models.SavedSearch.updated_at.desc(), models.SavedSearch.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_saved_search(r) for r in rows]
+
+    async def update(
+        self,
+        saved_search_id: UUID,
+        *,
+        name: str | None = None,
+        query: str | None = None,
+        collection_id: UUID | None = None,
+        set_collection_id: bool = False,
+        source: str | None = None,
+        set_source: bool = False,
+        type: str | None = None,
+        set_type: bool = False,
+    ) -> SavedSearch | None:
+        """Apply a partial update (tenant-scoped). Nullable filters are tri-state.
+
+        ``name``/``query`` are written when non-``None``; ``collection_id`` /
+        ``source`` / ``type`` are written (possibly to ``None`` to clear) only when
+        their ``set_*`` flag is true. Returns ``None`` if no row matches in this
+        tenant (the service maps that to 404); ownership is enforced one layer up.
+        """
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if query is not None:
+            row.query = query
+        if set_collection_id:
+            row.collection_id = collection_id
+        if set_source:
+            row.source = source
+        if set_type:
+            row.type = type
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_saved_search(row)
+
+    async def delete(self, saved_search_id: UUID) -> bool:
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
