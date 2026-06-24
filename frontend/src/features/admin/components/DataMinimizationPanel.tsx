@@ -6,16 +6,17 @@
  *   1. The admin console is READ-ONLY for v1 (ADR-0007 §4) — no mutating
  *      controls, so no toggles regardless.
  *   2. The frozen contract (contracts/openapi.yaml §admin) exposes NO
- *      data-minimization policy endpoint. Per ADR-0007 decision 5 and AGENTS.md
- *      scope guard, "data-minimization toggles" are flagged as behavior NOT yet
- *      in spec 0003/0004 and confirmed-before-build — we must not invent the
- *      policy values to render switches against.
+ *      data-minimization policy endpoint, and neither spec 0003 nor spec 0004
+ *      defines or enforces tenant-level data-minimization defaults (which
+ *      sources are excluded, what is audited). Per ADR-0007 decision 5, this is
+ *      wireframe-implied behavior that must be confirmed before implementation.
  *
- * So this panel does NOT fake a policy list. It states the data-minimization
- * principle the product commits to (index only what's needed; off by default;
- * every exclusion audited — spec 0003/0004) and is explicit that the per-policy
- * controls are a deferred write surface, not yet served by the backend. This
- * keeps the tab honest: no invented data, no dead toggles.
+ * So this panel makes NO governance or privacy promises the backend cannot
+ * prove. It does not claim sources are excluded by default or that changes are
+ * audited — none of that is specified or enforced yet. It simply states that the
+ * data-minimization policy surface is not yet exposed and will appear here, read
+ * only, once the contract + backend behavior land. No invented data, no dead
+ * toggles, no unprovable claims.
  */
 import { Icon } from '@/ui';
 
@@ -30,8 +31,7 @@ export function DataMinimizationPanel() {
           Data minimization
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Index only what&rsquo;s needed. Sources are off by default; every exclusion change is
-          recorded in the audit log.
+          Tenant data-minimization policy is not yet exposed by the backend.
         </p>
       </header>
 
@@ -43,17 +43,15 @@ export function DataMinimizationPanel() {
           <p className="flex items-start gap-2">
             <Icon name="lock" aria-hidden="true" className="mt-0.5 text-foreground" />
             <span>
-              The product&rsquo;s data-minimization stance — index only what&rsquo;s needed, private
-              channels and sensitivity-labelled content excluded by default, and every change
-              audited — is a core commitment (spec 0003/0004). The per-policy controls that
-              configure it are a <span className="text-foreground">write</span> surface, gated
-              behind read-before-write, and are not yet exposed by the backend.
+              The data-minimization policy controls (which sources are indexed, what is
+              excluded) are a <span className="text-foreground">write</span> surface that is
+              not yet defined in the contract or served by the backend. They are coming soon.
             </span>
           </p>
           <p className="mt-3 pl-7">
-            When the policy API lands, this panel will display the tenant&rsquo;s current exclusions
-            read-only here. Until then there is nothing to fabricate — no policy data is served, so
-            none is shown.
+            When the policy API lands, this panel will display the tenant&rsquo;s current policy
+            read-only here. Until then there is nothing to fabricate — no policy data is served,
+            so none is shown.
           </p>
         </div>
       </div>
