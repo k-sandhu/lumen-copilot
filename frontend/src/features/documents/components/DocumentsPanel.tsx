@@ -9,6 +9,7 @@
  */
 import { useState } from 'react';
 import type { Document } from '@/api';
+import { useCurrentUser } from '@/features/auth';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ScrollArea } from '@/components/ScrollArea';
 import { useCollections } from '../model/queries';
@@ -29,6 +30,12 @@ export function DocumentsPanel() {
     selectedId && collections.data?.items.some((c) => c.id === selectedId)
       ? selectedId
       : firstId;
+  const selectedCollection = collections.data?.items.find((c) => c.id === effectiveId);
+
+  // Identify the signed-in user so the Owner column can read "You" for their own
+  // documents (the contract carries owner_id, not a display name).
+  const me = useCurrentUser();
+  const currentUserId = me.data?.id;
 
   return (
     <div className="flex h-full min-h-0">
@@ -39,9 +46,15 @@ export function DocumentsPanel() {
         </ErrorBoundary>
       </aside>
 
-      {/* Right: upload + document list */}
+      {/* Right: page heading + upload + document list */}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="shrink-0 border-b border-border p-4">
+          <header className="mb-3">
+            <h1 className="text-lg font-semibold text-foreground">Documents</h1>
+            <p className="mt-0.5 text-sm text-foreground-muted">
+              Upload many file types — each is parsed, chunked, embedded, and permission-scoped.
+            </p>
+          </header>
           <ErrorBoundary label="Upload">
             <DocumentUpload collectionId={effectiveId} />
           </ErrorBoundary>
@@ -49,7 +62,12 @@ export function DocumentsPanel() {
         <div className="min-h-0 flex-1">
           {effectiveId ? (
             <ErrorBoundary label="Documents">
-              <DocumentList collectionId={effectiveId} onOpen={setOpenDoc} />
+              <DocumentList
+                collectionId={effectiveId}
+                collectionName={selectedCollection?.name}
+                currentUserId={currentUserId}
+                onOpen={setOpenDoc}
+              />
             </ErrorBoundary>
           ) : (
             <ScrollArea viewportClassName="p-6">
