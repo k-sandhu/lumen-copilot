@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from app.connectors.base import Connector, ConnectorConfigError, FetchedDoc
+from app.connectors.base import Connector, ConnectorConfigError, ConnectorError, FetchedDoc
 from app.connectors.registry import (
     UnknownConnectorError,
     get_connector,
@@ -317,3 +317,76 @@ async def test_health_reports_unhealthy_on_block(patched_client: dict[str, objec
     # A blocked URL never reaches the transport — validate-time block at fetch.
     health = await WebConnector().health(_source("http://127.0.0.1/x"))
     assert health.healthy is False
+
+
+# --- Non-2xx status gate + outbound User-Agent (regression: issue #138) ------
+
+
+async def test_sync_root_http_error_fails_the_sync(patched_client: dict[str, object]) -> None:
+    """A root page returning a non-2xx fails the whole sync — the HTTP error page
+    is never ingested as the document (#138)."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={"content-type": "text/html"},
+            text="<html><body><p>Please set a user-agent.</p></body></html>",
+        )
+
+    patched_client["handler"] = handler
+    with pytest.raises(ConnectorError) as exc:
+        await WebConnector().sync(_source(f"http://{_PUBLIC}/page"))
+    assert exc.value.code == "fetch_failed"
+
+
+async def test_sync_feed_skips_child_http_error(patched_client: dict[str, object]) -> None:
+    """A feed item returning a non-2xx is skipped (best-effort child), not fatal (#138)."""
+    feed = (
+        "<rss version='2.0'><channel>"
+        f"<item><title>Good</title><link>http://{_PUBLIC}/good</link></item>"
+        f"<item><title>Bad</title><link>http://{_PUBLIC}/bad</link></item>"
+        "</channel></rss>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/good":
+            return httpx.Response(200, headers={"content-type": "text/html"}, text="<p>ok</p>")
+        if request.url.path == "/bad":
+            return httpx.Response(500, headers={"content-type": "text/html"}, text="<p>boom</p>")
+        return httpx.Response(200, headers={"content-type": "application/rss+xml"}, text=feed)
+
+    patched_client["handler"] = handler
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml")))
+    assert [d.title for d in docs] == ["Good"]
+
+
+async def test_sync_sends_configured_user_agent(patched_client: dict[str, object]) -> None:
+    """The connector sends the configured descriptive UA on outbound fetches (#138)."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers.get("user-agent", "")
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<p>ok</p>")
+
+    patched_client["handler"] = handler
+    await WebConnector().sync(_source(f"http://{_PUBLIC}/page"))
+    assert "LumenCopilot" in seen["ua"]
+    assert "python-httpx" not in seen["ua"].lower()
+
+
+def test_web_user_agent_default_is_version_stamped() -> None:
+    """The default outbound UA is descriptive + version-stamped (config, #138)."""
+    from app.core.config import Settings
+
+    s = Settings()  # required fields come from the conftest-seeded test env
+    assert s.web_user_agent == (
+        f"LumenCopilot/{s.version} (+https://github.com/k-sandhu/lumen-copilot)"
+    )
+
+
+def test_web_user_agent_is_overridable() -> None:
+    """The full UA string is overridable via WEB_USER_AGENT (config, #138)."""
+    from app.core.config import Settings
+
+    s = Settings(WEB_USER_AGENT="Custom/1.0 (+mailto:ops@example.test)")  # type: ignore[call-arg]
+    assert s.web_user_agent == "Custom/1.0 (+mailto:ops@example.test)"

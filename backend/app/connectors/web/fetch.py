@@ -33,7 +33,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from app.connectors.base import ConnectorConfigError
+from app.connectors.base import ConnectorConfigError, ConnectorError
 
 # Schemes a public fetch may use. Everything else (file/ftp/gopher/data/…) is a
 # hard reject before any network work (ADR-0009 §3).
@@ -59,6 +59,13 @@ ALLOWED_CONTENT_TYPES = frozenset(
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 _DEFAULT_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB per fetched resource
 _DEFAULT_MAX_REDIRECTS = 5
+
+# Descriptive fallback User-Agent. Many sites (e.g. Wikimedia) reject a request
+# that announces no descriptive client with a 4xx error *page*; sending a real UA
+# keeps the fetcher a well-behaved client (ADR-0009 §3, issue #138). The connector
+# overrides this with the configured ``settings.web_user_agent``; this constant is
+# the fallback for a direct/standalone call so the chokepoint is never UA-less.
+_DEFAULT_USER_AGENT = "LumenCopilot (+https://github.com/k-sandhu/lumen-copilot)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,22 +278,28 @@ async def fetch_url(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     max_redirects: int = _DEFAULT_MAX_REDIRECTS,
     allowed_content_types: frozenset[str] = ALLOWED_CONTENT_TYPES,
+    user_agent: str = _DEFAULT_USER_AGENT,
 ) -> FetchResult:
     """Fetch ``url`` through the full SSRF guard, following redirects safely.
 
     The single fetch chokepoint (ADR-0009 §3). Validates the scheme + host and
     resolves a safe IP for **every** hop (the initial URL and each redirect
     target), pins the connection to the validated IP, caps the response size +
-    time, and allowlists the content type. Returns the decoded text + the final
-    URL.
+    time, requires a **2xx** final status, and allowlists the content type.
+    Returns the decoded text + the final URL.
 
     ``client`` is injectable so tests drive it with a mock transport (offline);
-    in production the connector passes a no-auto-redirect client.
+    in production the connector passes a no-auto-redirect client. ``user_agent``
+    is sent on **every** hop (the connector passes ``settings.web_user_agent``):
+    a UA-less request is rejected by many sites with an error *page* that would
+    otherwise be ingested as content (issue #138).
 
     Raises:
-        UrlBlockedError: any guard failure (scheme, host range, redirect target,
-            size cap, content type) — the API maps it to 422 ``url_blocked``.
-        ConnectorError: a transport-level fetch fault (connection/timeout).
+        UrlBlockedError: any SSRF/guard failure (scheme, host range, redirect
+            target, size cap, content type) — the API maps it to 422 ``url_blocked``.
+        ConnectorError: a transport-level fetch fault (connection/timeout) **or a
+            non-2xx final response** (``code="fetch_failed"``) — a failed fetch,
+            never ingestible content.
     """
     owns_client = client is None
     active = client or httpx.AsyncClient(
@@ -303,12 +316,10 @@ async def fetch_url(
             try:
                 response = await active.get(
                     pinned,
-                    headers={"Host": host_header},
+                    headers={"Host": host_header, "User-Agent": user_agent},
                     extensions={"sni_hostname": host},
                 )
             except httpx.HTTPError as exc:
-                from app.connectors.base import ConnectorError
-
                 raise ConnectorError(
                     f"could not fetch {current!r}: {type(exc).__name__}", code="fetch_failed"
                 ) from exc
@@ -323,6 +334,19 @@ async def fetch_url(
                 # redirect to a blocked address is refused, never followed).
                 current = str(httpx.URL(current).join(location))
                 continue
+
+            # A non-2xx final response is a *failed fetch*, not content: a 403/404/
+            # 500 error page (e.g. Wikimedia's UA-gate 403) must never be decoded
+            # and ingested as the document. Surface it as ``fetch_failed`` so the
+            # sync is marked failed (last_error) rather than indexing the rejection
+            # (issue #138). Checked before content-type/body so the error body is
+            # never read.
+            if not response.is_success:
+                status_code = response.status_code
+                await response.aclose()
+                raise ConnectorError(
+                    f"fetch of {current!r} returned HTTP {status_code}", code="fetch_failed"
+                )
 
             content_type = response.headers.get("content-type", "")
             try:

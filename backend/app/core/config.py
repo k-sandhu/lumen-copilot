@@ -284,6 +284,29 @@ class Settings(BaseSettings):
             )
         return value
 
+    # --- Web connector outbound identity (ADR-0009 §3, issue #138) -----------
+    # Descriptive User-Agent sent on EVERY outbound web-connector fetch. Many
+    # sites (e.g. Wikimedia) reject a request that announces no descriptive
+    # client with a 4xx error *page*; without a real UA the connector would index
+    # that rejection page as if it were the article. Left blank it is filled in
+    # below with a version-stamped token + contact URL; override the whole string
+    # via WEB_USER_AGENT (e.g. to carry an ops contact for a specific deployment).
+    web_user_agent: str = Field(default="", alias="WEB_USER_AGENT")
+
+    @model_validator(mode="after")
+    def _default_web_user_agent(self) -> Settings:
+        """Fill a descriptive, version-stamped default UA when none is configured.
+
+        A blank ``WEB_USER_AGENT`` (the default) becomes
+        ``LumenCopilot/<version> (+<repo-url>)`` so a fresh deploy is already a
+        well-behaved client; an explicitly configured value is preserved verbatim.
+        """
+        if not self.web_user_agent.strip():
+            self.web_user_agent = (
+                f"LumenCopilot/{self.version} (+https://github.com/k-sandhu/lumen-copilot)"
+            )
+        return self
+
     @model_validator(mode="after")
     def _validate_chunk_overlap(self) -> Settings:
         """Enforce ``0 <= overlap < size`` so chunking always makes progress."""
