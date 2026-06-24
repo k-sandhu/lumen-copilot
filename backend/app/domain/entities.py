@@ -81,6 +81,42 @@ class AuditOutcome(str, enum.Enum):
     ERROR = "error"
 
 
+class GrantResourceType(str, enum.Enum):
+    """What kind of resource an explicit grant is on (spec 0004 §2.2).
+
+    A grant on a ``COLLECTION`` cascades to every document in it; a grant on a
+    ``DOCUMENT`` is on that one document. These are the MVP resources; the column
+    is sized to admit more later without a schema change.
+    """
+
+    COLLECTION = "collection"
+    DOCUMENT = "document"
+
+
+class GrantPrincipalType(str, enum.Enum):
+    """Who an explicit grant is *to* (spec 0004 §2.2).
+
+    The MVP only issues ``USER`` grants (a grantee user id). ``GROUP``/``ROLE``
+    are modelled now — the column admits them — so group/role sharing lands later
+    as a service change, not a migration.
+    """
+
+    USER = "user"
+    GROUP = "group"
+    ROLE = "role"
+
+
+class GrantRole(str, enum.Enum):
+    """The access level an explicit grant confers (spec 0004 §2.2).
+
+    The MVP confers read access only (``VIEWER``) — the whole product is T0/read
+    (spec 0004 §2.5), so a grant never carries a write capability. Richer roles
+    are a later extension; the column admits them.
+    """
+
+    VIEWER = "viewer"
+
+
 @dataclass(frozen=True, slots=True)
 class Tenant:
     """A customer boundary. The root of every isolation predicate (INV-1)."""
@@ -268,3 +304,27 @@ class AuditEvent:
     source_ip: str | None
     metadata: dict[str, object] = field(default_factory=dict)
     ts: datetime = field(default_factory=lambda: datetime.min)
+
+
+@dataclass(frozen=True, slots=True)
+class Grant:
+    """An explicit access grant — the ``grants`` table row (spec 0004 §2.2, CC-1).
+
+    Records that ``principal`` (MVP: a user, ``principal_type=user`` +
+    ``principal_id``) may access ``resource`` (a ``collection`` or ``document``,
+    by id) the requester does not own, at ``role`` (MVP: ``viewer``). The
+    retrieval permission filter widens to admit a row whose owner is the requester
+    **or** for which such a grant exists (INV-2); a collection grant cascades to
+    its documents. Tenant-scoped (INV-1): a grant only ever applies within its own
+    tenant. ``granted_by`` is the owner/admin who created it (audited).
+    """
+
+    id: UUID
+    tenant_id: UUID
+    resource_type: GrantResourceType
+    resource_id: UUID
+    principal_type: GrantPrincipalType
+    principal_id: UUID
+    role: GrantRole
+    granted_by: UUID | None
+    created_at: datetime

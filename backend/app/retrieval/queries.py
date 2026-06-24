@@ -9,9 +9,18 @@ general relational CRUD stays in ``db/`` repositories.
 
 **Every** function here takes an :class:`~app.retrieval.permissions.AllowSet` and
 folds it into the ``WHERE`` clause: ``tenant_id = :tenant`` (INV-1) **AND**
-``documents.owner_id IN :owners`` (INV-2, deny-by-default ownership). There is no
+(``documents.owner_id IN :owners`` **OR** an explicit grant to the requester
+covers the document — INV-2, deny-by-default ownership *or* grant). The grant leg
+(spec 0004 §2.2, issue #18) is an ``EXISTS`` over the ``grants`` table correlated
+to the document: a row whose ``resource`` is **this document** *or* **this
+document's collection** (a collection grant **cascades** to its documents),
+granted to the requester's ``user`` principal within the same tenant. There is no
 function that omits the predicate — the permission filter is structural, not a
-caller's responsibility, which is what makes the single chokepoint provable.
+caller's responsibility, which is what makes the single chokepoint provable. A
+revoked grant (its row deleted) makes the ``EXISTS`` false again, so the document
+is excluded once more; deny-by-default is preserved (absence of ownership AND
+grant = excluded). Citations inherit the guarantee because they are drawn only
+from these retrieved passages.
 
 The functions return **chunk-id rankings** (and small metadata rows), not domain
 objects: ranking/fusion is pure and happens in :mod:`app.retrieval.fusion`; the
@@ -30,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -82,19 +91,75 @@ class DocumentTextRow:
 # ---------------------------------------------------------------------------
 
 
+def _grant_exists(allow_set: AllowSet) -> ColumnElement[bool]:
+    """An ``EXISTS`` over ``grants`` admitting a document the requester was granted.
+
+    The grant half of the permission predicate (spec 0004 §2.2, issue #18),
+    correlated to ``documents`` (the outer query must have ``documents`` in scope).
+    True when, **within the requester's tenant**, there is a grant to the
+    requester's ``user`` principal on either:
+
+    * **this document** (``resource_type='document'`` AND ``resource_id =
+      documents.id``), or
+    * **this document's collection** (``resource_type='collection'`` AND
+      ``resource_id = documents.collection_id``) — a collection grant **cascades**
+      to its documents.
+
+    Tenant-scoped on the grant row too, so a grant minted in another tenant can
+    never widen this filter (a cross-tenant grant is invisible). Deletion of the
+    grant row (revoke) makes this ``EXISTS`` false again — the document is excluded
+    once more, deny-by-default.
+    """
+    return (
+        select(models.Grant.id)
+        .where(
+            models.Grant.tenant_id == allow_set.tenant_id,
+            models.Grant.principal_type == "user",
+            models.Grant.principal_id == allow_set.grant_principal_id,
+            or_(
+                and_(
+                    models.Grant.resource_type == "document",
+                    models.Grant.resource_id == models.Document.id,
+                ),
+                and_(
+                    models.Grant.resource_type == "collection",
+                    models.Grant.resource_id == models.Document.collection_id,
+                ),
+            ),
+        )
+        .exists()
+    )
+
+
+def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
+    """The document-level "owner OR granted" predicate (INV-2, deny-by-default).
+
+    The reusable boolean every chokepoint ANDs after the ``tenant_id`` predicate:
+    the document is owned by someone in the allow-set **or** an explicit grant to
+    the requester covers it (directly or via its collection). Absence of both =
+    excluded. Assumes ``documents`` is in the query's scope.
+    """
+    return or_(
+        models.Document.owner_id.in_(allow_set.owner_ids),
+        _grant_exists(allow_set),
+    )
+
+
 def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT]:
-    """Fold the tenant + ownership predicate into a chunk/document ``SELECT`` (INV-1/INV-2).
+    """Fold the tenant + ownership/grant predicate into a chunk/document ``SELECT``.
 
     The single helper every chunk query in this module routes through, so the
     permission predicate is applied in exactly one place and cannot be forgotten:
-    the chunk's ``tenant_id`` (INV-1) and the owning document's ``owner_id`` in
-    the allow-set (INV-2, deny-by-default). Assumes the statement already joins
-    ``chunks`` to ``documents`` (the caller does the join so the document name is
-    available for citations).
+    the chunk's ``tenant_id`` (INV-1) **and** the owning document being permitted —
+    owned by someone in the allow-set **or** explicitly granted to the requester
+    (INV-2, deny-by-default ownership-or-grant; a collection grant cascades to its
+    documents). Assumes the statement already joins ``chunks`` to ``documents``
+    (the caller does the join so the document name is available for citations and
+    the grant ``EXISTS`` can correlate to ``documents.id`` / ``collection_id``).
     """
     return stmt.where(
         models.Chunk.tenant_id == allow_set.tenant_id,
-        models.Document.owner_id.in_(allow_set.owner_ids),
+        _document_permitted(allow_set),
     )
 
 
@@ -221,16 +286,18 @@ async def document_search(
     """Return permitted documents matching ``name_or_query`` by filename (lexical).
 
     The ``search_documents`` tool's query: a case-insensitive substring match on
-    the filename within the principal's allow-set (INV-1/INV-2). Ordered by
-    filename for a stable result; ``k`` caps the count. (Richer metadata search is
-    a fast-follow; filename is the MVP signal — matching the #44 repository's own
+    the filename within the principal's allow-set (INV-1/INV-2). Permitted =
+    owned by the requester **or** explicitly granted to them (directly or via the
+    document's collection — the grant cascade). Ordered by filename for a stable
+    result; ``k`` caps the count. (Richer metadata search is a fast-follow;
+    filename is the MVP signal — matching the #44 repository's own
     ``filename_query`` lexical match.)
     """
     stmt = (
         select(models.Document.id, models.Document.filename)
         .where(
             models.Document.tenant_id == allow_set.tenant_id,
-            models.Document.owner_id.in_(allow_set.owner_ids),
+            _document_permitted(allow_set),
             models.Document.filename.ilike(f"%{name_or_query}%"),
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
@@ -248,16 +315,18 @@ async def load_document_text(
 ) -> DocumentTextRow | None:
     """Return a permitted document's reassembled text, or ``None`` (INV-2 → not found).
 
-    Establishes the document is within the allow-set (tenant + ownership), then
-    concatenates its chunks in ``ord`` order into the document text. Returns
+    Establishes the document is within the allow-set (tenant + ownership-or-grant),
+    then concatenates its chunks in ``ord`` order into the document text. Returns
     ``None`` when the document is missing, in another tenant, or owned by another
-    user — the ``get_document`` tool maps that to "not found" (existence
-    non-disclosure, never a 403).
+    user **without** an explicit grant to the requester (directly or via its
+    collection) — the ``get_document`` tool maps that to "not found" (existence
+    non-disclosure, never a 403). An explicitly-granted document is returned
+    (citable), so a granted document is retrievable by the grantee (INV-2).
     """
     doc_stmt = select(models.Document.id, models.Document.filename).where(
         models.Document.id == document_id,
         models.Document.tenant_id == allow_set.tenant_id,
-        models.Document.owner_id.in_(allow_set.owner_ids),
+        _document_permitted(allow_set),
     )
     doc = (await session.execute(doc_stmt)).first()
     if doc is None:
