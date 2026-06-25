@@ -63,6 +63,31 @@ async def test_subscriber_stops_after_terminal_error() -> None:
     assert "late" not in [str(e.get("data")) for e in received]
 
 
+async def test_late_subscriber_receives_full_replay_after_producer_finished() -> None:
+    """A subscriber connecting *after* the producer finished still gets every envelope.
+
+    The realistic flow: the 202 schedules the producer, which can publish ``start``
+    and a near-instant terminal *before* the WS client finishes connecting (authz →
+    accept → subscribe). The backplane must replay the buffered envelopes — incl.
+    the terminal — to that late subscriber. This is the late-subscriber race the
+    Redis backplane had (#153, raw pub/sub has no buffering); InMemory locks the shared
+    replay contract here, the live Redis test (``test_realtime_backplane_live.py``)
+    is the regression for the production path.
+    """
+    backplane = InMemoryBackplane()
+    # Producer runs to completion BEFORE anyone subscribes.
+    await backplane.publish("late", envelopes.start("late", 0, data={"model": "m"}))
+    await backplane.publish(
+        "late", envelopes.error("late", 1, {"title": "Boom", "status": 503, "code": "x"})
+    )
+
+    received = await asyncio.wait_for(_collect(backplane, "late"), timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "error"]
+    assert [e["seq"] for e in received] == [0, 1]
+    # Exactly one terminal relayed (the contract's exactly-one-terminal rule).
+    assert sum(1 for e in received if is_terminal(e)) == 1
+
+
 async def test_publish_fans_out_to_multiple_subscribers() -> None:
     backplane = InMemoryBackplane()
     a = asyncio.create_task(_collect(backplane, "s3"))
