@@ -24,9 +24,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -44,12 +46,15 @@ from app.domain.entities import (
     GrantRole,
     Message,
     MessageRole,
+    RecentSearch,
     RefreshToken,
     Role,
+    SavedSearch,
     Source,
     SourceStatus,
     Tenant,
     User,
+    UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
 
@@ -158,6 +163,36 @@ def _to_chat_session(row: models.ChatSession) -> ChatSessionEntity:
         owner_id=row.owner_id,
         title=row.title,
         model=row.model,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_user_preferences(row: models.UserPreference) -> UserPreferences:
+    return UserPreferences(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        user_id=row.user_id,
+        default_model=row.default_model,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_recent_search(row: models.RecentSearch) -> RecentSearch:
+    return RecentSearch(query=row.query, last_used_at=row.last_used_at)
+
+
+def _to_saved_search(row: models.SavedSearch) -> SavedSearch:
+    return SavedSearch(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        name=row.name,
+        query=row.query,
+        collection_id=row.collection_id,
+        source=row.source,
+        type=row.type,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -334,6 +369,51 @@ class UserRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
+
+
+class UserPreferenceRepository(_TenantScopedRepository):
+    """A user's account preferences within one tenant (spec 0005, epic #144).
+
+    A per-user singleton keyed by ``(tenant_id, user_id)``. ``get`` returns
+    ``None`` for a user who has never set a preference — the service maps that to
+    the implicit server-default state **without** writing (read-before-write).
+    ``set_default_model`` is the lazy upsert: it creates the row on first write,
+    else updates it. Tenant-scoped (INV-1): a foreign-tenant/other-user row is
+    invisible, so one user can never read or clobber another's preferences.
+    """
+
+    async def get(self, user_id: UUID) -> UserPreferences | None:
+        stmt = select(models.UserPreference).where(
+            models.UserPreference.tenant_id == self._tenant_id,
+            models.UserPreference.user_id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_user_preferences(row) if row is not None else None
+
+    async def set_default_model(self, user_id: UUID, default_model: str | None) -> UserPreferences:
+        """Upsert the user's default-model override (``None`` clears it).
+
+        Creates the row on first write (lazy), else updates the existing one, and
+        returns the persisted state. Tenant-scoped (INV-1); the ``(tenant_id,
+        user_id)`` singleton is the upsert target.
+        """
+        stmt = select(models.UserPreference).where(
+            models.UserPreference.tenant_id == self._tenant_id,
+            models.UserPreference.user_id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            row = models.UserPreference(
+                tenant_id=self._tenant_id,
+                user_id=user_id,
+                default_model=default_model,
+            )
+            self._session.add(row)
+        else:
+            row.default_model = default_model
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_user_preferences(row)
 
 
 class RefreshTokenRepository(_TenantScopedRepository):
@@ -1145,6 +1225,140 @@ class ChatSessionRepository(_TenantScopedRepository):
         return True
 
 
+class SavedSearchRepository(_TenantScopedRepository):
+    """Saved searches within one tenant (spec 0005, epic #144).
+
+    Owner-scoped CRUD mirroring the chat-sessions keyset. Tenant-scoped (INV-1):
+    a foreign-tenant/other-owner id resolves to ``None``/no rows, so the
+    existence-non-disclosure 404 is enforced one layer up off the ``None`` return.
+    Writes are flushed not committed (the caller owns the transaction boundary).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        query: str,
+        collection_id: UUID | None = None,
+        source: str | None = None,
+        type: str | None = None,
+    ) -> SavedSearch:
+        row = models.SavedSearch(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            name=name,
+            query=query,
+            collection_id=collection_id,
+            source=source,
+            type=type,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_saved_search(row)
+
+    async def get(self, saved_search_id: UUID) -> SavedSearch | None:
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_saved_search(row) if row is not None else None
+
+    async def list_for_owner_page(
+        self, owner_id: UUID, *, limit: int, after_id: UUID | None = None
+    ) -> list[SavedSearch]:
+        """A keyset page of an owner's saved searches (newest-updated first).
+
+        Owner- *and* tenant-scoped (spec 0004 §2.2 + INV-1). Ordered by
+        ``(updated_at, id)`` **descending** with ``id`` the stable tiebreaker; the
+        boundary's ``updated_at`` is resolved by a correlated scalar subquery
+        (exact on Postgres + the offline SQLite), mirroring the chat-sessions keyset.
+        """
+        conditions = [
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            boundary_updated_at = (
+                select(models.SavedSearch.updated_at)
+                .where(
+                    models.SavedSearch.tenant_id == self._tenant_id,
+                    models.SavedSearch.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.SavedSearch.updated_at < boundary_updated_at,
+                    and_(
+                        models.SavedSearch.updated_at == boundary_updated_at,
+                        models.SavedSearch.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.SavedSearch)
+            .where(*conditions)
+            .order_by(models.SavedSearch.updated_at.desc(), models.SavedSearch.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_saved_search(r) for r in rows]
+
+    async def update(
+        self,
+        saved_search_id: UUID,
+        *,
+        name: str | None = None,
+        query: str | None = None,
+        collection_id: UUID | None = None,
+        set_collection_id: bool = False,
+        source: str | None = None,
+        set_source: bool = False,
+        type: str | None = None,
+        set_type: bool = False,
+    ) -> SavedSearch | None:
+        """Apply a partial update (tenant-scoped). Nullable filters are tri-state.
+
+        ``name``/``query`` are written when non-``None``; ``collection_id`` /
+        ``source`` / ``type`` are written (possibly to ``None`` to clear) only when
+        their ``set_*`` flag is true. Returns ``None`` if no row matches in this
+        tenant (the service maps that to 404); ownership is enforced one layer up.
+        """
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if query is not None:
+            row.query = query
+        if set_collection_id:
+            row.collection_id = collection_id
+        if set_source:
+            row.source = source
+        if set_type:
+            row.type = type
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_saved_search(row)
+
+    async def delete(self, saved_search_id: UUID) -> bool:
+        stmt = select(models.SavedSearch).where(
+            models.SavedSearch.tenant_id == self._tenant_id,
+            models.SavedSearch.id == saved_search_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
+
 class MessageRepository(_TenantScopedRepository):
     """Messages within one tenant."""
 
@@ -1602,3 +1816,110 @@ class AuditEventRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_audit_event(r) for r in rows]
+
+
+def normalize_query(query: str) -> str:
+    """Dedupe key for a recent search — trimmed, lower-cased, whitespace-collapsed.
+
+    So ``"  Acme   Renewal "`` and ``"acme renewal"`` are the same recent entry.
+    Returns ``""`` for a blank query (the caller skips recording it).
+    """
+    return " ".join(query.strip().lower().split())
+
+
+class RecentSearchRepository(_TenantScopedRepository):
+    """A user's recent ``/search`` history within one tenant (spec 0005, epic #144).
+
+    De-duplicated by normalized query (re-running a query bumps one row's
+    ``last_used_at`` rather than inserting a duplicate) and capped per user (oldest
+    evicted). Tenant-scoped (INV-1): a foreign-tenant/other-user row is invisible,
+    so one user's recents never surface for another. Writes are flushed not
+    committed (the caller owns the transaction).
+    """
+
+    async def record(self, user_id: UUID, query: str, *, cap: int = 20) -> None:
+        """Record (or bump) a query in the user's recent history (deduped, capped).
+
+        A blank query is ignored. An **atomic upsert** (``INSERT … ON CONFLICT
+        (tenant_id, user_id, normalized_query) DO UPDATE``) rather than
+        select-then-insert, so two concurrent identical ``/search`` requests can't
+        race into a unique-violation that would fail the search — one inserts, the
+        other updates ``last_used_at`` (recent history is only a side effect, it
+        must never break a search). The newest ``cap`` distinct queries are kept;
+        older ones are evicted so the list stays bounded per user.
+        """
+        normalized = normalize_query(query)
+        if not normalized:
+            return
+        now = datetime.now(UTC)
+        display = query.strip()
+        values = {
+            "id": uuid4(),
+            "tenant_id": self._tenant_id,
+            "user_id": user_id,
+            "query": display,
+            "normalized_query": normalized,
+            "last_used_at": now,
+        }
+        conflict = ["tenant_id", "user_id", "normalized_query"]
+        update = {"query": display, "last_used_at": now}
+        # Dialect-aware upsert: Postgres + the offline SQLite both support
+        # ON CONFLICT DO UPDATE on the unique (tenant, user, normalized) target.
+        # Executed per-branch (the two dialect Insert types don't share a variable).
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        if dialect == "postgresql":
+            await self._session.execute(
+                pg_insert(models.RecentSearch)
+                .values(**values)
+                .on_conflict_do_update(index_elements=conflict, set_=update)
+            )
+        else:
+            await self._session.execute(
+                sqlite_insert(models.RecentSearch)
+                .values(**values)
+                .on_conflict_do_update(index_elements=conflict, set_=update)
+            )
+        await self._session.flush()
+        await self._evict_beyond_cap(user_id, cap)
+
+    async def _evict_beyond_cap(self, user_id: UUID, cap: int) -> None:
+        """Delete the oldest recents beyond ``cap`` for this user (tenant-scoped)."""
+        stmt = (
+            select(models.RecentSearch)
+            .where(
+                models.RecentSearch.tenant_id == self._tenant_id,
+                models.RecentSearch.user_id == user_id,
+            )
+            .order_by(models.RecentSearch.last_used_at.asc(), models.RecentSearch.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        excess = len(rows) - cap
+        for row in rows[: max(0, excess)]:
+            await self._session.delete(row)
+        if excess > 0:
+            await self._session.flush()
+
+    async def list_for_user(self, user_id: UUID, *, limit: int) -> list[RecentSearch]:
+        """The user's recent queries, newest-used first (capped by ``limit``)."""
+        stmt = (
+            select(models.RecentSearch)
+            .where(
+                models.RecentSearch.tenant_id == self._tenant_id,
+                models.RecentSearch.user_id == user_id,
+            )
+            .order_by(models.RecentSearch.last_used_at.desc(), models.RecentSearch.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_recent_search(r) for r in rows]
+
+    async def clear_for_user(self, user_id: UUID) -> None:
+        """Clear all of the user's recent searches (tenant-scoped; idempotent)."""
+        stmt = select(models.RecentSearch).where(
+            models.RecentSearch.tenant_id == self._tenant_id,
+            models.RecentSearch.user_id == user_id,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        for row in rows:
+            await self._session.delete(row)
+        await self._session.flush()

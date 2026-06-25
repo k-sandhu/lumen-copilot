@@ -2,7 +2,7 @@
 
 The single M-series schema step for the admin-configurable agent loop bound
 (issue #148, ADR-0008 §4 single-head invariant — ``down_revision`` is the current
-head ``0008``). It adds exactly one column to ``tenants``:
+head ``0011_recent_searches``). It adds exactly one column to ``tenants``:
 
 * ``max_tool_turns`` — a **nullable** integer. NULL ⇒ the tenant uses the system
   default (``Settings.chat_max_tool_turns``); a non-null value is the tenant
@@ -21,9 +21,9 @@ drops the check then the column, restoring the pre-#148 shape. Offline DDL rende
 asserts the shapes; the live apply runs against a disposable throwaway database
 (never the app DB — the #70 lesson).
 
-Revision ID: 0009_tenant_max_tool_turns
-Revises: 0008_grants
-Create Date: 2026-06-24 02:00:00+00:00
+Revision ID: 0012_tenant_max_tool_turns
+Revises: 0011_recent_searches
+Create Date: 2026-06-24 05:00:00+00:00
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0009_tenant_max_tool_turns"
-down_revision: str | None = "0008_grants"
+revision: str = "0012_tenant_max_tool_turns"
+down_revision: str | None = "0011_recent_searches"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
