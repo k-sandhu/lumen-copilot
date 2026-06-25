@@ -44,6 +44,7 @@ _ADMIN_PATHS = (
     "/api/v1/admin/members",
     "/api/v1/admin/model-governance",
     "/api/v1/admin/risk-tiers",
+    "/api/v1/admin/settings",
 )
 
 
@@ -343,3 +344,119 @@ async def test_no_token_is_401_on_every_admin_path(client: AsyncClient, path: st
 async def test_malformed_token_is_401_on_every_admin_path(client: AsyncClient, path: str) -> None:
     resp = await client.get(path, headers={"Authorization": "Bearer not.a.jwt"})
     assert resp.status_code == 401
+
+
+# --- GET/PATCH /admin/settings (per-tenant tool-turn budget, issue #148) -----
+
+
+async def test_get_tenant_settings_returns_system_default(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == {"max_tool_turns", "max_tool_turns_is_default"}
+    # A fresh tenant has no override → the configured system default, flagged.
+    assert body["max_tool_turns"] == get_settings().chat_max_tool_turns
+    assert body["max_tool_turns_is_default"] is True
+
+
+async def test_patch_tenant_settings_sets_and_reads_back(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 12}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"max_tool_turns": 12, "max_tool_turns_is_default": False}
+    # The override persists and reads back via GET (round-trip).
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.json() == {"max_tool_turns": 12, "max_tool_turns_is_default": False}
+
+
+async def test_patch_tenant_settings_null_resets_to_default(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    await client.patch("/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 7})
+    # Clearing with null reverts the tenant to the system default.
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": None}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "max_tool_turns": get_settings().chat_max_tool_turns,
+        "max_tool_turns_is_default": True,
+    }
+
+
+@pytest.mark.parametrize("bad", [0, -1, 51, 1000])
+async def test_patch_tenant_settings_out_of_range_is_422(
+    client: AsyncClient, seeded: _Seeded, bad: int
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": bad}
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_tenant_settings_missing_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch("/api/v1/admin/settings", headers=_auth(token), json={})
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_patch_tenant_settings_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    # The write is admin-only (INV-5) — a member or security role is 403.
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 10}
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_patch_tenant_settings_unauthenticated_is_401(client: AsyncClient) -> None:
+    resp = await client.patch("/api/v1/admin/settings", json={"max_tool_turns": 10})
+    assert resp.status_code == 401
+
+
+async def test_patch_tenant_settings_is_tenant_scoped(client: AsyncClient, seeded: _Seeded) -> None:
+    # Admin A sets an override; admin B's tenant is untouched (INV-1).
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.patch("/api/v1/admin/settings", headers=_auth(token_a), json={"max_tool_turns": 9})
+    token_b = await _login(client, seeded.admin_b_email)
+    got_b = await client.get("/api/v1/admin/settings", headers=_auth(token_b))
+    assert got_b.json()["max_tool_turns_is_default"] is True
+
+
+async def test_patch_tenant_settings_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 15}
+    )
+    assert resp.status_code == 200, resp.text
+    # The write emits exactly one audit event for this tenant (INV-6).
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    settings_events = [e for e in events if e.action == "tenant.settings_updated"]
+    assert len(settings_events) == 1
+    ev = settings_events[0]
+    assert ev.metadata["max_tool_turns"] == 15
+    assert ev.resource_type == "tenant"
+    assert ev.resource_id == str(seeded.tenant_a)

@@ -53,27 +53,57 @@ class _ScriptedGateway:
     """A gateway whose ``stream_tools`` replays a scripted list of turns.
 
     Each turn is a list of ``StreamEvent``s (text chunks then a terminal event
-    carrying ``tool_calls`` / ``finish_reason``). Consecutive ``stream_tools``
-    calls pop successive turns, so a tool-call turn followed by a final-answer
-    turn drives the loop exactly once.
+    carrying ``tool_calls`` / ``finish_reason``). Consecutive *tool-choice=auto*
+    ``stream_tools`` calls pop successive turns, so a tool-call turn followed by a
+    final-answer turn drives the loop exactly once.
+
+    When the runtime exhausts its tool-turn budget it makes one **forced**
+    ``stream_tools`` call with ``tool_choice="none"`` to synthesise a tool-free
+    answer (issue #148). This fake models a real provider's response to that:
+    such a call yields the ``synthesis`` script (a tool-free turn) instead of
+    advancing the ``turns`` list — so a script of all-tool turns still ends with
+    a clean synthesised answer. ``auto_calls`` / ``synthesis_calls`` are exposed
+    so a test can assert exactly how many tool turns ran vs the forced final one.
     """
 
-    def __init__(self, turns: list[list[StreamEvent]]) -> None:
+    def __init__(
+        self,
+        turns: list[list[StreamEvent]],
+        *,
+        synthesis: list[StreamEvent] | None = None,
+    ) -> None:
         self._turns = turns
+        self._synthesis = synthesis
         self.calls = 0
+        self.auto_calls = 0
+        self.synthesis_calls = 0
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
     ) -> AsyncIterator[StreamEvent]:
-        turn = self._turns[min(self.calls, len(self._turns) - 1)]
         self.calls += 1
+        if tool_choice == "none":
+            self.synthesis_calls += 1
+            turn = (
+                self._synthesis
+                if self._synthesis is not None
+                else [StreamEvent(finish_reason="stop")]
+            )
+        else:
+            turn = self._turns[min(self.auto_calls, len(self._turns) - 1)]
+            self.auto_calls += 1
         for ev in turn:
             yield ev
 
 
 class _BoomGateway:
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator
@@ -195,7 +225,12 @@ async def ctx() -> AsyncIterator[_Ctx]:
 
 
 def _runtime(
-    ctx: _Ctx, *, gateway: object, retrieval: object, backplane: InMemoryBackplane
+    ctx: _Ctx,
+    *,
+    gateway: object,
+    retrieval: object,
+    backplane: InMemoryBackplane,
+    default_max_tool_turns: int = 4,
 ) -> ChatRuntime:
     return ChatRuntime(
         sessionmaker=ctx.sessionmaker,
@@ -204,6 +239,7 @@ def _runtime(
         principal=ctx.principal,
         request_id="req-1",
         source_ip="127.0.0.1",
+        default_max_tool_turns=default_max_tool_turns,
         retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
     )
 
@@ -388,6 +424,143 @@ async def test_empty_model_answer_falls_back_to_honest_message(ctx: _Ctx) -> Non
         msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in msgs if m.role.value == "assistant"][0]
     assert assistant.content.strip() != ""
+
+
+def _tool_turn(narration: str, call_id: str) -> list[StreamEvent]:
+    """A turn that emits a little narration then requests a search (never answers)."""
+    return [
+        StreamEvent(text=narration),
+        StreamEvent(
+            tool_calls=(ToolCall(id=call_id, name="search_text", arguments={"query": "q"}),),
+            finish_reason="tool_calls",
+        ),
+    ]
+
+
+async def test_tool_budget_exhaustion_forces_a_synthesized_answer(ctx: _Ctx) -> None:
+    """Issue #148 regression: if every turn calls a tool until the budget is spent,
+    the runtime forces one tool-free synthesis so the answer is real, not narration.
+
+    Without the fix the loop exits via the turn cap with ``answer_text`` equal to
+    just the inter-tool narration ("I'll search…", "Let me read…") — the live
+    2026-06-24 empty-answer bug. The fix makes a final ``tool_choice="none"`` call
+    and persists *that* as the answer.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        # Every scripted turn requests a tool (with leading narration) — the model
+        # never volunteers a tool-free answer within the budget.
+        [
+            _tool_turn("I'll search your documents for the incident. ", "c1"),
+            _tool_turn("Let me read the full postmortem. ", "c2"),
+        ],
+        # The forced tool-free synthesis the runtime demands once the budget is spent.
+        synthesis=[
+            StreamEvent(text="The root cause was a bad index migration; "),
+            StreamEvent(text="action items: add a canary and a rollback runbook."),
+            StreamEvent(finish_reason="stop"),
+        ],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+
+    import asyncio
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, default_max_tool_turns=2
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="What was the root cause and the action items?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # The loop spent its 2-turn budget on tool calls, then forced exactly one
+    # tool-free synthesis (tool_choice="none").
+    assert gateway.auto_calls == 2
+    assert gateway.synthesis_calls == 1
+    # Terminal is a single done (no error), and it is NOT the empty-answer fallback.
+    assert envs[-1]["type"] == "done"
+    assert [e["type"] for e in envs].count("done") == 1 and "error" not in [e["type"] for e in envs]
+
+    expected = (
+        "The root cause was a bad index migration; "
+        "action items: add a canary and a rollback runbook."
+    )
+    # Regression (PR #150 review): the LIVE stream must equal the synthesized answer
+    # too. The inter-tool narration is never emitted as a delta, so the streamed
+    # answer and the stored message agree — no live/persisted divergence.
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert streamed == expected
+    assert "I'll search" not in streamed
+    assert "Let me read" not in streamed
+
+    async with ctx.sessionmaker() as session:
+        msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in msgs if m.role.value == "assistant"][0]
+    # The persisted answer is the synthesized answer — not the inter-tool narration.
+    assert assistant.content == expected
+
+
+async def test_per_tenant_override_caps_tool_turns(ctx: _Ctx) -> None:
+    """A tenant's ``max_tool_turns`` override bounds the loop, beating the default (#148).
+
+    The default budget is set high (20); the tenant override is 1. If the override
+    were ignored the all-tool script would drive the loop 20 times (the fake clamps
+    to its last tool turn); respecting it runs exactly **one** tool turn before the
+    forced synthesis. ``auto_calls == 1`` is the proof the override won.
+    """
+    # Set the per-tenant override to 1 before the answer runs.
+    async with ctx.sessionmaker() as session:
+        await TenantRepository(session).update(ctx.tenant_id, max_tool_turns=1)
+        await session.commit()
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [_tool_turn("Searching… ", "c1")],
+        synthesis=[StreamEvent(text="Grounded final answer."), StreamEvent(finish_reason="stop")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, default_max_tool_turns=20
+    )
+
+    import asyncio
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # Exactly one tool turn ran (the override of 1), then the forced synthesis —
+    # not the default of 20.
+    assert gateway.auto_calls == 1
+    assert gateway.synthesis_calls == 1
+    # The streamed answer equals the synthesis (narration suppressed) and matches
+    # the persisted message — no live/stored divergence (PR #150 review).
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert streamed == "Grounded final answer."
+    assert "Searching" not in streamed
+    async with ctx.sessionmaker() as session:
+        msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in msgs if m.role.value == "assistant"][0]
+    assert assistant.content == "Grounded final answer."
 
 
 async def test_gateway_failure_ends_with_single_terminal_error(ctx: _Ctx) -> None:

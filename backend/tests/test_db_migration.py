@@ -78,14 +78,14 @@ def test_metadata_covers_every_mvp_table() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0011 with a SINGLE head (ADR-0008 §4).
+    """The chain is linear 0001 → … → 0012 with a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0011_recent_searches"]
+    assert list(script.get_heads()) == ["0012_tenant_max_tool_turns"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -116,6 +116,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     recent = script.get_revision("0011_recent_searches")
     assert recent is not None
     assert recent.down_revision == "0010_saved_searches"
+    tts = script.get_revision("0012_tenant_max_tool_turns")
+    assert tts is not None
+    assert tts.down_revision == "0011_recent_searches"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -364,6 +367,30 @@ def test_offline_grants_migration_round_trips(
     assert "drop index ix_grants_tenant_resource" in down
     assert "drop index ix_grants_tenant_principal" in down
     assert "drop table grants" in down
+
+
+def test_offline_tenant_max_tool_turns_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0012 adds ``tenants.max_tool_turns`` (+ its range check); down() reverses (#148).
+
+    AC: the upgrade renders the nullable ``max_tool_turns`` column on ``tenants``
+    and the ``ck_tenants_max_tool_turns_range`` 1–50 check; the downgrade drops the
+    constraint and the column. Offline DDL render (Postgres dialect) — structural
+    reversibility without a DB (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0011_recent_searches:0012_tenant_max_tool_turns", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The per-tenant override column + its bounded check (issue #148).
+    assert "alter table tenants add column max_tool_turns" in up
+    assert "ck_tenants_max_tool_turns_range" in up
+
+    command.downgrade(cfg, "0012_tenant_max_tool_turns:0011_recent_searches", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table tenants drop column max_tool_turns" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

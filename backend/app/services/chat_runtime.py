@@ -48,12 +48,13 @@ from app.db.repositories import (
     AuditEventRepository,
     CitationRepository,
     MessageRepository,
+    TenantRepository,
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import GroundedCitation
 from app.domain.entities import AuditOutcome, MessageRole
-from app.domain.llm import ChatMessage, Role, ToolCall
+from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall
 from app.llm import LLMGateway
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
@@ -70,8 +71,11 @@ log = get_logger(__name__)
 
 # How many tool-calling turns the agent may take before the runtime forces a
 # final answer (bounds the loop — no unbounded multi-step planning, issue #24
-# OUT). Each turn is one streamed completion that may request tools.
-_MAX_TOOL_TURNS = 4
+# OUT). Each turn is one streamed completion that may request tools. This module
+# default mirrors ``Settings.chat_max_tool_turns`` and is the fallback when no
+# configured default is injected (offline tests); the API always passes the
+# configured value, which a tenant admin may override per tenant (issue #148).
+_DEFAULT_MAX_TOOL_TURNS = 20
 # Default passages per search (configurable budget; kept small for the MVP).
 _DEFAULT_K = 6
 
@@ -87,6 +91,20 @@ class _StreamState:
         s = self.seq
         self.seq += 1
         return s
+
+
+@dataclass(slots=True)
+class _Usage:
+    """Mutable running token usage across the turns of one answer."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(self, usage: TokenUsage) -> None:
+        self.prompt_tokens += usage.prompt_tokens
+        self.completion_tokens += usage.completion_tokens
+        self.total_tokens += usage.total_tokens
 
 
 class ChatRuntime:
@@ -107,6 +125,7 @@ class ChatRuntime:
         principal: Principal,
         request_id: str,
         source_ip: str,
+        default_max_tool_turns: int = _DEFAULT_MAX_TOOL_TURNS,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -115,6 +134,9 @@ class ChatRuntime:
         self._principal = principal
         self._request_id = request_id
         self._source_ip = source_ip
+        # System default tool-turn budget (``Settings.chat_max_tool_turns``); a
+        # tenant's ``max_tool_turns`` override beats it when set (issue #148).
+        self._default_max_tool_turns = default_max_tool_turns
         # The retrieval service is built per-answer over the runtime's own
         # session. Injectable so the offline tests supply a fake whose
         # ``search_text`` does not need pgvector; defaults to the real adapter.
@@ -220,6 +242,9 @@ class ChatRuntime:
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
+        # The loop bound: this tenant's ``max_tool_turns`` override if set, else
+        # the configured system default (issue #148).
+        max_tool_turns = await self._resolve_max_tool_turns(session, tenant_id)
 
         messages: list[ChatMessage] = [
             ChatMessage(role=Role.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
@@ -230,35 +255,37 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
-        answer_parts: list[str] = []
-        prompt_tokens = completion_tokens = total_tokens = 0
+        # The answer is the text of exactly ONE turn: the tool-free turn the model
+        # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
+        # text is pre-tool narration ("I'll search…"), not answer content — it is
+        # never streamed as a ``delta`` nor persisted (issue #148). Streaming it
+        # would diverge the live answer from the stored message and re-expose the
+        # narration-as-answer bug for clients that render the stream.
+        answer_chunks: list[str] = []
+        usage = _Usage()
         finish_reason = "stop"
         total_hits = 0
 
-        for _turn in range(_MAX_TOOL_TURNS):
-            turn_tool_calls: list[ToolCall] = []
-            async for ev in self._gateway.stream_tools(
-                messages, tools=list(TOOL_SPECS), model=model
-            ):
-                if ev.text:
-                    answer_parts.append(ev.text)
-                    await self._publish(
-                        state, envelopes.delta(state.stream_id, state.next_seq(), {"text": ev.text})
-                    )
-                if ev.tool_calls:
-                    turn_tool_calls = list(ev.tool_calls)
-                if ev.finish_reason:
-                    finish_reason = ev.finish_reason
-                if ev.usage is not None:
-                    prompt_tokens += ev.usage.prompt_tokens
-                    completion_tokens += ev.usage.completion_tokens
-                    total_tokens += ev.usage.total_tokens
-
+        # Run the agentic tool loop. ``budget_exhausted`` stays True only if every
+        # turn within the budget requested tools — i.e. the model never reached a
+        # tool-free answer turn (the loop never ``break``s). That is the case the
+        # forced synthesis below repairs (issue #148).
+        budget_exhausted = True
+        for _turn in range(max_tool_turns):
+            turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
+                messages=messages, model=model, usage=usage
+            )
             if not turn_tool_calls:
+                # Tool-free turn → this is the answer. Only now is its text known
+                # to be answer content (not narration), so stream it now and stop.
+                await self._publish_text(state, turn_text)
+                answer_chunks = turn_text
+                budget_exhausted = False
                 break
 
             # The assistant turn that requested tools must be in the transcript
-            # before its tool results (provider protocol).
+            # before its tool results (provider protocol). Its narration text is
+            # dropped — neither streamed nor persisted.
             messages.append(
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
@@ -287,12 +314,27 @@ class ChatRuntime:
                     citation = GroundedCitation.from_passage(passage)
                     cited[passage.chunk_id] = citation
 
+        if budget_exhausted:
+            # The whole budget went to tool turns and the model never volunteered a
+            # tool-free answer (issue #148 — the live empty-answer bug). Force one
+            # synthesis turn with tools disabled so the model answers over the
+            # gathered tool context, then stream + persist THAT as the answer. The
+            # narration from the exhausted tool turns was never emitted, so the
+            # live stream and the stored message agree.
+            _, finish_reason, turn_text = await self._stream_one_turn(
+                messages=messages, model=model, usage=usage, tool_choice="none"
+            )
+            await self._publish_text(state, turn_text)
+            answer_chunks = turn_text
+
+        answer_text = "".join(answer_chunks).strip()
+
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
-        answer_text = "".join(answer_parts).strip()
         if not answer_text:
-            # The model produced no answer text (e.g. it only searched). Fall
-            # back to an honest "couldn't find it" rather than an empty turn.
+            # Still no answer text — even a forced synthesis said nothing (e.g.
+            # retrieval found nothing). Fall back to an honest "couldn't find it"
+            # rather than persisting an empty turn.
             answer_text = NO_SOURCES_FALLBACK
             await self._publish(
                 state,
@@ -328,10 +370,68 @@ class ChatRuntime:
             finish_reason=finish_reason,
             citation_count=len(stored_citations),
             citations=tuple(stored_citations),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
         )
+
+    async def _resolve_max_tool_turns(self, session: AsyncSession, tenant_id: UUID) -> int:
+        """The effective tool-turn budget for this answer (issue #148).
+
+        A tenant admin may override the system default per tenant
+        (``Tenant.max_tool_turns``); ``None`` ⇒ the configured default this
+        runtime was built with (``Settings.chat_max_tool_turns``). Clamped to
+        ≥ 1 so the loop always runs at least one turn against a degenerate value.
+        """
+        tenant = await TenantRepository(session).get(tenant_id)
+        override = tenant.max_tool_turns if tenant is not None else None
+        return max(1, override if override is not None else self._default_max_tool_turns)
+
+    async def _stream_one_turn(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str,
+        usage: _Usage,
+        tool_choice: str | None = None,
+    ) -> tuple[list[ToolCall], str, list[str]]:
+        """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
+
+        Buffers the turn's text chunks and folds token ``usage`` into the running
+        total, but does **not** publish: only the caller knows whether a turn's
+        text is answer content (a tool-free turn, or the forced synthesis) to be
+        streamed, or pre-tool narration (a tool-calling turn) to be dropped (issue
+        #148). ``tool_choice="none"`` forces a tool-free turn — the final synthesis
+        once the tool-turn budget is spent.
+        """
+        turn_tool_calls: list[ToolCall] = []
+        finish_reason = "stop"
+        text_chunks: list[str] = []
+        async for ev in self._gateway.stream_tools(
+            messages, tools=list(TOOL_SPECS), model=model, tool_choice=tool_choice
+        ):
+            if ev.text:
+                text_chunks.append(ev.text)
+            if ev.tool_calls:
+                turn_tool_calls = list(ev.tool_calls)
+            if ev.finish_reason:
+                finish_reason = ev.finish_reason
+            if ev.usage is not None:
+                usage.add(ev.usage)
+        return turn_tool_calls, finish_reason, text_chunks
+
+    async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
+        """Publish answer text as ``delta`` envelopes, preserving chunk granularity.
+
+        Called only for the answer turn's text — the tool-free turn or the forced
+        synthesis — never for a tool-calling turn's pre-tool narration (issue
+        #148), so the streamed answer equals the persisted one.
+        """
+        for chunk in chunks:
+            if chunk:
+                await self._publish(
+                    state, envelopes.delta(state.stream_id, state.next_seq(), {"text": chunk})
+                )
 
     async def _run_one_tool(
         self,
