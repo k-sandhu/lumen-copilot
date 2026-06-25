@@ -41,8 +41,8 @@ describe('SearchPage', () => {
       screen.queryByRole('button', { name: /toggle color theme/i }),
     ).not.toBeInTheDocument();
 
-    // Search functionality is intact: the composer and initial prompt render.
-    expect(screen.getByRole('searchbox')).toBeInTheDocument();
+    // Search functionality is intact: the combobox and initial prompt render.
+    expect(screen.getByRole('combobox')).toBeInTheDocument();
     expect(
       screen.getByText(/search across your connected sources/i),
     ).toBeInTheDocument();

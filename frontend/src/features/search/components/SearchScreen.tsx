@@ -30,8 +30,8 @@ import { ApiError } from '@/api';
 import type { SearchResult } from '@/api';
 import { ScrollArea } from '@/components/ScrollArea';
 import { Icon } from '@/ui';
-import { useSearch, useSearchCollections } from '../model/queries';
-import { SearchComposer } from './SearchComposer';
+import { useCreateSavedSearch, useSearch, useSearchCollections } from '../model/queries';
+import { SearchTypeahead } from './SearchTypeahead';
 import { DirectAnswerBlock } from './DirectAnswerBlock';
 import { SearchResultRow } from './SearchResultRow';
 import { SearchFilters, type SearchFilterState } from './SearchFilters';
@@ -94,10 +94,22 @@ export function SearchScreen() {
               One permissioned box across your connected sources and uploaded documents.
             </p>
           </header>
-          <SearchComposer
+          <SearchTypeahead
             value={draft}
             onChange={setDraft}
-            onSubmit={(q) => setSubmitted(q)}
+            onRunQuery={(q) => {
+              setDraft(q);
+              setSubmitted(q);
+            }}
+            onApplySaved={(s) => {
+              setDraft(s.query);
+              setFilters({
+                ...(s.collection_id ? { collectionId: s.collection_id } : {}),
+                ...(s.source ? { source: s.source } : {}),
+                ...(s.type ? { type: s.type } : {}),
+              });
+              setSubmitted(s.query);
+            }}
             busy={isLoading || query.isFetching}
           />
         </div>
@@ -148,7 +160,12 @@ export function SearchScreen() {
                       <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
                     ) : null}
 
-                    <ResultsToolbar count={results.length} filtered={hasFilter} />
+                    <ResultsToolbar
+                      count={results.length}
+                      filtered={hasFilter}
+                      query={data.query}
+                      filters={filters}
+                    />
 
                     <TrimNotice hiddenCount={data.hidden_count} />
 
@@ -170,15 +187,109 @@ export function SearchScreen() {
   );
 }
 
-function ResultsToolbar({ count, filtered }: { count: number; filtered: boolean }) {
+function ResultsToolbar({
+  count,
+  filtered,
+  query,
+  filters,
+}: {
+  count: number;
+  filtered: boolean;
+  query: string;
+  filters: SearchFilterState;
+}) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between gap-3">
       <p className="text-sm text-foreground-muted">
         <b className="text-foreground">{count}</b> {count === 1 ? 'result' : 'results'} ·
         permission-trimmed
         {filtered ? ' · filtered' : ''}
       </p>
+      <SaveSearchControl query={query} filters={filters} />
     </div>
+  );
+}
+
+/**
+ * "Save search" — names the current query + filters into a saved search. Inline
+ * (a button that expands to a small name field), so the user never leaves the
+ * results. Applying a saved search later re-runs the same /search (the typeahead).
+ */
+function SaveSearchControl({ query, filters }: { query: string; filters: SearchFilterState }) {
+  const create = useCreateSavedSearch();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+
+  if (!query.trim()) return null;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const n = name.trim();
+    if (!n) return;
+    create.mutate(
+      {
+        name: n,
+        query,
+        ...(filters.collectionId ? { collection_id: filters.collectionId } : {}),
+        ...(filters.source ? { source: filters.source } : {}),
+        ...(filters.type ? { type: filters.type } : {}),
+      },
+      {
+        onSuccess: () => {
+          setOpen(false);
+          setName('');
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-foreground-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <Icon name="list" className="h-3.5 w-3.5" />
+        Save search
+      </button>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="flex shrink-0 items-center gap-2">
+      <input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        aria-label="Saved search name"
+        placeholder="Name this search"
+        maxLength={200}
+        className="w-40 rounded-md border border-border bg-surface px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+      />
+      <button
+        type="submit"
+        disabled={create.isPending || name.trim().length === 0}
+        className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        {create.isPending ? 'Saving…' : 'Save'}
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false);
+          setName('');
+        }}
+        className="rounded-md px-2 py-1 text-xs text-foreground-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        Cancel
+      </button>
+      {create.isError ? (
+        <span role="alert" className="text-xs text-danger">
+          Couldn’t save.
+        </span>
+      ) : null}
+    </form>
   );
 }
 
