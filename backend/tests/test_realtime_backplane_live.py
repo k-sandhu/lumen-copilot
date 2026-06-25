@@ -45,14 +45,19 @@ live = pytest.mark.skipif(
 
 @pytest.fixture
 async def _redis_url() -> AsyncIterator[str]:
-    """The configured Redis URL, skipping the test if Redis is unreachable.
+    """The configured Redis URL, skipping cleanly if Settings or Redis aren't usable.
 
-    Reachability is probed with :func:`ping` (a transient client, closed in the
-    helper) so an opted-in run against a down Redis skips cleanly rather than
-    erroring — and an offline run never reaches here (gated by ``RUN_LIVE``).
+    These tests need only Redis, but ``Settings`` validates the *whole* stack config
+    (DB/S3/Celery/…), so a partial/malformed env is skipped rather than erroring —
+    opting into the Redis-only live tests must not require a fully configured stack.
+    Reachability is then probed with :func:`ping` (a transient client, closed in the
+    helper) so an opted-in run against a down Redis also skips cleanly. An offline
+    run never reaches here (gated by ``RUN_LIVE``).
     """
-    settings = Settings()  # reads real env / .env (pydantic-settings)
-    url = settings.redis_url
+    try:
+        url = Settings().redis_url  # reads real env / .env (pydantic-settings)
+    except Exception as exc:  # noqa: BLE001 — incomplete stack config → skip, not error
+        pytest.skip(f"Settings unavailable for live Redis test: {type(exc).__name__}")
     try:
         await ping(url)
     except Exception as exc:  # noqa: BLE001 — any connection failure → skip, not error
