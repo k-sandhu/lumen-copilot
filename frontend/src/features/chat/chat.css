@@ -491,6 +491,50 @@
   cursor: default;
 }
 
+/* "Set as default" model action + the "Default" indicator (spec 0005) */
+.lc-default-btn {
+  height: calc(30px * max(var(--fs), var(--space)));
+  padding: 0 calc(9px * var(--space));
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--ds-font-sans);
+  font-size: calc(12px * var(--fs));
+  font-weight: 540;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur-1),
+    color var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-default-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.lc-default-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.lc-default-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5px * var(--space));
+  height: calc(30px * max(var(--fs), var(--space)));
+  padding: 0 calc(9px * var(--space));
+  font-size: calc(12px * var(--fs));
+  font-weight: 540;
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+.lc-default-tag .lc-icon {
+  width: calc(13px * var(--fs));
+  height: calc(13px * var(--fs));
+  color: var(--accent);
+}
+
 /* round primary send button + neutral stop button */
 .lc-send-btn {
   display: grid;

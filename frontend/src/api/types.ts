@@ -683,3 +683,84 @@ export interface ChatDoneData {
     totalTokens?: number;
   };
 }
+
+// --- Preferences / saved searches / suggestions (spec 0005, epic #144) ------
+
+/** `GET`/`PATCH /preferences` response — the caller's account preferences. */
+export interface UserPreferences {
+  /** A `/models` id, or null to use the server default. */
+  default_model_id: string | null;
+  /** When last changed, or null if never (the implicit server-default state). */
+  updated_at: string | null;
+}
+
+/** `PATCH /preferences` body — partial (at least one field). */
+export interface UserPreferencesUpdate {
+  /** A `/models` id to set, or null to clear (fall back to the server default). */
+  default_model_id?: string | null;
+}
+
+/** A saved `/search` query + its filters. */
+export interface SavedSearch {
+  id: string;
+  name: string;
+  query: string;
+  collection_id?: string | null;
+  source?: ResultSource | null;
+  type?: string | null;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `POST /saved-searches` body. */
+export interface SavedSearchCreate {
+  name: string;
+  query: string;
+  collection_id?: string;
+  source?: ResultSource;
+  type?: string;
+}
+
+/** `PATCH /saved-searches/{id}` body — partial (at least one field). */
+export interface SavedSearchUpdate {
+  name?: string;
+  query?: string;
+  collection_id?: string | null;
+  source?: ResultSource | null;
+  type?: string | null;
+}
+
+/** `GET /saved-searches` response (cursor-paginated). */
+export interface SavedSearchList {
+  items: SavedSearch[];
+  next_cursor?: string | null;
+}
+
+/** What a typeahead suggestion represents. */
+export type SuggestionKind = 'completion' | 'document' | 'saved_search';
+
+/** One typeahead suggestion from `GET /search/suggest`. */
+export interface Suggestion {
+  kind: SuggestionKind;
+  text: string;
+  document_id?: string | null;
+  source?: ResultSource | null;
+  saved_search_id?: string | null;
+}
+
+/** `GET /search/suggest` response. */
+export interface SuggestResponse {
+  suggestions: Suggestion[];
+}
+
+/** One recent `/search` query the caller ran. */
+export interface RecentSearch {
+  query: string;
+  last_used_at: string;
+}
+
+/** `GET /search/recent` response. */
+export interface RecentSearchList {
+  items: RecentSearch[];
+}
