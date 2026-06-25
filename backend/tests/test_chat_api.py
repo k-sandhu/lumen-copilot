@@ -87,7 +87,7 @@ class _ScriptedGateway:
         self._chunk_id = passage_chunk_id
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
     ) -> AsyncIterator[StreamEvent]:
         # Turn shape is decided by whether the transcript already has a tool turn:
         # a real gateway streams; here we infer the turn from message count.
@@ -578,9 +578,9 @@ def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _
             "/api/v1/auth/login", json={"email": seeded.alice_email, "password": _PASSWORD}
         ).json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
-        sid = client.post(
-            "/api/v1/chat/sessions", headers=headers, json={"title": "s"}
-        ).json()["id"]
+        sid = client.post("/api/v1/chat/sessions", headers=headers, json={"title": "s"}).json()[
+            "id"
+        ]
         sent = client.post(
             f"/api/v1/chat/sessions/{sid}/messages",
             headers=headers,

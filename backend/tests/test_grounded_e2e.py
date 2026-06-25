@@ -118,7 +118,7 @@ class _GroundedAnswerGateway:
     """
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         tool_texts = [

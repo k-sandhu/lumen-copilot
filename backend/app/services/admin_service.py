@@ -1,12 +1,17 @@
 """Admin governance use-cases — read-mostly /admin/* (issue #87).
 
-The orchestration layer behind the read-only admin console surfaces (ADR-0004:
-``services/`` compose adapters; routers call exactly one service). All three
-surfaces are **reads** — there is intentionally **no write/governance mutation**
-here (read-before-write, spec 0004 §2.5 / mission filter #3): the MVP is entirely
-T0, so the admin console *reflects* governance, it never changes it.
+The orchestration layer behind the admin console surfaces (ADR-0004: ``services/``
+compose adapters; routers call exactly one service). The governance surfaces
+(members, model governance, risk tiers) are **reads** — the admin console
+*reflects* governance, it never changes it (read-before-write, spec 0004 §2.5 /
+mission filter #3). The one **write** is the per-tenant settings update (issue
+#148): a reversible, tenant-scoped **T1** action (spec 0004 §2.5 — "authorized
+owner; audited; no extra approval") that sets a tenant's chat tool-turn budget.
+It is admin-gated one layer up (INV-5) and audited here (INV-6); it touches only
+the caller's own tenant's operational config, never another tenant and no T2+
+governance.
 
-Three use-cases:
+Use-cases:
 
 * :meth:`AdminService.list_members` — the tenant's roster (id, email, roles),
   cursor-paginated. Tenant-scoped (INV-1): only the caller's own tenant's
@@ -18,6 +23,10 @@ Three use-cases:
 * :meth:`AdminService.risk_tiers` — the read-before-write risk-tier reference
   (T0–T3, spec 0004 §2.5) as **static config**, not a table (the tiers are a
   fixed product policy, not per-tenant data).
+* :meth:`AdminService.get_tenant_settings` / :meth:`AdminService.update_tenant_settings`
+  — read and write the per-tenant admin settings (issue #148): the chat tool-turn
+  budget override (``Tenant.max_tool_turns``); ``None`` ⇒ the system default. The
+  update is the one write surface here and the one audited admin action.
 
 Tenant binding (spec 0004 §2.3): the tenant id is the one resolved from the
 caller's token (``current_tenant``), passed in by the router — never request
@@ -54,10 +63,13 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import ValidationError
+from app.core.errors import NotFoundError, ValidationError
 from app.db import models
-from app.domain.entities import Role, User
+from app.db.repositories import AuditEventRepository, TenantRepository
+from app.domain.audit import AuditAction, AuditActor
+from app.domain.entities import AuditOutcome, Role, User
 from app.domain.models import ModelTier
+from app.services.audit import AuditSink
 from app.services.models_service import ChatModelService
 
 # Pagination bounds mirror the contract's Limit parameter (min 1, max 100).
@@ -163,6 +175,22 @@ class MemberPage:
 
     items: list[User]
     next_cursor: str | None
+
+
+# --- Per-tenant admin settings (issue #148) ---------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TenantSettingsView:
+    """The admin-configurable per-tenant settings (contract ``TenantSettings``).
+
+    ``max_tool_turns`` is the **effective** chat tool-turn budget — the tenant's
+    override if set, else the system default; ``max_tool_turns_is_default`` says
+    which, so the admin console can show "default (20)" vs an explicit override.
+    """
+
+    max_tool_turns: int
+    max_tool_turns_is_default: bool
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -279,16 +307,20 @@ class _TenantMemberQuery:
 
 
 class AdminService:
-    """Read-only governance surfaces for the admin console (issue #87).
+    """Admin console surfaces for one tenant (issues #87, #148).
 
     Constructed per-request with the session, the resolved ``tenant_id`` (from
-    the token, never request input), and ``Settings`` (the model registry is
-    config). Holds **no write** use-case — read-before-write (spec 0004 §2.5).
-    Role gating (admin-only) is the router's ``require_roles`` dependency; this
-    service is only reached once that gate has passed.
+    the token, never request input), and ``Settings`` (the model registry +
+    default budgets are config). The governance surfaces are reads; the one write
+    is :meth:`update_tenant_settings` — a reversible, tenant-scoped **T1** action
+    (spec 0004 §2.5), audited here. Role gating (admin-only, INV-5) is the
+    router's ``require_roles`` dependency; this service is only reached once that
+    gate has passed.
     """
 
     def __init__(self, session: AsyncSession, *, tenant_id: UUID, settings: Settings) -> None:
+        self._session = session
+        self._tenant_id = tenant_id
         self._members = _TenantMemberQuery(session, tenant_id)
         self._settings = settings
 
@@ -339,3 +371,65 @@ class AdminService:
         the same for every tenant. Returned in tier order T0 → T3.
         """
         return list(_RISK_TIERS)
+
+    # --- Per-tenant settings (issue #148) -----------------------------------
+
+    async def get_tenant_settings(self) -> TenantSettingsView:
+        """The caller's tenant's admin-configurable settings (issue #148).
+
+        Returns the **effective** chat tool-turn budget — the tenant's override if
+        set, else the system default (``Settings.chat_max_tool_turns``) — and
+        whether the default is in force. Tenant-scoped (INV-1): the tenant id is
+        the one the router resolved from the token.
+        """
+        tenant = await TenantRepository(self._session).get(self._tenant_id)
+        override = tenant.max_tool_turns if tenant is not None else None
+        return self._settings_view(override)
+
+    async def update_tenant_settings(
+        self,
+        *,
+        max_tool_turns: int | None,
+        actor_id: UUID,
+        request_id: str,
+        source_ip: str,
+    ) -> TenantSettingsView:
+        """Set (or clear) the tenant's chat tool-turn budget override (issue #148).
+
+        The one /admin **write** — a reversible, tenant-scoped **T1** action (spec
+        0004 §2.5): admin-gated one layer up (INV-5), audited here (INV-6).
+        ``max_tool_turns`` is written as given: an int sets the per-tenant override,
+        ``None`` clears it so the system default applies again. The wire schema +
+        the DB ``ck_tenants_max_tool_turns_range`` check bound it to 1–50 (INV-8).
+        Returns the resulting effective settings (a read-back of what was stored).
+        """
+        updated = await TenantRepository(self._session).update(
+            self._tenant_id, max_tool_turns=max_tool_turns
+        )
+        if updated is None:
+            # Unreachable in practice (the caller's own tenant, resolved from the
+            # token, exists); guard so a vanished tenant is a clean 404, not a 500.
+            raise NotFoundError("Tenant not found.")
+        # Audit the settings write (INV-6 / mission filter #4) — the action ran and
+        # is attributed to the admin who made it; the new value rides the metadata.
+        audit = AuditSink(AuditEventRepository(self._session, self._tenant_id))
+        await audit.emit(
+            action=AuditAction.TENANT_SETTINGS_UPDATED,
+            actor=AuditActor.user(actor_id),
+            resource_type="tenant",
+            resource_id=str(self._tenant_id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=request_id,
+            source_ip=source_ip,
+            metadata={"max_tool_turns": max_tool_turns},
+        )
+        return self._settings_view(updated.max_tool_turns)
+
+    def _settings_view(self, override: int | None) -> TenantSettingsView:
+        """Project a stored override into the effective settings view (issue #148)."""
+        if override is None:
+            return TenantSettingsView(
+                max_tool_turns=self._settings.chat_max_tool_turns,
+                max_tool_turns_is_default=True,
+            )
+        return TenantSettingsView(max_tool_turns=override, max_tool_turns_is_default=False)

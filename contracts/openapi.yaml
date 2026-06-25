@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.4.0
+  version: 0.5.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -41,6 +41,15 @@ info:
     `GET`/`DELETE /search/recent` (recent-query history; `/search` records the
     executed query). All per-user and tenant-scoped (INV-1/INV-2). No shape from
     0.1.0–0.3.0 changed; REST request/response only.
+
+
+    This revision (0.5.0) **additively** adds the **admin per-tenant settings
+    wire** (issue #148): `GET /admin/settings` (the tenant's effective chat
+    tool-turn budget) and `PATCH /admin/settings` (set or clear the per-tenant
+    override). The PATCH is the first `/admin` **write** — a reversible,
+    tenant-scoped **T1** action (spec 0004 §2.5): `admin`-only (**403** otherwise,
+    INV-5), audited, with an out-of-range value rejected as **422** (INV-8). No
+    shape from 0.1.0–0.4.0 changed; REST request/response only.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -588,7 +597,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
-  # --- Admin (M2: read-only governance surfaces, admin only) : #80 -----------
+  # --- Admin (M2 governance reads #80 + per-tenant settings write #148, admin only) ---
   /admin/members:
     get:
       operationId: listMembers
@@ -646,6 +655,50 @@ paths:
               schema: { $ref: "#/components/schemas/RiskTierList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/settings:
+    get:
+      operationId: getTenantSettings
+      summary: The tenant's admin-configurable settings (admin only).
+      description: >
+        The caller's tenant's effective chat tool-turn budget (issue #148): the
+        per-tenant override if set, else the system default, plus whether the
+        default is in force. Restricted to the `admin` role; otherwise **403**
+        (INV-5). Tenant-scoped (INV-1).
+      tags: [admin]
+      responses:
+        "200":
+          description: The tenant's settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateTenantSettings
+      summary: Set or clear the tenant's chat tool-turn budget (admin only).
+      description: >
+        Set the per-tenant chat tool-turn budget override, or clear it (`null`) to
+        fall back to the system default (issue #148). The first `/admin` **write**
+        — a reversible, tenant-scoped **T1** action (spec 0004 §2.5): `admin`-only
+        (**403** otherwise, INV-5), audited (INV-6). An out-of-range value (outside
+        1–50) or a missing field is **422** (INV-8). Returns the resulting
+        effective settings.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantSettingsUpdate" }
+      responses:
+        "200":
+          description: The updated settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
@@ -1577,6 +1630,44 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RiskTier" }
 
+    TenantSettings:
+      type: object
+      additionalProperties: false
+      description: >
+        The admin-configurable per-tenant settings (issue #148). `max_tool_turns`
+        is the EFFECTIVE chat tool-turn budget — the per-tenant override if set,
+        else the system default — and `max_tool_turns_is_default` says which.
+      required: [max_tool_turns, max_tool_turns_is_default]
+      properties:
+        max_tool_turns:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: >
+            How many tool-calling turns the grounded answer runtime may take
+            before it forces a final synthesis. A "turn" is one streamed
+            completion that may request tools.
+        max_tool_turns_is_default:
+          type: boolean
+          description: True when no per-tenant override is set and the system default is in force.
+
+    TenantSettingsUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set or clear the per-tenant chat tool-turn budget override (issue #148).
+        `max_tool_turns` is required so the intent is explicit.
+      required: [max_tool_turns]
+      properties:
+        max_tool_turns:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 50
+          description: >
+            An integer in 1–50 sets the per-tenant override; `null` clears it so
+            the system default applies again (the system default is configured
+            server-side, `CHAT_MAX_TOOL_TURNS`).
+
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:
       type: string
@@ -1932,6 +2023,9 @@ tags:
   - name: audit
     description: The append-only audit trail with provenance (admin / security only).
   - name: admin
-    description: Read-only tenant governance — members, model governance, risk tiers (admin only).
+    description: >-
+      Tenant administration (admin only) — members, model governance and risk
+      tiers (reads), plus per-tenant settings (`GET`/`PATCH /admin/settings`, the
+      chat tool-turn budget — the one admin write, audited; issue #148).
   - name: sources
     description: Connected sources — the connector grid (add / sync / remove a Web URL source).

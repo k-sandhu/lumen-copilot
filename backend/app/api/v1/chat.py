@@ -438,6 +438,7 @@ async def send_message(
         session_id=session_id,
         result=result,
         collection_ids=body.collection_ids,
+        default_max_tool_turns=settings.chat_max_tool_turns,
     )
     return SendMessageResponse(
         message=_bare_message_to_response(result.user_message),
@@ -454,12 +455,15 @@ def _schedule_answer(
     session_id: UUID,
     result: SendResult,
     collection_ids: list[UUID] | None,
+    default_max_tool_turns: int,
 ) -> None:
     """Launch the answer runtime after the 202 response is sent.
 
     The runtime owns its **own** DB session (the request session is closed once
     the response is returned), so it is built with the sessionmaker, not the
-    request session. It streams over the injected backplane (overridable in tests).
+    request session. It streams over the injected backplane (overridable in
+    tests). ``default_max_tool_turns`` is the configured system default budget;
+    the runtime applies the tenant's per-tenant override over it (issue #148).
     """
     runtime = ChatRuntime(
         sessionmaker=get_sessionmaker(),
@@ -468,6 +472,7 @@ def _schedule_answer(
         principal=principal,
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
+        default_max_tool_turns=default_max_tool_turns,
     )
     history = _to_chat_messages(result.history)
 

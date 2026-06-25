@@ -90,6 +90,33 @@ async def test_tenant_create_and_get(session: AsyncSession) -> None:
     assert fetched is not None
     assert fetched.id == created.id
     assert fetched.name == "Acme"
+    # A fresh tenant carries no per-tenant tool-turn override — the system
+    # default applies (issue #148).
+    assert created.max_tool_turns is None
+    assert fetched.max_tool_turns is None
+
+
+async def test_tenant_update_sets_and_clears_max_tool_turns(session: AsyncSession) -> None:
+    """The per-tenant tool-turn override round-trips: set an int, then clear it (#148)."""
+    tenants = TenantRepository(session)
+    created = await tenants.create(name="Acme")
+
+    # Set an explicit per-tenant override.
+    updated = await tenants.update(created.id, max_tool_turns=7)
+    assert updated is not None
+    assert updated.max_tool_turns == 7
+    assert (await tenants.get(created.id)).max_tool_turns == 7  # type: ignore[union-attr]
+
+    # Clearing it (None) reverts the tenant to the system default.
+    cleared = await tenants.update(created.id, max_tool_turns=None)
+    assert cleared is not None
+    assert cleared.max_tool_turns is None
+    assert (await tenants.get(created.id)).max_tool_turns is None  # type: ignore[union-attr]
+
+
+async def test_tenant_update_unknown_id_returns_none(session: AsyncSession) -> None:
+    tenants = TenantRepository(session)
+    assert await tenants.update(uuid.uuid4(), max_tool_turns=10) is None
 
 
 async def test_user_round_trips_with_roles(

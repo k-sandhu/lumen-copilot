@@ -55,6 +55,11 @@ class AuditAction(str, enum.Enum):
     # service that emits these is the testable seam landed here.
     PERMISSION_GRANTED = "permission.granted"
     PERMISSION_REVOKED = "permission.revoked"
+    # Admin per-tenant settings write (issue #148). Additive to the §2.4 taxonomy
+    # — deny-by-default is preserved (the set only grows). The first /admin write:
+    # a reversible, tenant-scoped T1 action (spec 0004 §2.5 — "authorized owner;
+    # audited; no extra approval"), audited like every consequential action.
+    TENANT_SETTINGS_UPDATED = "tenant.settings_updated"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"
