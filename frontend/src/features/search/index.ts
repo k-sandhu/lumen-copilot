@@ -4,7 +4,7 @@
  * cross-feature deep imports).
  */
 export { SearchScreen } from './components/SearchScreen';
-export { SearchComposer } from './components/SearchComposer';
+export { SearchTypeahead } from './components/SearchTypeahead';
 export { SearchResultRow } from './components/SearchResultRow';
 export { SearchFilters, type SearchFilterState } from './components/SearchFilters';
 export { DirectAnswerBlock } from './components/DirectAnswerBlock';

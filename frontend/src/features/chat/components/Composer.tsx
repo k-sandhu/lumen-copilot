@@ -27,6 +27,12 @@ export interface ComposerProps {
   onStop: () => void;
   /** Disable everything (e.g. no session selected). */
   disabled?: boolean;
+  /** The caller's saved default model id (spec 0005); null when unset. */
+  defaultModelId?: string | null;
+  /** Persist the currently-selected model as the caller's default (#144). */
+  onSetDefaultModel?: () => void;
+  /** True while the default-model preference write is in flight. */
+  settingDefault?: boolean;
 }
 
 export function Composer({
@@ -38,6 +44,9 @@ export function Composer({
   onSend,
   onStop,
   disabled = false,
+  defaultModelId,
+  onSetDefaultModel,
+  settingDefault = false,
 }: ComposerProps) {
   const [draft, setDraft] = useState('');
   // Knowledge mode is a presentational scope indicator (#89). It defaults to
@@ -95,6 +104,27 @@ export function Composer({
             onChange={onModelChange}
             disabled={disabled || streaming}
           />
+          {model && onSetDefaultModel ? (
+            model === defaultModelId ? (
+              <span
+                className="lc-default-tag"
+                title="This is your default model for new chats"
+              >
+                <Icon name="check" />
+                Default
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="lc-default-btn"
+                onClick={onSetDefaultModel}
+                disabled={settingDefault || disabled}
+                title="Use this model as the default for new chats"
+              >
+                {settingDefault ? 'Saving…' : 'Set as default'}
+              </button>
+            )
+          ) : null}
           <div className="lc-composer__bar-spacer" />
           {streaming ? (
             <button type="button" onClick={onStop} aria-label="Stop generating" className="lc-stop-btn">

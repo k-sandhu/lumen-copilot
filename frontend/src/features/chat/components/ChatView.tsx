@@ -15,6 +15,7 @@ import { ApiError } from '@/api';
 import type { ChatModelInfo, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
+import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useChatStore } from '../model/chatStore';
 import '../chat.css';
 import {
@@ -199,6 +200,8 @@ function ActiveSession({
   const messages = useMessages(sessionId);
   const send = useSendMessage(sessionId);
   const updateSession = useUpdateSession();
+  const prefs = usePreferences();
+  const setDefaultPref = useUpdatePreferences();
 
   // The selected model: default until the user changes it (AC-3). The session
   // model is persisted via PATCH when changed.
@@ -206,12 +209,21 @@ function ActiveSession({
   // Remember the last request so a stream error/disconnect can be retried (AC-5).
   const lastSendRef = useRef<SendMessageRequest | null>(null);
 
-  // Preselect the default once models load (don't clobber a user choice).
+  // Preselect once models load (don't clobber a user choice): prefer the caller's
+  // saved default-model preference (spec 0005) when it's still a valid registry
+  // id, else the server default. Wait for the preference to settle so we don't
+  // preselect the server default and then visibly jump.
   useEffect(() => {
-    if (model === '' && models && models.length > 0) {
-      setModel(defaultModelId(models));
-    }
-  }, [model, models]);
+    if (model !== '' || !models || models.length === 0 || prefs.isLoading) return;
+    const preferred = prefs.data?.default_model_id;
+    const valid = preferred != null && models.some((m) => m.id === preferred);
+    setModel(valid ? preferred : defaultModelId(models));
+  }, [model, models, prefs.isLoading, prefs.data]);
+
+  // Persist the currently-selected model as the caller's default for new chats.
+  const onSetDefaultModel = useCallback(() => {
+    if (model) setDefaultPref.mutate({ default_model_id: model });
+  }, [model, setDefaultPref]);
 
   // The assistant messageId we're waiting for the server reload to surface. The
   // live answer stays rendered until the persisted message arrives, so the turn
@@ -331,6 +343,9 @@ function ActiveSession({
           onSend={onSend}
           onStop={onStop}
           disabled={modelsLoading && (models?.length ?? 0) === 0}
+          defaultModelId={prefs.data?.default_model_id ?? null}
+          onSetDefaultModel={onSetDefaultModel}
+          settingDefault={setDefaultPref.isPending}
         />
       </div>
     </div>

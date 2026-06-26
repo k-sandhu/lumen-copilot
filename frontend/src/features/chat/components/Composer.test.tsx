@@ -74,6 +74,44 @@ describe('Composer', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('offers "Set as default" and reports the chosen model (#144)', async () => {
+    const onSetDefaultModel = vi.fn();
+    render(
+      <Composer
+        models={MODELS}
+        model="m1"
+        onModelChange={vi.fn()}
+        busy={false}
+        streaming={false}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        defaultModelId={null}
+        onSetDefaultModel={onSetDefaultModel}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /set as default/i }));
+    expect(onSetDefaultModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a "Default" tag (not the button) when the model is already the default (#144)', () => {
+    render(
+      <Composer
+        models={MODELS}
+        model="m1"
+        onModelChange={vi.fn()}
+        busy={false}
+        streaming={false}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        defaultModelId="m1"
+        onSetDefaultModel={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /set as default/i })).not.toBeInTheDocument();
+    expect(screen.getByText('Default')).toBeInTheDocument();
+  });
+
   it('surfaces the knowledge-mode chips, "Company sources" active by default (#89)', () => {
     setup();
     const group = screen.getByRole('group', { name: /knowledge mode/i });
