@@ -415,6 +415,27 @@ def test_ws_rejects_missing_token(app: FastAPI) -> None:
                 pass
 
 
+def test_ws_missing_token_denied_before_accept_no_envelope(app: FastAPI) -> None:
+    """A missing token is denied **before accept** — handshake rejected, no leak.
+
+    Pins the documented client-visible outcome (issue #158): the endpoint closes
+    the socket before ``accept``. Over a real transport that surfaces as an HTTP
+    403 rejection of the WebSocket upgrade; the in-process ``TestClient``
+    short-circuits the close into a ``WebSocketDisconnect`` (it never reaches the
+    HTTP-403 translation a network client sees). Either way the socket is never
+    accepted and **no envelope** is delivered — so this asserts the disconnect is
+    raised and nothing was received, keeping the corrected docstrings honest.
+    """
+    with TestClient(app) as client:
+        leaked: dict[str, object] | None = None
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/chat/some-stream") as ws:
+                # Reaching the body means the socket was accepted — any receive is
+                # a leak. The denial path must raise before yielding an envelope.
+                leaked = ws.receive_json()
+        assert leaked is None, f"envelope leaked on a pre-accept denial: {leaked!r}"
+
+
 def _fill_replay(backplane: InMemoryBackplane, envs: list[dict[str, object]]) -> None:
     """Synchronously seed the in-memory backplane's replay with ``envs``.
 
