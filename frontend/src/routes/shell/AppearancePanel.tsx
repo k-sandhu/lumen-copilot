@@ -11,7 +11,7 @@
  * A11y: each axis is a labelled group; options are toggle buttons carrying
  * aria-pressed, so the current selection is announced.
  */
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { Icon, THEMES, ACCENTS, DENSITIES, type AppearanceApi, type ThemeMode } from '@/ui';
 import type { IconName } from '@/ui';
 import './appearance.css';
@@ -25,11 +25,19 @@ const MODE_OPTIONS: Array<{ value: ThemeMode; label: string; icon: IconName }> =
 interface AppearancePanelProps {
   /** The appearance api (lifted to the trigger so the pill label stays in sync). */
   appearance: AppearanceApi;
+  /**
+   * Optional account-level preference controls rendered above the (device-local)
+   * appearance axes — e.g. the default-model picker (issue #167). Kept a slot so
+   * the panel stays a pure, server-state-free presentational component.
+   */
+  children?: ReactNode;
 }
 
-export function AppearancePanel({ appearance: a }: AppearancePanelProps) {
+export function AppearancePanel({ appearance: a, children }: AppearancePanelProps) {
   return (
     <div className="lc-aps">
+      {children}
+
       {/* THEME */}
       <div className="lc-aps__section">
         <div className="lc-aps__label">

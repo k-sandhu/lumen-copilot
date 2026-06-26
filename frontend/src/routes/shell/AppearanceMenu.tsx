@@ -6,6 +6,7 @@
  */
 import { Icon, useAppearance, THEMES, type IconName } from '@/ui';
 import type { ThemeMode } from '@/ui';
+import { DefaultModelSetting } from '@/features/preferences/components/DefaultModelSetting';
 import { useDisclosure } from './useDisclosure';
 import { AppearancePanel } from './AppearancePanel';
 
@@ -50,10 +51,14 @@ export function AppearanceMenu() {
         >
           <div className="lc-menu__head">
             <div className="lc-menu__name">Appearance &amp; preferences</div>
-            <div className="lc-menu__meta">Applies instantly · saved on this device.</div>
+            <div className="lc-menu__meta">
+              Appearance saved on this device · default model synced to your account.
+            </div>
           </div>
           <div className="lc-menu__sep" />
-          <AppearancePanel appearance={appearance} />
+          <AppearancePanel appearance={appearance}>
+            <DefaultModelSetting />
+          </AppearancePanel>
         </div>
       ) : null}
     </div>
