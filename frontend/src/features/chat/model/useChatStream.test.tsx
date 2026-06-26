@@ -157,6 +157,54 @@ describe('useChatStream', () => {
     expect(result.current.problem?.code).toBe('stream_disconnected');
   });
 
+  it('treats a start-then-silence stall (no first token) as terminal error with retry (#159)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 10 }),
+    );
+
+    // Backend opens the stream and announces `start`, then stalls before the
+    // first delta/event/terminal. The `start` must re-arm the idle watchdog.
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      vi.advanceTimersByTime(9);
+    });
+    // `start` re-armed the watchdog; it has not yet fired, so no terminal error.
+    expect(result.current.phase).not.toBe('error');
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(result.current.phase).toBe('error');
+    expect(result.current.problem?.code).toBe('stream_disconnected');
+    expect(h.get().closed).toBe(true);
+  });
+
+  it('treats silence after a side-band event (no terminal) as terminal error (#159)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 10 }),
+    );
+
+    // start → event (e.g. tool_call) → silence: the `event` must re-arm too.
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'event', streamId: SID, seq: 1, name: 'tool_call', data: {} });
+      vi.advanceTimersByTime(9);
+    });
+    expect(result.current.phase).not.toBe('error');
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(result.current.phase).toBe('error');
+    expect(result.current.problem?.code).toBe('stream_disconnected');
+  });
+
   it('treats idle silence between tokens as terminal error while preserving text', () => {
     vi.useFakeTimers();
     const h = harness();

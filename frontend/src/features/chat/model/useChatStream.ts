@@ -160,7 +160,12 @@ export function useChatStream({
           terminalRef.current = true;
           clientRef.current?.close();
         }
-        if (envelope.type === 'delta' && !terminalRef.current) {
+        // Re-arm after EVERY non-terminal envelope (start / delta / event), not
+        // just delta: the lifecycle is start → (delta|event)* → done|error, so a
+        // `start` (or `event`) that is the last thing before the backend stalls
+        // would otherwise leave the watchdog cleared with no timer to synthesize
+        // a terminal `stream_disconnected` (#159).
+        if (!terminalRef.current) {
           armWatchdog();
         }
       },
