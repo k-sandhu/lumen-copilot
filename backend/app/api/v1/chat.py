@@ -18,11 +18,12 @@ returned ``stream_id``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.deps import (
@@ -406,7 +407,6 @@ async def send_message(
     session_id: UUID,
     body: SendMessageRequest,
     request: Request,
-    background: BackgroundTasks,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
@@ -417,8 +417,10 @@ async def send_message(
 
     The unknown-model check (422) and the not-visible check (404) happen *before*
     anything is persisted. On success the user message is committed and the
-    agentic answer runtime is launched as a background task that streams over the
-    WS backplane keyed by the returned ``stream_id``.
+    agentic answer runtime is launched as a detached, tracked ``asyncio.Task``
+    (issue #156) that streams over the WS backplane keyed by the returned
+    ``stream_id`` — off the request cycle, so a slow/hung answer neither delays
+    the 202 nor blocks graceful shutdown.
     """
     service = _build_service(
         session=session, principal=principal, tenant_id=tenant_id, settings=settings
@@ -431,7 +433,6 @@ async def send_message(
     await session.commit()
 
     _schedule_answer(
-        background=background,
         backplane=backplane,
         principal=principal,
         request=request,
@@ -448,7 +449,6 @@ async def send_message(
 
 def _schedule_answer(
     *,
-    background: BackgroundTasks,
     backplane: Backplane,
     principal: CurrentUser,
     request: Request,
@@ -457,13 +457,20 @@ def _schedule_answer(
     collection_ids: list[UUID] | None,
     default_max_tool_turns: int,
 ) -> None:
-    """Launch the answer runtime after the 202 response is sent.
+    """Launch the answer runtime as a tracked task detached from the response.
 
     The runtime owns its **own** DB session (the request session is closed once
     the response is returned), so it is built with the sessionmaker, not the
     request session. It streams over the injected backplane (overridable in
     tests). ``default_max_tool_turns`` is the configured system default budget;
     the runtime applies the tenant's per-tenant override over it (issue #148).
+
+    Rather than a Starlette ``BackgroundTask`` (which runs inside the response
+    cycle and so keeps the request — and graceful shutdown — alive until it
+    finishes, issue #156), the producer is scheduled as an ``asyncio.Task``
+    registered in the app's process-wide ``answer_tasks`` set. The lifespan
+    teardown cancels and drains that set under a bounded grace window; the
+    ``add_done_callback`` discards a finished task so the set self-empties.
     """
     runtime = ChatRuntime(
         sessionmaker=get_sessionmaker(),
@@ -486,4 +493,7 @@ def _schedule_answer(
             collection_ids=collection_ids,
         )
 
-    background.add_task(_produce)
+    tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
+    task = asyncio.create_task(_produce())
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
