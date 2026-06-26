@@ -101,6 +101,19 @@ describe('DefaultModelSetting', () => {
     expect(select.value).toBe('');
   });
 
+  it('falls back to the server default and warns when the saved model is gone', async () => {
+    // A stored id no longer in the registry would leave the <select> on a value
+    // with no matching <option>; mirror ChatView and fall back to server default.
+    mockApi({ preferences: () => jsonResponse(prefs({ default_model_id: 'removed/model-x' })) });
+    renderWithQuery(<DefaultModelSetting />);
+
+    const select = (await screen.findByRole('combobox', {
+      name: /default model/i,
+    })) as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect(screen.getByText(/no longer available/i)).toBeInTheDocument();
+  });
+
   it('PATCHes the chosen model id when the user picks a different model', async () => {
     let patched: unknown = null;
     mockApi({

@@ -14,7 +14,7 @@
 import { useMemo } from 'react';
 import { ApiError } from '@/api';
 import type { ModelTier } from '@/api';
-import { useModels } from '@/features/chat/model/queries';
+import { useModels } from '@/features/chat';
 import { usePreferences, useUpdatePreferences } from '../model/queries';
 
 const TIER_ORDER: ModelTier[] = ['frontier', 'fast', 'oss'];
@@ -58,7 +58,7 @@ export function DefaultModelSetting() {
     return (
       <div className="lc-aps__section">
         <div className="lc-aps__label">Default model</div>
-        <p role="alert" className="mt-1 text-xs" style={{ color: 'var(--c-danger, #b42318)' }}>
+        <p role="alert" className="mt-1 text-xs" style={{ color: 'var(--danger, #b42318)' }}>
           Couldn't load your model preference. Please try again.
         </p>
       </div>
@@ -74,7 +74,13 @@ export function DefaultModelSetting() {
     );
   }
 
-  const selected = prefs.data?.default_model_id ?? SERVER_DEFAULT;
+  // A stored model that is no longer in the registry falls back to the server
+  // default (mirroring the backend's fail-closed answer-time behavior and the
+  // chat model preselect), with a prompt to choose a new one.
+  const storedId = prefs.data?.default_model_id ?? null;
+  const storedIsValid = storedId !== null && (modelItems ?? []).some((m) => m.id === storedId);
+  const staleId = storedId !== null && !storedIsValid ? storedId : null;
+  const selected = storedId !== null && staleId === null ? storedId : SERVER_DEFAULT;
   const mutationError = mutationErrorMessage(update.error);
 
   const onChange = (value: string) => {
@@ -109,8 +115,14 @@ export function DefaultModelSetting() {
         </select>
       </label>
       <p className="mt-1 text-xs opacity-70">Used for new chats · saved to your account.</p>
+      {staleId ? (
+        <p role="status" className="mt-1 text-xs" style={{ color: 'var(--danger, #b42318)' }}>
+          Your saved model is no longer available — the server default is used until you choose a
+          new one.
+        </p>
+      ) : null}
       {mutationError ? (
-        <p role="alert" className="mt-1 text-xs" style={{ color: 'var(--c-danger, #b42318)' }}>
+        <p role="alert" className="mt-1 text-xs" style={{ color: 'var(--danger, #b42318)' }}>
           {mutationError}
         </p>
       ) : null}
