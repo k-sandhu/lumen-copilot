@@ -237,6 +237,23 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # How long (seconds) the app lifespan waits for in-flight answer producers to
+    # cancel and drain on shutdown before it stops waiting and proceeds to engine
+    # disposal (issue #156). The answer runtime runs off the request as a tracked
+    # ``asyncio.Task``; on SIGTERM the lifespan cancels those tasks and awaits them
+    # bounded by this budget so a hung/slow answer can no longer block uvicorn's
+    # graceful shutdown. Kept config, not a literal at the call site
+    # (backend/AGENTS.md). A non-positive value would disable the bound — rejected.
+    chat_shutdown_grace_seconds: float = Field(default=10.0, alias="CHAT_SHUTDOWN_GRACE_SECONDS")
+
+    @field_validator("chat_shutdown_grace_seconds")
+    @classmethod
+    def _chat_shutdown_grace_positive(cls, value: float) -> float:
+        """Reject a non-positive grace: 0/negative would disable the shutdown bound."""
+        if value <= 0:
+            raise ValueError("CHAT_SHUTDOWN_GRACE_SECONDS must be positive (issue #156)")
+        return value
+
     # --- Ingestion (CC-5 / issue #21) ---------------------------------------
     # Chunking is config, not a literal at the call site (backend/AGENTS.md): the
     # target chunk window and the overlap adjacent chunks share, both in
