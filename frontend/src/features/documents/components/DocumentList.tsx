@@ -13,6 +13,7 @@
 import { useState } from 'react';
 import { ApiError } from '@/api';
 import type { Document, DocumentStatus } from '@/api';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ScrollArea } from '@/components/ScrollArea';
 import { FreshnessPill, PermissionPill, StatusDot } from '@/ui';
@@ -280,6 +281,9 @@ function DocumentRow({
   onOpen: () => void;
 }) {
   const remove = useDeleteDocument();
+  // Confirm-before-destructive via the shared focus-managed dialog (mirrors
+  // SourcesPanel's pending-target state machine), replacing native window.confirm.
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const ready = doc.status === 'ready';
   const kind = fileKind(doc);
   const fresh = documentFreshness(doc);
@@ -357,10 +361,7 @@ function DocumentRow({
             disabled={remove.isPending}
             onClick={(e) => {
               e.stopPropagation();
-              if (typeof window !== 'undefined' && !window.confirm(`Delete “${doc.filename}”?`)) {
-                return;
-              }
-              remove.mutate(doc.id);
+              setConfirmOpen(true);
             }}
             // The row is itself a button (Enter/Space opens the viewer). The
             // Delete button's own Enter/Space already fires its click, so we must
@@ -376,6 +377,21 @@ function DocumentRow({
           >
             Delete
           </button>
+          {/* `fixed`-positioned overlay; a <div> here is valid inside the cell and
+              renders nothing until opened. */}
+          <ConfirmDialog
+            open={confirmOpen}
+            title="Delete document?"
+            description={`Delete “${doc.filename}”? This permanently removes it and its indexed chunks. This can't be undone.`}
+            confirmLabel="Delete"
+            busyLabel="Deleting…"
+            busy={remove.isPending}
+            onConfirm={() => {
+              remove.mutate(doc.id);
+              setConfirmOpen(false);
+            }}
+            onCancel={() => setConfirmOpen(false)}
+          />
         </td>
       </tr>
 

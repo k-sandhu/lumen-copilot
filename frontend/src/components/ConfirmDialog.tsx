@@ -1,7 +1,8 @@
 /**
- * ConfirmDialog (#27) — a small modal confirm for the destructive remove action.
- * Removing a source cascades its ingested documents (ADR-0009 §5), so it gates
- * behind an explicit confirm (read-before-write spirit, AGENTS.md §2.3).
+ * ConfirmDialog (#27) — a small modal confirm for destructive actions. Shared
+ * across features (Sources remove, Documents/Collections delete; #166) — the one
+ * focus-managed confirm the app standardizes on, so destructive deletes don't fall
+ * back to native `window.confirm`.
  *
  * A11y: role="alertdialog" aria-modal, labelled + described; focus moves to the
  * confirm button on open and is restored on close; Escape and backdrop dismiss.
@@ -16,6 +17,8 @@ interface ConfirmDialogProps {
   confirmLabel: string;
   /** Disable buttons + show a pending label while the action runs. */
   busy?: boolean;
+  /** Label shown on the confirm button while `busy` (e.g. "Deleting…"). */
+  busyLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -26,6 +29,7 @@ export function ConfirmDialog({
   description,
   confirmLabel,
   busy = false,
+  busyLabel = 'Removing…',
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -77,7 +81,7 @@ export function ConfirmDialog({
             disabled={busy}
             className="rounded-md bg-danger px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:opacity-60"
           >
-            {busy ? 'Removing…' : confirmLabel}
+            {busy ? busyLabel : confirmLabel}
           </button>
         </div>
       </div>

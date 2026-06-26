@@ -3,7 +3,7 @@
  * error (with retry), empty, success; plus create / rename / delete and the
  * cross-tenant 404 negative (INV-1).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
@@ -32,9 +32,6 @@ const collection = (over: Partial<Record<string, unknown>> = {}) => ({
   ...over,
 });
 
-beforeEach(() => {
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
-});
 afterEach(() => vi.restoreAllMocks());
 
 describe('CollectionsSidebar', () => {
@@ -113,9 +110,9 @@ describe('CollectionsSidebar', () => {
     });
   });
 
-  it('deletes a collection after confirm; a 404 surfaces inline (INV-1)', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    vi.spyOn(globalThis, 'fetch')
+  it('deletes a collection after confirming in the dialog; a 404 surfaces inline (INV-1)', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(jsonResponse({ items: [collection()], next_cursor: null }))
       .mockResolvedValueOnce(problem(404, 'Not Found'))
       .mockResolvedValue(jsonResponse({ items: [collection()], next_cursor: null }));
@@ -123,7 +120,33 @@ describe('CollectionsSidebar', () => {
     renderWithQuery(<CollectionsSidebar selectedId="col-1" onSelect={() => {}} />);
 
     await screen.findByText('Acme contracts');
+    // Clicking the trash opens the focus-managed confirm dialog (warns the cascade).
     await user.click(screen.getByRole('button', { name: /delete acme contracts/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText(/and all its documents/i)).toBeInTheDocument();
+
+    // Confirming fires DELETE; the 404 surfaces inline.
+    await user.click(within(dialog).getByRole('button', { name: /^delete$/i }));
+    await waitFor(() => {
+      const del = fetchSpy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'DELETE');
+      expect(del?.[0]).toContain('/collections/col-1');
+    });
     expect(await screen.findByText(/delete failed|not found/i)).toBeInTheDocument();
+  });
+
+  it('does not delete a collection when the dialog is cancelled', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ items: [collection()], next_cursor: null }));
+    const user = userEvent.setup();
+    renderWithQuery(<CollectionsSidebar selectedId="col-1" onSelect={() => {}} />);
+
+    await screen.findByText('Acme contracts');
+    await user.click(screen.getByRole('button', { name: /delete acme contracts/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: /cancel/i }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false);
   });
 });
