@@ -15,8 +15,8 @@
  * tokens), honors prefers-reduced-motion (global rule + token durations), rail and
  * main scroll independently (min-height:0 grid), and works in light + dark.
  */
-import { useCallback, useEffect, useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
 import { CommandPalette, useCommandPalette } from '@/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Brand } from './Brand';
@@ -51,6 +51,8 @@ export function AppShell() {
   const palette = useCommandPalette();
   const commands = useShellCommands();
   const isMobile = useIsMobile();
+  const location = useLocation();
+  const mainRef = useRef<HTMLElement>(null);
 
   // Desktop: collapse to an icons-only rail. Mobile: open/close an overlay rail.
   const [collapsed, setCollapsed] = useState(false);
@@ -60,6 +62,14 @@ export function AppShell() {
   useEffect(() => {
     if (!isMobile) setMobileOpen(false);
   }, [isMobile]);
+
+  // On route change, move focus to <main> (tabIndex=-1) and reset its scroll so
+  // a keyboard/SR user lands on the new screen instead of the clicked nav link,
+  // and the new screen starts from the top rather than the previous scroll spot.
+  useEffect(() => {
+    mainRef.current?.focus();
+    mainRef.current?.scrollTo?.(0, 0);
+  }, [location.pathname]);
 
   const toggleRail = useCallback(() => {
     if (isMobile) setMobileOpen((v) => !v);
@@ -78,6 +88,11 @@ export function AppShell() {
 
   return (
     <div className="lc-shell" data-rail={railState}>
+      {/* First focusable element on the page: lets keyboard users jump past the
+          chrome straight to the routed screen. Off-screen until focused. */}
+      <a href="#main-content" className="lc-skip">
+        Skip to content
+      </a>
       <Brand />
       <TopBar onOpenPalette={() => palette.setOpen(true)} onToggleRail={toggleRail} />
       <NavRail onNavigate={isMobile ? closeMobile : undefined} />
@@ -91,7 +106,7 @@ export function AppShell() {
         />
       ) : null}
 
-      <main className="lc-shell__main" id="main-content">
+      <main className="lc-shell__main" id="main-content" ref={mainRef} tabIndex={-1}>
         <ErrorBoundary label="Screen">
           <InAppShellProvider value={true}>
             <Outlet />

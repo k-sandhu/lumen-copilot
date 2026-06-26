@@ -7,7 +7,7 @@
  * disabled rather than as a dead link.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -134,6 +134,27 @@ describe('AppShell', () => {
   it('shows the tenant from /auth/me with a hard-isolation tooltip', async () => {
     renderShell();
     expect(await screen.findByText('northwind')).toBeInTheDocument();
+  });
+
+  it('exposes a focus-revealed "Skip to content" link targeting #main-content (#163)', () => {
+    renderShell();
+    const skip = screen.getByRole('link', { name: /skip to content/i });
+    expect(skip).toHaveAttribute('href', '#main-content');
+    // It targets the real <main> landmark the shell renders.
+    expect(document.getElementById('main-content')?.tagName).toBe('MAIN');
+  });
+
+  it('moves focus to <main> when the route changes (#163)', async () => {
+    const user = userEvent.setup();
+    renderShell('/');
+    const main = document.getElementById('main-content');
+    expect(main).not.toBeNull();
+
+    // Navigate to a different screen via the rail; focus lands on the routed
+    // <main> (tabIndex=-1) rather than staying on the clicked nav link.
+    await user.click(screen.getByRole('link', { name: /^search$/i }));
+    expect(await screen.findByText('search screen')).toBeInTheDocument();
+    await waitFor(() => expect(main).toHaveFocus());
   });
 
   it('opens the account menu showing the signed-in principal', async () => {

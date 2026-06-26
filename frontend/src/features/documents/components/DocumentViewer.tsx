@@ -12,11 +12,12 @@
  * success states are all handled; a not-permitted document (INV-2 → 404) shows a
  * clear message.
  */
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, resolveDocumentContentUrl } from '@/api';
 import type { Document } from '@/api';
 import { SourceInspector, StatusDot, type SourcePassage } from '@/ui';
+import { useFocusTrap } from '@/lib/useFocusTrap';
 import { formatBytes, fileKind, ingestSteps, type IngestStep } from '../model/presentation';
 
 interface DocumentViewerProps {
@@ -34,8 +35,8 @@ const INGEST_TONE: Record<IngestStep['state'], 'ok' | 'sync' | 'muted' | 'danger
 };
 
 export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const lastFocused = useRef<HTMLElement | null>(null);
 
   const query = useQuery<string>({
     queryKey: ['document-content', doc.id],
@@ -48,24 +49,16 @@ export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerPro
     enabled: doc.status === 'ready',
   });
 
-  // Manage focus + Escape-to-close for the drawer; restore focus on close.
-  useEffect(() => {
-    lastFocused.current = (document.activeElement as HTMLElement) ?? null;
-    closeRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      lastFocused.current?.focus?.();
-    };
-  }, [onClose]);
+  // Move focus to the Close button on open, trap Tab inside the drawer, restore
+  // focus on close; Escape dismisses. The component is mounted only while open,
+  // so the trap is always active (open=true).
+  useFocusTrap(true, dialogRef, onClose, { initialFocus: closeRef });
 
   const steps = ingestSteps(doc);
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label={`Document: ${doc.filename}`}

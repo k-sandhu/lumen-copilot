@@ -170,6 +170,38 @@ describe('MessageBubble', () => {
     expect(screen.getByText(/answered just now/i)).toBeInTheDocument();
   });
 
+  it('wraps a streaming assistant answer in a polite live region (#163)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Partial answer so f"
+        citations={[]}
+        streaming
+        onOpenCitation={() => {}}
+      />,
+    );
+    // role="log" + aria-live="polite" so a screen reader hears tokens stream in;
+    // non-atomic so it announces deltas, not the whole answer on each token.
+    const live = screen.getByRole('log', { name: /assistant answer/i });
+    expect(live).toHaveAttribute('aria-live', 'polite');
+    expect(live).toHaveAttribute('aria-atomic', 'false');
+  });
+
+  it('does NOT keep the live region on a settled turn — answers are not re-announced (#163)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Revenue rose in Q4."
+        citations={[CITATION]}
+        answeredAt="2d ago"
+        onOpenCitation={() => {}}
+      />,
+    );
+    // Once settled, the live-region attributes are dropped so the finished answer
+    // isn't read out a second time when the caret/footer mount.
+    expect(screen.queryByRole('log')).not.toBeInTheDocument();
+  });
+
   it('renders user messages as plain text (no markdown interpretation)', () => {
     render(
       <MessageBubble role="user" content="**not bold**" citations={[]} onOpenCitation={() => {}} />,

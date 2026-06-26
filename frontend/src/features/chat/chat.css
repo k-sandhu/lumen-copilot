@@ -201,6 +201,48 @@
   margin-bottom: 0;
 }
 
+/* per-code-block Copy button — positioned over the top-right of each fenced
+   block. The wrapper is relative so the button overlays the <pre>; the <pre>
+   keeps its own .prose-md margins/scroll. Uses the kit lc-iconbtn token styling
+   (no ad-hoc colors); reveals on hover/focus-within so it doesn't clutter the
+   reading column at rest. */
+.lc-codeblock {
+  position: relative;
+}
+.lc-codeblock__copy {
+  position: absolute;
+  top: calc(6px * var(--space));
+  right: calc(6px * var(--space));
+  z-index: 1;
+  height: calc(28px * max(var(--fs), var(--space)));
+  width: calc(28px * max(var(--fs), var(--space)));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--dur-1),
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.lc-codeblock:hover .lc-codeblock__copy,
+.lc-codeblock:focus-within .lc-codeblock__copy {
+  opacity: 1;
+}
+.lc-codeblock__copy:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.lc-codeblock__copy .lc-icon {
+  width: calc(14px * var(--fs));
+  height: calc(14px * var(--fs));
+}
+
 /* streaming caret */
 .lc-caret {
   display: inline-block;
