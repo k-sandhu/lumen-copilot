@@ -66,7 +66,10 @@ function labelForModel(
  * wire, so the answer's evidence recency is the message time — surfaced so an
  * answer's evidence age is never hidden (mission "freshness").
  */
-function sourceMetaFor(citations: UiCitation[], iso: string | undefined): Record<string, SourceMeta> {
+function sourceMetaFor(
+  citations: UiCitation[],
+  iso: string | undefined,
+): Record<string, SourceMeta> {
   const freshness = relativeTime(iso);
   if (!freshness) return {};
   const stale = isStale(iso);
@@ -87,16 +90,23 @@ export function ChatThread({
   onOpenCitation,
 }: ChatThreadProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   // Whether autoscroll is "stuck" to the bottom (user hasn't scrolled up).
   const stickRef = useRef(true);
 
   // Track whether the user is near the bottom; if they scroll up, stop following.
-  function onScroll(e: React.UIEvent<HTMLDivElement>) {
-    const el = e.currentTarget;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickRef.current = distanceFromBottom < 80;
-  }
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const onScroll = () => {
+      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      stickRef.current = distanceFromBottom < 80;
+    };
+
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    return () => viewport.removeEventListener('scroll', onScroll);
+  }, []);
 
   // Follow new content only while stuck to the bottom. Guard scrollIntoView —
   // it is not implemented in jsdom (tests) and may be absent in older runtimes.
@@ -114,10 +124,8 @@ export function ChatThread({
   const showEmpty = !isLoading && !isError && messages.length === 0 && live === null;
 
   return (
-    <ScrollArea>
+    <ScrollArea viewportRef={viewportRef}>
       <div
-        ref={scrollRef}
-        onScroll={onScroll}
         className="lc-thread"
         // The ScrollArea viewport is the scroller; this just lays out content.
       >
@@ -129,9 +137,7 @@ export function ChatThread({
 
         {isError && (
           <div role="alert" className="lc-thread__banner">
-            <p>
-              {error instanceof ApiError ? error.displayMessage : 'Could not load this chat.'}
-            </p>
+            <p>{error instanceof ApiError ? error.displayMessage : 'Could not load this chat.'}</p>
             <button type="button" onClick={onRetryLoad} className="lc-confirm__btn self-start">
               Retry
             </button>

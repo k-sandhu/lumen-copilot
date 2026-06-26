@@ -1,5 +1,5 @@
 import * as RadixScrollArea from '@radix-ui/react-scroll-area';
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import { cn } from '@/lib/cn';
 
 interface ScrollAreaProps {
@@ -7,6 +7,8 @@ interface ScrollAreaProps {
   className?: string;
   /** Class for the inner viewport (where content lives). */
   viewportClassName?: string;
+  /** Ref for callers that need the actual scroll container. */
+  viewportRef?: Ref<HTMLDivElement>;
 }
 
 /**
@@ -15,10 +17,18 @@ interface ScrollAreaProps {
  * inside a flex/grid cell that uses `min-h-0`. Long content never forces a
  * whole-page scroll (frontend/AGENTS.md "Independently scrollable panes").
  */
-export function ScrollArea({ children, className, viewportClassName }: ScrollAreaProps) {
+export function ScrollArea({
+  children,
+  className,
+  viewportClassName,
+  viewportRef,
+}: ScrollAreaProps) {
   return (
     <RadixScrollArea.Root className={cn('h-full overflow-hidden', className)} type="hover">
-      <RadixScrollArea.Viewport className={cn('h-full w-full', viewportClassName)}>
+      <RadixScrollArea.Viewport
+        ref={viewportRef}
+        className={cn('h-full w-full', viewportClassName)}
+      >
         {children}
       </RadixScrollArea.Viewport>
       <RadixScrollArea.Scrollbar
