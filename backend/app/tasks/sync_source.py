@@ -156,6 +156,13 @@ async def sync_source_async(
             continue
         indexed += 1
 
+    if fetched and indexed == 0:
+        return await _fail(
+            tenant_id,
+            source_id,
+            f"all {len(fetched)} fetched document(s) failed to ingest",
+        )
+
     # --- Phase 4: advance the source to ready. -------------------------------
     async with session_scope() as session:
         await SourceRepository(session, tenant_id).update_status(
