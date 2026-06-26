@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProvenanceDrawer, type ProvenanceDetail } from './ProvenanceDrawer';
 
@@ -39,9 +39,9 @@ describe('ProvenanceDrawer', () => {
     expect(screen.getByText(/"tenant": "acme"/)).toBeInTheDocument();
   });
 
-  it('moves focus into the drawer on open', () => {
+  it('moves focus into the drawer on open', async () => {
     render(<ProvenanceDrawer open detail={DETAIL} onClose={() => {}} />);
-    expect(screen.getByRole('dialog')).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveFocus());
   });
 
   it('closes on Escape', async () => {
@@ -58,5 +58,18 @@ describe('ProvenanceDrawer', () => {
     render(<ProvenanceDrawer open detail={DETAIL} onClose={onClose} />);
     await user.click(screen.getByRole('button', { name: /close provenance drawer/i }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('traps Tab within the dialog — focus never escapes to the page (#163)', async () => {
+    const user = userEvent.setup();
+    render(<ProvenanceDrawer open detail={DETAIL} onClose={() => {}} />);
+    const dialog = screen.getByRole('dialog');
+
+    // Tabbing repeatedly always lands on an element inside the dialog; focus
+    // never leaks to the backdrop or document body behind the overlay.
+    for (let i = 0; i < 6; i++) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
   });
 });
