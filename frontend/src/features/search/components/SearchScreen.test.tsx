@@ -18,8 +18,8 @@ function json(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
-function problem(status: number, title: string): Response {
-  return new Response(JSON.stringify({ type: 'about:blank', title, status }), {
+function problem(status: number, title: string, extra: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({ type: 'about:blank', title, status, ...extra }), {
     status,
     headers: { 'Content-Type': 'application/problem+json' },
   });
@@ -192,6 +192,24 @@ describe('SearchScreen', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/session expired/i);
     expect(within(alert).getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it('shows an actionable ERROR with retry on a 503 llm_unconfigured', async () => {
+    mockSearch(
+      problem(503, 'Service Unavailable', {
+        code: 'llm_unconfigured',
+        detail: 'LLM provider is not configured (OPENROUTER_API_KEY is blank).',
+      }),
+    );
+    renderWithQuery(<SearchScreen />);
+    await runSearch();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      /search is temporarily unavailable.*answer service isn’t configured yet/i,
+    );
+    expect(within(alert).getByRole('button', { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryByText(/OPENROUTER_API_KEY/i)).toBeNull();
   });
 
   it('shows a rephrase ERROR on a 422 (INV-8)', async () => {
