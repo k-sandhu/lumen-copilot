@@ -55,3 +55,14 @@ def test_overridden_secret_boots_in_production() -> None:
         JWT_SECRET="a-real-production-secret",
     )
     assert s.environment == "production"
+
+
+def test_version_is_sourced_from_package_single_source() -> None:
+    # The served version (/health + OpenAPI title) must derive from the single
+    # package source, app.__version__, not a re-typed literal in config.py — so a
+    # release bump cannot leave a stale version on the wire (issue #158). This
+    # fails if a hardcoded literal is ever reintroduced in the version field.
+    import app
+
+    s = Settings(_env_file=None, **_BASE)
+    assert s.version == app.__version__

@@ -18,6 +18,7 @@ from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app import __version__ as _APP_VERSION
 from app.domain.models import ModelTier
 
 
@@ -107,7 +108,11 @@ class Settings(BaseSettings):
 
     # --- Service identity (surfaced by /health) ---
     service_name: str = "lumen-copilot-backend"
-    version: str = "0.0.1"
+    # Sourced once from the package version (app.__version__, mirroring
+    # pyproject.toml) so the value served by /health and the OpenAPI title cannot
+    # drift from the package when someone bumps the release — not a re-typed
+    # literal. Override per-deploy via the VERSION env var if needed.
+    version: str = _APP_VERSION
 
     # --- Environment / observability ---
     environment: str = Field(default="local", alias="ENVIRONMENT")
