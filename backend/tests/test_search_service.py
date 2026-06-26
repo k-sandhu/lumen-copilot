@@ -7,12 +7,16 @@ Two layers, both honouring the offline-safe pattern of the retrieval tests (#45)
   result projection (title / snippet / match spans / owner / freshness /
   permission), the opaque rank cursor, the source/type corpus narrowing, the
   optional cited direct answer (a fake gateway), ``hidden_count``, and the audit
-  emit (INV-6). Defense-in-depth: the service re-asserts ownership during
-  enrichment, so a passage whose document is not the caller's is dropped.
-* **Live (compose Postgres + pgvector)** — the headline INV-1/INV-2 negative runs
+  emit (INV-6). Enrichment trusts the chokepoint for INV-2 (owner **or** grant)
+  and only re-checks the tenant scope (INV-1): a passage whose document is in
+  another tenant is dropped, but a same-tenant non-owned passage the chokepoint
+  surfaced (e.g. a grant) is projected — it is not re-narrowed to ownership.
+* **Live (compose Postgres + pgvector)** — the headline INV-1/INV-2 cases run
   end-to-end through the **real** ``RetrievalService.search`` (the permission
-  chokepoint) so the search results are proven to exclude another user's / another
-  tenant's matching passage. Skips automatically when Postgres is unreachable.
+  chokepoint): the negatives prove results exclude another user's / another
+  tenant's matching passage, and the grant positive proves a document granted to
+  the caller *does* come back from ``/search`` (matching what suggest surfaces).
+  Skips automatically when Postgres is unreachable.
 """
 
 from __future__ import annotations
@@ -39,10 +43,11 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import DocumentStatus, Role
+from app.domain.entities import DocumentStatus, GrantResourceType, Role
 from app.domain.llm import ChatMessage, Completion, Embedding, TokenUsage
 from app.domain.retrieval import RetrievedPassage
 from app.services.audit import AuditSink
+from app.services.grants_service import GrantsService
 from app.services.search_service import SearchService
 
 import app.db.models  # noqa: F401  isort: skip
@@ -265,26 +270,68 @@ async def test_forwards_resolved_principal_to_chokepoint(session: AsyncSession) 
     assert retrieval.calls[0]["principal"] is principal
 
 
-async def test_drops_passage_for_foreign_owner_document(session: AsyncSession) -> None:
-    """Defense in depth: a passage whose document is not the caller's is not surfaced.
+async def test_projects_same_tenant_non_owned_passage_from_chokepoint(
+    session: AsyncSession,
+) -> None:
+    """Enrichment trusts the chokepoint for INV-2 — it does NOT re-narrow to ownership.
 
-    Even if a (hypothetically buggy) retrieval returned a foreign-owner passage,
-    the enrichment step re-asserts ownership and drops it — INV-2 fail-closed.
+    A same-tenant passage the chokepoint surfaced for a document the caller does
+    not own (e.g. one explicitly granted to them) must be projected, not dropped:
+    re-asserting strict ownership here would wrongly hide grant-visible documents
+    (the regression this fix targets — the chokepoint, not enrichment, is the INV-2
+    authority). The projected result carries the document's real owner. (The grant
+    *enforcement* is proven end-to-end by the live test; offline the fake retrieval
+    stands in for the chokepoint's owner-or-grant decision.)
     """
     tenant = (await TenantRepository(session).create(name="T")).id
     user_a, _doc_a, _ = await _seed_document(
         session, tenant_id=tenant, email="a@x.test", filename="a.txt", chunk_texts=["a"]
     )
     user_b, doc_b, chunk_b = await _seed_document(
-        session, tenant_id=tenant, email="b@x.test", filename="b.txt", chunk_texts=["secret"]
+        session, tenant_id=tenant, email="b@x.test", filename="b.txt", chunk_texts=["shared"]
     )
-    # The fake retrieval is told to (wrongly) return user B's passage to user A.
+    # The chokepoint (here the fake) permitted user B's passage for user A — the
+    # owner-or-grant decision it owns. Enrichment must surface it, not re-narrow.
+    retrieval = _FakeRetrieval(
+        [_passage(chunk_id=chunk_b[0], document_id=doc_b, name="b.txt", text="shared")]
+    )
+    svc = _service(
+        session,
+        principal=_principal(user_a, tenant),
+        retrieval=retrieval,
+        gateway=_DisabledGateway(),
+    )
+
+    page = await svc.search(query="shared")
+
+    assert [r.document_id for r in page.results] == [doc_b]
+    assert page.results[0].owner == user_b  # the document's real owner, not the caller
+    assert page.results[0].permission == "allowed"
+
+
+async def test_drops_passage_for_foreign_tenant_document(session: AsyncSession) -> None:
+    """INV-1 defense-in-depth kept: a cross-tenant document is dropped at enrichment.
+
+    The tenant-scoped :class:`DocumentRepository` cannot re-read a document outside
+    the caller's tenant, so even if a (hypothetically buggy) retrieval returned a
+    foreign-tenant passage, enrichment yields no metadata and drops it — tenant
+    scope is the one re-check enrichment still performs.
+    """
+    tenant_a = (await TenantRepository(session).create(name="A")).id
+    tenant_b = (await TenantRepository(session).create(name="B")).id
+    user_a, _doc_a, _ = await _seed_document(
+        session, tenant_id=tenant_a, email="a@x.test", filename="a.txt", chunk_texts=["a"]
+    )
+    _user_b, doc_b, chunk_b = await _seed_document(
+        session, tenant_id=tenant_b, email="b@y.test", filename="b.txt", chunk_texts=["secret"]
+    )
+    # The fake retrieval (wrongly) returns a tenant-B passage to a tenant-A caller.
     retrieval = _FakeRetrieval(
         [_passage(chunk_id=chunk_b[0], document_id=doc_b, name="b.txt", text="secret")]
     )
     svc = _service(
         session,
-        principal=_principal(user_a, tenant),
+        principal=_principal(user_a, tenant_a),
         retrieval=retrieval,
         gateway=_DisabledGateway(),
     )
@@ -646,6 +693,124 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
             assert doc_c not in doc_ids  # INV-2: other owner excluded
             assert all(r.permission == "allowed" for r in page.results)
             assert all(r.owner == user_a for r in page.results)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+
+
+@_live
+async def test_live_search_returns_granted_document_passages() -> None:
+    """End-to-end on real Postgres: GET /search returns a *granted* document's passages.
+
+    Regression for #181: ``_to_results`` used to re-narrow to strict ownership, so a
+    document granted to the caller (admitted by the chokepoint's owner-OR-grant
+    predicate) was surfaced in ``/search/suggest`` yet returned ZERO results from
+    ``/search``. User A owns a document whose chunk text + embedding match the
+    query; user B is a non-owner in the same tenant. Before any grant B's search
+    returns nothing; after an explicit document grant to B, ``/search`` returns A's
+    passage to B — with ``owner == user_a`` (the document's real owner, not the
+    caller) and ``permission == "allowed"`` — proving search now matches what the
+    chokepoint permits and what suggest already surfaces. Runs through the real
+    ``RetrievalService.search`` chokepoint (pgvector + full-text), so it exercises
+    the actual grant ``EXISTS``, not the offline fake.
+    """
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.ext.asyncio import create_async_engine as _create
+
+    from app.retrieval import RetrievalService
+
+    engine = _create(_PG_URL)
+    schema = f"search_grant_test_{uuid.uuid4().hex[:8]}"
+    hot = 13
+    query_text = "annual revenue growth strategy"
+    matching = "annual revenue growth strategy for the year"
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
+            await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        async with factory() as sess:
+            await sess.execute(sql_text(f'SET search_path TO "{schema}", public'))
+            tenant = (await TenantRepository(sess).create(name="A")).id
+
+            owner = await UserRepository(sess, tenant).create(
+                email="owner@x.test", password_hash="h", roles=[Role.MEMBER]
+            )
+            grantee = await UserRepository(sess, tenant).create(
+                email="grantee@x.test", password_hash="h", roles=[Role.MEMBER]
+            )
+            coll = await CollectionRepository(sess, tenant).create(owner_id=owner.id, name="C")
+            doc = await DocumentRepository(sess, tenant).create(
+                owner_id=owner.id,
+                collection_id=coll.id,
+                filename="a.txt",
+                mime_type="text/plain",
+                size_bytes=1,
+                storage_key="k",
+                status=DocumentStatus.READY,
+            )
+            await ChunkRepository(sess, tenant).replace_for_document(
+                doc.id,
+                [
+                    ChunkInput(
+                        text=matching,
+                        char_start=0,
+                        char_end=len(matching),
+                        embedding=_unit_vector(_EMBED_DIM, hot),
+                    )
+                ],
+            )
+            await sess.commit()
+
+            gateway = _LiveGateway(_unit_vector(_EMBED_DIM, hot))
+            retrieval = RetrievalService(sess, gateway=gateway)  # type: ignore[arg-type]
+
+            def _search_as(user_id: uuid.UUID) -> SearchService:
+                audit = AuditSink(AuditEventRepository(sess, tenant))
+                return SearchService(
+                    sess,
+                    principal=_principal(user_id, tenant),
+                    gateway=gateway,  # type: ignore[arg-type]
+                    audit=audit,
+                    retrieval=retrieval,
+                    request_id="req-live",
+                    source_ip="127.0.0.1",
+                )
+
+            # Before the grant: the non-owner's search returns nothing (deny-by-default).
+            before = await _search_as(grantee.id).search(query=query_text, limit=10)
+            assert before.results == []
+
+            # Owner grants the non-owner viewer access to the document.
+            grants = GrantsService(
+                sess,
+                tenant_id=tenant,
+                owner_id=owner.id,
+                roles=(Role.MEMBER,),
+                audit=AuditSink(AuditEventRepository(sess, tenant)),
+                request_id="req-live",
+                source_ip="127.0.0.1",
+            )
+            await grants.create_grant(
+                resource_type=GrantResourceType.DOCUMENT,
+                resource_id=doc.id,
+                principal_id=grantee.id,
+            )
+            await sess.commit()
+
+            # After the grant: /search returns the granted document's passage —
+            # the regression. (Previously this stayed empty because enrichment
+            # re-narrowed to the caller's ownership.)
+            after = await _search_as(grantee.id).search(query=query_text, limit=10)
+            assert [r.document_id for r in after.results] == [doc.id]
+            result = after.results[0]
+            assert result.owner == owner.id  # the document's real owner, not the grantee
+            assert result.permission == "allowed"
+            assert result.title == "a.txt"
     finally:
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

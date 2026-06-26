@@ -4,9 +4,10 @@ End-to-end against the real FastAPI app over an offline in-memory SQLite DB (the
 collections/documents API pattern). The #45 retrieval chokepoint's hybrid query
 needs pgvector, which SQLite lacks, so the router's retrieval dependency is
 overridden with a **fake** that returns a scripted, per-principal passage list —
-the real chokepoint's permission filter is proven in ``test_search_service``'s
-live test. The fakes still flow through the service's ownership re-check + the
-real ``db/`` rows, so cross-tenant isolation is exercised here too.
+the real chokepoint's permission filter (owner OR grant, INV-2) is proven in
+``test_search_service``'s live tests. The fakes still flow through the service's
+tenant-scoped enrichment + the real ``db/`` rows, so cross-tenant isolation
+(INV-1) is exercised here too.
 
 Covers:
 
@@ -15,8 +16,8 @@ Covers:
   last_indexed) — assertions check the **contract**, not a hand-rolled duplicate;
 * the optional cited ``direct_answer`` (scripted gateway) — citations reference
   result ids present in the page (INV-3);
-* negatives: missing token → 401 problem+json (INV-4); a foreign-owner passage is
-  trimmed (INV-1/INV-2); malformed cursor → 422 (INV-8);
+* negatives: missing token → 401 problem+json (INV-4); a cross-tenant passage is
+  trimmed at enrichment (INV-1); malformed cursor → 422 (INV-8);
 * the search emits a ``retrieval.query`` audit event (INV-6).
 """
 
@@ -66,8 +67,8 @@ class _Seeded:
         bob_id: uuid.UUID,
         alice_doc: uuid.UUID,
         alice_chunk: uuid.UUID,
-        bob_doc: uuid.UUID,
-        bob_chunk: uuid.UUID,
+        carol_doc: uuid.UUID,
+        carol_chunk: uuid.UUID,
     ) -> None:
         self.tenant_a = tenant_a
         self.tenant_b = tenant_b
@@ -77,8 +78,10 @@ class _Seeded:
         self.carol_email = "carol@globex.test"
         self.alice_doc = alice_doc
         self.alice_chunk = alice_chunk
-        self.bob_doc = bob_doc
-        self.bob_chunk = bob_chunk
+        # Carol is in tenant B — her document is the cross-tenant (INV-1) fixture
+        # the enrichment step trims even if a buggy retrieval hands it back.
+        self.carol_doc = carol_doc
+        self.carol_chunk = carol_chunk
 
 
 # --- Fakes injected into the router ----------------------------------------
@@ -87,9 +90,11 @@ class _Seeded:
 class _FakeRetrieval:
     """Returns a fixed passage for every search (per the test seed).
 
-    The service re-asserts ownership during enrichment against the *resolved*
-    principal, so a passage whose document is not the caller's is trimmed — this
-    is how the cross-tenant/other-owner negative is exercised offline.
+    Enrichment re-reads each document through the *tenant-scoped* repository, so a
+    passage whose document is in another tenant is dropped — this is how the
+    cross-tenant (INV-1) negative is exercised offline. The same-tenant
+    owner-OR-grant decision (INV-2) belongs to the retrieval chokepoint, which the
+    fake stands in for here.
     """
 
     def __init__(self, passage: RetrievedPassage) -> None:
@@ -147,7 +152,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             bob = await UserRepository(seed, ta.id).create(
                 email="bob@acme.test", password_hash=hash_password(_PASSWORD), roles=[Role.MEMBER]
             )
-            await UserRepository(seed, tb.id).create(
+            carol = await UserRepository(seed, tb.id).create(
                 email="carol@globex.test",
                 password_hash=hash_password(_PASSWORD),
                 roles=[Role.MEMBER],
@@ -166,19 +171,21 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 doc_a.id,
                 [ChunkInput(text="2024 standard deduction is $14,600.", char_start=0, char_end=34)],
             )
-            coll_b = await CollectionRepository(seed, ta.id).create(owner_id=bob.id, name="cb")
-            doc_b = await DocumentRepository(seed, ta.id).create(
-                owner_id=bob.id,
-                collection_id=coll_b.id,
-                filename="bob-secret.pdf",
+            # Carol's document lives in tenant B — the cross-tenant fixture for the
+            # enrichment trim test (INV-1).
+            coll_c = await CollectionRepository(seed, tb.id).create(owner_id=carol.id, name="cc")
+            doc_c = await DocumentRepository(seed, tb.id).create(
+                owner_id=carol.id,
+                collection_id=coll_c.id,
+                filename="carol-secret.pdf",
                 mime_type="application/pdf",
                 size_bytes=10,
-                storage_key=f"{ta.id}/bob-secret.pdf",
+                storage_key=f"{tb.id}/carol-secret.pdf",
                 status=DocumentStatus.READY,
             )
-            chunks_b = await ChunkRepository(seed, ta.id).replace_for_document(
-                doc_b.id,
-                [ChunkInput(text="bob's confidential figures", char_start=0, char_end=26)],
+            chunks_c = await ChunkRepository(seed, tb.id).replace_for_document(
+                doc_c.id,
+                [ChunkInput(text="carol's confidential figures", char_start=0, char_end=28)],
             )
             await seed.commit()
             factory.lumen_seeded = _Seeded(  # type: ignore[attr-defined]
@@ -188,8 +195,8 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 bob_id=bob.id,
                 alice_doc=doc_a.id,
                 alice_chunk=chunks_a[0].id,
-                bob_doc=doc_b.id,
-                bob_chunk=chunks_b[0].id,
+                carol_doc=doc_c.id,
+                carol_chunk=chunks_c[0].id,
             )
             yield factory
     finally:
@@ -214,15 +221,15 @@ def _alice_passage(seeded: _Seeded) -> RetrievedPassage:
     )
 
 
-def _bob_passage(seeded: _Seeded) -> RetrievedPassage:
+def _carol_passage(seeded: _Seeded) -> RetrievedPassage:
     return RetrievedPassage(
-        chunk_id=seeded.bob_chunk,
-        document_id=seeded.bob_doc,
-        document_name="bob-secret.pdf",
+        chunk_id=seeded.carol_chunk,
+        document_id=seeded.carol_doc,
+        document_name="carol-secret.pdf",
         ord=0,
-        text="bob's confidential figures",
+        text="carol's confidential figures",
         char_start=0,
-        char_end=26,
+        char_end=28,
         score=0.9,
     )
 
@@ -370,21 +377,23 @@ async def test_search_without_token_is_401(client: AsyncClient) -> None:
     assert resp.headers["content-type"].startswith("application/problem+json")
 
 
-async def test_search_trims_foreign_owner_results(
+async def test_search_trims_cross_tenant_results(
     sessionmaker: async_sessionmaker[AsyncSession],
     seeded: _Seeded,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """INV-1/INV-2: a passage owned by another user is trimmed from Alice's results.
+    """INV-1: a passage from another tenant is trimmed from Alice's results.
 
-    The fake retrieval is wired to (wrongly) hand back Bob's passage; the service's
-    ownership re-check against the resolved principal drops it — Alice never sees
-    Bob's content, and the result set is empty (hidden_count discloses nothing in
-    the MVP allow-set).
+    The fake retrieval is wired to (wrongly) hand back Carol's tenant-B passage;
+    the tenant-scoped :class:`DocumentRepository` cannot re-read it during
+    enrichment, so it is dropped — Alice never sees a cross-tenant document, and
+    the result set is empty. (Same-tenant ownership/grant is the chokepoint's job,
+    proven end-to-end in ``test_search_service``'s live tests; enrichment's only
+    re-check is tenant scope.)
     """
     application = _make_app(
         sessionmaker,
-        passage=_bob_passage(seeded),  # Bob's passage handed to Alice's search
+        passage=_carol_passage(seeded),  # Carol's tenant-B passage handed to Alice
         gateway=_DisabledGateway(),
         monkeypatch=monkeypatch,
     )
@@ -395,7 +404,7 @@ async def test_search_trims_foreign_owner_results(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["results"] == []
-    assert str(seeded.bob_doc) not in resp.text
+    assert str(seeded.carol_doc) not in resp.text
     application.dependency_overrides.clear()
 
 
