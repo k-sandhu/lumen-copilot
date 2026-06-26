@@ -19,7 +19,9 @@ import {
   uploadDocument,
   deleteDocument,
   resolveDocumentContentUrl,
+  fetchDocumentContent,
   ApiError,
+  registerRefreshHandler,
 } from './index';
 import { setAccessToken, clearAccessToken } from './token';
 
@@ -58,8 +60,13 @@ const sampleDocument = {
 
 beforeEach(() => {
   clearAccessToken();
+  registerRefreshHandler(null);
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  registerRefreshHandler(null);
+  clearAccessToken();
+});
 
 describe('collections api', () => {
   it('lists collections (GET /collections)', async () => {
@@ -84,7 +91,9 @@ describe('collections api', () => {
   });
 
   it('creates a collection (POST /collections)', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(sampleCollection, 201));
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(sampleCollection, 201));
     const created = await createCollection({ name: 'Acme contracts' });
     expect(created.id).toBe(sampleCollection.id);
     const init = spy.mock.calls[0]?.[1] as RequestInit;
@@ -331,9 +340,107 @@ describe('resolveDocumentContentUrl (follow 302 → presigned URL)', () => {
   });
 
   it('throws ApiError on a 404 (not permitted / cross-tenant — INV-2)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      problem(404, 'Not Found'),
-    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(404, 'Not Found'));
     await expect(resolveDocumentContentUrl('nope')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('refreshes once, retries, and returns the presigned URL after an expired-token 401', async () => {
+    setAccessToken('expired');
+    const presigned = 'https://minio.example/bucket/obj?sig=fresh';
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(problem(401, 'Unauthorized'))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: presigned } }));
+    const handler = vi.fn(async () => {
+      setAccessToken('fresh');
+    });
+    registerRefreshHandler(handler);
+
+    const url = await resolveDocumentContentUrl(sampleDocument.id);
+
+    expect(url).toBe(presigned);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const retryInit = fetchSpy.mock.calls[1]?.[1] as RequestInit;
+    const retryHeaders = new Headers(retryInit.headers);
+    expect(retryInit.redirect).toBe('manual');
+    expect(retryHeaders.get('Authorization')).toBe('Bearer fresh');
+  });
+
+  it('propagates the original 401 when refresh fails', async () => {
+    setAccessToken('expired');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401, 'Unauthorized'));
+    const handler = vi.fn(async () => {
+      clearAccessToken();
+      throw new Error('refresh failed');
+    });
+    registerRefreshHandler(handler);
+
+    await expect(resolveDocumentContentUrl(sampleDocument.id)).rejects.toMatchObject({
+      status: 401,
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('only retries once when the content endpoint keeps returning 401', async () => {
+    setAccessToken('expired');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401, 'Unauthorized'));
+    const handler = vi.fn(async () => {
+      setAccessToken('still-bad');
+    });
+    registerRefreshHandler(handler);
+
+    await expect(resolveDocumentContentUrl(sampleDocument.id)).rejects.toMatchObject({
+      status: 401,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+function installObjectUrl(): {
+  create: ReturnType<typeof vi.fn>;
+  revoke: ReturnType<typeof vi.fn>;
+} {
+  const create = vi.fn(() => 'blob:doc-content');
+  const revoke = vi.fn();
+  Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: create });
+  Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke });
+  return { create, revoke };
+}
+
+describe('fetchDocumentContent (bearer fetch → blob URL)', () => {
+  it('refreshes once, retries with the fresh bearer, and returns a blob URL', async () => {
+    setAccessToken('expired');
+    const urls = installObjectUrl();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(problem(401, 'Unauthorized'))
+      .mockResolvedValueOnce(
+        new Response(new Blob(['pdf-bytes'], { type: 'application/pdf' }), { status: 200 }),
+      );
+    const handler = vi.fn(async () => {
+      setAccessToken('fresh');
+    });
+    registerRefreshHandler(handler);
+
+    const content = await fetchDocumentContent(sampleDocument.id);
+
+    expect(content.url).toBe('blob:doc-content');
+    content.revoke();
+    expect(urls.create).toHaveBeenCalledTimes(1);
+    expect(urls.revoke).toHaveBeenCalledWith('blob:doc-content');
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const retryInit = fetchSpy.mock.calls[1]?.[1] as RequestInit;
+    const retryHeaders = new Headers(retryInit.headers);
+    expect(retryInit.redirect).toBe('follow');
+    expect(retryHeaders.get('Authorization')).toBe('Bearer fresh');
+  });
+
+  it('still surfaces a non-auth content failure as an ApiError', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(404, 'Not Found'));
+
+    await expect(fetchDocumentContent('nope')).rejects.toMatchObject({ status: 404 });
   });
 });
