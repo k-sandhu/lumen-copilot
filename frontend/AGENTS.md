@@ -19,6 +19,15 @@ frontend/src/
 ```
 - **`api/` is the only backend caller** (ADR-0004). No `fetch`/`WebSocket` to the backend anywhere else; components consume hooks, not transport. The client is **generated** from `contracts/` — never hand-maintained.
 - Features are **vertically sliced** and independently testable; shared logic graduates to `components/`/`lib/` deliberately, not by reaching across features.
+
+### Wire types: `gen:api`, and the hand-authored stopgap (`api/types.ts`)
+The canonical REST types are **generated** from the frozen contract, not hand-written:
+```
+pnpm gen:api   # openapi-typescript ../contracts/openapi.yaml -o src/api/generated/schema.ts
+```
+`src/api/generated/` is **gitignored and never committed** (`.gitignore` "Generated contract artifacts"; ADR-0004) — it is rebuilt from `contracts/openapi.yaml` on demand, so committing it would let it drift silently. Until the generated client is wired through everywhere, `src/api/types.ts` is a documented **hand-authored mirror** of the same contract so the app type-checks before `gen:api` runs.
+- **When you touch a wire shape** (or after a `contracts/` change): run `pnpm gen:api` and reconcile any diff between the generated `schema.ts` and `api/types.ts`. **The contract wins** — update `api/types.ts` to match (or, better, re-export from the generated types). Do **not** commit `src/api/generated/`.
+- CI does not see the generated output (it is gitignored), so this regenerate-and-verify step is the only guard against `api/types.ts` drifting from the contract — run it as part of any wire-touching change.
 - Server state lives in **TanStack Query** (caching, refetch, invalidation); only genuinely client-side UI state (open panels, draft input, theme) lives in **Zustand**. Don't mirror server data into a store.
 
 ## The UX quality bar — non-negotiable (ADR-0006)

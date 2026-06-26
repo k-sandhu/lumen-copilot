@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { ApiError } from '@/api';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ScrollArea } from '@/components/ScrollArea';
 import { cn } from '@/lib/cn';
 import {
@@ -119,6 +120,9 @@ function CollectionRow({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(collection.name);
+  // Confirm-before-destructive via the shared focus-managed dialog (mirrors
+  // SourcesPanel), replacing native window.confirm.
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const update = useUpdateCollection();
   const remove = useDeleteCollection();
@@ -216,15 +220,7 @@ function CollectionRow({
           <button
             type="button"
             disabled={remove.isPending}
-            onClick={() => {
-              if (
-                typeof window !== 'undefined' &&
-                !window.confirm(`Delete “${collection.name}” and all its documents?`)
-              ) {
-                return;
-              }
-              remove.mutate(collection.id);
-            }}
+            onClick={() => setConfirmOpen(true)}
             aria-label={`Delete ${collection.name}`}
             className="rounded p-1 text-xs text-danger hover:bg-surface disabled:opacity-60"
           >
@@ -237,6 +233,19 @@ function CollectionRow({
           {remove.error instanceof ApiError ? remove.error.displayMessage : 'Delete failed.'}
         </p>
       )}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Delete collection?"
+        description={`Delete “${collection.name}” and all its documents? This permanently removes the collection and everything in it. This can't be undone.`}
+        confirmLabel="Delete"
+        busyLabel="Deleting…"
+        busy={remove.isPending}
+        onConfirm={() => {
+          remove.mutate(collection.id);
+          setConfirmOpen(false);
+        }}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </li>
   );
 }

@@ -6,7 +6,7 @@
  * columns (Name + type badge, Collection, Visibility, Owner, Updated, Status) are
  * all backed by real document fields.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
@@ -40,9 +40,6 @@ const doc = (over: Partial<Record<string, unknown>> = {}) => ({
 });
 
 afterEach(() => vi.restoreAllMocks());
-beforeEach(() => {
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
-});
 
 describe('DocumentList', () => {
   it('renders a loading state then the documents table', async () => {
@@ -171,7 +168,7 @@ describe('DocumentList', () => {
     expect(last).toContain('q=msa');
   });
 
-  it('deletes a document after confirm (AC-3)', async () => {
+  it('deletes a document after confirming in the dialog (AC-3)', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(jsonResponse({ items: [doc()], next_cursor: null }))
@@ -181,40 +178,63 @@ describe('DocumentList', () => {
     renderWithQuery(<DocumentList collectionId="col-1" onOpen={() => {}} />);
 
     await screen.findByText('msa.pdf');
+    // Clicking Delete opens the focus-managed confirm dialog — it does NOT delete yet.
     await user.click(screen.getByRole('button', { name: /delete msa.pdf/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText(/delete document\?/i)).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE'),
+    ).toBe(false);
+
+    // Confirming fires DELETE /documents/doc-1.
+    await user.click(within(dialog).getByRole('button', { name: /^delete$/i }));
     await waitFor(() => {
       const del = fetchSpy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'DELETE');
       expect(del?.[0]).toContain('/documents/doc-1');
     });
   });
 
-  it('does not open the viewer when deleting (action click is isolated)', async () => {
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(jsonResponse({ items: [doc()], next_cursor: null }))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+  it('does not delete when the confirm dialog is cancelled', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ items: [doc()], next_cursor: null }));
+    const user = userEvent.setup();
+    renderWithQuery(<DocumentList collectionId="col-1" onOpen={() => {}} />);
+
+    await screen.findByText('msa.pdf');
+    await user.click(screen.getByRole('button', { name: /delete msa.pdf/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: /cancel/i }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false);
+  });
+
+  it('does not open the viewer when opening the delete dialog (action click is isolated)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ items: [doc()], next_cursor: null }),
+    );
     const onOpen = vi.fn();
     const user = userEvent.setup();
     renderWithQuery(<DocumentList collectionId="col-1" onOpen={onOpen} />);
     await screen.findByText('msa.pdf');
     await user.click(screen.getByRole('button', { name: /delete msa.pdf/i }));
+    await screen.findByRole('alertdialog');
     expect(onOpen).not.toHaveBeenCalled();
   });
 
   // Regression (review #125): the row is a `role="button"` whose onKeyDown opens
   // the viewer on Enter/Space. The Delete button only stopped CLICK propagation,
   // so a keyboard activation of Delete bubbled its keydown to the row and opened
-  // the viewer alongside the delete. Keyboard activation of Delete must delete and
-  // NOT open the viewer — for both Enter and Space.
+  // the viewer alongside the delete. Keyboard activation of Delete must open the
+  // confirm dialog and NOT open the viewer — for both Enter and Space.
   it.each([
     ['Enter', '{Enter}'],
     ['Space', ' '],
-  ])('does not open the viewer when deleting with the %s key', async (_name, keys) => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(jsonResponse({ items: [doc()], next_cursor: null }))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+  ])('does not open the viewer when activating Delete with the %s key', async (_name, keys) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ items: [doc()], next_cursor: null }),
+    );
     const onOpen = vi.fn();
     const user = userEvent.setup();
     renderWithQuery(<DocumentList collectionId="col-1" onOpen={onOpen} />);
@@ -227,12 +247,9 @@ describe('DocumentList', () => {
     expect(del).toHaveFocus();
     await user.keyboard(keys);
 
-    // The delete fired …
-    await waitFor(() => {
-      const sent = fetchSpy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'DELETE');
-      expect(sent?.[0]).toContain('/documents/doc-1');
-    });
-    // … and the viewer never opened.
+    // The confirm dialog opened …
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    // … and the viewer never opened (the keydown did not bubble to the row).
     expect(onOpen).not.toHaveBeenCalled();
   });
 

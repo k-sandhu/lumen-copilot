@@ -30,7 +30,7 @@ components/
   SourcesPanel.tsx        → KPIs + connector grid + add/sync/remove; every state
   SourceCard.tsx          → one connector card (glyph, status, stats, actions)
   AddSourceModal.tsx      → paste-a-URL flow → POST /sources; 422 inline error
-  ConfirmDialog.tsx       → confirm-before-remove (cascades the source's docs)
+  (confirm-before-remove uses the shared components/ConfirmDialog)
 model/
   queries.ts              → TanStack Query over api/sources (+ sync polling)
   presentation.ts         → wire Source → status tone/label, glyph, freshness;
