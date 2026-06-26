@@ -58,8 +58,10 @@ export function AddSourceModal({ open, onClose }: AddSourceModalProps) {
   }, [open]);
 
   // Move focus to the URL field on open, trap Tab inside the dialog, restore
-  // focus to the trigger on close; Escape dismisses (not while submitting).
-  useFocusTrap(open, dialogRef, onClose, { initialFocus: inputRef, disabled: submitting });
+  // focus to the trigger on close. The Tab trap stays ACTIVE while submitting —
+  // a slow/hung POST must not let focus escape behind the overlay — so only the
+  // Escape dismiss is gated on `submitting` (mirrors ConfirmDialog's `busy`).
+  useFocusTrap(open, dialogRef, () => !submitting && onClose(), { initialFocus: inputRef });
 
   if (!open) return null;
 
