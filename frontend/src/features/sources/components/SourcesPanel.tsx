@@ -23,7 +23,7 @@ import { relativeTime } from '../model/presentation';
 import type { Source } from '../model/types';
 import { SourceCard } from './SourceCard';
 import { AddSourceModal } from './AddSourceModal';
-import { ConfirmDialog } from './ConfirmDialog';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 export function SourcesPanel() {
   const query = useSources();
