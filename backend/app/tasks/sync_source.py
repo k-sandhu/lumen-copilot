@@ -230,11 +230,18 @@ async def _ingest_one(
 
 
 async def _fail(tenant_id: UUID, source_id: UUID, reason: str) -> SyncResult:
-    """Mark a source ``error`` with ``reason`` (own transaction). ADR-0009 §4."""
+    """Mark a source ``error`` with ``reason`` (own transaction). ADR-0009 §4.
+
+    ``indexed_count=0`` is written explicitly: the failed sync already deleted the
+    source's prior documents (Phase 3), so a stale non-zero count from an earlier
+    successful sync must not survive (e.g. "error / 2 indexed" with an empty doc
+    list). ``update_status`` leaves ``indexed_count`` untouched unless supplied (#157).
+    """
     async with session_scope() as session:
         await SourceRepository(session, tenant_id).update_status(
             source_id,
             status=SourceStatus.ERROR,
+            indexed_count=0,
             last_error=reason,
             set_last_error=True,
         )
