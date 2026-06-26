@@ -1,16 +1,16 @@
 /**
- * Small typed fetch wrapper — part of the api/ boundary (ADR-0004): the ONLY
+ * Small typed fetch wrapper - part of the api/ boundary (ADR-0004): the ONLY
  * place the SPA performs HTTP to the backend. Features call typed functions in
  * sibling modules (e.g. `health.ts`, `auth.ts`); they never touch `fetch`.
  *
  * Errors are parsed into a typed `ApiError` carrying the RFC-9457 `Problem`
  * body when the server sends one, so callers branch on shape, not status codes.
  *
- * AUTH WIRING (issue #48, spec 0004 §2.3):
+ * AUTH WIRING (issue #48, spec 0004 section 2.3):
  *   - Every request carries `credentials: 'include'` so the httpOnly refresh
  *     cookie rides along (login sets it; refresh consumes it).
- *   - When an access token is held it is sent as `Authorization: Bearer …`
- *     (unless `skipAuth` — login/refresh are unauthenticated).
+ *   - When an access token is held it is sent as `Authorization: Bearer ...`
+ *     (unless `skipAuth` - login/refresh are unauthenticated).
  *   - On a 401 (INV-4: missing/expired token), the client performs ONE silent
  *     refresh via the registered handler, then retries the original request
  *     once. A failed refresh propagates the 401 so the caller routes to login.
@@ -20,7 +20,7 @@ import { getAccessToken } from './token';
 import type { Problem } from './types';
 
 /**
- * Refresh hook registered by `auth.ts` to break the client↔auth import cycle.
+ * Refresh hook registered by `auth.ts` to break the client/auth import cycle.
  * It must mint+store a new access token (or throw). `null` disables refresh.
  */
 type RefreshHandler = (() => Promise<void>) | null;
@@ -75,7 +75,7 @@ function joinUrl(base: string, path: string): string {
 }
 
 export interface RequestOptions extends Omit<RequestInit, 'body'> {
-  /** JSON body — serialized and sent with application/json. */
+  /** JSON body - serialized and sent with application/json. */
   json?: unknown;
   /** Treat these non-2xx statuses as success (e.g. 503 readiness still parses). */
   okStatuses?: number[];
@@ -84,8 +84,39 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
    * endpoints themselves (login/refresh) so refresh never recurses.
    */
   skipAuth?: boolean;
-  /** Internal: set on the post-refresh retry so we never refresh twice. */
-  _isRetry?: boolean;
+}
+
+/**
+ * Run one authenticated operation with the shared 401 refresh policy.
+ *
+ * The operation signals an expired token by throwing `ApiError` status 401.
+ * This helper refreshes once, reruns the operation once with `isRetry=true`,
+ * and otherwise preserves the original error.
+ */
+export async function withRefreshRetry<T>(
+  run: (isRetry: boolean) => Promise<T>,
+  opts: { skipAuth?: boolean } = {},
+): Promise<T> {
+  try {
+    return await run(false);
+  } catch (error) {
+    if (
+      !(error instanceof ApiError) ||
+      error.status !== 401 ||
+      opts.skipAuth === true ||
+      !refreshHandler
+    ) {
+      throw error;
+    }
+
+    try {
+      await runRefresh();
+    } catch {
+      throw error;
+    }
+
+    return run(true);
+  }
 }
 
 /**
@@ -95,7 +126,7 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
  *              path (used for liveness/readiness which live outside /api).
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { json, okStatuses = [], headers, skipAuth = false, _isRetry = false, ...init } = options;
+  const { json, okStatuses = [], headers, skipAuth = false, ...init } = options;
 
   // Health/readiness live outside the versioned API base (they're proxied at
   // "/health"); every other path is relative to API_BASE_URL (the "/api/v1"
@@ -103,64 +134,56 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   // feature paths like "/auth/login" would hit the SPA origin and 404.
   const url = path.startsWith('/health') ? path : joinUrl(API_BASE_URL, path);
 
-  const finalHeaders = new Headers(headers);
-  finalHeaders.set('Accept', 'application/json, application/problem+json');
+  return withRefreshRetry<T>(
+    async () => {
+      const finalHeaders = new Headers(headers);
+      finalHeaders.set('Accept', 'application/json, application/problem+json');
 
-  // Bearer the access token onto every authenticated request (AC-1).
-  if (!skipAuth) {
-    const token = getAccessToken();
-    if (token) finalHeaders.set('Authorization', `Bearer ${token}`);
-  }
-
-  let body: BodyInit | undefined;
-  if (json !== undefined) {
-    finalHeaders.set('Content-Type', 'application/json');
-    body = JSON.stringify(json);
-  }
-
-  let response: Response;
-  try {
-    // credentials:'include' carries the httpOnly refresh cookie (spec 0004).
-    response = await fetch(url, {
-      credentials: 'include',
-      ...init,
-      headers: finalHeaders,
-      body,
-    });
-  } catch (cause) {
-    // Network/CORS/abort — no HTTP status to speak of.
-    throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
-  }
-
-  const accepted = response.ok || okStatuses.includes(response.status);
-
-  if (!accepted) {
-    // INV-4: an expired/invalid token → 401. Try ONE silent refresh + retry.
-    if (response.status === 401 && !skipAuth && !_isRetry && refreshHandler) {
-      try {
-        await runRefresh();
-      } catch {
-        // Refresh failed — fall through and surface the original 401 so the
-        // caller (route guard) sends the user back to login (AC-4).
-        const problem = await safeParseProblem(response);
-        throw new ApiError(`Request to ${url} failed with 401`, 401, problem);
+      // Bearer the access token onto every authenticated request (AC-1).
+      if (!skipAuth) {
+        const token = getAccessToken();
+        if (token) finalHeaders.set('Authorization', `Bearer ${token}`);
       }
-      return request<T>(path, { ...options, _isRetry: true });
-    }
 
-    const problem = await safeParseProblem(response);
-    throw new ApiError(
-      `Request to ${url} failed with ${response.status}`,
-      response.status,
-      problem,
-    );
-  }
+      let body: BodyInit | undefined;
+      if (json !== undefined) {
+        finalHeaders.set('Content-Type', 'application/json');
+        body = JSON.stringify(json);
+      }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
+      let response: Response;
+      try {
+        // credentials:'include' carries the httpOnly refresh cookie (spec 0004).
+        response = await fetch(url, {
+          credentials: 'include',
+          ...init,
+          headers: finalHeaders,
+          body,
+        });
+      } catch (cause) {
+        // Network/CORS/abort: no HTTP status to speak of.
+        throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
+      }
 
-  return (await response.json()) as T;
+      const accepted = response.ok || okStatuses.includes(response.status);
+
+      if (!accepted) {
+        const problem = await safeParseProblem(response);
+        throw new ApiError(
+          `Request to ${url} failed with ${response.status}`,
+          response.status,
+          problem,
+        );
+      }
+
+      if (response.status === 204) {
+        return undefined as T;
+      }
+
+      return (await response.json()) as T;
+    },
+    { skipAuth },
+  );
 }
 
 async function safeParseProblem(response: Response): Promise<Problem | undefined> {
@@ -168,7 +191,7 @@ async function safeParseProblem(response: Response): Promise<Problem | undefined
     const data: unknown = await response.json();
     if (isProblem(data)) return data;
   } catch {
-    // Non-JSON or empty body — fall through to undefined.
+    // Non-JSON or empty body - fall through to undefined.
   }
   return undefined;
 }
