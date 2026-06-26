@@ -12,6 +12,7 @@
  */
 import { FreshnessPill, Icon, PermissionPill, StatusDot } from '@/ui';
 import { cn } from '@/lib/cn';
+import type { ApiError } from '@/api';
 import type { Source } from '../model/types';
 import {
   freshness,
@@ -27,13 +28,22 @@ interface SourceCardProps {
   source: Source;
   /** True while a re-sync mutation for THIS source is in flight. */
   syncing?: boolean;
+  /** Last failed re-sync trigger for THIS source. */
+  syncError?: ApiError | null;
   /** True while a remove mutation for THIS source is in flight. */
   removing?: boolean;
   onSync: (source: Source) => void;
   onRemove: (source: Source) => void;
 }
 
-export function SourceCard({ source, syncing, removing, onSync, onRemove }: SourceCardProps) {
+export function SourceCard({
+  source,
+  syncing,
+  syncError,
+  removing,
+  onSync,
+  onRemove,
+}: SourceCardProps) {
   const tone = statusTone(source.status);
   const badge = statusBadge(source.status);
   const fresh = freshness(source);
@@ -127,6 +137,11 @@ export function SourceCard({ source, syncing, removing, onSync, onRemove }: Sour
           Remove
         </button>
       </div>
+      {syncError ? (
+        <p role="alert" className="mt-1 text-xs text-danger">
+          {syncError.displayMessage}
+        </p>
+      ) : null}
     </article>
   );
 }
