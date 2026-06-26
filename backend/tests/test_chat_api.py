@@ -20,6 +20,7 @@ via monkeypatch, so the full REST→persist→stream path runs without a live mo
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 
@@ -28,6 +29,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from starlette.websockets import WebSocketDisconnect
@@ -35,6 +37,7 @@ from starlette.websockets import WebSocketDisconnect
 import app.api.v1.chat as chat_module
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
+from app.core.config import Settings
 from app.db.base import Base
 from app.db.repositories import (
     ChunkInput,
@@ -47,7 +50,7 @@ from app.db.repositories import (
 from app.domain.entities import Role
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
-from app.main import create_app
+from app.main import create_app, lifespan
 from app.realtime.backplane import InMemoryBackplane, StreamOwner
 
 import app.db.models  # noqa: F401  isort: skip
@@ -255,6 +258,15 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+    # The ASGITransport client skips the app lifespan, so the lifespan's
+    # answer-task drain (#156) never runs; cancel any detached producer still in
+    # flight here so it doesn't outlive this loop and leak (mirrors the lifespan
+    # teardown). The runtime turns CancelledError into its terminal envelope.
+    tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+    for task in list(tasks):
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _login(client: AsyncClient, email: str) -> str:
@@ -613,3 +625,127 @@ def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _
         assert len(citations) == 1
         assert citations[0]["document_name"] == "taxes.pdf"
         assert citations[0]["chunk_id"] == str(seeded.alice_chunk)
+
+
+# --- Graceful shutdown: detached, tracked answer tasks (issue #156) ----------
+
+
+class _BlockingRuntime:
+    """A runtime whose ``run`` never completes until cancelled.
+
+    Models a hung/slow answer producer: it parks on a never-set ``asyncio.Event``
+    so the only way the task ends is the lifespan cancelling it. ``started`` lets
+    the test wait until the producer is actually executing before asserting.
+    """
+
+    def __init__(self, **_kwargs: object) -> None:
+        self.started = asyncio.Event()
+
+    async def run(self, **_kwargs: object) -> None:
+        self.started.set()
+        await asyncio.Event().wait()  # blocks forever unless cancelled
+
+
+async def test_hung_answer_does_not_block_send_or_shutdown(
+    app: FastAPI, seeded: _Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # REGRESSION (#156): a hung answer producer must NOT keep the 202 alive nor
+    # block lifespan shutdown. Pre-fix the producer was a Starlette BackgroundTask
+    # tied to the response and the lifespan could neither reach nor cancel it, so
+    # uvicorn graceful shutdown wedged. Now the producer is a tracked asyncio.Task
+    # that the lifespan cancels and drains within chat_shutdown_grace_seconds.
+    blocking = _BlockingRuntime()
+    monkeypatch.setattr(chat_module, "ChatRuntime", lambda **kwargs: blocking)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with lifespan(app):
+            token = await _login(client, seeded.alice_email)
+            sid = (
+                await client.post(
+                    "/api/v1/chat/sessions", headers=_auth(token), json={"title": "s"}
+                )
+            ).json()["id"]
+            # The POST returns 202 immediately even though the producer hangs —
+            # proof it is detached, not run inside the response cycle.
+            sent = await asyncio.wait_for(
+                client.post(
+                    f"/api/v1/chat/sessions/{sid}/messages",
+                    headers=_auth(token),
+                    json={"content": "What is the 2024 standard deduction?"},
+                ),
+                timeout=5,
+            )
+            assert sent.status_code == 202, sent.text
+
+            # The producer is tracked on app.state and is genuinely running.
+            await asyncio.wait_for(blocking.started.wait(), timeout=5)
+            tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+            assert len(tasks) == 1
+            answer_task = next(iter(tasks))
+            assert not answer_task.done()
+        # Exiting the lifespan cancelled + drained the hung task within the grace
+        # window rather than hanging; the set self-empties via the done callback.
+        await asyncio.sleep(0)  # let the discard done-callback run
+        assert answer_task.cancelled()
+        assert app.state.answer_tasks == set()
+
+
+def test_send_tracks_and_self_empties_answer_task(app: FastAPI, seeded: _Seeded) -> None:
+    # POSITIVE (#156): a normal scripted answer is tracked on app.state.answer_tasks
+    # while in flight and the set self-empties (via add_done_callback) once it
+    # completes. Uses the sync TestClient (its one loop runs startup/shutdown).
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.alice_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        sid = client.post("/api/v1/chat/sessions", headers=headers, json={"title": "s"}).json()[
+            "id"
+        ]
+        sent = client.post(
+            f"/api/v1/chat/sessions/{sid}/messages",
+            headers=headers,
+            json={"content": "What is the 2024 standard deduction?"},
+        )
+        assert sent.status_code == 202, sent.text
+        stream_id = sent.json()["stream_id"]
+
+        # Draining the WS lets the scripted producer run to its terminal envelope;
+        # once done the task discards itself from the tracking set (via the
+        # add_done_callback, which the loop runs on a subsequent tick).
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            for _ in range(50):
+                if ws.receive_json()["type"] in ("done", "error"):
+                    break
+        for _ in range(50):
+            if not app.state.answer_tasks:
+                break
+            time.sleep(0.02)
+        assert app.state.answer_tasks == set()
+
+
+# Minimal valid base env so Settings constructs; the test overrides one field.
+_SETTINGS_BASE = {
+    "DATABASE_URL": "postgresql+asyncpg://t:t@localhost/t",
+    "REDIS_URL": "redis://localhost",
+    "CELERY_BROKER_URL": "redis://localhost",
+    "CELERY_RESULT_BACKEND": "redis://localhost",
+    "S3_ENDPOINT_URL": "http://localhost:9000",
+    "S3_ACCESS_KEY": "t",
+    "S3_SECRET_KEY": "tt",
+    "S3_BUCKET": "b",
+}
+
+
+@pytest.mark.parametrize("bad", [0, -1, -0.5])
+def test_chat_shutdown_grace_must_be_positive(bad: float) -> None:
+    # NEGATIVE (#156): a non-positive grace would disable the shutdown bound, so
+    # Settings refuses to construct (mirrors the chat_max_tool_turns band guard).
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_SETTINGS_BASE, CHAT_SHUTDOWN_GRACE_SECONDS=bad)
+
+
+def test_chat_shutdown_grace_default_is_positive() -> None:
+    s = Settings(_env_file=None, **_SETTINGS_BASE)
+    assert s.chat_shutdown_grace_seconds > 0

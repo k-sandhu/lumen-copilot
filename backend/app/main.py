@@ -9,6 +9,7 @@ holds no business logic or I/O of its own (that lives in adapters/services).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -77,7 +78,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Startup best-effort ensures the object-store bucket exists so uploads have a
     target from first boot; a transient failure here is logged but does not
     block the process from coming up (readiness will report the real state).
-    Shutdown disposes the DB engine cleanly.
+    Shutdown cancels any still-running answer-producer tasks and drains them
+    under a bounded grace window so a hung answer can't wedge uvicorn's graceful
+    shutdown (issue #156), then disposes the DB engine cleanly.
     """
     settings: Settings = app.state.settings
     log.info("startup.begin", environment=settings.environment, version=settings.version)
@@ -89,8 +92,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    await _drain_answer_tasks(app, grace_seconds=settings.chat_shutdown_grace_seconds)
     await dispose_engine()
     log.info("shutdown.complete")
+
+
+async def _drain_answer_tasks(app: FastAPI, *, grace_seconds: float) -> None:
+    """Cancel outstanding answer tasks and await them, bounded by ``grace_seconds``.
+
+    Snapshots the live tasks, cancels each, and gathers them under
+    ``asyncio.wait_for``; the runtime turns ``CancelledError`` into its existing
+    terminal envelope so cancellation stays contract-clean. On timeout we log and
+    return so shutdown proceeds to engine disposal rather than blocking forever.
+    """
+    tasks = list(app.state.answer_tasks)
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=grace_seconds,
+        )
+        log.info("shutdown.answer_tasks_drained", count=len(tasks))
+    except TimeoutError:
+        log.warning("shutdown.answer_tasks_timeout", count=len(tasks), grace=grace_seconds)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:
@@ -150,6 +177,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # Process-wide registry of in-flight answer-producer tasks (issue #156). Held
+    # on app.state alongside settings; initialised here (not only in the lifespan)
+    # so it exists even for transports that skip the lifespan (e.g. tests driving
+    # the ASGI app directly). The lifespan teardown drains it.
+    app.state.answer_tasks = set()
 
     app.add_middleware(CorrelationMiddleware)
     _register_exception_handlers(app)
