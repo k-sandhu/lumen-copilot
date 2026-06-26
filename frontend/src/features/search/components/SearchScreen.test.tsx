@@ -44,6 +44,12 @@ function mockSearch(
 ) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = urlOf(input);
+    // The typeahead fires suggest/recent/saved on mount + as you type; route them
+    // to FRESH empty responses so they never consume the single `/search` mock
+    // Response (a Response body can be read once).
+    if (url.includes('/search/suggest')) return Promise.resolve(json({ suggestions: [] }));
+    if (url.includes('/search/recent')) return Promise.resolve(json({ items: [] }));
+    if (url.includes('/saved-searches')) return Promise.resolve(json({ items: [] }));
     if (url.includes('/collections')) return Promise.resolve(json(emptyCollections));
     return Promise.resolve(
       typeof searchResponse === 'function' ? searchResponse(url) : searchResponse,
@@ -108,8 +114,9 @@ const multiSourceResponse: SearchResponse = {
 
 async function runSearch(term = 'pto policy') {
   const user = userEvent.setup();
-  await user.type(screen.getByRole('searchbox'), term);
-  await user.click(screen.getByRole('button', { name: /^search$/i }));
+  // The search box is now an accessible combobox; Enter runs the typed query
+  // (no separate Search button — choosing a suggestion or pressing Enter submits).
+  await user.type(screen.getByRole('combobox'), `${term}{Enter}`);
   return user;
 }
 
@@ -134,7 +141,11 @@ describe('SearchScreen', () => {
       resolve = r;
     });
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+      const url = urlOf(input);
+      if (url.includes('/search/suggest')) return Promise.resolve(json({ suggestions: [] }));
+      if (url.includes('/search/recent')) return Promise.resolve(json({ items: [] }));
+      if (url.includes('/saved-searches')) return Promise.resolve(json({ items: [] }));
+      if (url.includes('/collections')) return Promise.resolve(json(emptyCollections));
       return deferred;
     });
     renderWithQuery(<SearchScreen />);
@@ -194,7 +205,11 @@ describe('SearchScreen', () => {
     // `/search` fails once (500) then succeeds; `/collections` always resolves.
     let searchCalls = 0;
     const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      if (urlOf(input).includes('/collections')) return Promise.resolve(json(emptyCollections));
+      const url = urlOf(input);
+      if (url.includes('/search/suggest')) return Promise.resolve(json({ suggestions: [] }));
+      if (url.includes('/search/recent')) return Promise.resolve(json({ items: [] }));
+      if (url.includes('/saved-searches')) return Promise.resolve(json({ items: [] }));
+      if (url.includes('/collections')) return Promise.resolve(json(emptyCollections));
       searchCalls += 1;
       return Promise.resolve(searchCalls === 1 ? problem(500, 'Server Error') : json(fullResponse));
     });

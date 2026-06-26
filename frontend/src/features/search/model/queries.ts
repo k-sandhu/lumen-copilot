@@ -9,9 +9,35 @@
  * `q` is trimmed and carried in the query key, so each distinct submitted query
  * is cached independently and an in-flight request is cancelled via the signal.
  */
-import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query';
-import { listCollections, search } from '@/api';
-import type { CollectionList, SearchQuery, SearchResponse } from '@/api';
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
+import {
+  clearRecentSearches,
+  createSavedSearch,
+  deleteSavedSearch,
+  hasAccessToken,
+  listCollections,
+  listRecentSearches,
+  listSavedSearches,
+  search,
+  suggestSearch,
+} from '@/api';
+import type {
+  CollectionList,
+  RecentSearchList,
+  SavedSearch,
+  SavedSearchCreate,
+  SavedSearchList,
+  SearchQuery,
+  SearchResponse,
+  SuggestResponse,
+} from '@/api';
 
 /** Stable query key for one submitted search (filters included for cache split). */
 export function searchKey(query: SearchQuery) {
@@ -57,5 +83,76 @@ export function useSearchCollections(): UseQueryResult<CollectionList> {
     queryKey: searchCollectionsKey,
     queryFn: ({ signal }) => listCollections({}, signal),
     staleTime: 30_000,
+  });
+}
+
+// --- Typeahead suggestions, recent history, saved searches (spec 0005) ------
+
+/**
+ * Server-side typeahead suggestions for the (debounced) partial query. Disabled
+ * for a blank query so we never fire the 422-on-empty path; the AbortSignal
+ * cancels a superseded keystroke's request. `q` should already be debounced by
+ * the caller (the combobox). Suggestions are permission-trimmed by the backend.
+ */
+export function useSuggest(q: string): UseQueryResult<SuggestResponse> {
+  const trimmed = q.trim();
+  return useQuery<SuggestResponse>({
+    queryKey: ['suggest', trimmed] as const,
+    queryFn: ({ signal }) => suggestSearch(trimmed, 8, signal),
+    enabled: hasAccessToken() && trimmed.length > 0,
+    staleTime: 10_000,
+  });
+}
+
+export const recentSearchesKey = ['recent-searches'] as const;
+
+/** The caller's recent search queries (typeahead "Recent" group). */
+export function useRecentSearches(): UseQueryResult<RecentSearchList> {
+  return useQuery<RecentSearchList>({
+    queryKey: recentSearchesKey,
+    queryFn: ({ signal }) => listRecentSearches(10, signal),
+    enabled: hasAccessToken(),
+    staleTime: 10_000,
+  });
+}
+
+/** Clear the caller's recent history; refreshes the recent list. */
+export function useClearRecentSearches(): UseMutationResult<void, unknown, void> {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, void>({
+    mutationFn: () => clearRecentSearches(),
+    onSuccess: () => {
+      queryClient.setQueryData<RecentSearchList>(recentSearchesKey, { items: [] });
+    },
+  });
+}
+
+export const savedSearchesKey = ['saved-searches'] as const;
+
+/** The caller's saved searches. */
+export function useSavedSearches(): UseQueryResult<SavedSearchList> {
+  return useQuery<SavedSearchList>({
+    queryKey: savedSearchesKey,
+    queryFn: ({ signal }) => listSavedSearches(undefined, signal),
+    enabled: hasAccessToken(),
+    staleTime: 30_000,
+  });
+}
+
+/** Save the current search (name + query + filters); refreshes the saved list. */
+export function useCreateSavedSearch(): UseMutationResult<SavedSearch, unknown, SavedSearchCreate> {
+  const queryClient = useQueryClient();
+  return useMutation<SavedSearch, unknown, SavedSearchCreate>({
+    mutationFn: (body) => createSavedSearch(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: savedSearchesKey }),
+  });
+}
+
+/** Delete a saved search; refreshes the saved list. */
+export function useDeleteSavedSearch(): UseMutationResult<void, unknown, string> {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, string>({
+    mutationFn: (id) => deleteSavedSearch(id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: savedSearchesKey }),
   });
 }

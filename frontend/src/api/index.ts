@@ -31,6 +31,15 @@ export {
 export type { PageParams } from './chat';
 export { listModels } from './models';
 export { search } from './search';
+export { getPreferences, updatePreferences } from './preferences';
+export {
+  listSavedSearches,
+  createSavedSearch,
+  getSavedSearch,
+  updateSavedSearch,
+  deleteSavedSearch,
+} from './savedSearches';
+export { suggestSearch, listRecentSearches, clearRecentSearches } from './suggest';
 export { listAuditEvents } from './audit';
 export { listMembers, getModelGovernance, getRiskTiers } from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
