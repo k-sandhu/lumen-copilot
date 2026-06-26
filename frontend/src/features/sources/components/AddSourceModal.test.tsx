@@ -60,6 +60,22 @@ describe('AddSourceModal', () => {
     await waitFor(() => expect(field).toHaveFocus());
   });
 
+  it('traps Tab within the dialog — focus never escapes the open modal (#163)', async () => {
+    const user = userEvent.setup();
+    renderWithQuery(<AddSourceModal open onClose={() => {}} />);
+    const dialog = screen.getByRole('dialog');
+    await waitFor(() => expect(screen.getByLabelText(/link/i)).toHaveFocus());
+
+    // Tabbing forward and backward keeps focus inside the dialog (URL field →
+    // Add source → Cancel → Close, wrapping at the edges), never on the page.
+    for (let i = 0; i < 6; i++) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
   it('blocks a bad URL client-side without firing a request', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const user = userEvent.setup();

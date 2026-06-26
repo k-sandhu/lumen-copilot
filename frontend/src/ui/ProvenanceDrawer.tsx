@@ -8,8 +8,9 @@
  * open and returns to the opener on close; Escape and a backdrop click dismiss.
  * Motion is CSS-only and collapses under prefers-reduced-motion.
  */
-import { useEffect, useId, useRef } from 'react';
+import { useId, useRef } from 'react';
 import { cn } from '@/lib/cn';
+import { useFocusTrap } from '@/lib/useFocusTrap';
 import { Icon } from './Icon';
 
 export interface ProvenanceCandidate {
@@ -40,27 +41,11 @@ interface ProvenanceDrawerProps {
 
 export function ProvenanceDrawer({ open, detail, onClose }: ProvenanceDrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const lastFocused = useRef<HTMLElement | null>(null);
   const titleId = useId();
 
-  // Move focus into the drawer on open; restore it on close. Escape dismisses.
-  useEffect(() => {
-    if (!open) return;
-    lastFocused.current = (document.activeElement as HTMLElement) ?? null;
-    panelRef.current?.focus();
-
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      lastFocused.current?.focus?.();
-    };
-  }, [open, onClose]);
+  // Move focus into the drawer on open, trap Tab inside it, restore focus on
+  // close; Escape dismisses. Shared with every other aria-modal surface.
+  useFocusTrap(open, panelRef, onClose, { initialFocus: panelRef });
 
   if (!open) return null;
 

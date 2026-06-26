@@ -68,6 +68,18 @@ describe('DocumentViewer', () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
+  it('traps Tab within the drawer — focus never escapes the open dialog (#163)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    const user = userEvent.setup();
+    renderWithQuery(<DocumentViewer doc={doc} onClose={() => {}} />);
+    const dialog = screen.getByRole('dialog');
+
+    for (let i = 0; i < 5; i++) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+  });
+
   it('renders the parse → chunk → embed → ready ingestion trace (#89)', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
     renderWithQuery(<DocumentViewer doc={{ ...doc, chunk_count: 142 }} onClose={() => {}} />);
