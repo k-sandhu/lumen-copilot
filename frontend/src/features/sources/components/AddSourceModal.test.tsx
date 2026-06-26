@@ -60,6 +60,66 @@ describe('AddSourceModal', () => {
     await waitFor(() => expect(field).toHaveFocus());
   });
 
+  it('traps Tab within the dialog — focus never escapes the open modal (#163)', async () => {
+    const user = userEvent.setup();
+    renderWithQuery(<AddSourceModal open onClose={() => {}} />);
+    const dialog = screen.getByRole('dialog');
+    await waitFor(() => expect(screen.getByLabelText(/link/i)).toHaveFocus());
+
+    // Tabbing forward and backward keeps focus inside the dialog (URL field →
+    // Add source → Cancel → Close, wrapping at the edges), never on the page.
+    for (let i = 0; i < 6; i++) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('keeps the Tab trap ACTIVE while the create is pending (#163)', async () => {
+    // A slow/hung POST /sources holds `create.isPending` true. The Tab trap must
+    // stay installed — gating it off during submission would run the hook's
+    // cleanup and let focus escape to the page BEHIND the still-mounted overlay.
+    // fetch never resolves so we stay pending. We render a focusable control
+    // OUTSIDE the dialog (a stand-in for the page behind the overlay); a live
+    // trap must never let Tab land on it.
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>(() => {}));
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <>
+        <button type="button" data-testid="behind-overlay">
+          behind the overlay
+        </button>
+        <AddSourceModal open onClose={onClose} />
+      </>,
+    );
+
+    const dialog = screen.getByRole('dialog');
+    const outside = screen.getByTestId('behind-overlay');
+    await user.type(screen.getByLabelText(/link/i), 'https://acme.com/docs');
+    await user.click(screen.getByRole('button', { name: /add source/i }));
+
+    // Now submitting: the button shows the pending label and inputs are disabled.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /adding/i })).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/link/i)).toBeDisabled();
+
+    // The Tab trap is still live: cycling forward/backward keeps focus inside the
+    // dialog (its controls are disabled, so the trap parks focus on the container)
+    // and NEVER escapes to the focusable element behind the overlay.
+    for (let i = 0; i < 4; i++) {
+      await user.tab();
+      expect(outside).not.toHaveFocus();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+    await user.tab({ shift: true });
+    expect(outside).not.toHaveFocus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('blocks a bad URL client-side without firing a request', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const user = userEvent.setup();

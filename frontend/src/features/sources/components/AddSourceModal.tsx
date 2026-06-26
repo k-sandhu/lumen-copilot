@@ -17,6 +17,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/api';
 import { Icon } from '@/ui';
+import { useFocusTrap } from '@/lib/useFocusTrap';
 import { useCreateSource } from '../model/queries';
 import { createSourceErrorMessage, validateUrl } from '../model/presentation';
 
@@ -29,8 +30,8 @@ export function AddSourceModal({ open, onClose }: AddSourceModalProps) {
   const titleId = useId();
   const errorId = useId();
   const hintId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const lastFocused = useRef<HTMLElement | null>(null);
 
   const [url, setUrl] = useState('');
   // A client-side validation message, kept separate from the server error so the
@@ -42,32 +43,27 @@ export function AddSourceModal({ open, onClose }: AddSourceModalProps) {
     create.error instanceof ApiError ? createSourceErrorMessage(create.error) : null;
   const error = clientError ?? serverError;
 
-  // Manage focus + Escape; restore focus to the trigger on close. Reset the form
-  // each time the modal opens so a prior error/url never leaks into a new attempt.
+  const submitting = create.isPending;
+
+  // Reset the form each time the modal opens so a prior error/url never leaks
+  // into a new attempt. (Focus/Tab-trap/Escape/restore is handled below by the
+  // shared useFocusTrap hook.)
   useEffect(() => {
     if (!open) return;
-    lastFocused.current = (document.activeElement as HTMLElement) ?? null;
     setUrl('');
     setClientError(null);
     create.reset();
-    // Defer focus to the next frame so the field is mounted.
-    const id = window.requestAnimationFrame(() => inputRef.current?.focus());
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.cancelAnimationFrame(id);
-      window.removeEventListener('keydown', onKey);
-      lastFocused.current?.focus?.();
-    };
-    // create.reset is stable; intentionally run only on open/close transitions.
+    // create.reset is stable; intentionally run only on the open transition.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, onClose]);
+  }, [open]);
+
+  // Move focus to the URL field on open, trap Tab inside the dialog, restore
+  // focus to the trigger on close. The Tab trap stays ACTIVE while submitting —
+  // a slow/hung POST must not let focus escape behind the overlay — so only the
+  // Escape dismiss is gated on `submitting` (mirrors ConfirmDialog's `busy`).
+  useFocusTrap(open, dialogRef, () => !submitting && onClose(), { initialFocus: inputRef });
 
   if (!open) return null;
-
-  const submitting = create.isPending;
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -91,6 +87,7 @@ export function AddSourceModal({ open, onClose }: AddSourceModalProps) {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}

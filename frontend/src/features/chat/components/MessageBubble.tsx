@@ -123,7 +123,22 @@ function MessageBubbleComponent({
               </div>
             )}
 
-            <div className="min-w-0 break-words">
+            {/* While streaming, the answer is a polite, non-atomic live region so
+                a screen reader announces tokens as they arrive (without spamming
+                on every token, and without re-announcing the whole answer). A
+                settled turn drops the live-region attributes so the finished
+                answer isn't read out a second time. */}
+            <div
+              className="min-w-0 break-words"
+              {...(streaming
+                ? {
+                    role: 'log',
+                    'aria-live': 'polite' as const,
+                    'aria-atomic': false,
+                    'aria-label': 'Assistant answer',
+                  }
+                : {})}
+            >
               <MarkdownView className="lc-answer">{content}</MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>

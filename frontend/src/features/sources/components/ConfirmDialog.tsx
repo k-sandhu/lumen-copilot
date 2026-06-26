@@ -6,7 +6,8 @@
  * A11y: role="alertdialog" aria-modal, labelled + described; focus moves to the
  * confirm button on open and is restored on close; Escape and backdrop dismiss.
  */
-import { useEffect, useId, useRef } from 'react';
+import { useId, useRef } from 'react';
+import { useFocusTrap } from '@/lib/useFocusTrap';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -30,28 +31,18 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const titleId = useId();
   const descId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
-  const lastFocused = useRef<HTMLElement | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    lastFocused.current = (document.activeElement as HTMLElement) ?? null;
-    const id = window.requestAnimationFrame(() => confirmRef.current?.focus());
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape' && !busy) onCancel();
-    }
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.cancelAnimationFrame(id);
-      window.removeEventListener('keydown', onKey);
-      lastFocused.current?.focus?.();
-    };
-  }, [open, busy, onCancel]);
+  // Focus the confirm button on open, trap Tab inside the dialog, restore focus
+  // on close. Escape is gated on `busy` so it can't cancel mid-action.
+  useFocusTrap(open, dialogRef, () => !busy && onCancel(), { initialFocus: confirmRef });
 
   if (!open) return null;
 
   return (
     <div
+      ref={dialogRef}
       role="alertdialog"
       aria-modal="true"
       aria-labelledby={titleId}
