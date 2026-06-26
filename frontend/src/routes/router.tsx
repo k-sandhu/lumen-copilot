@@ -1,6 +1,7 @@
 import { createBrowserRouter } from 'react-router-dom';
 import { RouteGuard } from '@/features/auth';
 import { featureRoutes } from './discovery';
+import { NotFoundPage } from './NotFoundPage';
 import { AppShell } from './shell';
 
 /**
@@ -20,7 +21,9 @@ import { AppShell } from './shell';
  * The layout route is pathless; its children keep their own absolute paths (`/`,
  * `/search`, `/documents`, `/audit`, `/admin`, and the dev pages `/docs/*`,
  * `/features`). Every one of them renders inside the shell's main; the chat
- * workspace keeps its own multi-pane layout there.
+ * workspace keeps its own multi-pane layout there. A trailing `path: '*'`
+ * catch-all renders the in-shell NotFoundPage so unknown URLs never leave a
+ * blank `<Outlet/>`.
  */
 export const router = createBrowserRouter([
   {
@@ -29,6 +32,9 @@ export const router = createBrowserRouter([
         <AppShell />
       </RouteGuard>
     ),
-    children: featureRoutes.map(({ path, element }) => ({ path, element })),
+    children: [
+      ...featureRoutes.map(({ path, element }) => ({ path, element })),
+      { path: '*', element: <NotFoundPage /> },
+    ],
   },
 ]);
