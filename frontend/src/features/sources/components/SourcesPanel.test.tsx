@@ -126,6 +126,61 @@ describe('SourcesPanel — actions', () => {
     );
   });
 
+  it('surfaces a per-card inline error when a source sync trigger fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input);
+      if (init?.method === 'POST' && url.includes('/sources/s1/sync')) {
+        return Promise.resolve(problem(503, 'Sync failed'));
+      }
+      return Promise.resolve(
+        json(
+          list([
+            makeSource(),
+            makeSource({
+              id: 's2',
+              config: { url: 'https://wiki.acme.com/runbook', mode: 'page' },
+            }),
+          ]),
+        ),
+      );
+    });
+    const user = userEvent.setup();
+    renderWithQuery(<SourcesPanel />);
+
+    const failedCard = await screen.findByRole('article', { name: /handbook\.acme\.com/i });
+    const otherCard = await screen.findByRole('article', { name: /wiki\.acme\.com/i });
+    await user.click(within(failedCard).getByRole('button', { name: /sync now/i }));
+
+    expect(await within(failedCard).findByRole('alert')).toHaveTextContent(/sync failed/i);
+    expect(within(otherCard).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('clears a failed sync error after a successful retry', async () => {
+    let syncAttempts = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input);
+      if (init?.method === 'POST' && url.includes('/sources/s1/sync')) {
+        syncAttempts += 1;
+        return Promise.resolve(
+          syncAttempts === 1
+            ? problem(503, 'Sync failed')
+            : json(makeSource({ status: 'syncing' }), 202),
+        );
+      }
+      return Promise.resolve(json(list([makeSource()])));
+    });
+    const user = userEvent.setup();
+    renderWithQuery(<SourcesPanel />);
+
+    const card = await screen.findByRole('article', { name: /handbook\.acme\.com/i });
+    await user.click(within(card).getByRole('button', { name: /sync now/i }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent(/sync failed/i);
+
+    await user.click(within(card).getByRole('button', { name: /sync now/i }));
+
+    await waitFor(() => expect(within(card).queryByRole('alert')).not.toBeInTheDocument());
+  });
+
   it('removes a source only after confirming (DELETE /sources/{id})', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = String(input);

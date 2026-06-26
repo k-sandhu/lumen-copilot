@@ -35,12 +35,22 @@ export function SourcesPanel() {
   const [pendingRemove, setPendingRemove] = useState<Source | null>(null);
   // Track the id each mutation targets so only that card shows its busy state.
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<{ id: string; error: ApiError } | null>(null);
 
   const items = query.data?.items ?? [];
 
   const handleSync = (source: Source) => {
     setSyncingId(source.id);
-    sync.mutate(source.id, { onSettled: () => setSyncingId(null) });
+    setSyncError(null);
+    sync.mutate(source.id, {
+      onError: (error) =>
+        setSyncError({
+          id: source.id,
+          error: error instanceof ApiError ? error : new ApiError('Sync failed', 0),
+        }),
+      onSuccess: () => setSyncError(null),
+      onSettled: () => setSyncingId(null),
+    });
   };
 
   const confirmRemove = () => {
@@ -75,6 +85,7 @@ export function SourcesPanel() {
             query={query}
             items={items}
             syncingId={syncingId}
+            syncError={syncError}
             removingId={remove.isPending ? (pendingRemove?.id ?? null) : null}
             onAdd={() => setAddOpen(true)}
             onSync={handleSync}
@@ -107,6 +118,7 @@ function Body({
   query,
   items,
   syncingId,
+  syncError,
   removingId,
   onAdd,
   onSync,
@@ -115,6 +127,7 @@ function Body({
   query: SourcesQuery;
   items: Source[];
   syncingId: string | null;
+  syncError: { id: string; error: ApiError } | null;
   removingId: string | null;
   onAdd: () => void;
   onSync: (source: Source) => void;
@@ -138,6 +151,7 @@ function Body({
             <SourceCard
               source={source}
               syncing={syncingId === source.id}
+              syncError={syncError?.id === source.id ? syncError.error : null}
               removing={removingId === source.id}
               onSync={onSync}
               onRemove={onRemove}
