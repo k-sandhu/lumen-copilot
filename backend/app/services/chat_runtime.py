@@ -33,6 +33,7 @@ stream with one terminal envelope and never leak a vendor error.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections.abc import Callable, Sequence
@@ -86,6 +87,11 @@ class _StreamState:
 
     stream_id: str
     seq: int = 0
+    # Set once a terminal (``done``/``error``) has been published, so the
+    # exactly-one-terminal contract holds even when two terminal paths race —
+    # e.g. an error already emitted and then a shutdown ``CancelledError`` tries
+    # to emit its own (issue #156).
+    terminal_sent: bool = False
 
     def next_seq(self) -> int:
         s = self.seq
@@ -196,6 +202,24 @@ class ChatRuntime:
                     collection_ids=collection_ids,
                 )
                 await session.commit()
+        except asyncio.CancelledError:
+            # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
+            # cancels every in-flight producer on SIGTERM, issue #156). In Python
+            # 3.12 ``CancelledError`` is a ``BaseException``, so it bypasses the
+            # ``AppError``/``Exception`` arms below — without this arm the stream
+            # would end after ``start`` with NO terminal, and the Redis replay
+            # buffer would hand a reconnecting client an orphaned stream to wait
+            # on forever. Emit one RETRYABLE terminal (503; the contract has the
+            # client treat ``error`` as retryable) then RE-RAISE so the task still
+            # stops — never swallow cancellation.
+            await self._terminal_error(
+                state,
+                503,
+                "Service Unavailable",
+                "dependency_unavailable",
+                "Server is shutting down.",
+            )
+            raise
         except AppError as exc:
             await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
             return
@@ -206,6 +230,11 @@ class ChatRuntime:
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
             return
 
+        if state.terminal_sent:
+            # A terminal already fired (e.g. cancellation mid-commit raced ahead);
+            # never publish a second terminal — exactly-one-terminal contract.
+            return
+        state.terminal_sent = True
         await self._publish(
             state,
             envelopes.done(
@@ -603,6 +632,12 @@ class ChatRuntime:
     async def _terminal_error(
         self, state: _StreamState, status: int, title: str, code: str, detail: str | None
     ) -> None:
+        if state.terminal_sent:
+            # A terminal already fired for this stream; never publish a second one
+            # (exactly-one-terminal contract). Guards the case where an error and a
+            # shutdown ``CancelledError`` both reach a terminal path (issue #156).
+            return
+        state.terminal_sent = True
         problem: dict[str, object] = {"title": title, "status": status, "code": code}
         if detail:
             problem["detail"] = detail

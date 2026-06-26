@@ -50,7 +50,7 @@ from app.db.repositories import (
 from app.domain.entities import Role
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
-from app.main import create_app, lifespan
+from app.main import _drain_answer_tasks, create_app, lifespan
 from app.realtime.backplane import InMemoryBackplane, StreamOwner
 
 import app.db.models  # noqa: F401  isort: skip
@@ -644,6 +644,77 @@ class _BlockingRuntime:
     async def run(self, **_kwargs: object) -> None:
         self.started.set()
         await asyncio.Event().wait()  # blocks forever unless cancelled
+
+
+class _BlockingGateway:
+    """A gateway whose ``stream_tools`` parks forever until cancelled.
+
+    Drives the REAL :class:`ChatRuntime` into an in-flight state: ``run`` publishes
+    ``start`` and then blocks inside the first completion turn, so a shutdown
+    cancellation lands *after* ``start`` but *before* any terminal — exactly the
+    SIGTERM-mid-answer window the #156 drain creates.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def stream_tools(
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+    ) -> AsyncIterator[StreamEvent]:
+        self.entered.set()
+        await asyncio.Event().wait()  # blocks forever unless cancelled
+        yield StreamEvent(finish_reason="stop")  # pragma: no cover — unreachable
+
+
+async def test_shutdown_cancellation_emits_single_retryable_terminal(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # REGRESSION (#156): the lifespan drain cancels every in-flight answer producer
+    # on SIGTERM. The REAL ChatRuntime.run must convert that asyncio.CancelledError
+    # (a BaseException in 3.12 — it bypasses the AppError/Exception arms) into
+    # exactly ONE terminal `error` envelope before re-raising, or the Redis replay
+    # buffer hands a reconnecting client a start-but-no-terminal stream to wait on
+    # forever. Pre-fix: the replay holds `start` and NO terminal (this asserts ==1).
+    gateway = _BlockingGateway()
+    monkeypatch.setattr(chat_module, "get_llm_gateway", lambda: gateway)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        token = await _login(client, seeded.alice_email)
+        sid = (
+            await client.post("/api/v1/chat/sessions", headers=_auth(token), json={"title": "s"})
+        ).json()["id"]
+        sent = await client.post(
+            f"/api/v1/chat/sessions/{sid}/messages",
+            headers=_auth(token),
+            json={"content": "What is the 2024 standard deduction?"},
+        )
+        assert sent.status_code == 202, sent.text
+        stream_id = sent.json()["stream_id"]
+
+        # The producer is genuinely in-flight: `start` is published and the runtime
+        # is parked inside the first completion turn.
+        await asyncio.wait_for(gateway.entered.wait(), timeout=5)
+        tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+        assert len(tasks) == 1
+        answer_task = next(iter(tasks))
+
+        # Drive the shutdown drain: cancel + await the in-flight producer.
+        await _drain_answer_tasks(app, grace_seconds=5)
+        assert answer_task.cancelled()
+
+    # Drain the backplane replay for this stream: it must end with exactly one
+    # terminal, and that terminal is a RETRYABLE `error` (not a `done`).
+    replay = list(backplane._replay.get(stream_id, ()))
+    assert replay, "producer published nothing"
+    assert replay[0]["type"] == "start"
+    terminals = [e for e in replay if e["type"] in ("done", "error")]
+    assert len(terminals) == 1, f"expected exactly one terminal, got {[e['type'] for e in replay]}"
+    terminal = terminals[0]
+    assert terminal["type"] == "error"
+    problem = terminal["problem"]
+    assert problem["status"] == 503  # retryable; clients treat `error` as retryable
+    assert problem["code"] == "dependency_unavailable"
 
 
 async def test_hung_answer_does_not_block_send_or_shutdown(
