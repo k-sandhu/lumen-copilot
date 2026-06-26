@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterable, Sequence
+from importlib import import_module
 
 import pytest
 import pytest_asyncio
@@ -45,11 +46,12 @@ from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
-from app.tasks.sync_source import sync_source_async
+from app.tasks.sync_source import SyncResult, sync_source_async
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
 _DIM = 8
+sync_source_module = import_module("app.tasks.sync_source")
 
 
 def _settings(**overrides: object) -> Settings:
@@ -157,8 +159,8 @@ def _patch_sync(monkeypatch: pytest.MonkeyPatch, docs: list[FetchedDoc] | Except
     monkeypatch.setattr("app.connectors.web.connector.WebConnector.sync", _fake_sync)
 
 
-async def _run(tenant_id: uuid.UUID, source_id: uuid.UUID) -> None:
-    await sync_source_async(
+async def _run(tenant_id: uuid.UUID, source_id: uuid.UUID) -> SyncResult:
+    return await sync_source_async(
         tenant_id,
         source_id,
         settings=_settings(),
@@ -304,6 +306,123 @@ async def test_fetch_block_marks_source_error(
         assert source.last_error is not None
         assert "fetch failed" in source.last_error
         # No documents were ingested.
+        docs = await DocumentRepository(session, tenant_id).list_for_source(source_id)
+        assert docs == []
+
+
+async def test_sync_all_docs_failing_marks_source_error(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, source_id = await _seed_source()
+    body = "The five boxing wizards jump quickly. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Page One", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Page Two", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+
+    async def _fail_ingest(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("embeddings unavailable")
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _fail_ingest)
+
+    result = await _run(tenant_id, source_id)
+
+    assert result.status is SourceStatus.ERROR
+    assert result.indexed_count == 0
+    assert result.error is not None
+    assert "failed" in result.error
+    assert "ingest" in result.error
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.ERROR
+        assert source.last_error is not None
+        assert "failed" in source.last_error
+        assert "ingest" in source.last_error
+        assert source.indexed_count == 0
+        assert source.last_synced_at is None
+
+        docs = await DocumentRepository(session, tenant_id).list_for_source(source_id)
+        assert docs == []
+
+
+async def test_resync_all_docs_failing_zeroes_stale_indexed_count(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-sync that fails every doc must reset a prior non-zero ``indexed_count``.
+
+    Regression for #157: the failed-sync path first deletes the source's prior
+    documents (Phase 3), then routes to ``_fail``. If ``_fail`` does not write
+    ``indexed_count=0``, ``update_status`` leaves the stale count from the earlier
+    successful sync — leaving the source ``error`` with e.g. ``indexed_count == 2``
+    while its document list is empty. Unlike the never-synced case, this starts
+    from a source that already indexed >0.
+    """
+    tenant_id, source_id = await _seed_source()
+    body = "The five boxing wizards jump quickly. " * 8
+
+    # First sync succeeds → indexed_count > 0.
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Page One", text=body, url="http://93.184.216.34/a"),
+            FetchedDoc(title="Page Two", text=body, url="http://93.184.216.34/b"),
+        ],
+    )
+    await _run(tenant_id, source_id)
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.READY
+        assert source.indexed_count == 2
+
+    # Re-sync: docs are still fetched, but every ingest fails → all-failed guard.
+    async def _fail_ingest(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("embeddings unavailable")
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _fail_ingest)
+
+    result = await _run(tenant_id, source_id)
+
+    assert result.status is SourceStatus.ERROR
+    assert result.indexed_count == 0
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.ERROR
+        # The stale count from the first (successful) sync must be cleared to 0.
+        assert source.indexed_count == 0
+        # And the doc list is empty (the re-sync deleted the prior docs).
+        docs = await DocumentRepository(session, tenant_id).list_for_source(source_id)
+        assert docs == []
+
+
+async def test_sync_empty_fetch_stays_ready(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, source_id = await _seed_source()
+    _patch_sync(monkeypatch, [])
+
+    result = await _run(tenant_id, source_id)
+
+    assert result.status is SourceStatus.READY
+    assert result.indexed_count == 0
+    assert result.error is None
+
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.READY
+        assert source.indexed_count == 0
+        assert source.last_error is None
+        assert source.last_synced_at is not None
+
         docs = await DocumentRepository(session, tenant_id).list_for_source(source_id)
         assert docs == []
 
