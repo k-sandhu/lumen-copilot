@@ -12,6 +12,7 @@ import {
   isValidElement,
   memo,
   useCallback,
+  useDeferredValue,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
@@ -132,33 +133,61 @@ function CodeBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
   );
 }
 
+/**
+ * The remark/rehype/sanitize/highlight render, split out and `memo`ized on the
+ * `source` string so the (expensive) parse only re-runs when the source it is given
+ * changes — not on every parent re-render. The `schema`, plugin order, and sanitize
+ * step are unchanged from before.
+ */
+const MarkdownPipeline = memo(function MarkdownPipeline({
+  source,
+  resolveInternalLink,
+}: {
+  source: string;
+  resolveInternalLink?: (href: string) => string | null;
+}) {
+  return (
+    <Markdown
+      // Order matters: sanitize AFTER gfm/highlight so their output is also cleaned.
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeHighlight, [rehypeSanitize, schema]]}
+      components={{
+        a: ({ children: linkChildren, href }) => {
+          const to = href ? (resolveInternalLink?.(href) ?? null) : null;
+          // Internal doc link → client-side navigation inside the viewer.
+          if (to !== null) return <Link to={to}>{linkChildren}</Link>;
+          // External/unknown links open safely in a new tab; rel guards tab-nabbing.
+          return (
+            <a href={href} target="_blank" rel="noreferrer noopener">
+              {linkChildren}
+            </a>
+          );
+        },
+        // Fenced code blocks (always wrapped in <pre>) get a per-block Copy
+        // button. Inline `code` has no surrounding <pre>, so it is untouched
+        // and renders as today.
+        pre: CodeBlock,
+      }}
+    >
+      {source}
+    </Markdown>
+  );
+});
+
 function MarkdownViewComponent({ children, className, resolveInternalLink }: MarkdownProps) {
+  // #166: while an answer streams, `children` grows by one delta per token and the
+  // full remark/rehype/sanitize/highlight pipeline re-runs each time (O(n^2) over a
+  // long answer). `useDeferredValue` lets React keep the urgent updates (the caret,
+  // surrounding layout) responsive and reuse the previously parsed markdown while it
+  // re-renders the expensive pipeline at a lower priority, coalescing bursts of
+  // deltas instead of blocking on every token. The deferred value always catches up
+  // to the latest source — including the final value once the stream settles, so no
+  // trailing tokens are dropped. `MarkdownPipeline` is memoized on `source`, so the
+  // parse only fires when the (deferred) source actually changes.
+  const source = useDeferredValue(children);
   return (
     <div className={`prose-md ${className ?? ''}`.trim()}>
-      <Markdown
-        // Order matters: sanitize AFTER gfm/highlight so their output is also cleaned.
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight, [rehypeSanitize, schema]]}
-        components={{
-          a: ({ children: linkChildren, href }) => {
-            const to = href ? (resolveInternalLink?.(href) ?? null) : null;
-            // Internal doc link → client-side navigation inside the viewer.
-            if (to !== null) return <Link to={to}>{linkChildren}</Link>;
-            // External/unknown links open safely in a new tab; rel guards tab-nabbing.
-            return (
-              <a href={href} target="_blank" rel="noreferrer noopener">
-                {linkChildren}
-              </a>
-            );
-          },
-          // Fenced code blocks (always wrapped in <pre>) get a per-block Copy
-          // button. Inline `code` has no surrounding <pre>, so it is untouched
-          // and renders as today.
-          pre: CodeBlock,
-        }}
-      >
-        {children}
-      </Markdown>
+      <MarkdownPipeline source={source} resolveInternalLink={resolveInternalLink} />
     </div>
   );
 }

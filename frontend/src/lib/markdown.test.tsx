@@ -60,3 +60,40 @@ describe('MarkdownView code blocks', () => {
     expect(await navigator.clipboard.readText()).toContain('print("hi")');
   });
 });
+
+// #166 — streaming reparse coalescing. During a chat stream `children` grows by
+// one delta per token; the markdown parse must not block on every token, while the
+// FINAL value still always renders once the stream settles (no dropped tail). The
+// source string is deferred (useDeferredValue) so React can reuse the previously
+// parsed markdown and re-run the expensive pipeline at a lower priority.
+describe('MarkdownView streaming reparse coalescing (#166)', () => {
+  it('renders the first value', () => {
+    renderMd('hello world');
+    expect(screen.getByText('hello world')).toBeInTheDocument();
+  });
+
+  it('renders the final accumulated value after a burst of streamed deltas (no dropped tail)', () => {
+    // Simulate a stream: the accumulated source grows token by token. The final
+    // committed value must render — the deferred source always catches up to the
+    // latest `children`, including the terminal value when the stream settles.
+    const { rerender } = render(<MarkdownView>{'Revenue '}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    rerender(<MarkdownView>{'Revenue was '}</MarkdownView>);
+    rerender(<MarkdownView>{'Revenue was up '}</MarkdownView>);
+    rerender(<MarkdownView>{'Revenue was up 12%.'}</MarkdownView>);
+
+    expect(screen.getByText('Revenue was up 12%.')).toBeInTheDocument();
+  });
+
+  it('still renders sanitized rich markdown (table) after streaming updates', () => {
+    const { rerender } = render(<MarkdownView>{'partial'}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    rerender(<MarkdownView>{'| a | b |\n| - | - |\n| 1 | 2 |'}</MarkdownView>);
+    // The GFM table renders through the pipeline (proves the deferred source still
+    // flows through remark-gfm + sanitize, not a stale/plain copy).
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '1' })).toBeInTheDocument();
+  });
+});
