@@ -40,9 +40,10 @@ Feature (`features/chat`):
   state (text, citations, tool activity, terminal). Dedupes by `seq`. Unit-tested
   in isolation including terminal `error` and synthetic disconnect.
 - `model/useChatStream.ts` — subscribes to one stream via the WS client and the
-  reducer; an unexpected disconnect (socket closes with no terminal) becomes a
-  terminal error with retry. Cancellable. The client factory is injectable for
-  tests.
+  reducer; an unexpected disconnect or first-token/idle watchdog expiry becomes
+  a terminal error with retry. Clean terminal envelopes close the socket so
+  completed streams do not reconnect. Cancellable. The client factory and
+  watchdog deadline are injectable for tests.
 - `model/queries.ts` — TanStack Query hooks: sessions, messages, models, and the
   new/rename/delete/send mutations. Server data is **never** mirrored into Zustand.
 - `model/chatStore.ts` — Zustand UI-only state: active session, in-flight stream
