@@ -42,6 +42,9 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 401) return 'Your session expired. Sign in again to search.';
     if (error.status === 403) return 'You don’t have permission to run this search.';
+    if (error.status === 503 && error.problem?.code === 'llm_unconfigured') {
+      return 'Search is temporarily unavailable — the answer service isn’t configured yet. Try again shortly.';
+    }
     if (error.status === 422) return 'That query couldn’t be understood. Try rephrasing it.';
     return error.displayMessage || 'Search failed. Please try again.';
   }
