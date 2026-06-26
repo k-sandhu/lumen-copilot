@@ -22,7 +22,7 @@
  * 404 (INV-1/INV-2), never 403; the client surfaces the typed Problem body so
  * the UI can branch on shape, not status text.
  */
-import { request, ApiError } from './client';
+import { request, ApiError, withRefreshRetry } from './client';
 import { API_BASE_URL } from './env';
 import { getAccessToken } from './token';
 import type {
@@ -77,7 +77,10 @@ function problemFromText(text: string): Problem | undefined {
 // --- Collections ----------------------------------------------------------
 
 /** List the caller's collections (one cursor page). */
-export function listCollections(page: PageQuery = {}, signal?: AbortSignal): Promise<CollectionList> {
+export function listCollections(
+  page: PageQuery = {},
+  signal?: AbortSignal,
+): Promise<CollectionList> {
   return request<CollectionList>(`/collections${buildQuery({ ...page })}`, { signal });
 }
 
@@ -99,7 +102,10 @@ export function deleteCollection(id: string): Promise<void> {
 // --- Documents (read / delete) --------------------------------------------
 
 /** List documents, optionally filtered by collection / status / filename. */
-export function listDocuments(query: DocumentListQuery = {}, signal?: AbortSignal): Promise<DocumentList> {
+export function listDocuments(
+  query: DocumentListQuery = {},
+  signal?: AbortSignal,
+): Promise<DocumentList> {
   const qs = buildQuery({
     collection_id: query.collection_id,
     status: query.status,
@@ -216,43 +222,49 @@ export function uploadDocument({
  */
 export async function resolveDocumentContentUrl(id: string, signal?: AbortSignal): Promise<string> {
   const url = joinApi(`/documents/${id}/content`);
-  const token = getAccessToken();
-  const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
-  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return withRefreshRetry(async () => {
+    const token = getAccessToken();
+    const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
+    if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      redirect: 'manual',
-      headers,
-      signal,
-    });
-  } catch (cause) {
-    throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
-  }
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        redirect: 'manual',
+        headers,
+        signal,
+      });
+    } catch (cause) {
+      throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
+    }
 
-  // `redirect: 'manual'` surfaces a redirect as an opaqueredirect response
-  // (status 0, type 'opaqueredirect') OR, in non-browser/test fetches, as a real
-  // 3xx with a readable Location. Handle both.
-  if (response.status === 302 || response.status === 301 || response.status === 307) {
-    const location = response.headers.get('Location');
-    if (location) return location;
-  }
+    // `redirect: 'manual'` surfaces a redirect as an opaqueredirect response
+    // (status 0, type 'opaqueredirect') OR, in non-browser/test fetches, as a real
+    // 3xx with a readable Location. Handle both.
+    if (response.status === 302 || response.status === 301 || response.status === 307) {
+      const location = response.headers.get('Location');
+      if (location) return location;
+    }
 
-  if (response.status >= 200 && response.status < 400) {
-    // Bytes are streamed same-origin; the endpoint URL is itself the viewer src.
-    return url;
-  }
+    if (response.status >= 200 && response.status < 400) {
+      // Bytes are streamed same-origin; the endpoint URL is itself the viewer src.
+      return url;
+    }
 
-  let problem: Problem | undefined;
-  try {
-    problem = problemFrom(await response.json());
-  } catch {
-    /* non-JSON body */
-  }
-  throw new ApiError(`Content request for ${id} failed with ${response.status}`, response.status, problem);
+    let problem: Problem | undefined;
+    try {
+      problem = problemFrom(await response.json());
+    } catch {
+      /* non-JSON body */
+    }
+    throw new ApiError(
+      `Content request for ${id} failed with ${response.status}`,
+      response.status,
+      problem,
+    );
+  });
 }
 
 // --- Document content (chat citation viewer, #50) --------------------------
@@ -288,41 +300,43 @@ export async function fetchDocumentContent(
   signal?: AbortSignal,
 ): Promise<DocumentContent> {
   const url = joinApi(`/documents/${documentId}/content`);
-  const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
-  const token = getAccessToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return withRefreshRetry(async () => {
+    const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
+    const token = getAccessToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  let response: Response;
-  try {
-    // credentials:'include' lets the refresh cookie ride along, but the actual
-    // authorization is the bearer header above; redirect:'follow' transparently
-    // chases the contract's optional 302 → presigned URL.
-    response = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      redirect: 'follow',
-      headers,
-      signal,
-    });
-  } catch (cause) {
-    throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
-  }
-
-  if (!response.ok) {
-    let problem: Problem | undefined;
+    let response: Response;
     try {
-      problem = problemFrom(await response.json());
-    } catch {
-      /* non-JSON body */
+      // credentials:'include' lets the refresh cookie ride along, but the actual
+      // authorization is the bearer header above; redirect:'follow' transparently
+      // chases the contract's optional 302 → presigned URL.
+      response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        redirect: 'follow',
+        headers,
+        signal,
+      });
+    } catch (cause) {
+      throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
     }
-    throw new ApiError(
-      `Content request for ${documentId} failed with ${response.status}`,
-      response.status,
-      problem,
-    );
-  }
 
-  const blob = await response.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+    if (!response.ok) {
+      let problem: Problem | undefined;
+      try {
+        problem = problemFrom(await response.json());
+      } catch {
+        /* non-JSON body */
+      }
+      throw new ApiError(
+        `Content request for ${documentId} failed with ${response.status}`,
+        response.status,
+        problem,
+      );
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+  });
 }
