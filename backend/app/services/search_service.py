@@ -17,19 +17,21 @@ permission-trimmed passages into the contract's ``SearchResponse`` shape:
 **Permissioned by default (INV-1/INV-2).** The service never issues an
 unfiltered query. Every result comes from ``RetrievalService.search`` keyed off
 the resolved :class:`~app.auth.principal.Principal`, whose allow-set is *same
-tenant* + *owned by the caller* (MVP, spec 0004 §2.2). A cross-tenant or
-other-owner passage is never retrieved, so it can never appear in ``results`` —
-the negative tests assert exactly this.
+tenant* + (*owned by the caller* **or** *explicitly granted to them* — directly
+or via a cascading collection grant, spec 0004 §2.2). A cross-tenant passage, or
+one the caller neither owns nor was granted, is never retrieved, so it can never
+appear in ``results`` — the negative tests assert exactly this, and the
+grant-positive test asserts a granted document's passages *do* appear.
 
 **Hidden count (MVP).** Because the permission filter is *structural* — there is
 no path that returns an unfiltered candidate set to diff against (ADR-0004, the
 whole point of the single chokepoint) — the service cannot count passages it was
 never allowed to see without violating the invariant. So ``hidden_count`` is
-``0`` in the MVP allow-set (own documents only, spec 0004 §2.2): every otherwise-
-matching passage is either fully visible or in another user's/tenant's space and
-never retrieved. The field is wired through end-to-end so the grant-aware
-allow-set (``revisit-at-implementation``), which *will* surface "N hidden by your
-permissions", populates it without any caller change.
+``0``: every otherwise-matching passage is either fully visible (owned or
+granted) or outside the allow-set (another tenant, or neither owned nor granted)
+and never retrieved. The field is wired through end-to-end so a future surface
+that *can* say "N hidden by your permissions" populates it without any caller
+change.
 
 **Audit (mission filter #4 / INV-6).** Every search emits exactly one
 ``retrieval.query`` event through the one :class:`~app.services.audit.AuditSink`
@@ -362,8 +364,17 @@ class SearchService:
         ids, text, offsets, score) but not the owner or freshness; those come from
         the tenant-scoped :class:`DocumentRepository` (the only SQL), looked up
         per distinct source document. A document that cannot be re-read (deleted
-        between retrieval and enrichment) is dropped rather than surfaced with a
-        guessed owner — defense in depth on INV-2.
+        between retrieval and enrichment, or in another tenant) is dropped rather
+        than surfaced with a guessed owner.
+
+        Every passage here already cleared the ``retrieval/`` chokepoint, whose
+        INV-2 predicate admits a document owned by the caller **or** explicitly
+        granted to them (directly or via a cascading collection grant —
+        ``_document_permitted``, spec 0004 §2.2). So enrichment must **not**
+        re-narrow to strict ownership: a grant-visible (non-owned) document's
+        passages are legitimately retrieved and must be projected too (matching
+        what ``/search/suggest`` already surfaces). The only re-check kept here is
+        the repository's tenant scope (INV-1); INV-2 stays the chokepoint's job.
         """
         pattern = _term_pattern(query)
         results: list[SearchResultData] = []
@@ -374,13 +385,14 @@ class SearchService:
             meta = doc_cache.get(passage.document_id)
             if passage.document_id not in doc_cache:
                 document = await self._documents.get(passage.document_id)
-                # The repository is tenant-scoped (INV-1); ownership is re-asserted
-                # against the principal so a document outside the caller's allow-set
-                # never contributes (it cannot reach here, but fail closed anyway).
+                # The repository is tenant-scoped (INV-1), so a cross-tenant or
+                # missing document yields no metadata and is dropped. Ownership is
+                # NOT re-asserted: the chokepoint already permitted this passage by
+                # ownership OR grant, and re-narrowing to ownership would wrongly
+                # drop a grant-visible document (the INV-2 authority is the
+                # chokepoint, not this enrichment step).
                 meta = (
-                    (document.owner_id, document.updated_at)
-                    if document is not None and document.owner_id == self._principal.user_id
-                    else None
+                    (document.owner_id, document.updated_at) if document is not None else None
                 )
                 doc_cache[passage.document_id] = meta
             if meta is None:
