@@ -20,8 +20,40 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.auth.principal import Principal
+from app.domain.entities import Artifact, ArtifactProducedBy
 from app.domain.tools import RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
+from app.services.artifacts_service import ArtifactLinks
+
+
+@runtime_checkable
+class ArtifactWriter(Protocol):
+    """The narrow artifact-write seam a T1 file-writing tool persists through (#220).
+
+    A tool never constructs a storage client (issue #220) — it writes through the
+    #208 ``ArtifactsService``, which is already scoped to the caller's tenant +
+    owner at construction (``tenant_id``/``owner_id`` come from the principal,
+    never request input). This Protocol exposes only ``create_artifact`` so a
+    write tool cannot reach the read/list/delete surface; the real
+    :class:`~app.services.artifacts_service.ArtifactsService` satisfies it
+    structurally, and a test fake need only implement this one method.
+
+    Validation (allowlist / size cap) and the ``artifact.created`` audit both live
+    inside the service (CC-B), so tenant isolation and INV-6 are preserved by
+    delegation — the tool only supplies the bytes + metadata.
+    """
+
+    async def create_artifact(
+        self,
+        *,
+        data: bytes,
+        filename: str,
+        content_type: str,
+        produced_by: ArtifactProducedBy,
+        links: ArtifactLinks | None = None,
+    ) -> Artifact:
+        """Validate, store, and register a produced artifact; return its row."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +66,22 @@ class ToolContext:
     permission-filtered ``retrieval`` service and the request-scoped knobs
     (``collection_ids``/``default_k``). New tool families extend this additively
     (e.g. a future ``http`` client) without widening any existing tool's reach.
+
+    ``artifacts`` is the optional #208 write seam a T1 file-writing tool persists
+    through (``None`` for a read-only run that offers no write tool — the handler
+    then reports a typed ``ok=False`` rather than crashing). ``simulate_writes``
+    is the read-only test-mode flag (F-AB-5): when set, a write tool builds and
+    validates the bytes but does **not** persist — the artifact-producing action is
+    simulated, so the read-only harness never mutates state.
     """
 
     principal: Principal
     retrieval: RetrievalService
     collection_ids: list[UUID] | None = None
     default_k: int = 6
+    artifacts: ArtifactWriter | None = None
+    session_id: UUID | None = None
+    simulate_writes: bool = False
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and
@@ -145,6 +187,7 @@ class DenyAllApprovalGate:
 __all__ = [
     "ApprovalGate",
     "ApprovalRequest",
+    "ArtifactWriter",
     "DenyAllApprovalGate",
     "ToolContext",
     "ToolDefinition",
