@@ -53,11 +53,14 @@ This spec is the source of truth for `AGENTS.md` §9's negative-test set. It **c
 | Tier | Meaning | Examples | Gate |
 |---|---|---|---|
 | **T0** | Read-only | retrieve, answer, summarize, draft-in-chat | none — **the entire MVP is T0** |
-| **T1** | Reversible internal write | create collection, upload/delete *own* document, rename | authorized owner; audited; no extra approval |
+| **T1** | Reversible internal write | create collection, upload/delete *own* document, rename, **write/delete an own artifact** ([#208]) | authorized owner; audited; no extra approval |
 | **T2** | Consequential / external write | write-back to a source, send, external share | **explicit human approval** in-session + stated risk tier — **out of MVP** (E5/CC-7) |
 | **T3** | Destructive / irreversible external | bulk delete, change source permissions | approval **+** confirmation — out of MVP |
 
 - **Invariant:** no T2/T3 action executes without a recorded approval. The MVP asserts the *negative*: there is **no code path** that performs a T2+ action, and any attempt is rejected.
+- **Artifact store ([#208], CC-12).** Files an agent/run *produces* (distinct from user-uploaded `documents`) persist through the tenant/owner-scoped `artifacts` table + the `storage/` adapter (`artifacts/` key prefix, allowlist/size cap, `artifacts.*` audit actions, RLS backstop like every scoped table §2.1). Writing an artifact is a **T1** action — owner-gated, audited, no extra approval; a cross-tenant/non-owned artifact is **404** (INV-1/INV-2). The file-writing *tool* and code-sandbox *capture* that call this seam, and the artifact *panel UI*, are follow-ups. *(Owner-**or-grant** visibility is the modelled end-state; the `grants` table's `resource_type` CHECK admits only `collection`/`document` today, so widening artifact visibility to explicit grants is a deliberate `revisit-at-implementation` follow-up — the service's single visibility chokepoint is where it lands.)*
+
+[#208]: https://github.com/k-sandhu/lumen-copilot/issues/208
 
 ## 3. Invariants → negative-test categories
 

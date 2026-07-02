@@ -28,7 +28,9 @@ import pytest
 from app.core.config import Settings
 from app.core.errors import ForbiddenError, NotFoundError, ValidationError
 from app.storage.keys import (
+    assert_artifact_key_owned_by,
     assert_key_owned_by,
+    build_artifact_key,
     build_key,
     safe_filename,
     sha256_hex,
@@ -95,6 +97,56 @@ def test_assert_key_owned_by_refuses_prefix_confusion() -> None:
     # "tenant-a" must not match a sibling whose name merely starts the same.
     with pytest.raises(ForbiddenError):
         assert_key_owned_by("tenant-ab/abc/f.txt", "tenant-a")
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests — artifact keys (issue #208, AC-5). The tenant segment sits
+# after the ``artifacts/`` namespace prefix; the seam must key off that.
+# ---------------------------------------------------------------------------
+
+
+def test_build_artifact_key_is_namespaced_tenant_prefixed_and_content_addressed() -> None:
+    data = b"agent output"
+    key = build_artifact_key("tenant-a", data, "chart.png")
+    assert key == f"artifacts/tenant-a/{sha256_hex(data)}/chart.png"
+    # Distinct namespace from an upload of the same bytes/name.
+    assert key != build_key("tenant-a", data, "chart.png")
+
+
+def test_build_artifact_key_rejects_unsafe_tenant_id() -> None:
+    for bad in ["../other", "a/b", "", ".", "/abs"]:
+        with pytest.raises(ValidationError):
+            build_artifact_key(bad, b"x", "f.csv")
+
+
+def test_build_artifact_key_sanitizes_filename() -> None:
+    key = build_artifact_key("t", b"x", "../../etc/passwd")
+    assert key.endswith("/passwd")
+    assert ".." not in key
+
+
+def test_assert_artifact_key_owned_by_allows_same_prefix() -> None:
+    # No raise => owned (the tenant segment is the second path component).
+    assert_artifact_key_owned_by("artifacts/tenant-a/abc/f.csv", "tenant-a")
+
+
+def test_assert_artifact_key_owned_by_refuses_cross_tenant() -> None:
+    # AC-5 (negative): a forged artifact key under another tenant is refused.
+    with pytest.raises(ForbiddenError):
+        assert_artifact_key_owned_by("artifacts/tenant-b/abc/secret.csv", "tenant-a")
+
+
+def test_assert_artifact_key_owned_by_refuses_missing_namespace() -> None:
+    # An upload-style key (no ``artifacts/`` prefix) can never pass as an artifact —
+    # the two namespaces are not interchangeable.
+    with pytest.raises(ForbiddenError):
+        assert_artifact_key_owned_by("tenant-a/abc/f.csv", "tenant-a")
+
+
+def test_assert_artifact_key_owned_by_refuses_prefix_confusion() -> None:
+    # "tenant-a" must not match a sibling whose name merely starts the same.
+    with pytest.raises(ForbiddenError):
+        assert_artifact_key_owned_by("artifacts/tenant-ab/abc/f.csv", "tenant-a")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +224,10 @@ def _unit_settings() -> Settings:
         UPLOAD_ALLOWED_CONTENT_TYPES="text/plain,application/pdf",
         MAX_UPLOAD_BYTES=100,
         S3_PRESIGN_TTL_SECONDS=120,
+        # Artifact allowlist/cap (issue #208) — broader types + its own cap so the
+        # adapter's artifact methods validate against the right config.
+        ARTIFACT_ALLOWED_CONTENT_TYPES="text/csv,application/json,image/png",
+        MAX_ARTIFACT_BYTES=200,
     )  # type: ignore[call-arg]
 
 
@@ -342,6 +398,103 @@ async def test_presign_get_returns_url_for_owning_tenant(store: ObjectStore) -> 
 
     url = await store.presign_get("tenant-a", key)
     assert url == "https://minio/presigned-get"
+    call = client.generate_presigned_url.await_args
+    assert call.args[0] == "get_object"
+    assert call.kwargs["ExpiresIn"] == 120
+
+
+# ---------------------------------------------------------------------------
+# Adapter unit tests — artifact methods (issue #208), mocked S3 client.
+# ---------------------------------------------------------------------------
+
+
+async def test_put_artifact_validates_then_stores_under_namespace(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.put_object = AsyncMock()
+    _install_mock_client(store, client)
+
+    data = b'{"rows": 3}'
+    result = await store.put_artifact("tenant-a", data, "application/json", "out.json")
+
+    assert isinstance(result, StoredObject)
+    assert result.key == f"artifacts/tenant-a/{sha256_hex(data)}/out.json"
+    assert result.sha256 == sha256_hex(data)
+    client.put_object.assert_awaited_once()
+    assert client.put_object.await_args.kwargs["Key"] == result.key
+
+
+async def test_put_artifact_rejects_disallowed_type_before_io(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.put_object = AsyncMock()
+    _install_mock_client(store, client)
+
+    # application/pdf is an *upload* type but NOT an artifact type — must be refused.
+    with pytest.raises(ValidationError):
+        await store.put_artifact("tenant-a", b"x", "application/pdf", "a.pdf")
+    client.put_object.assert_not_awaited()
+
+
+async def test_put_artifact_rejects_over_artifact_cap_before_io(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.put_object = AsyncMock()
+    _install_mock_client(store, client)
+
+    # 201 bytes exceeds MAX_ARTIFACT_BYTES=200 (distinct from the upload cap).
+    with pytest.raises(ValidationError):
+        await store.put_artifact("tenant-a", b"x" * 201, "text/csv", "big.csv")
+    client.put_object.assert_not_awaited()
+
+
+async def test_get_artifact_round_trips_for_owning_tenant(store: ObjectStore) -> None:
+    data = b"col1,col2\n1,2\n"
+    key = build_artifact_key("tenant-a", data, "data.csv")
+    client = MagicMock()
+    client.get_object = AsyncMock(return_value={"Body": _streaming_body(data)})
+    _install_mock_client(store, client)
+
+    assert await store.get_artifact("tenant-a", key) == data
+    client.get_object.assert_awaited_once_with(Bucket="unit-bucket", Key=key)
+
+
+async def test_get_artifact_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.get_object = AsyncMock()
+    _install_mock_client(store, client)
+
+    # AC-5: a forged artifact key under tenant-b is refused for tenant-a, before I/O.
+    with pytest.raises(ForbiddenError):
+        await store.get_artifact("tenant-a", "artifacts/tenant-b/abc/secret.csv")
+    client.get_object.assert_not_awaited()
+
+
+async def test_delete_artifact_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.delete_object = AsyncMock()
+    _install_mock_client(store, client)
+
+    with pytest.raises(ForbiddenError):
+        await store.delete_artifact("tenant-a", "artifacts/tenant-b/abc/secret.csv")
+    client.delete_object.assert_not_awaited()
+
+
+async def test_presign_get_artifact_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.generate_presigned_url = AsyncMock()
+    _install_mock_client(store, client)
+
+    with pytest.raises(ForbiddenError):
+        await store.presign_get_artifact("tenant-a", "artifacts/tenant-b/abc/secret.csv")
+    client.generate_presigned_url.assert_not_awaited()
+
+
+async def test_presign_get_artifact_returns_url_for_owning_tenant(store: ObjectStore) -> None:
+    key = build_artifact_key("tenant-a", b"x", "f.csv")
+    client = MagicMock()
+    client.generate_presigned_url = AsyncMock(return_value="https://minio/presigned-artifact")
+    _install_mock_client(store, client)
+
+    url = await store.presign_get_artifact("tenant-a", key)
+    assert url == "https://minio/presigned-artifact"
     call = client.generate_presigned_url.await_args
     assert call.args[0] == "get_object"
     assert call.kwargs["ExpiresIn"] == 120
