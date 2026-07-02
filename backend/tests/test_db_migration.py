@@ -63,6 +63,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "saved_searches",
     "recent_searches",
     "tool_invocations",
+    "artifacts",
 }
 
 
@@ -87,7 +88,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0013_tool_invocations"]
+    assert list(script.get_heads()) == ["0014_artifacts"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -124,6 +125,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     tools = script.get_revision("0013_tool_invocations")
     assert tools is not None
     assert tools.down_revision == "0012_tenant_max_tool_turns"
+    art = script.get_revision("0014_artifacts")
+    assert art is not None
+    assert art.down_revision == "0013_tool_invocations"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -446,6 +450,58 @@ def test_offline_tool_invocations_migration_round_trips(
     assert "drop index ix_tool_invocations_tenant_session" in down
     assert "drop table tool_invocations" in down
 
+
+
+def test_offline_artifacts_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0014 creates the tenant/owner-scoped ``artifacts`` table + RLS; down() reverses (#208).
+
+    AC (CC-12, spec 0004 §2.1/§2.2): the upgrade renders the ``artifacts`` table
+    with its ``produced_by`` + storage-key/sha256 columns, the nullable link ids
+    (only ``session_id`` an FK), the size + ``produced_by`` CHECKs, the tenant/owner
+    + session + retention indexes, and the same fail-closed RLS policy the 0007
+    backstop uses (``artifacts`` is tenant-scoped, INV-1). The downgrade drops the
+    policy, disables RLS, drops the indexes, and drops the table. Offline DDL render
+    (Postgres dialect) — structural reversibility without a DB (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0013_tool_invocations:0014_artifacts", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped artifacts table + its FKs.
+    assert "create table artifacts" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK
+    assert "references chat_sessions" in up  # the only real link FK (session_id)
+    assert "produced_by" in up
+    assert "storage_key" in up
+    assert "sha256" in up
+    assert "retention_expires_at" in up
+    # The domain-pinning CHECKs.
+    assert "ck_artifacts_produced_by" in up
+    assert "ck_artifacts_size_nonneg" in up
+    # The list + retention indexes.
+    assert "create index ix_artifacts_tenant_owner on artifacts (tenant_id, owner_id)" in up
+    assert "create index ix_artifacts_session_id on artifacts (session_id)" in up
+    # The retention sweep index is partial on Postgres (keep-forever rows excluded).
+    assert "create index ix_artifacts_retention on artifacts (retention_expires_at)" in up
+    assert "where retention_expires_at is not null" in up
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table artifacts enable row level security" in up
+    assert "alter table artifacts force row level security" in up
+    assert "create policy rls_artifacts on artifacts" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0014_artifacts:0013_tool_invocations", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_artifacts on artifacts" in down
+    assert "alter table artifacts disable row level security" in down
+    assert "drop index ix_artifacts_retention" in down
+    assert "drop index ix_artifacts_session_id" in down
+    assert "drop index ix_artifacts_tenant_owner" in down
+    assert "drop table artifacts" in down
 
 def test_audit_index_names_match_model_and_migration() -> None:
     """The migration's index names are exactly those declared on the ORM model.

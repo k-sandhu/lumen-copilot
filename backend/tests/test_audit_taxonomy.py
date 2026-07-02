@@ -57,6 +57,11 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # /admin write, a reversible T1 action audited like every consequential
         # action (mission filter #4 "auditable").
         "tenant.settings_updated",
+        # Agent/run-produced artifacts (issue #208, CC-12) — additive; every
+        # create/download/delete of a produced file is audited (a T1 action).
+        "artifact.created",
+        "artifact.downloaded",
+        "artifact.deleted",
         # Governed tool platform (CC-7 / issue #207) — additive; every tool
         # invocation emits both the intent and the outcome (INV-6).
         "tool.invoked",
