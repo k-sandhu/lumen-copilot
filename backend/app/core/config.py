@@ -199,6 +199,20 @@ class Settings(BaseSettings):
     # contract-valid (the 200 and 302 responses are both defined).
     document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
 
+    # --- OpenSearch — the single retrieval store (ADR-0010) ---
+    # BM25 lexical + kNN vectors in one engine behind ``app/search/``. Inside
+    # compose the URL is the service name (``.env``); the default targets the
+    # compose-mapped HOST port so dev/tests outside the containers reach the same
+    # engine. An unreachable engine fails retrieval CLOSED (503), never an
+    # unfiltered fallback.
+    opensearch_url: str = Field(default="http://localhost:47186", alias="OPENSEARCH_URL")
+    opensearch_index: str = Field(default="lumen-chunks", alias="OPENSEARCH_INDEX")
+    opensearch_timeout_seconds: float = Field(default=10.0, alias="OPENSEARCH_TIMEOUT_SECONDS")
+    # Basic-auth credentials for secured deployments; blank (the local default,
+    # security plugin disabled) sends no Authorization header.
+    opensearch_username: str = Field(default="", alias="OPENSEARCH_USERNAME")
+    opensearch_password: str = Field(default="", alias="OPENSEARCH_PASSWORD")
+
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     llm_model: str = Field(default="openrouter/openai/gpt-4o-mini", alias="LLM_MODEL")
