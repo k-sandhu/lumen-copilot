@@ -996,6 +996,200 @@ paths:
         "204": { description: Cleared. }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  # --- MCP servers (ADR-0012; epic #199 / issue #224) ------------------------
+  /mcp-servers:
+    get:
+      operationId: listMcpServers
+      summary: The caller's registered MCP servers.
+      description: >
+        Lists the MCP (Model Context Protocol) servers the caller has
+        registered, tenant- and owner-scoped (ADR-0012 §5, spec 0004
+        INV-1/INV-2): a caller only ever sees their own servers within their
+        tenant. Each item carries the `transport`, `endpoint_url`, `enabled`
+        toggle, health `status`, `last_health_at`, `discovered_tool_count`, and a
+        masked `secret_hint` — **never** the stored credential value (ADR-0012 §5,
+        CC-C #209).
+      tags: [mcp-servers]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of registered MCP servers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpServerList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: registerMcpServer
+      summary: Register a remote MCP server.
+      description: >
+        Registers a remote MCP server (ADR-0012 §1/§5). `transport` is
+        constrained to the remote transports `streamable_http` (primary) or `sse`
+        (compat) — **stdio/local-process is rejected** as unsupported (ADR-0012
+        §1). `endpoint_url` MUST be `https` and passes the mandatory SSRF check on
+        register (and again on every connect): reject loopback, private/RFC-1918,
+        IPv6 ULA, link-local, CGNAT, and cloud-metadata ranges, on every redirect
+        hop (ADR-0012 §4, reusing the ADR-0009 chokepoint). A malformed body, an
+        unsupported/`stdio` transport, or an invalid / non-https / SSRF-blocked
+        `endpoint_url` is rejected with **422** (INV-8) — `code` distinguishes the
+        cases (e.g. `endpoint_blocked` for an SSRF rejection,
+        `unsupported_transport` for stdio). The optional `auth` credential is
+        **write-only**: it is stored envelope-encrypted via CC-C (#209) as an
+        `auth_ref` and is **never** returned by any endpoint — the response
+        carries only a masked `secret_hint`. The created server is returned with
+        `status: pending`; run `POST /mcp-servers/{serverId}/test` to probe health
+        and discover tools. A write at read-before-write tier T1 (owner-gated;
+        spec 0004 §2.5) — registration emits an audit event (INV-6).
+      tags: [mcp-servers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/McpServerCreate" }
+      responses:
+        "201":
+          description: Registered (status pending; secret stored write-only via CC-C).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpServer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: >
+            Malformed body, an unsupported / `stdio` transport, or an invalid /
+            non-https / SSRF-blocked `endpoint_url` (INV-8, ADR-0012 §1/§4). `code`
+            distinguishes the cases (e.g. `unsupported_transport`,
+            `endpoint_blocked`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /mcp-servers/{serverId}:
+    parameters:
+      - { $ref: "#/components/parameters/McpServerId" }
+    get:
+      operationId: getMcpServer
+      summary: Get one registered MCP server.
+      description: >
+        Returns one MCP server, owner-gated: a non-owner or cross-tenant id is
+        **404** (existence non-disclosure within the tenant, INV-1/INV-2). The
+        response never includes the stored credential — only a masked `secret_hint`
+        (ADR-0012 §5).
+      tags: [mcp-servers]
+      responses:
+        "200":
+          description: The MCP server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpServer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateMcpServer
+      summary: Update a registered MCP server (rename, toggle, rotate credential).
+      description: >
+        Updates a registered MCP server (ADR-0012 §5). Change the display `name`,
+        the `enabled` toggle, the `endpoint_url` (re-validated + SSRF-checked, same
+        rules as register), or rotate the `auth` credential (write-only, replaces
+        the CC-C `auth_ref`; send `null` to clear it). The credential value is
+        never returned — the response carries only the updated masked `secret_hint`.
+        Owner-gated: a non-owner or cross-tenant id is **404** (INV-1/INV-2); a
+        malformed body or invalid / non-https / SSRF-blocked `endpoint_url` is
+        **422** (INV-8). Emits an audit event (INV-6).
+      tags: [mcp-servers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/McpServerUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpServer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: >
+            Malformed body, an unsupported / `stdio` transport, or an invalid /
+            non-https / SSRF-blocked `endpoint_url` (INV-8, ADR-0012 §1/§4).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      operationId: deleteMcpServer
+      summary: Remove a registered MCP server.
+      description: >
+        Deletes the MCP server, its stored credential (`auth_ref` in the CC-C
+        vault), and its discovered-tool snapshot; the server's tools are removed
+        from the registry so assistants can no longer invoke them (ADR-0012 §5/§6).
+        Owner-gated: a non-owner or cross-tenant id is **404** (INV-1/INV-2). Emits
+        an audit event (INV-6).
+      tags: [mcp-servers]
+      responses:
+        "204": { description: Deleted (server + its stored credential + discovered tools). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mcp-servers/{serverId}/test:
+    parameters:
+      - { $ref: "#/components/parameters/McpServerId" }
+    post:
+      operationId: testMcpServer
+      summary: Probe an MCP server's health and re-discover its tools.
+      description: >
+        Runs a bounded liveness/handshake probe through the SSRF-guarded egress
+        path and re-discovers the server's advertised tools (ADR-0012 §2 `health` +
+        `list_tools`, §4 egress). On success the server's `status` becomes `ready`,
+        `last_health_at` is stamped, and the discovered-tool snapshot
+        (`discovered_tool_count`) is refreshed; a failed handshake / down / slow
+        server marks `status: error` and returns the updated server with a safe
+        `last_error` — a probe never throws (ADR-0012 §7 failure isolation). The
+        credential is fetched in-process from CC-C at connect time and never
+        returned. Owner-gated: a non-owner or cross-tenant id is **404**
+        (INV-1/INV-2). Emits an audit event (INV-6).
+      tags: [mcp-servers]
+      responses:
+        "200":
+          description: >
+            Probe completed; the updated server is returned. Both a healthy
+            (`status: ready`) and an unreachable/erroring (`status: error`) result
+            return 200 — the outcome is in `status` / `last_error`, not the HTTP
+            code (ADR-0012 §7).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpServer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /mcp-servers/{serverId}/tools:
+    parameters:
+      - { $ref: "#/components/parameters/McpServerId" }
+    get:
+      operationId: listMcpServerTools
+      summary: The tools discovered from an MCP server.
+      description: >
+        Lists the tools discovered from this server on the last successful probe
+        (ADR-0012 §6). Each tool carries its **namespaced** registry name
+        (`mcp:<server_slug>:<tool>`), description, advertised argument JSON schema,
+        and inferred `risk_tier` — default **T2** (approval-gated) unless the server
+        annotated it read-only/non-destructive, which maps to **T0** (ADR-0012 §6,
+        spec 0004 §2.5). Owner-gated: a non-owner or cross-tenant id is **404**
+        (INV-1/INV-2).
+      tags: [mcp-servers]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of discovered tools (from the last probe).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpToolList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -1032,6 +1226,11 @@ components:
       schema: { type: string, format: uuid }
     SavedSearchId:
       name: savedSearchId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    McpServerId:
+      name: serverId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1765,6 +1964,203 @@ components:
           format: uri
           description: The public URL to ingest (http/https only).
 
+    # --- MCP servers (ADR-0012) ---------------------------------------------
+    McpTransport:
+      type: string
+      description: >
+        The remote MCP transport (ADR-0012 §1). Only remote transports ship in
+        v1; `stdio`/local-process is deferred behind the code-execution sandbox
+        (ADR-0013) and is rejected at registration.
+      enum: [streamable_http, sse]
+
+    McpServerStatus:
+      type: string
+      description: >
+        Health state from the last probe (ADR-0012 §5). `pending` before the
+        first successful probe, `ready` after a healthy handshake, `error` when
+        the last probe failed.
+      enum: [pending, ready, error]
+
+    McpRiskTier:
+      type: string
+      description: >
+        Inferred governance tier for a discovered tool (ADR-0012 §6, spec 0004
+        §2.5). Default **T2** (approval-gated) unless the server annotates the tool
+        read-only/non-destructive, which maps to **T0**. Trust is earned, never
+        assumed — unannotated ⇒ T2.
+      enum: [T0, T1, T2, T3]
+
+    McpServer:
+      type: object
+      additionalProperties: false
+      description: >
+        One registered MCP server, tenant- and owner-scoped (ADR-0012 §5, spec
+        0004 INV-1/INV-2). The response **never** includes the stored credential
+        value — only a masked `secret_hint` (CC-C #209, AC-3). The `auth_ref`
+        itself is a server-internal detail and is not exposed.
+      required: [id, name, transport, endpoint_url, enabled, status, discovered_tool_count, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        transport: { $ref: "#/components/schemas/McpTransport" }
+        endpoint_url:
+          type: string
+          format: uri
+          description: The remote MCP endpoint (https only; SSRF-checked on register and every connect).
+        enabled:
+          type: boolean
+          description: Owner toggle — when false the server's tools are not offered to assistants.
+        status: { $ref: "#/components/schemas/McpServerStatus" }
+        last_health_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last successful health probe finished (null before the first successful probe).
+        last_error:
+          type: [string, "null"]
+          description: Safe failure reason when status is error (never contains the credential; ADR-0012 §7).
+        discovered_tool_count:
+          type: integer
+          minimum: 0
+          description: Number of tools discovered on the last successful probe (0 until first discovery).
+        secret_hint:
+          type: [string, "null"]
+          description: >
+            A **masked** hint at the stored credential (e.g. `"••••abcd"`), or null
+            when no auth credential is stored. This is the ONLY credential-derived
+            value ever returned — the actual secret is write-only, envelope-encrypted
+            in the CC-C vault, and never serialized through any API (ADR-0012 §5,
+            CC-C #209 AC-3).
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    McpServerList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/McpServer" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    McpServerCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Register a remote MCP server (ADR-0012 §5). `transport` is constrained to
+        the remote values (`stdio` rejected as 422 `unsupported_transport`);
+        `endpoint_url` must be https and pass the SSRF check (else 422). The
+        optional `auth` credential is **write-only** — stored envelope-encrypted via
+        CC-C (#209) and never returned; the response carries only a masked
+        `secret_hint`.
+      required: [name, transport, endpoint_url]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        transport: { $ref: "#/components/schemas/McpTransport" }
+        endpoint_url:
+          type: string
+          format: uri
+          description: The remote MCP endpoint (https only; SSRF-checked on register).
+        auth:
+          $ref: "#/components/schemas/McpServerAuth"
+
+    McpServerUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        Update a registered MCP server (ADR-0012 §5). Any subset of fields; at
+        least one. Rotating `auth` replaces the stored CC-C credential (write-only,
+        never returned); send `auth: null` to clear it. Changing `endpoint_url`
+        re-runs the https + SSRF validation (else 422).
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        transport: { $ref: "#/components/schemas/McpTransport" }
+        endpoint_url:
+          type: string
+          format: uri
+          description: The remote MCP endpoint (https only; re-validated + SSRF-checked).
+        enabled: { type: boolean, description: Owner toggle. }
+        auth:
+          oneOf:
+            - $ref: "#/components/schemas/McpServerAuth"
+            - type: "null"
+          description: Rotate the write-only credential, or null to clear it.
+
+    McpServerAuth:
+      type: object
+      additionalProperties: false
+      writeOnly: true
+      description: >
+        Write-only auth material for the MCP endpoint (ADR-0012 §5). Sent on
+        register/update, envelope-encrypted into the CC-C vault (#209) as an
+        `auth_ref`, and **never** returned by any endpoint. A `bearer` token or a
+        custom `header` are supported; exactly one form per registration.
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [bearer, header]
+          description: >
+            `bearer` — the value is an Authorization bearer token; `header` — the
+            value is set as the named `header_name`.
+        value:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: The secret value (write-only — never echoed back).
+        header_name:
+          type: string
+          description: The header name to attach the value to (required when type is `header`).
+
+    McpTool:
+      type: object
+      additionalProperties: false
+      description: >
+        One tool discovered from an MCP server (ADR-0012 §6). Injected into the
+        CC-A registry (#207) under its namespaced name so it flows through the same
+        allow-list / approval / audit path as native tools.
+      required: [name, risk_tier, input_schema]
+      properties:
+        name:
+          type: string
+          description: >
+            The namespaced registry name `mcp:<server_slug>:<tool>` (ADR-0012 §6) —
+            stable per server, collision-free across servers and native tools.
+        raw_name:
+          type: string
+          description: The tool's original (un-namespaced) name as advertised by the server.
+        description:
+          type: [string, "null"]
+          description: The server-advertised tool description (may be null).
+        input_schema:
+          type: object
+          description: >
+            The tool's advertised argument JSON Schema. Model-supplied args are
+            validated against this before invoke (ADR-0012 §6, INV-8); an opaque
+            pass-through of the server's schema.
+        risk_tier: { $ref: "#/components/schemas/McpRiskTier" }
+        read_only:
+          type: boolean
+          description: >
+            True when the server annotated the tool read-only/non-destructive
+            (mapping it to T0); false/absent ⇒ defaulted to T2 (ADR-0012 §6).
+
+    McpToolList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/McpTool" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
     # Single problem model for ALL errors (RFC-9457 application/problem+json).
     # Every endpoint's error responses reference this; both tiers depend on it.
     Problem:
@@ -2029,3 +2425,7 @@ tags:
       chat tool-turn budget — the one admin write, audited; issue #148).
   - name: sources
     description: Connected sources — the connector grid (add / sync / remove a Web URL source).
+  - name: mcp-servers
+    description: >-
+      Registered MCP (Model Context Protocol) servers — register / manage remote
+      tool-providing endpoints, probe health + discover tools (ADR-0012).
