@@ -207,7 +207,10 @@ class Settings(BaseSettings):
     # unfiltered fallback.
     opensearch_url: str = Field(default="http://localhost:47186", alias="OPENSEARCH_URL")
     opensearch_index: str = Field(default="lumen-chunks", alias="OPENSEARCH_INDEX")
-    opensearch_timeout_seconds: float = Field(default=10.0, alias="OPENSEARCH_TIMEOUT_SECONDS")
+    # 30s default (#258): bulk writes carry ~20KB-per-chunk embedding payloads
+    # and kNN graph insertion is not instant; 10s proved too tight for real
+    # batches on a laptop-sized single node. Queries stay far below this.
+    opensearch_timeout_seconds: float = Field(default=30.0, alias="OPENSEARCH_TIMEOUT_SECONDS")
     # Basic-auth credentials for secured deployments; blank (the local default,
     # security plugin disabled) sends no Authorization header.
     opensearch_username: str = Field(default="", alias="OPENSEARCH_USERNAME")

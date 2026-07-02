@@ -49,6 +49,11 @@ log = get_logger(__name__)
 # Bulk NDJSON content type (the _bulk endpoint rejects application/json).
 _NDJSON = "application/x-ndjson"
 
+# Chunks per _bulk request (#258). Bounds the request body no matter how large a
+# document is — 1024-dim vectors make each chunk ~20KB of NDJSON, so an
+# unbatched 40+-chunk document blew past the request timeout deterministically.
+_BULK_BATCH_SIZE = 32
+
 
 @dataclass(frozen=True, slots=True)
 class IndexedChunk:
@@ -334,7 +339,19 @@ class OpenSearchStore:
         refresh cadence alone. A partial bulk failure fails the call (the
         ingestion task retries as a unit; the index must never silently hold a
         subset).
+
+        The write is issued in bounded sub-batches of ``_BULK_BATCH_SIZE``
+        chunks (#258): each chunk carries a ~20KB embedding, so one request per
+        *document* grows unboundedly with document size and a chunk-heavy
+        document deterministically outlives the request timeout. Batches run
+        sequentially in order; the first failing batch fails the whole call
+        (the caller's retry re-runs the idempotent sync, converging).
         """
+        for start in range(0, len(chunks), _BULK_BATCH_SIZE):
+            await self._bulk_batch(chunks[start : start + _BULK_BATCH_SIZE], refresh=refresh)
+
+    async def _bulk_batch(self, chunks: Sequence[IndexedChunk], *, refresh: bool) -> None:
+        """Issue one bounded ``_bulk`` request for ``chunks`` (fail closed)."""
         if not chunks:
             return
         lines: list[str] = []
