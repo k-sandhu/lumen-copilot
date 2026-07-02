@@ -1367,6 +1367,40 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+
+  # --- merged: /code-runs/{codeRunId} ---
+  /code-runs/{codeRunId}:
+    parameters:
+      - { $ref: "#/components/parameters/CodeRunId" }
+    get:
+      operationId: getCodeRun
+      summary: Inspect a code run (status, code, output, timing, artifacts).
+      description: >
+        Read-only inspection of one sandbox code run (ADR-0013 §4, E15-7 / E6-5).
+        Runs are **agent-mediated**: the `run_python` tool (CC-A #207, highest risk
+        tier, admin-gated #231) enqueues them off the request path (ADR-0013 §1/§4)
+        — there is deliberately **no** public "execute arbitrary code" endpoint here.
+        This surface exists so the inspector UI (#232) and debuggable-runs (E6-5) can
+        show what the agent ran and what it produced: the exact `code` executed, its
+        `status`, captured `stdout`/`stderr` (output-size-capped, §2/G7), `exit_code`,
+        `duration_ms`, `resource_usage`, and the ids of any artifacts the run emitted
+        (`artifact_ids`, collected via CC-B #208).
+
+
+        Tenant- and owner-scoped (spec 0004 INV-1/INV-2): a run id in another tenant —
+        or one the caller does not own — returns **404** (existence non-disclosure),
+        never 403. A malformed (non-uuid) id is **422**.
+      tags: [code-runs]
+      responses:
+        "200":
+          description: The code run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeRun" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
 components:
   parameters:
     Cursor:
@@ -1414,6 +1448,12 @@ components:
 
     AssistantId:
       name: assistantId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    CodeRunId:
+      name: codeRunId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -2766,6 +2806,106 @@ components:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
 
+    # --- merged schemas: CodeRunStatus, ResourceUsage, CodeRun ---
+    CodeRunStatus:
+      type: string
+      description: >
+        Lifecycle of a sandbox code run (ADR-0013 §4 `code_runs.status`). `queued`
+        = enqueued, not yet started; `running` = executing in the ephemeral
+        container; `succeeded` = finished with exit code 0; `failed` = finished with
+        a non-zero exit code; `timeout` = wall-clock-killed (G6); `killed` =
+        OOM-killed / pids-capped (G6); `denied` = refused before execution (e.g.
+        code execution disabled for the tenant, or a policy/quota block — §6).
+      enum: [queued, running, succeeded, failed, timeout, killed, denied]
+
+    ResourceUsage:
+      type: object
+      additionalProperties: false
+      description: >
+        Measured resource consumption for a finished run (ADR-0013 §4
+        `code_runs.resource_usage`). Fields are best-effort — omitted when the
+        runtime did not report them; absent entirely while the run is queued/running.
+      properties:
+        peak_memory_bytes:
+          type: [integer, "null"]
+          minimum: 0
+          description: Peak resident memory the run reached, in bytes.
+        cpu_time_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: Total CPU time consumed, in milliseconds.
+        max_pids:
+          type: [integer, "null"]
+          minimum: 0
+          description: Peak number of processes/threads the run spawned.
+        output_bytes:
+          type: [integer, "null"]
+          minimum: 0
+          description: Total captured stdout+stderr size in bytes (subject to the output-size cap, G7).
+
+    CodeRun:
+      type: object
+      additionalProperties: false
+      description: >
+        One agent-authored sandbox code run, for inspection/history (ADR-0013 §4,
+        E15-7 / E6-5). Tenant- and owner-scoped (spec 0004 INV-1/INV-2). Runs are
+        created by the `run_python` agent tool off the request path — never by a
+        public execute endpoint. `stdout`/`stderr` are output-size-capped (G7);
+        `exit_code`, `duration_ms`, `resource_usage`, and `artifact_ids` populate as
+        the run finishes (null/empty while queued or running).
+      required:
+        [id, status, code, stdout, stderr, artifact_ids, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/CodeRunStatus" }
+        code:
+          type: string
+          description: The exact Python source that was executed (inspectable, E15-7 / E6-5).
+        stdout:
+          type: string
+          description: Captured standard output (output-size-capped; may be truncated, G7).
+        stderr:
+          type: string
+          description: Captured standard error (output-size-capped; may be truncated, G7).
+        exit_code:
+          type: [integer, "null"]
+          description: >
+            Process exit code once the run finishes; null while queued/running or
+            when the run was killed/denied before producing one.
+        duration_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: Wall-clock execution time in milliseconds; null until the run finishes.
+        resource_usage:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceUsage" }
+            - { type: "null" }
+          description: Measured resource consumption; null until the run finishes.
+        artifact_ids:
+          type: array
+          description: >
+            Ids of artifacts the run emitted (files collected from the output dir and
+            persisted via CC-B #208, tenant-scoped). Empty until (and unless) the run
+            produces output files.
+          items: { type: string, format: uuid }
+        image_digest:
+          type: [string, "null"]
+          description: >
+            The pinned base-image digest actually used (reproducibility, E3-7);
+            null until the run starts.
+        trace_id:
+          type: [string, "null"]
+          description: Links the run to the parent agent trace (E15-7); null when unlinked.
+        created_at: { type: string, format: date-time }
+        started_at:
+          type: [string, "null"]
+          format: date-time
+          description: When execution began; null while still queued.
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the run reached a terminal status; null until then.
+
   responses:
     Problem:
       description: Error (problem+json).
@@ -2850,3 +2990,7 @@ tags:
   - name: assistants
     description: "Saved, governed chat configurations (ADR-0011) \u2014 create/edit drafts, publish\
   \ immutable versions, list versions, and roll back."
+  - name: code-runs
+    description: "Inspect agent-authored sandbox code runs (ADR-0013) \u2014 status, code, output,\
+  \ timing, resource usage, and emitted artifacts. Read-only; runs are created by\
+  \ the `run_python` agent tool, not a public execute endpoint."
