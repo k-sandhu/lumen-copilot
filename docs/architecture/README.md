@@ -23,5 +23,6 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0012](0012-mcp-integration.md) | MCP server integration — transport, module boundary (`backend/app/mcp/`), egress | Accepted |
 | [0013](0013-code-execution-sandbox.md) | Code-execution sandbox for agent-authored Python (container-per-run via a `sandbox-runner` service) | Accepted |
 | [0014](0014-web-search-provider.md) | Web-search provider & egress (`web_search` agent tool — self-hosted SearXNG) | Accepted |
+| [0015](0015-scheduling-and-headless-runs.md) | Scheduling & headless agent runs (celery-redbeat + a persisting run sink) | Accepted |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.
