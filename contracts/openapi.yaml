@@ -1401,6 +1401,272 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+
+  # --- merged: /schedules, /schedules/{scheduleId}, /schedules/{scheduleId}/pause, /schedules/{scheduleId}/resume, /schedules/{scheduleId}/run-now, /runs, /runs/{runId} ---
+  /schedules:
+    get:
+      operationId: listSchedules
+      summary: The caller's schedules (owner-scoped).
+      description: >
+        Lists the caller's saved recurring runs, tenant- and owner-scoped
+        (ADR-0015 §8, spec 0004 INV-1/INV-2): a caller only ever sees their own
+        schedules within their tenant. Each item carries its `cadence`, `timezone`,
+        `enabled` flag, and the last-fire summary (`next_run_at`, `last_run_at`,
+        `last_status`) for the list view.
+      tags: [schedules]
+      parameters:
+        - name: assistant_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Filter to schedules that run one assistant.
+        - name: enabled
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: Filter to enabled (true) or paused (false) schedules.
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of the caller's schedules (newest first).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    post:
+      operationId: createSchedule
+      summary: Create a schedule (a recurring assistant run).
+      description: >
+        Creates a recurring run of a saved assistant (ADR-0015 §8): pick the
+        assistant, a `cadence` (a cron expression OR a structured cadence), an IANA
+        `timezone` that drives the DST-correct `next_run_at`, the assistant's
+        `input_params`, a `delivery` policy, and an `overlap_policy`. Owner-gated
+        **T1** write (reversible internal write, spec 0004 §2.5); audited. A
+        malformed cron expression or an unknown IANA timezone is rejected with
+        **422** (INV-8); `code` distinguishes the cases (e.g. `invalid_cron`,
+        `invalid_timezone`). The created schedule is returned `enabled` with its
+        computed `next_run_at`.
+      tags: [schedules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleCreate" }
+      responses:
+        "201":
+          description: Created; the RedBeat entry is derived and next_run_at computed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: >
+            Malformed body, an unknown assistant, or an invalid cron expression /
+            IANA timezone (INV-8). `code` distinguishes the cases (e.g.
+            `invalid_cron`, `invalid_timezone`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /schedules/{scheduleId}:
+    parameters:
+      - { $ref: "#/components/parameters/ScheduleId" }
+    get:
+      operationId: getSchedule
+      summary: Get one schedule.
+      description: >
+        Owner-scoped: a schedule owned by another user or in another tenant is
+        **404** (existence non-disclosure, INV-1/INV-2).
+      tags: [schedules]
+      responses:
+        "200":
+          description: The schedule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateSchedule
+      summary: Edit a schedule (cadence, timezone, inputs, delivery, overlap).
+      description: >
+        Updates a schedule; the RedBeat entry is re-derived from the new cadence /
+        timezone (ADR-0015 §1). Owner-gated — a non-owner or cross-tenant schedule
+        is **404** (INV-1/INV-2). A malformed cron expression or unknown IANA
+        timezone is **422** (INV-8, `code` = `invalid_cron` / `invalid_timezone`).
+        Audited.
+      tags: [schedules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: >
+            Malformed body, or an invalid cron expression / IANA timezone (INV-8).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      operationId: deleteSchedule
+      summary: Delete a schedule (cascades its runs per retention).
+      description: >
+        Removes the schedule and its derived RedBeat entry; its runs cascade per
+        retention (ADR-0015 §8). Owner-gated — a non-owner or cross-tenant schedule
+        is **404** (INV-1/INV-2). Audited.
+      tags: [schedules]
+      responses:
+        "204": { description: Deleted (schedule + its runs). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /schedules/{scheduleId}/pause:
+    parameters:
+      - { $ref: "#/components/parameters/ScheduleId" }
+    post:
+      operationId: pauseSchedule
+      summary: Pause a schedule (set enabled=false).
+      description: >
+        Sets `enabled=false` and removes the derived RedBeat entry so the schedule
+        stops firing (ADR-0015 §6). Idempotent — pausing an already-paused schedule
+        returns it unchanged (200). Owner-gated — a non-owner or cross-tenant
+        schedule is **404** (INV-1/INV-2). Audited.
+      tags: [schedules]
+      responses:
+        "200":
+          description: Paused (enabled=false); next_run_at is null.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /schedules/{scheduleId}/resume:
+    parameters:
+      - { $ref: "#/components/parameters/ScheduleId" }
+    post:
+      operationId: resumeSchedule
+      summary: Resume a schedule (set enabled=true).
+      description: >
+        Sets `enabled=true` and re-derives the RedBeat entry so the schedule fires
+        again; `next_run_at` is recomputed tz/DST-correct (ADR-0015 §6).
+        Idempotent — resuming an already-enabled schedule returns it unchanged
+        (200). Owner-gated — a non-owner or cross-tenant schedule is **404**
+        (INV-1/INV-2). Audited.
+      tags: [schedules]
+      responses:
+        "200":
+          description: Resumed (enabled=true); next_run_at recomputed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /schedules/{scheduleId}/run-now:
+    parameters:
+      - { $ref: "#/components/parameters/ScheduleId" }
+    post:
+      operationId: runScheduleNow
+      summary: Enqueue an out-of-band manual run immediately.
+      description: >
+        Enqueues a `manual` run of the schedule's assistant right now, out of band
+        from the cadence (ADR-0015 §6). The run is created `queued` and executed by
+        the `lumen.run_assistant` Celery task off the request path; the response
+        returns the new run's `run_id` (202 — accepted). Owner-gated — a non-owner
+        or cross-tenant schedule is **404** (INV-1/INV-2). Running a schedule whose
+        assistant/version is unavailable, or an illegal state, is a **409**
+        (INV-8). Audited (`run.started`).
+      tags: [schedules]
+      responses:
+        "202":
+          description: Accepted; a manual run was enqueued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunEnqueued" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /runs:
+    get:
+      operationId: listRuns
+      summary: The run inbox — list runs (newest first).
+      description: >
+        Lists the caller's runs, tenant- and owner-scoped (ADR-0015 §8, spec 0004
+        INV-1/INV-2), newest first. Filter by `assistant_id`, `schedule_id`, or
+        `status`. Each item carries `status`, `trigger`, `started_at`/`finished_at`,
+        and the `summary` digest line for the inbox — the transcript, tool calls and
+        citations live on the detail (`GET /runs/{runId}`).
+      tags: [runs]
+      parameters:
+        - name: assistant_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Filter to runs of one assistant.
+        - name: schedule_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Filter to runs from one schedule (omit for both scheduled + manual).
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/RunStatus" }
+          description: Filter to one run status.
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of runs (newest first).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /runs/{runId}:
+    parameters:
+      - { $ref: "#/components/parameters/RunId" }
+    get:
+      operationId: getRun
+      summary: Run detail — status, inputs, transcript, citations, outputs, error.
+      description: >
+        The full run record (ADR-0015 §8): `status`, resolved `inputs`, the ordered
+        persisted transcript (`steps` — the durable analogue of the WS envelope
+        stream, with tool calls and deltas), the grounded `citations`, the run's
+        `outputs`, the typed `error` / escalation reason (never a raw vendor
+        string), and the inbox `summary`. Owner-scoped — a run owned by another user
+        or in another tenant is **404** (existence non-disclosure, INV-1/INV-2).
+
+
+        **Live attach:** to watch an in-progress run, connect the existing chat
+        WebSocket with this run's `id` as the `streamId`; the consumer relays the
+        run's envelopes (drains the transcript-backed replay, then goes live),
+        reusing the `start` → (`delta` | `event` | `citation`) → `done`/`error`
+        sequence unchanged (ADR-0015 §3) — no new envelope shape.
+      tags: [runs]
+      responses:
+        "200":
+          description: The run detail.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -1454,6 +1720,17 @@ components:
 
     CodeRunId:
       name: codeRunId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    ScheduleId:
+      name: scheduleId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RunId:
+      name: runId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -2906,6 +3183,341 @@ components:
           format: date-time
           description: When the run reached a terminal status; null until then.
 
+    # --- merged schemas: CadenceUnit, StructuredCadence, Cadence, ScheduleDelivery, OverlapPolicy, RunStatus, RunTrigger, Schedule, ScheduleCreate, ScheduleUpdate, ScheduleList, RunEnqueued, RunError, RunStepKind, RunStep, Run, RunList ---
+    CadenceUnit:
+      type: string
+      description: The recurrence period for a structured cadence (ADR-0015 §2).
+      enum: [hour, day, week, month]
+
+    StructuredCadence:
+      type: object
+      additionalProperties: false
+      description: >
+        A structured recurrence — the human-friendly alternative to a raw cron
+        expression (ADR-0015 §2 `cadence` jsonb). e.g.
+        `{ every: day, at: "08:00" }` = every day at 08:00 local (in the schedule's
+        `timezone`). `day_of_week` (0=Sunday..6=Saturday) applies when `every` is
+        `week`; `day_of_month` (1..31) applies when `every` is `month`.
+      required: [every, at]
+      properties:
+        every: { $ref: "#/components/schemas/CadenceUnit" }
+        at:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: Local time-of-day HH:MM (24h) in the schedule's timezone.
+        day_of_week:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 6
+          description: 0=Sunday..6=Saturday; used when `every` is `week`.
+        day_of_month:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 31
+          description: 1..31; used when `every` is `month`.
+
+    Cadence:
+      description: >
+        A schedule's recurrence — exactly one form (ADR-0015 §2): either a raw
+        `cron` expression OR a `StructuredCadence`. The server normalizes both to
+        one stored form and computes `next_run_at` tz/DST-correct from the
+        schedule's `timezone`. A malformed cron is a **422** `invalid_cron`.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [cron]
+          properties:
+            cron:
+              type: string
+              minLength: 1
+              description: A standard 5-field cron expression (e.g. "0 8 * * 1").
+        - type: object
+          additionalProperties: false
+          required: [structured]
+          properties:
+            structured: { $ref: "#/components/schemas/StructuredCadence" }
+
+    ScheduleDelivery:
+      type: object
+      additionalProperties: false
+      description: >
+        Where a completed run's result lands (ADR-0015 §6). v1 is in-app only —
+        the run inbox and an optional digest; external channels (email/Slack) are
+        deferred (T2-ish, spec 0004 §2.5).
+      properties:
+        inbox:
+          type: boolean
+          default: true
+          description: Land the completed run in the owner's in-app run inbox.
+        digest:
+          type: [string, "null"]
+          enum: [none, daily, weekly, null]
+          description: Roll recent runs into a periodic in-app digest, or null/none for no digest.
+
+    OverlapPolicy:
+      type: string
+      description: >
+        What happens when a schedule fires while its previous run is still active
+        (ADR-0015 §5). `skip` (default) records a skipped fire; `queue` enqueues
+        behind the active run; `allow` runs concurrently.
+      enum: [skip, queue, allow]
+
+    RunStatus:
+      type: string
+      description: >
+        The run state machine (ADR-0015 §2). Terminal states are `succeeded`,
+        `failed`, and `escalated` (a first-class terminal, distinct from failed —
+        the run needs a human, ADR-0015 §6). An illegal transition is a **409**
+        (INV-8).
+      enum: [queued, running, succeeded, failed, escalated]
+
+    RunTrigger:
+      type: string
+      description: Why the run fired (ADR-0015 §2). `schedule` = a cadence fire; `manual` = run-now.
+      enum: [schedule, manual]
+
+    Schedule:
+      type: object
+      additionalProperties: false
+      description: >
+        A user-defined recurring run of a saved assistant, tenant- and owner-scoped
+        (ADR-0015 §2/§8, spec 0004 INV-1/INV-2). The `owner_id` is the run's
+        principal — a fired run retrieves only what the owner could retrieve
+        interactively (INV-2).
+      required:
+        [id, assistant_id, owner_id, cadence, timezone, delivery, overlap_policy, enabled, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        assistant_id:
+          type: string
+          format: uuid
+          description: The saved assistant this schedule runs.
+        owner_id:
+          type: string
+          format: uuid
+          description: The schedule's owner — the run's principal (INV-2).
+        cadence: { $ref: "#/components/schemas/Cadence" }
+        timezone:
+          type: string
+          description: IANA timezone name (e.g. America/New_York); drives DST-correct next_run_at.
+        input_params:
+          type: object
+          additionalProperties: true
+          description: The assistant's inputs applied to each fire (the prompt-template values).
+        delivery: { $ref: "#/components/schemas/ScheduleDelivery" }
+        overlap_policy: { $ref: "#/components/schemas/OverlapPolicy" }
+        enabled:
+          type: boolean
+          description: True = firing; false = paused (the derived RedBeat entry is removed).
+        next_run_at:
+          type: [string, "null"]
+          format: date-time
+          description: The upcoming fire (computed tz/DST-correct); null when paused.
+        last_run_at:
+          type: [string, "null"]
+          format: date-time
+          description: When this schedule last fired, or null before the first fire.
+        last_status:
+          oneOf:
+            - { $ref: "#/components/schemas/RunStatus" }
+            - { type: "null" }
+          description: The status of the last fire, or null before the first fire.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ScheduleCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Create a schedule (ADR-0015 §8). An invalid cron or unknown IANA timezone
+        is rejected **422** (`invalid_cron` / `invalid_timezone`, INV-8); an unknown
+        assistant is **404** (INV-1/INV-2).
+      required: [assistant_id, cadence, timezone]
+      properties:
+        assistant_id: { type: string, format: uuid }
+        cadence: { $ref: "#/components/schemas/Cadence" }
+        timezone:
+          type: string
+          minLength: 1
+          description: IANA timezone name (e.g. America/New_York). An unknown name is 422.
+        input_params:
+          type: object
+          additionalProperties: true
+          description: The assistant's inputs for each fire.
+        delivery: { $ref: "#/components/schemas/ScheduleDelivery" }
+        overlap_policy:
+          allOf: [{ $ref: "#/components/schemas/OverlapPolicy" }]
+          description: Overlap handling; omitted defaults to skip.
+        enabled:
+          type: boolean
+          default: true
+          description: Create paused by setting false; omitted defaults to true.
+
+    ScheduleUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        Edit a schedule (ADR-0015 §8). Any invalid cron / IANA timezone is 422.
+      properties:
+        cadence: { $ref: "#/components/schemas/Cadence" }
+        timezone: { type: string, minLength: 1 }
+        input_params:
+          type: object
+          additionalProperties: true
+        delivery: { $ref: "#/components/schemas/ScheduleDelivery" }
+        overlap_policy: { $ref: "#/components/schemas/OverlapPolicy" }
+        enabled: { type: boolean }
+
+    ScheduleList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Schedule" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    RunEnqueued:
+      type: object
+      additionalProperties: false
+      description: The id of a run just enqueued by run-now (ADR-0015 §8), created queued.
+      required: [run_id]
+      properties:
+        run_id:
+          type: string
+          format: uuid
+          description: The new run's id — also its WS streamId for live attach (ADR-0015 §3).
+
+    RunError:
+      type: object
+      additionalProperties: false
+      description: >
+        A typed run failure / escalation reason (ADR-0015 §2 `error` jsonb) — never
+        a raw vendor string (the runtime's opaque-error rule). Present on `failed`
+        and `escalated` runs.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable reason (e.g. model_unavailable, ambiguous, tool_failed).
+        message:
+          type: string
+          description: Human-readable explanation for the owner's inbox.
+
+    RunStepKind:
+      type: string
+      description: >
+        A transcript step kind (ADR-0015 §2 `run_steps.kind`) — the durable
+        analogue of the WS envelope type set: `delta` (incremental output),
+        `tool_call` / `tool_result` (a tool turn), `citation` (a grounded passage),
+        `error` (a failure step).
+      enum: [delta, tool_call, tool_result, citation, error]
+
+    RunStep:
+      type: object
+      additionalProperties: false
+      description: >
+        One ordered step of a run's persisted transcript (ADR-0015 §2 `run_steps`),
+        the durable equivalent of a WS envelope. `seq` is monotonic per run — the
+        same ordering guarantee as the WS `seq`. `payload` carries the envelope
+        `data` (tool args/results, delta text, or citation fields), typed per
+        `kind`.
+      required: [seq, kind, created_at]
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: Monotonic per-run sequence — the transcript ordering (matches the WS seq).
+        kind: { $ref: "#/components/schemas/RunStepKind" }
+        payload:
+          type: object
+          additionalProperties: true
+          description: The step data (the envelope `data`), typed per `kind`.
+        created_at: { type: string, format: date-time }
+
+    Run:
+      type: object
+      additionalProperties: false
+      description: >
+        One execution of an assistant — scheduled or manual (ADR-0015 §2/§8),
+        tenant- and owner-scoped (spec 0004 INV-1/INV-2). The full detail carries
+        the ordered transcript (`steps`), the grounded `citations` (drawn only from
+        permitted, retrieved passages — INV-3), the `outputs`, and the typed
+        `error` on a failed/escalated run. `id` doubles as the WS `streamId` for
+        live attach (ADR-0015 §3).
+      required: [id, assistant_id, trigger, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The run id — also its WS streamId for live attach (ADR-0015 §3).
+        schedule_id:
+          type: [string, "null"]
+          format: uuid
+          description: The schedule that fired this run, or null for a manual/run-now run.
+        assistant_id: { type: string, format: uuid }
+        assistant_version_id:
+          type: [string, "null"]
+          format: uuid
+          description: The pinned assistant version executed — a run is reproducible after edits.
+        trigger: { $ref: "#/components/schemas/RunTrigger" }
+        status: { $ref: "#/components/schemas/RunStatus" }
+        inputs:
+          type: object
+          additionalProperties: true
+          description: The resolved input_params snapshotted for this fire.
+        summary:
+          type: [string, "null"]
+          description: Short digest line for the inbox (ADR-0015 §6).
+        message_id:
+          type: [string, "null"]
+          format: uuid
+          description: The assistant message the transcript produced (reuses the chat message/citation tables).
+        steps:
+          type: array
+          description: The ordered persisted transcript (empty on the list view; present on detail).
+          items: { $ref: "#/components/schemas/RunStep" }
+        citations:
+          type: array
+          description: >
+            The grounded citations of the run's answer — only permitted, retrieved
+            passages (spec 0004 INV-3). Reuses the chat citation shape.
+          items: { $ref: "#/components/schemas/Citation" }
+        outputs:
+          type: object
+          additionalProperties: true
+          description: The run's structured outputs, when the assistant produces them.
+        error:
+          oneOf:
+            - { $ref: "#/components/schemas/RunError" }
+            - { type: "null" }
+          description: The typed failure / escalation reason on a failed or escalated run; else null.
+        started_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the run started executing, or null while queued.
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the run reached a terminal status, or null while not terminal.
+        created_at: { type: string, format: date-time }
+
+    RunList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Run" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
   responses:
     Problem:
       description: Error (problem+json).
@@ -2994,3 +3606,9 @@ tags:
     description: "Inspect agent-authored sandbox code runs (ADR-0013) \u2014 status, code, output,\
   \ timing, resource usage, and emitted artifacts. Read-only; runs are created by\
   \ the `run_python` agent tool, not a public execute endpoint."
+  - name: schedules
+    description: "The caller's recurring assistant runs \u2014 create / edit / delete a schedule and\
+  \ pause / resume / run-now (ADR-0015 \xA78)."
+  - name: runs
+    description: "The run inbox \u2014 list runs and read a run's detail (status, transcript, tool\
+  \ calls, citations, outputs, error). Live attach reuses the chat WS envelopes."
