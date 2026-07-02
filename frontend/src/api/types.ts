@@ -232,6 +232,14 @@ export interface ChatSessionList {
 
 /** POST /chat/sessions body. */
 export interface ChatSessionCreate {
+  /**
+   * Optional (additive; ADR-0011 §5). Start the session from an assistant: the
+   * server resolves it, pins its current published version, and injects its
+   * instructions / tool-allowlist / knowledge-scope into the chat runtime.
+   * Omitted ⇒ an ad-hoc session. A cross-tenant / non-owned / non-granted id →
+   * 404; a non-published or disabled assistant → 422.
+   */
+  assistant_id?: string;
   title?: string;
   /** A model id from GET /models; omitted = server default. */
   model?: string;
@@ -553,6 +561,147 @@ export interface SourceCreate {
   type: SourceType;
   /** The public URL to ingest (http/https only). */
   url: string;
+}
+
+// --- Assistants (contracts/openapi.yaml §assistants, ADR-0011 / #210) ---
+
+/**
+ * How much an assistant may act on its own (ADR-0011 §3). Capped by the risk
+ * tier of its allowed tools; at MVP the product is T0/T1 only.
+ */
+export type AutonomyLevel = 'suggest' | 'draft' | 'act_with_approval' | 'act_auto';
+
+/** Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions. */
+export type AssistantStatus = 'draft' | 'published' | 'disabled';
+
+/** A retrieval source class the assistant's scope may draw from. */
+export type KnowledgeMode = 'company' | 'uploaded' | 'web' | 'model';
+
+/**
+ * The retrieval filter (ADR-0011 §1/§2). A *narrowing* set layered on top of the
+ * per-user INV-2 permission predicate inside `retrieval/` — it can only
+ * intersect, never widen, what the running principal may already retrieve.
+ */
+export interface KnowledgeScope {
+  /** Collections to scope retrieval to (empty ⇒ no collection narrowing). */
+  collectionIds?: string[];
+  /** Connected sources to scope retrieval to. */
+  sourceIds?: string[];
+  /** Which source classes the scope may draw from. */
+  modes?: KnowledgeMode[];
+}
+
+/**
+ * A saved, named, governed chat configuration (ADR-0011 §1) — the mutable head.
+ * Tenant- and owner-scoped (INV-1/INV-2).
+ */
+export interface Assistant {
+  id: string;
+  name: string;
+  /** Optional human description. */
+  description?: string | null;
+  /** System-prompt text injected at run time (persona/role; never removes grounding rules). */
+  instructions?: string | null;
+  /** A model id from GET /models; null ⇒ the smart server default resolved at run time. */
+  model: string | null;
+  knowledgeScope: KnowledgeScope;
+  /** Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands). */
+  toolAllowlist: string[];
+  autonomyLevel: AutonomyLevel;
+  /** The accountable owner's user id. */
+  owner: string;
+  /** The backup owner's user id; required before publish (ADR-0011 §4). */
+  backupOwner?: string | null;
+  status: AssistantStatus;
+  /** The current published head version number (null while never published). */
+  version?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * POST /assistants body — create a draft (ADR-0011 §1). Only `name` is required;
+ * the server owns `owner`/`status`/timestamps. A malformed body → 422 (INV-8).
+ */
+export interface AssistantCreate {
+  name: string;
+  description?: string;
+  instructions?: string;
+  /** A model id from GET /models; omitted ⇒ the smart server default. */
+  model?: string;
+  knowledgeScope?: KnowledgeScope;
+  toolAllowlist?: string[];
+  autonomyLevel?: AutonomyLevel;
+  /** Optional at draft time; required before publish. */
+  backupOwner?: string;
+}
+
+/**
+ * PATCH /assistants/{id} body — patch the mutable head (ADR-0011 §1). All fields
+ * optional; at least one must be present (minProperties: 1). Malformed → 422.
+ */
+export interface AssistantUpdate {
+  name?: string;
+  description?: string | null;
+  instructions?: string | null;
+  /** A model id from GET /models, or null to clear (⇒ smart server default). */
+  model?: string | null;
+  knowledgeScope?: KnowledgeScope;
+  toolAllowlist?: string[];
+  autonomyLevel?: AutonomyLevel;
+  /** Set or clear the backup owner (must be distinct from owner, same tenant). */
+  backupOwner?: string | null;
+}
+
+/** The full frozen assistant definition captured at publish time (ADR-0011 §1). */
+export interface AssistantVersionConfig {
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  model: string | null;
+  knowledgeScope: KnowledgeScope;
+  toolAllowlist: string[];
+  autonomyLevel: AutonomyLevel;
+}
+
+/**
+ * An immutable published snapshot (ADR-0011 §1) — the full frozen definition a
+ * session/run pins to. Write-once; never mutated or deleted.
+ */
+export interface AssistantVersion {
+  id: string;
+  assistant_id: string;
+  /** Monotonic per assistant (unique within the assistant). */
+  version: number;
+  config: AssistantVersionConfig;
+  /** The user id who published (or rolled back to create) this version. */
+  author: string;
+  notes?: string | null;
+  diff_summary?: string | null;
+  created_at: string;
+}
+
+/** Optional release metadata for a publish (ADR-0011 §1). */
+export interface AssistantPublishRequest {
+  notes?: string;
+}
+
+/** Roll the head back to a prior version (ADR-0011 §1). Unknown/malformed → 422. */
+export interface AssistantRollbackRequest {
+  version: number;
+  notes?: string;
+}
+
+/** 200 from GET /assistants — a cursor page of assistants. */
+export interface AssistantList {
+  items: Assistant[];
+  next_cursor?: string | null;
+}
+
+/** 200 from GET /assistants/{id}/versions — a cursor page of versions. */
+export interface AssistantVersionList {
+  items: AssistantVersion[];
+  next_cursor?: string | null;
 }
 
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
