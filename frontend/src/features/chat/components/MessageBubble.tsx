@@ -23,6 +23,7 @@ import { MarkdownView } from '@/lib/markdown';
 import { FreshnessPill, Icon, PermissionPill, RetrievalTrace, type TraceStep } from '@/ui';
 import type { MessageRole } from '@/api';
 import type { UiCitation } from '../model/citation';
+import { groupCitationsByDocument } from '../model/presentation';
 import { ToolActivity } from './ToolActivity';
 import { AnswerFooter } from './AnswerFooter';
 import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
@@ -146,34 +147,48 @@ function MessageBubbleComponent({
             {citations.length > 0 && (
               <>
                 <p className="lc-sources__label">Sources used</p>
+                {/* One card per DOCUMENT (#248): a grounded answer often cites
+                    several passages of the same file, so grouping avoids listing
+                    the document N times. Each passage keeps its FLAT number so the
+                    inline [n] markers still line up. */}
                 <ol className="lc-sources">
-                  {citations.map((citation, i) => {
-                    const meta = sourceMeta?.[citation.documentId];
+                  {groupCitationsByDocument(citations).map((group) => {
+                    const meta = sourceMeta?.[group.documentId];
                     return (
-                      <li key={citation.id} className="lc-source-row">
-                        {/* One button per source (single tab stop) named like the
-                            kit CitationChip — "Citation N: <source>" — so it reads
-                            as the numbered reference and opens the inspector. */}
-                        <button
-                          type="button"
-                          className="lc-source-row__btn"
-                          aria-label={`Citation ${i + 1}: ${citation.documentName}`}
-                          onClick={() => onOpenCitation(citation, meta)}
-                        >
-                          <span className="lc-source-row__num">{i + 1}</span>
-                          <span className="lc-source-row__main">
-                            <span className="lc-source-row__title">{citation.documentName}</span>
-                            {meta?.freshness && (
-                              <span className="lc-source-row__sub">
-                                <FreshnessPill label={meta.freshness} stale={meta.stale ?? false} />
-                              </span>
-                            )}
+                      <li key={group.documentId} className="lc-source-row">
+                        <span className="lc-source-row__main">
+                          <span className="lc-source-row__title" title={group.documentName}>
+                            {group.documentName}
                           </span>
-                        </button>
+                          {meta?.freshness && (
+                            <span className="lc-source-row__sub">
+                              <FreshnessPill label={meta.freshness} stale={meta.stale ?? false} />
+                            </span>
+                          )}
+                        </span>
+                        {/* One button per cited passage, numbered by its flat
+                            index so it reads as the numbered reference and opens
+                            that passage in the inspector. */}
+                        <span
+                          className="lc-source-row__passages"
+                          role="group"
+                          aria-label={`Cited passages from ${group.documentName}`}
+                        >
+                          {group.passages.map((p) => (
+                            <button
+                              key={p.citation.id}
+                              type="button"
+                              className="lc-source-row__num-btn"
+                              aria-label={`Citation ${p.number}: ${group.documentName}`}
+                              onClick={() => onOpenCitation(p.citation, meta)}
+                            >
+                              {p.number}
+                            </button>
+                          ))}
+                        </span>
                         {/* Honest by construction: the backend only returns sources
                             the caller may see (spec 0004 INV-2), so a cited source
-                            is one this user has access to. Non-interactive, so it
-                            stays outside the button. */}
+                            is one this user has access to. */}
                         <PermissionPill level="granted" />
                       </li>
                     );

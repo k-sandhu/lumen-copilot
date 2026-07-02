@@ -124,6 +124,43 @@ export function buildRetrievalSummary(
   };
 }
 
+/** One document's cited passages, grouped for the "Sources used" strip (#248). */
+export interface CitationGroup {
+  documentId: string;
+  documentName: string;
+  /** The passages cited from this document, each with its FLAT 1-based number. */
+  passages: { citation: UiCitation; number: number }[];
+}
+
+/**
+ * Group citations by document for the "Sources used" strip, preserving
+ * first-appearance order (#248). A grounded answer often cites several passages
+ * of the SAME document; rendering one card per passage repeats the document N
+ * times. Grouping shows one card per document with its passage numbers.
+ *
+ * The `number` is the citation's FLAT 1-based index across ALL citations (not a
+ * per-group index), so it still matches any inline `[n]` marker the model wrote
+ * in the answer — grouping is visual only; it never renumbers.
+ */
+export function groupCitationsByDocument(citations: UiCitation[]): CitationGroup[] {
+  const order: string[] = [];
+  const byDoc = new Map<string, CitationGroup>();
+  citations.forEach((citation, i) => {
+    let group = byDoc.get(citation.documentId);
+    if (!group) {
+      group = {
+        documentId: citation.documentId,
+        documentName: citation.documentName,
+        passages: [],
+      };
+      byDoc.set(citation.documentId, group);
+      order.push(citation.documentId);
+    }
+    group.passages.push({ citation, number: i + 1 });
+  });
+  return order.map((id) => byDoc.get(id) as CitationGroup);
+}
+
 /**
  * Split a citation snippet into highlight runs for the SourceInspector. We
  * don't get sub-span offsets within the snippet from the wire, so the whole
