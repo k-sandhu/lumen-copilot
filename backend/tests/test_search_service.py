@@ -413,6 +413,76 @@ async def test_pagination_cursor_round_trip(session: AsyncSession) -> None:
     assert {r.id for r in first.results}.isdisjoint({r.id for r in second.results})
 
 
+class _KRespectingRetrieval:
+    """A retrieval fake that HONOURS ``k`` like the real chokepoint — returns the
+    top ``k`` of a ranked corpus. Lets a test exercise the pagination boundary at
+    the retrieval ceiling (the plain ``_FakeRetrieval`` ignores ``k``)."""
+
+    def __init__(self, available: list[RetrievedPassage]) -> None:
+        self._available = available
+        self.calls: list[int] = []
+
+    async def search(
+        self,
+        *,
+        principal: Principal,
+        query: str,
+        k: int,
+        collection_ids: list[uuid.UUID] | None = None,
+    ) -> list[RetrievedPassage]:
+        self.calls.append(k)
+        return list(self._available[:k])
+
+
+async def test_pagination_terminates_at_retrieval_ceiling_without_empty_page(
+    session: AsyncSession,
+) -> None:
+    """With more matches than retrieval can rank, pagination walks to the MAX_K
+    ceiling, never emits a silently-empty page, and never hands out a next_cursor
+    past the reachable band (#270)."""
+    from app.retrieval import MAX_K
+
+    tenant = (await TenantRepository(session).create(name="T")).id
+    user, doc, _ = await _seed_document(
+        session, tenant_id=tenant, email="a@x.test", filename="f.txt", chunk_texts=["x"]
+    )
+    # A corpus larger than the retrieval ceiling can rank.
+    corpus = [
+        _passage(chunk_id=uuid.uuid4(), document_id=doc, name="f.txt", text=f"c{i}")
+        for i in range(MAX_K + 25)
+    ]
+    retrieval = _KRespectingRetrieval(corpus)
+    svc = _service(
+        session,
+        principal=_principal(user, tenant),
+        retrieval=retrieval,  # type: ignore[arg-type]
+        gateway=_DisabledGateway(),
+    )
+
+    seen = 0
+    cursor: str | None = None
+    pages = 0
+    while True:
+        page = await svc.search(query="c", limit=20, cursor=cursor)
+        pages += 1
+        assert len(page.results) > 0, "a page must never be silently empty (#270)"
+        seen += len(page.results)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+        assert pages < 20, "pagination must terminate, not loop"
+
+    # The reachable set is exactly the retrieval ceiling — nothing past rank MAX_K
+    # is advertised, and the walk stopped cleanly (no dead cursor).
+    assert seen == MAX_K
+    # A single wide page terminates just as honestly: MAX_K results, no next page.
+    big = await svc.search(query="c", limit=100)
+    assert len(big.results) == MAX_K
+    assert big.next_cursor is None
+    # The service never asks retrieval for more than the ceiling.
+    assert max(retrieval.calls) <= MAX_K
+
+
 async def test_malformed_cursor_is_rejected(session: AsyncSession) -> None:
     """A forged/garbled cursor fails closed → ValidationError (422), not page 1 (INV-8)."""
     from app.core.errors import ValidationError
