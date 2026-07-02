@@ -29,6 +29,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -632,6 +633,61 @@ class Grant(TenantScopedMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ToolInvocation(TenantScopedMixin, Base):
+    """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
+
+    No ``TimestampMixin``/``updated_at``: an invocation record is written once and
+    never re-described — so only ``created_at`` is kept (like ``audit_events`` and
+    ``grants``). One row **per invocation**, whatever the outcome: a success, an
+    off-allow-list/unapproved **denial**, or a tool **failure** are all recorded
+    (``ok`` + ``error``), so the trace has no silent gap. This feeds the WS trace
+    now and AgentOps analytics later (E14) — it is not itself the append-only audit
+    log (that stays ``audit_events``), so it is an ordinary tenant-scoped table
+    (the app role may write it; it is not UPDATE/DELETE-revoked).
+
+    ``args_hash`` is a stable, non-reversible hash of the call args (never the raw
+    args — the same discipline as the audit query hash, spec 0004 §2.4). ``run_id``
+    is reserved for a future multi-step agent-run grouping (nullable, MVP unused).
+    Tenant-leading indexes serve the two reads: by session (the trace for a chat)
+    and by (tenant, tool) (per-tool analytics). RLS: put under the same fail-closed
+    ``app.tenant_id`` backstop as every tenant-scoped table (the migration).
+    """
+
+    __tablename__ = "tool_invocations"
+    __table_args__ = (
+        Index("ix_tool_invocations_tenant_session", "tenant_id", "session_id"),
+        Index("ix_tool_invocations_tenant_tool", "tenant_id", "tool_name"),
+        CheckConstraint("duration_ms >= 0", name="ck_tool_invocations_duration_nonneg"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The chat session the call ran in (nullable: an ad-hoc/non-session invocation
+    # path may not carry one). SET NULL so deleting a session keeps the trace rows.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The assistant message the call contributed to (nullable, same rationale).
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Reserved for a future multi-step agent-run grouping (E14); no FK yet.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    args_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The ``ERROR_*`` code when ``ok`` is False (governance denial or failure);
+    # null on success.
+    error: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

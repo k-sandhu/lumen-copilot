@@ -50,23 +50,24 @@ from app.db.repositories import (
     CitationRepository,
     MessageRepository,
     TenantRepository,
+    ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import GroundedCitation
 from app.domain.entities import AuditOutcome, MessageRole
-from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall
+from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
+from app.domain.tools import ToolResult
 from app.llm import LLMGateway
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
 from app.services.audit import AuditSink
-from app.services.chat_tools import (
-    TOOL_SPECS,
-    ToolOutcome,
-    run_tool,
-)
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
+from app.services.tools.impls import retrieval as _retrieval_impl
+from app.services.tools.registry import default_allowlist, tool_specs
+from app.services.tools.runner import ToolRunner
+from app.services.tools.types import ToolContext
 
 log = get_logger(__name__)
 
@@ -271,6 +272,27 @@ class ChatRuntime:
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
+        # The per-run allow-list (issue #207 §2): for ad-hoc chat this is the
+        # default read-only retrieval tools; an assistant/session-specific
+        # ``tool_allowlist`` (E1) would narrow/extend it. The governed runner is
+        # the single chokepoint every tool call passes through — it enforces the
+        # allow-list + approval seam, bounds each call, records a
+        # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
+        # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
+        allowed = default_allowlist()
+        runner = ToolRunner(
+            allowed=allowed,
+            invocations=ToolInvocationRepository(session, tenant_id),
+            audit=audit,
+            actor=AuditActor.user(self._principal.user_id),
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            session_id=session_id,
+        )
+        # The tool schemas advertised to the model — exactly the allow-list, so the
+        # model is only *offered* tools it may call (the runner still enforces the
+        # allow-list as the hard gate).
+        advertised = tool_specs(allowed)
         # The loop bound: this tenant's ``max_tool_turns`` override if set, else
         # the configured system default (issue #148).
         max_tool_turns = await self._resolve_max_tool_turns(session, tenant_id)
@@ -299,10 +321,21 @@ class ChatRuntime:
         # turn within the budget requested tools — i.e. the model never reached a
         # tool-free answer turn (the loop never ``break``s). That is the case the
         # forced synthesis below repairs (issue #148).
+        # The permission-scoped context every tool handler runs against (issue
+        # #207): it carries the asking principal (the ``retrieval/`` filter keys
+        # off it, INV-2) and the run's retrieval service + collection scope. Built
+        # once — the handlers reach nothing outside it.
+        tool_context = ToolContext(
+            principal=self._principal,
+            retrieval=retrieval,
+            collection_ids=collection_ids,
+            default_k=_DEFAULT_K,
+        )
+
         budget_exhausted = True
         for _turn in range(max_tool_turns):
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
-                messages=messages, model=model, usage=usage
+                messages=messages, model=model, usage=usage, tools=advertised
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
@@ -319,25 +352,25 @@ class ChatRuntime:
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
             for call in turn_tool_calls:
-                outcome = await self._run_one_tool(
+                result = await self._run_one_tool(
                     state=state,
-                    retrieval=retrieval,
+                    runner=runner,
                     audit=audit,
+                    context=tool_context,
                     call=call,
-                    collection_ids=collection_ids,
-                    default_k=_DEFAULT_K,
+                    message_id=assistant_message_id,
                 )
-                total_hits += outcome.hit_count
+                total_hits += result.hit_count
                 messages.append(
                     ChatMessage(
                         role=Role.TOOL,
-                        content=outcome.content,
+                        content=result.content,
                         tool_call_id=call.id,
                         name=call.name,
                     )
                 )
                 # Record + emit citations for each newly-seen permitted passage.
-                for passage in outcome.passages:
+                for passage in result.passages:
                     if passage.chunk_id in cited:
                         continue
                     citation = GroundedCitation.from_passage(passage)
@@ -351,7 +384,7 @@ class ChatRuntime:
             # narration from the exhausted tool turns was never emitted, so the
             # live stream and the stored message agree.
             _, finish_reason, turn_text = await self._stream_one_turn(
-                messages=messages, model=model, usage=usage, tool_choice="none"
+                messages=messages, model=model, usage=usage, tools=advertised, tool_choice="none"
             )
             await self._publish_text(state, turn_text)
             answer_chunks = turn_text
@@ -422,6 +455,7 @@ class ChatRuntime:
         messages: list[ChatMessage],
         model: str,
         usage: _Usage,
+        tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
@@ -430,14 +464,15 @@ class ChatRuntime:
         total, but does **not** publish: only the caller knows whether a turn's
         text is answer content (a tool-free turn, or the forced synthesis) to be
         streamed, or pre-tool narration (a tool-calling turn) to be dropped (issue
-        #148). ``tool_choice="none"`` forces a tool-free turn — the final synthesis
-        once the tool-turn budget is spent.
+        #148). ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue
+        #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
+        forces a tool-free turn — the final synthesis once the budget is spent.
         """
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
         async for ev in self._gateway.stream_tools(
-            messages, tools=list(TOOL_SPECS), model=model, tool_choice=tool_choice
+            messages, tools=list(tools), model=model, tool_choice=tool_choice
         ):
             if ev.text:
                 text_chunks.append(ev.text)
@@ -466,13 +501,22 @@ class ChatRuntime:
         self,
         *,
         state: _StreamState,
-        retrieval: RetrievalService,
+        runner: ToolRunner,
         audit: AuditSink,
+        context: ToolContext,
         call: ToolCall,
-        collection_ids: list[UUID] | None,
-        default_k: int,
-    ) -> ToolOutcome:
-        """Surface a tool_call event, run the (permission-filtered) tool, audit it."""
+        message_id: UUID,
+    ) -> ToolResult:
+        """Surface a tool_call event, run the call through the governed runner, emit its result.
+
+        The runner is the single governance chokepoint (issue #207): it enforces
+        the allow-list + approval seam, bounds the call, records the
+        ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result`` — so
+        an off-list / unapproved / failing tool returns an ``ok=False`` result the
+        model reads, and the stream never crashes (AC-2/3/5, INV-6). This method
+        only renders the WS trace envelopes and layers the retrieval-specific
+        ``retrieval.query`` audit on top for tools that returned passages/documents.
+        """
         await self._publish(
             state,
             envelopes.event(
@@ -482,15 +526,12 @@ class ChatRuntime:
                 data={"callId": call.id, "tool": call.name, "args": call.arguments},
             ),
         )
-        outcome = await run_tool(
-            retrieval,
-            principal=self._principal,
-            call=call,
-            collection_ids=collection_ids,
-            default_k=default_k,
-        )
-        # Audit every retrieval (INV-6): the permission-filtered search ran.
-        await self._audit_retrieval(audit=audit, call=call, outcome=outcome)
+        result = await runner.run(call=call, context=context, message_id=message_id)
+        # A retrieval tool additionally emits the retrieval-semantics audit event
+        # (query hash + document ids + hit count, spec 0004 §2.4). The generic
+        # ``tool.invoked``/``tool.result`` events the runner emits are additive.
+        if _is_retrieval_call(call):
+            await self._audit_retrieval(audit=audit, call=call, result=result)
         await self._publish(
             state,
             envelopes.event(
@@ -500,12 +541,14 @@ class ChatRuntime:
                 data={
                     "callId": call.id,
                     "tool": call.name,
-                    "hitCount": outcome.hit_count,
-                    "summary": outcome.summary,
+                    "hitCount": result.hit_count,
+                    "summary": result.summary,
+                    "ok": result.ok,
+                    **({"error": result.error} if result.error else {}),
                 },
             ),
         )
-        return outcome
+        return result
 
     # --- persistence + audit ------------------------------------------------
 
@@ -560,7 +603,7 @@ class ChatRuntime:
         return stored
 
     async def _audit_retrieval(
-        self, *, audit: AuditSink, call: ToolCall, outcome: ToolOutcome
+        self, *, audit: AuditSink, call: ToolCall, result: ToolResult
     ) -> None:
         query = str(call.arguments.get("query") or call.arguments.get("name_or_query") or "")
         await audit.emit(
@@ -574,8 +617,8 @@ class ChatRuntime:
             metadata={
                 "tool": call.name,
                 "query_hash": _hash_query(query),
-                "document_ids": [str(d) for d in outcome.document_ids],
-                "hit_count": outcome.hit_count,
+                "document_ids": [str(d) for d in result.document_ids],
+                "hit_count": result.hit_count,
             },
         )
 
@@ -667,6 +710,25 @@ def _hash_query(query: str) -> str:
     reviewer correlate retrieval + answer events for the same turn.
     """
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def _is_retrieval_call(call: ToolCall) -> bool:
+    """Whether a tool call targets a retrieval tool (gets the ``retrieval.query`` audit).
+
+    The three retrieval tools additionally emit the retrieval-semantics audit event
+    (query hash + document ids + hit count, spec 0004 §2.4) on top of the generic
+    ``tool.*`` events the runner emits for every tool. Keyed off the retrieval impl's
+    declared names so a future non-retrieval tool does not wrongly get it.
+    """
+    return call.name in _RETRIEVAL_TOOL_NAMES
+
+
+# The retrieval tools' names, read once from their impl module (the single source
+# of truth for what a "retrieval tool" is) so the retrieval-specific audit stays
+# correct as tools are added elsewhere.
+_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
+    defn.name for defn in _retrieval_impl.TOOLS
+)
 
 
 __all__ = ["ChatRuntime"]

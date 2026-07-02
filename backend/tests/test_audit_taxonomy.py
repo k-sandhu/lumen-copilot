@@ -62,6 +62,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "artifact.created",
         "artifact.downloaded",
         "artifact.deleted",
+        # Governed tool platform (CC-7 / issue #207) — additive; every tool
+        # invocation emits both the intent and the outcome (INV-6).
+        "tool.invoked",
+        "tool.result",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
