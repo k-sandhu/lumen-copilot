@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.5.0
+  version: 0.6.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -351,6 +351,31 @@ paths:
               schema: { type: string, format: uri }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /documents/{documentId}/text:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocumentText
+      summary: Get the extracted plain text of a ready document.
+      description: >
+        The ingestion parser's plain-text output for the document, reassembled
+        from its stored chunks (issue #244). This is the viewer's text surface
+        for formats a browser cannot render natively (DOCX/PPTX/XLSX) and the
+        universal "show me the text" affordance. Visibility is identical to
+        `/documents/{documentId}/content` (INV-2: not visible → 404, never 403).
+        A document that exists but is not `ready` has no text yet → 409
+        (`code=document_not_ready`).
+      tags: [documents]
+      responses:
+        "200":
+          description: The extracted text.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentText" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # --- Chat (sessions, history, send → stream) : CC-6 #24 --------------------
   /chat/sessions:
@@ -1791,11 +1816,16 @@ components:
     CurrentUser:
       type: object
       additionalProperties: false
-      required: [id, email, tenant_id, roles, created_at]
+      required: [id, email, tenant_id, tenant_name, roles, created_at]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email }
         tenant_id: { type: string, format: uuid }
+        tenant_name:
+          type: string
+          description: >
+            Human-readable tenant name (the `tenants.name` column) so the UI
+            never has to surface the raw tenant UUID (issue #247).
         roles:
           type: array
           items: { type: string, enum: [member, admin, security] }
@@ -1882,6 +1912,25 @@ components:
           items: { $ref: "#/components/schemas/Document" }
         next_cursor:
           type: [string, "null"]
+
+    DocumentText:
+      type: object
+      additionalProperties: false
+      required: [text, chunk_count, truncated]
+      properties:
+        text:
+          type: string
+          description: The extracted plain text (parser output, chunk-reassembled).
+        chunk_count:
+          type: integer
+          minimum: 0
+          description: Number of chunks the text was reassembled from.
+        truncated:
+          type: boolean
+          description: >
+            True when the text was capped at the server limit
+            (DOCUMENT_TEXT_MAX_BYTES); the UI should say so and offer the
+            original-bytes download instead of implying completeness.
 
     # --- Chat ---------------------------------------------------------------
     ChatSessionCreate:
@@ -3544,6 +3593,14 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     NotFound:
       description: Not found — or in another tenant / not permitted (INV-1/INV-2).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: >
+        The resource exists but is not in a state that allows this request
+        (illegal transition / not ready — INV-8). The problem `code` names the
+        specific conflict (e.g. `document_not_ready`).
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
