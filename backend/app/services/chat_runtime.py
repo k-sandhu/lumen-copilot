@@ -454,6 +454,11 @@ class ChatRuntime:
             model=model,
             citation_count=len(stored_citations),
             retrieved_hits=total_hits,
+            # Distinct cited documents, first-appearance order — the provenance
+            # the Audit "Answers cited" KPI reads (#249).
+            cited_document_ids=list(
+                dict.fromkeys(str(c.document_id) for c in stored_citations)
+            ),
         )
 
         return _RunResult(
@@ -660,6 +665,7 @@ class ChatRuntime:
         model: str,
         citation_count: int,
         retrieved_hits: int,
+        cited_document_ids: Sequence[str],
     ) -> None:
         await audit.emit(
             action=AuditAction.ANSWER_GENERATED,
@@ -675,6 +681,13 @@ class ChatRuntime:
                 "query_hash": _hash_query(question),
                 "citation_count": citation_count,
                 "retrieved_hits": retrieved_hits,
+                # The distinct documents this answer grounded on. The audit read
+                # path (audit_query_service) synthesises allow-candidates from
+                # ``document_ids`` when an event has no explicit candidates, so
+                # recording them here is what makes the Audit "Answers cited" KPI
+                # count a grounded answer as cited (#249). Empty ⇒ no candidates
+                # ⇒ honestly "not grounded".
+                "document_ids": list(cited_document_ids),
             },
         )
 
