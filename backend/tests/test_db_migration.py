@@ -52,8 +52,9 @@ _MVP_TABLES = {
 
 # Every table the ORM registry now carries: the MVP set plus refresh_tokens
 # (0003, issue #19, spec 0004 §2.3), sources (0006, issue #109, ADR-0009 §4),
-# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants), and the spec-0005
-# preferences/saved-search/recent tables (0009–0011, epic #144).
+# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants), the spec-0005
+# preferences/saved-search/recent tables (0009–0011, epic #144), and
+# tool_invocations (0013, issue #207 — the governed tool platform trace).
 _ALL_TABLES = _MVP_TABLES | {
     "refresh_tokens",
     "sources",
@@ -61,6 +62,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "user_preferences",
     "saved_searches",
     "recent_searches",
+    "tool_invocations",
 }
 
 
@@ -78,14 +80,14 @@ def test_metadata_covers_every_mvp_table() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0012 with a SINGLE head (ADR-0008 §4).
+    """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0012_tenant_max_tool_turns"]
+    assert list(script.get_heads()) == ["0013_tool_invocations"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -119,6 +121,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     tts = script.get_revision("0012_tenant_max_tool_turns")
     assert tts is not None
     assert tts.down_revision == "0011_recent_searches"
+    tools = script.get_revision("0013_tool_invocations")
+    assert tools is not None
+    assert tools.down_revision == "0012_tenant_max_tool_turns"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -391,6 +396,55 @@ def test_offline_tenant_max_tool_turns_migration_round_trips(
     command.downgrade(cfg, "0012_tenant_max_tool_turns:0011_recent_searches", sql=True)
     down = capsys.readouterr().out.lower()
     assert "alter table tenants drop column max_tool_turns" in down
+
+
+def test_offline_tool_invocations_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0013 creates the ``tool_invocations`` trace table + RLS; down() reverses (#207).
+
+    AC (issue #207 §4): the upgrade renders the tenant-scoped ``tool_invocations``
+    table with its ``session_id``/``message_id`` FKs (SET NULL), the ``args_hash``
+    + ``ok``/``error`` + ``duration_ms`` columns, the non-negative-duration check,
+    the two tenant-leading indexes (by session for the trace, by tool for
+    analytics), and the same fail-closed RLS policy the 0007 backstop uses
+    (tenant-scoped, INV-1). The downgrade drops the policy, disables RLS, and drops
+    the table. Offline DDL render (Postgres dialect) — structural reversibility
+    without a DB (#70 lesson); the behavioural proof is the runner tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0012_tenant_max_tool_turns:0013_tool_invocations", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table tool_invocations" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references chat_sessions" in up  # session_id FK
+    assert "references messages" in up  # message_id FK
+    assert "args_hash" in up
+    assert "duration_ms" in up
+    assert "ck_tool_invocations_duration_nonneg" in up
+    assert (
+        "create index ix_tool_invocations_tenant_session on tool_invocations "
+        "(tenant_id, session_id)" in up
+    )
+    assert (
+        "create index ix_tool_invocations_tenant_tool on tool_invocations "
+        "(tenant_id, tool_name)" in up
+    )
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table tool_invocations enable row level security" in up
+    assert "alter table tool_invocations force row level security" in up
+    assert "create policy rls_tool_invocations on tool_invocations" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0013_tool_invocations:0012_tenant_max_tool_turns", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_tool_invocations on tool_invocations" in down
+    assert "alter table tool_invocations disable row level security" in down
+    assert "drop index ix_tool_invocations_tenant_tool" in down
+    assert "drop index ix_tool_invocations_tenant_session" in down
+    assert "drop table tool_invocations" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:
