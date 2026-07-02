@@ -1,0 +1,32 @@
+# SearXNG settings for the local Lumen Copilot stack (ADR-0014, issue #219).
+#
+# Mounted read-only into the pinned `searxng` compose service. The one thing the
+# `search_web/` adapter needs that a stock SearXNG image does NOT enable by
+# default is **JSON output** (`search.formats: [json]`) so the adapter gets
+# structured results, not scraped HTML (ADR-0014 §1). Everything else is stock.
+#
+# `server.secret_key` here is a LOCAL-DEV placeholder, not a secret: this SearXNG
+# instance is reachable only on the internal compose network (and the mapped host
+# port for dev/tests), needs no API key, and holds no tenant data. A real
+# deployment overrides it via the SEARXNG_SECRET env var (compose passes it
+# through) — never ship this value outside local.
+
+use_default_settings: true
+
+server:
+  # Overridden by the SEARXNG_SECRET env var in compose; this literal is a
+  # local-dev-only placeholder (see the header note).
+  secret_key: "lumen-local-dev-searxng-not-a-secret"
+  # The metasearch aggregates public engines; no per-query key, no auth.
+  limiter: false
+  image_proxy: false
+
+search:
+  # THE load-bearing line: expose JSON so the adapter reads structured results.
+  # (Stock SearXNG ships only `html`.) `csv`/`rss` intentionally left off.
+  formats:
+    - html
+    - json
+
+# Keep the default engine set (general web search). Tuning the engine/category
+# mix is a later, config-only change — the adapter is engine-agnostic.

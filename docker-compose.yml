@@ -84,6 +84,40 @@ services:
       retries: 20
       start_period: 40s
 
+  searxng:
+    # Self-hosted metasearch backing the `web_search` agent tool (ADR-0014, #219):
+    # OSS (AGPL-3.0), no per-query API key, no tenant queries egressing to a
+    # commercial vendor. JSON output is enabled via the mounted settings so the
+    # `search_web/` adapter reads structured results (not scraped HTML). The
+    # `web_search` tool is OFF by default (WEB_SEARCH_ENABLED=false), so this
+    # service is present but only exercised once a deploy/tenant enables web mode.
+    # Pinned image (no :latest), healthcheck, reachable on the internal compose
+    # network + the mapped host port for dev/tests.
+    image: searxng/searxng:2026.7.2-67973783d
+    restart: unless-stopped
+    environment:
+      # The public base URL SearXNG advertises (internal to the compose network).
+      SEARXNG_BASE_URL: http://searxng:8080/
+      # Real secret for a deployment comes from the host env; the mounted
+      # settings.yml carries only a local-dev placeholder (never a real secret).
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-lumen-local-dev-searxng-not-a-secret}
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "${WEB_SEARCH_PORT:-47187}:8080"
+    healthcheck:
+      # The JSON search endpoint is the contract the adapter uses; a 200 on a
+      # trivial query means the engine is answering in the format we need.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- 'http://localhost:8080/search?q=ping&format=json' >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   backend:
     build:
       context: ./backend

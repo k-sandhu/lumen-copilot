@@ -434,6 +434,76 @@ class Settings(BaseSettings):
             )
         return self
 
+    # --- Web search (the ``web_search`` agent tool — ADR-0014, issue #219) ----
+    # Backs the ``web_search`` tool with self-hosted SearXNG (OSS, no per-query
+    # key; ADR-0014 §1) run as a compose service. **Off by default** (governance,
+    # ADR-0014 §5): the tool fails closed unless a tenant/deploy explicitly enables
+    # web mode here — a disabled deploy returns a tool *result* error, never a
+    # crash. The endpoint is an internal service address, so the query leg is a
+    # trusted internal hop (distinct from the untrusted result-page fetch, which
+    # always goes through the ``connectors/web/fetch.py`` SSRF chokepoint).
+    web_search_enabled: bool = Field(default=False, alias="WEB_SEARCH_ENABLED")
+    # SearXNG JSON endpoint the adapter queries. Inside compose this is the service
+    # name; on the host (tests/dev outside compose) the default targets the
+    # compose-mapped host port so a live probe reaches the same engine.
+    web_search_endpoint: str = Field(
+        default="http://localhost:47187", alias="WEB_SEARCH_ENDPOINT"
+    )
+    # Per-request wall-clock budget for the query leg (adapter -> SearXNG). A
+    # stalled provider surfaces as a tool timeout, never a hung run.
+    web_search_timeout_seconds: float = Field(
+        default=10.0, alias="WEB_SEARCH_TIMEOUT_SECONDS"
+    )
+    # Default number of results returned when the model does not specify ``k``.
+    web_search_default_k: int = Field(default=5, alias="WEB_SEARCH_DEFAULT_K")
+    # Hard cap on the requested ``k`` (a hostile/large value is clamped to this).
+    web_search_max_k: int = Field(default=10, alias="WEB_SEARCH_MAX_K")
+    # How many top result pages to fetch + extract through the SSRF chokepoint for
+    # passage-level, cite-worthy text (ADR-0014 §4). ``0`` disables page fetching
+    # (snippets only). Each fetched page counts against the per-tenant rate limit.
+    web_search_fetch_top_n: int = Field(default=3, alias="WEB_SEARCH_FETCH_TOP_N")
+    # Per-tenant rate limit for web search, reusing the Redis fixed-window limiter
+    # (``tasks/rate_limit.py``; ADR-0014 §3). Bounds how many search calls one
+    # tenant may make per window so a single tenant cannot fan out unbounded
+    # outbound requests (search calls + result-page fetches) — a DoS/amplification
+    # pivot. An over-budget search is refused as a tool result (throttled), not an
+    # HTTP error. Distinct keyspace from the connector-sync limiter.
+    web_search_rate_max_per_window: int = Field(
+        default=20, alias="WEB_SEARCH_RATE_MAX_PER_WINDOW"
+    )
+    web_search_rate_window_seconds: int = Field(
+        default=60, alias="WEB_SEARCH_RATE_WINDOW_SECONDS"
+    )
+
+    @field_validator(
+        "web_search_default_k",
+        "web_search_max_k",
+        "web_search_rate_max_per_window",
+        "web_search_rate_window_seconds",
+    )
+    @classmethod
+    def _web_search_counts_positive(cls, value: int) -> int:
+        """A non-positive k/window/limit would disable bounding — reject (fail fast).
+
+        The per-tenant web-search rate limit is load-bearing (ADR-0014 §3); a zero
+        or negative window/limit would make the limiter admit everything or divide
+        by a zero window, and a non-positive ``k`` would make a search return
+        nothing, so a misconfiguration must fail fast at startup.
+        """
+        if value <= 0:
+            raise ValueError(
+                "WEB_SEARCH_* (default_k/max_k/rate max/window) must be positive (ADR-0014)"
+            )
+        return value
+
+    @field_validator("web_search_fetch_top_n")
+    @classmethod
+    def _web_search_fetch_top_n_non_negative(cls, value: int) -> int:
+        """Result-page fetch count must be >= 0 (``0`` = snippets only, no fetch)."""
+        if value < 0:
+            raise ValueError("WEB_SEARCH_FETCH_TOP_N must be >= 0 (0 disables page fetching)")
+        return value
+
     @model_validator(mode="after")
     def _validate_chunk_overlap(self) -> Settings:
         """Enforce ``0 <= overlap < size`` so chunking always makes progress."""
