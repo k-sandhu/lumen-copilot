@@ -1,8 +1,9 @@
 /**
- * AdminHeader coverage (#122): the tenant-scoped header shows the REAL principal's
- * tenant id (GET /auth/me) — never a fabricated company name — and degrades
- * gracefully while loading or when the principal is unavailable (every async
- * surface resolves to legible text, frontend/AGENTS.md).
+ * AdminHeader coverage (#122, #247): the tenant-scoped header shows the REAL
+ * principal's tenant NAME (GET /auth/me) with the raw id in the tooltip — never a
+ * fabricated company name — and degrades gracefully while loading or when the
+ * principal is unavailable (every async surface resolves to legible text,
+ * frontend/AGENTS.md).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -17,6 +18,7 @@ const PRINCIPAL: CurrentUser = {
   id: 'u1',
   email: 'admin@acme.test',
   tenant_id: 'acme-tenant-1234',
+  tenant_name: 'Acme',
   roles: ['admin'],
   created_at: '2026-01-01T00:00:00Z',
 };
@@ -24,11 +26,15 @@ const PRINCIPAL: CurrentUser = {
 beforeEach(() => useCurrentUser.mockReset());
 
 describe('AdminHeader', () => {
-  it('shows the real tenant id, not a fabricated company name', () => {
+  it('shows the tenant NAME (raw id only in the tooltip), not a fabricated company name', () => {
     useCurrentUser.mockReturnValue({ data: PRINCIPAL, isLoading: false, isError: false });
     render(<AdminHeader />);
     expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument();
-    expect(screen.getByText('acme-tenant-1234')).toBeInTheDocument();
+    const name = screen.getByText('Acme');
+    expect(name).toBeInTheDocument();
+    expect(name).toHaveAttribute('title', 'Tenant ID: acme-tenant-1234');
+    // The raw id is not shown as visible text.
+    expect(screen.queryByText('acme-tenant-1234')).not.toBeInTheDocument();
     expect(screen.getByText(/governance, models, and data controls/i)).toBeInTheDocument();
     expect(screen.queryByText(/northwind/i)).not.toBeInTheDocument();
   });

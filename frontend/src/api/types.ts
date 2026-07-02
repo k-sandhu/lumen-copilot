@@ -59,6 +59,8 @@ export interface CurrentUser {
   email: string;
   /** Resolved from the bearer token; clients never send it (spec 0004). */
   tenant_id: string;
+  /** Human-readable tenant name so the UI never surfaces the raw id (#247). */
+  tenant_name: string;
   roles: UserRole[];
   created_at: string;
 }

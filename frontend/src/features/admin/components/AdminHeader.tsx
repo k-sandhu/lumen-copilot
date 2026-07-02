@@ -2,10 +2,9 @@
  * AdminHeader — the tenant-scoped header for the read-only admin console (#122,
  * admin.html: "Admin · <tenant> · governance, models, and data controls"). The
  * tenant identity is the REAL principal the app already loads (GET /auth/me, via
- * useCurrentUser) — the backend exposes a `tenant_id` (a UUID), not a human
- * display name, so we show the id honestly rather than inventing a company name
- * (AGENTS.md scope guard: never fake backend-unsupported data). Tenant isolation
- * is a hard invariant (spec 0004 INV-1).
+ * useCurrentUser): we lead with the human-readable `tenant_name` (#247) and keep
+ * the raw `tenant_id` in the tooltip for support — never inventing data (AGENTS.md
+ * scope guard). Tenant isolation is a hard invariant (spec 0004 INV-1).
  *
  * Like every async surface (frontend/AGENTS.md), it never shows a blank or stuck
  * value: loading and unavailable both resolve to legible text.
@@ -19,14 +18,18 @@ export function AdminHeader() {
     ? 'loading tenant…'
     : me.isError || !me.data
       ? 'tenant unavailable'
-      : me.data.tenant_id;
+      : me.data.tenant_name;
+  const idHint = me.data ? `Tenant ID: ${me.data.tenant_id}` : undefined;
 
   return (
     <header>
       <h1 className="text-lg font-semibold text-foreground">Admin</h1>
       <p className="mt-1 text-sm text-foreground-muted">
         <span aria-live="polite">
-          Tenant <span className="lc-mono text-foreground">{tenant}</span>
+          Tenant{' '}
+          <span className="text-foreground" title={idHint}>
+            {tenant}
+          </span>
         </span>{' '}
         &middot; governance, models, and data controls.
       </p>
