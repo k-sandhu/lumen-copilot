@@ -65,6 +65,8 @@ _ALL_TABLES = _MVP_TABLES | {
     "tool_invocations",
     "artifacts",
     "secrets",
+    "assistants",
+    "assistant_versions",
 }
 
 
@@ -89,7 +91,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0015_secrets"]
+    assert list(script.get_heads()) == ["0016_assistants"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -132,6 +134,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     secrets = script.get_revision("0015_secrets")
     assert secrets is not None
     assert secrets.down_revision == "0014_artifacts"
+    assistants = script.get_revision("0016_assistants")
+    assert assistants is not None
+    assert assistants.down_revision == "0015_secrets"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -552,6 +557,69 @@ def test_offline_secrets_migration_round_trips(
     assert "alter table secrets disable row level security" in down
     assert "drop index ix_secrets_tenant_owner" in down
     assert "drop table secrets" in down
+
+
+def test_offline_assistants_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0016 creates assistants + immutable assistant_versions + chat FKs; down() reverses (#211).
+
+    AC (ADR-0011 §1): the upgrade renders the tenant/owner-scoped ``assistants``
+    head (with its jsonb ``knowledge_scope``/``tool_allowlist`` and the autonomy /
+    status CHECKs), the immutable ``assistant_versions`` table (UNIQUE per
+    assistant, the version-positive CHECK, and the append-only UPDATE/DELETE
+    REVOKE), the two nullable pin FKs on ``chat_sessions`` (SET NULL), and the same
+    fail-closed RLS policy the 0007 backstop uses on both new tables. The downgrade
+    re-grants the version write perms, drops the policies, drops the chat FK
+    columns, and drops the tables. Offline DDL render (Postgres dialect) —
+    structural reversibility without a DB (#70 lesson); the behavioural proof is
+    the service + repository tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0015_secrets:0016_assistants", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped assistants head + its FKs.
+    assert "create table assistants" in up
+    assert "create table assistant_versions" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id / backup_owner_id / author_id FKs
+    assert "references assistants" in up  # version.assistant_id + chat pin FK
+    # The jsonb config columns on the head.
+    assert "knowledge_scope jsonb" in up
+    assert "tool_allowlist jsonb" in up
+    # The domain-pinning CHECKs.
+    assert "ck_assistants_autonomy_level" in up
+    assert "ck_assistants_status" in up
+    assert "ck_assistant_versions_version_positive" in up
+    # The per-assistant monotonic-version UNIQUE.
+    assert "uq_assistant_versions_assistant_version" in up
+    # The version history is append-only: the app role loses UPDATE/DELETE on it.
+    assert "revoke update, delete on table assistant_versions" in up
+    # The two nullable pin FKs on chat_sessions (additive; SET NULL).
+    assert "alter table chat_sessions add column assistant_id" in up
+    assert "alter table chat_sessions add column assistant_version_id" in up
+    assert "on delete set null" in up
+    # The RLS backstop on both new tables — same fail-closed GUC policy as 0007.
+    assert "alter table assistants enable row level security" in up
+    assert "alter table assistants force row level security" in up
+    assert "create policy rls_assistants on assistants" in up
+    assert "alter table assistant_versions enable row level security" in up
+    assert "create policy rls_assistant_versions on assistant_versions" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0016_assistants:0015_secrets", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_assistants on assistants" in down
+    assert "drop policy if exists rls_assistant_versions on assistant_versions" in down
+    # The append-only revoke is undone before the drop.
+    assert "grant update, delete on table assistant_versions" in down
+    assert "alter table chat_sessions drop column assistant_version_id" in down
+    assert "alter table chat_sessions drop column assistant_id" in down
+    assert "drop table assistant_versions" in down
+    assert "drop table assistants" in down
+
 
 def test_audit_index_names_match_model_and_migration() -> None:
     """The migration's index names are exactly those declared on the ORM model.

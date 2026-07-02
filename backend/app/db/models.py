@@ -301,6 +301,7 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     """A conversation thread. Ownership-bearing."""
 
     __tablename__ = "chat_sessions"
+    __table_args__ = (Index("ix_chat_sessions_assistant_id", "assistant_id"),)
 
     id: Mapped[uuid.UUID] = _pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(
@@ -311,6 +312,21 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     model: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Optional assistant pin (ADR-0011 §1): a session started from an assistant
+    # records both which assistant and the exact pinned version it ran, so the
+    # transcript is reproducible after the assistant is edited/rolled back. Both
+    # NULL for ad-hoc chat (the default, unchanged path). SET NULL on delete so a
+    # deleted assistant/version does not cascade-delete the conversation.
+    assistant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    assistant_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistant_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
@@ -749,3 +765,114 @@ class ToolInvocation(TenantScopedMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class Assistant(TenantScopedMixin, TimestampMixin, Base):
+    """A saved, named, governed chat configuration — the mutable head (ADR-0011 §1, #211).
+
+    Tenant- and owner-scoped (INV-1/INV-2): a caller sees only their own (or
+    granted) assistants. An assistant is **not** a new engine — it is a saved
+    version of the three inputs the chat runtime already consumes (``instructions``
+    → system prompt, ``tool_allowlist`` → the CC-A allowed-tool set,
+    ``knowledge_scope`` → the retrieval filter) plus a ``model`` default, an
+    accountable ``owner_id`` + a ``backup_owner_id`` (required before publish, §4),
+    an ``autonomy_level``, and a lifecycle ``status``.
+
+    ``owner_id``/``backup_owner_id`` use ``ON DELETE SET NULL`` (not CASCADE) so
+    deprovisioning a user leaves the row for admin reassignment rather than
+    silently deleting a governed config (ADR-0011 §4 — orphan handling). The two
+    enum domains are ``CheckConstraint``-pinned so a bad value can never be stored.
+    Tenant-scoped like every table (INV-1); the ``0016`` migration puts it under
+    the RLS backstop.
+    """
+
+    __tablename__ = "assistants"
+    __table_args__ = (
+        Index("ix_assistants_tenant_owner", "tenant_id", "owner_id"),
+        CheckConstraint(
+            "autonomy_level in ('suggest', 'draft', 'act_with_approval', 'act_auto')",
+            name="ck_assistants_autonomy_level",
+        ),
+        CheckConstraint(
+            "status in ('draft', 'published', 'disabled')",
+            name="ck_assistants_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    backup_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL ⇒ the smart server default resolved fail-closed at run time.
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The narrowing retrieval filter {collection_ids, source_ids, modes}.
+    knowledge_scope: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    # The CC-A allowed-tool set (string[]). [] ⇒ the ad-hoc default set.
+    tool_allowlist: Mapped[list[object]] = mapped_column(_JSON, nullable=False, default=list)
+    autonomy_level: Mapped[str] = mapped_column(String(20), nullable=False, default="suggest")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+
+    versions: Mapped[list[AssistantVersion]] = relationship(
+        back_populates="assistant", cascade="all, delete-orphan"
+    )
+
+
+class AssistantVersion(TenantScopedMixin, Base):
+    """An immutable published snapshot — the ``assistant_versions`` row (ADR-0011 §1, #211).
+
+    No ``TimestampMixin``/``updated_at``: a published version is **write-once**
+    (append-only) — the app DB role is granted no UPDATE/DELETE on it (the ``0016``
+    migration revokes them), the same posture as ``audit_events``. A session/run
+    pins the exact ``id`` it ran, so editing or rolling back an assistant never
+    rewrites what a past transcript ran on. ``config`` is the full frozen assistant
+    definition; ``version`` is monotonic per assistant (``UNIQUE`` within it). A
+    rollback appends a **new** version copying a prior ``config`` — never mutates
+    history. Tenant-scoped (INV-1); the ``0016`` migration also puts it under the
+    RLS backstop.
+    """
+
+    __tablename__ = "assistant_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "assistant_id",
+            "version",
+            name="uq_assistant_versions_assistant_version",
+        ),
+        Index("ix_assistant_versions_tenant_assistant", "tenant_id", "assistant_id"),
+        CheckConstraint("version >= 1", name="ck_assistant_versions_version_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    assistant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Who published (or rolled back to create) this version. SET NULL so removing
+    # that user does not cascade-delete the immutable snapshot.
+    author_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    config: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    assistant: Mapped[Assistant] = relationship(back_populates="versions")
