@@ -46,6 +46,15 @@ export { listMembers, getModelGovernance, getRiskTiers } from './admin';
 // public one is already re-exported above, so we expose only the functions here.
 export { listSources, createSource, syncSource, deleteSource } from './sources';
 export {
+  listAssistants,
+  createAssistant,
+  getAssistant,
+  updateAssistant,
+  deleteAssistant,
+  publishAssistant,
+} from './assistants';
+export type { AssistantPageQuery } from './assistants';
+export {
   getAccessToken,
   hasAccessToken,
   setAccessToken,
