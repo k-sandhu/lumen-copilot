@@ -64,6 +64,15 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "secret.created",
         "secret.accessed",
         "secret.deleted",
+        # Agent/run-produced artifacts (issue #208, CC-12) — additive; every
+        # create/download/delete of a produced file is audited (a T1 action).
+        "artifact.created",
+        "artifact.downloaded",
+        "artifact.deleted",
+        # Governed tool platform (CC-7 / issue #207) — additive; every tool
+        # invocation emits both the intent and the outcome (INV-6).
+        "tool.invoked",
+        "tool.result",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",

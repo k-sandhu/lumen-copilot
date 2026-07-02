@@ -7,9 +7,11 @@ application change.
 
 Public surface (issue #22): ``ObjectStore`` exposes ``put``/``get``/``delete``/
 ``presign_put``/``presign_get`` over tenant-prefixed, content-addressed keys with
-content-type + size validation; ``StoredObject`` is the returned descriptor.
-Retention/lifecycle, DLP, KMS/SSE, and the parsing sandbox are fenced OUT to
-OD-4 / CC-5 #21.
+content-type + size validation; ``StoredObject`` is the returned descriptor. It
+also exposes the parallel ``put_artifact``/``get_artifact``/``delete_artifact``/
+``presign_get_artifact`` lifecycle for agent/run-produced artifacts (issue #208)
+under an ``artifacts/`` key namespace with the broader artifact allowlist. DLP,
+KMS/SSE, and the parsing sandbox are fenced OUT to OD-4 / CC-5 #21.
 """
 
 from app.storage.object_store import ObjectStore, StoredObject

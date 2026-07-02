@@ -29,6 +29,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -39,6 +40,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
@@ -504,6 +506,81 @@ class AuditEvent(TenantScopedMixin, Base):
     )
 
 
+class Artifact(TenantScopedMixin, Base):
+    """A file an agent/run produced — tenant/owner-scoped, immutable (issue #208).
+
+    Distinct from the user-uploaded ``documents`` table: this is where the
+    file-writing tool and the code sandbox persist their output (CC-12). Mirrors
+    the ``documents`` tenant/owner + storage-key pattern, but is **immutable** —
+    no ``updated_at`` (a new version is a new row), and no ``status`` (the bytes
+    exist the moment the row does). ``produced_by`` (chat_session|run|tool) is the
+    write origin; the three nullable link ids let the artifact point back at the
+    producing session/run/tool invocation.
+
+    Only ``session_id`` is a real FK (``chat_sessions`` exists and is tenant-scoped
+    + CASCADE like the other links). ``run_id`` and ``tool_invocation_id`` are
+    plain nullable UUID columns rather than FKs because their referent tables (the
+    run/agent framework, CC-A) do not exist yet — mirroring how ``grants`` keeps
+    ``resource_id``/``principal_id`` FK-less because the referent varies; the
+    service validates linkage. They become FKs when those tables land.
+
+    Tenant-scoped (INV-1) with the same ``0007``-style RLS backstop applied in the
+    ``0013`` migration. ``retention_expires_at`` (nullable ⇒ keep) is the janitor
+    purge boundary; ``ix_artifacts_retention`` serves the sweep.
+    """
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        Index("ix_artifacts_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_artifacts_session_id", "session_id"),
+        # The retention janitor's sweep predicate: rows whose retention has
+        # elapsed. Partial index (retention_expires_at IS NOT NULL) on Postgres so
+        # the common "keep forever" rows (NULL) do not bloat it; a plain index
+        # elsewhere (SQLite test runs ignore the WHERE clause harmlessly).
+        Index(
+            "ix_artifacts_retention",
+            "retention_expires_at",
+            postgresql_where=text("retention_expires_at IS NOT NULL"),
+        ),
+        CheckConstraint("size_bytes >= 0", name="ck_artifacts_size_nonneg"),
+        CheckConstraint(
+            "produced_by in ('chat_session', 'run', 'tool')",
+            name="ck_artifacts_produced_by",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    produced_by: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Optional back-links to the producing context. Only session_id is an FK (its
+    # table exists); run_id / tool_invocation_id are plain UUIDs until CC-A lands.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    tool_invocation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The object-store key (tenant-prefixed, content-addressed; app.storage.keys),
+    # under the ``artifacts/`` prefix.
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    retention_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Grant(TenantScopedMixin, Base):
     """An explicit access grant — the sharing seam behind INV-2 (spec 0004 §2.2).
 
@@ -616,4 +693,59 @@ class Secret(TenantScopedMixin, TimestampMixin, Base):
         Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+
+
+class ToolInvocation(TenantScopedMixin, Base):
+    """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
+
+    No ``TimestampMixin``/``updated_at``: an invocation record is written once and
+    never re-described — so only ``created_at`` is kept (like ``audit_events`` and
+    ``grants``). One row **per invocation**, whatever the outcome: a success, an
+    off-allow-list/unapproved **denial**, or a tool **failure** are all recorded
+    (``ok`` + ``error``), so the trace has no silent gap. This feeds the WS trace
+    now and AgentOps analytics later (E14) — it is not itself the append-only audit
+    log (that stays ``audit_events``), so it is an ordinary tenant-scoped table
+    (the app role may write it; it is not UPDATE/DELETE-revoked).
+
+    ``args_hash`` is a stable, non-reversible hash of the call args (never the raw
+    args — the same discipline as the audit query hash, spec 0004 §2.4). ``run_id``
+    is reserved for a future multi-step agent-run grouping (nullable, MVP unused).
+    Tenant-leading indexes serve the two reads: by session (the trace for a chat)
+    and by (tenant, tool) (per-tool analytics). RLS: put under the same fail-closed
+    ``app.tenant_id`` backstop as every tenant-scoped table (the migration).
+    """
+
+    __tablename__ = "tool_invocations"
+    __table_args__ = (
+        Index("ix_tool_invocations_tenant_session", "tenant_id", "session_id"),
+        Index("ix_tool_invocations_tenant_tool", "tenant_id", "tool_name"),
+        CheckConstraint("duration_ms >= 0", name="ck_tool_invocations_duration_nonneg"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The chat session the call ran in (nullable: an ad-hoc/non-session invocation
+    # path may not carry one). SET NULL so deleting a session keeps the trace rows.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The assistant message the call contributed to (nullable, same rationale).
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Reserved for a future multi-step agent-run grouping (E14); no FK yet.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    args_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The ``ERROR_*`` code when ``ok`` is False (governance denial or failure);
+    # null on success.
+    error: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

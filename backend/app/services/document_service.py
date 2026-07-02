@@ -336,6 +336,26 @@ class DocumentService:
 
         event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
 
+    def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
+        """Schedule a search-index sync to fire after the request commits.
+
+        The deletion twin of :meth:`_enqueue_ingestion_after_commit` (same
+        one-shot ``after_commit`` listener, same single enqueue seam in
+        ``tasks/``): the ``lumen.sync_document_index`` worker reads the
+        committed (deleted) state and removes the document's chunk docs from
+        the engine (ADR-0010 §5) — and never fires on rollback.
+        """
+        from sqlalchemy import event
+
+        import app.tasks as tasks
+
+        tenant_id = self._tenant_id
+
+        def _on_commit(_session: object) -> None:
+            tasks.enqueue_index_sync(tenant_id, document_id)
+
+        event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
+
     async def list_page(
         self,
         *,
@@ -450,6 +470,11 @@ class DocumentService:
         deleted = await self._documents.delete(document_id)
         if not deleted:  # pragma: no cover — visibility already established
             return False
+        # Clear the document's chunk docs from the search index (ADR-0010 §5):
+        # enqueued after-commit so the worker reads the already-deleted state and
+        # the index never resurrects a rolled-back delete. Best-effort — the
+        # index is derived; the reindex command repairs a missed sync.
+        self._enqueue_index_sync_after_commit(document.id)
         await self._audit.emit(
             action=AuditAction.DOCUMENT_DELETED,
             actor=AuditActor.user(self._owner_id),

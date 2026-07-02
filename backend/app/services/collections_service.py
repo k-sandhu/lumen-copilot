@@ -132,6 +132,8 @@ class CollectionsService:
         request_id: str,
         source_ip: str,
     ) -> None:
+        self._session = session
+        self._tenant_id = tenant_id
         self._repo = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
         self._owner_id = owner_id
@@ -268,4 +270,27 @@ class CollectionsService:
                 source_ip=self._source_ip,
                 metadata={"collection_id": str(collection_id), "filename": doc.filename},
             )
+            # Clear each cascaded document's chunk docs from the search index
+            # (ADR-0010 §5) — after-commit, so a rollback never leaves the index
+            # ahead of Postgres. Best-effort; the reindex command repairs gaps.
+            self._enqueue_index_sync_after_commit(doc.id)
         return True
+
+    def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
+        """Schedule a search-index sync to fire after the request commits.
+
+        Mirrors ``DocumentService._enqueue_index_sync_after_commit``: a one-shot
+        SQLAlchemy ``after_commit`` listener per cascaded document, going through
+        ``tasks.enqueue_index_sync`` — the single enqueue point (ADR-0004),
+        resolved at call time so a test can monkeypatch it.
+        """
+        from sqlalchemy import event
+
+        import app.tasks as tasks
+
+        tenant_id = self._tenant_id
+
+        def _on_commit(_session: object) -> None:
+            tasks.enqueue_index_sync(tenant_id, document_id)
+
+        event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)

@@ -84,6 +84,30 @@ def build_key(tenant_id: str, data: bytes, filename: str) -> str:
     return f"{validate_tenant_id(tenant_id)}/{sha256_hex(data)}/{safe_filename(filename)}"
 
 
+# Namespace prefix for agent/run-produced artifacts (issue #208), kept distinct
+# from uploaded documents so the two never share a key even for identical bytes,
+# and so a bucket lifecycle rule / listing can target artifacts alone. The
+# ``assert_key_owned_by`` tenant-prefix seam is applied to the *tenant segment*,
+# which sits **after** this constant prefix — see :func:`assert_artifact_key_owned_by`.
+_ARTIFACT_PREFIX = "artifacts"
+
+
+def build_artifact_key(tenant_id: str, data: bytes, filename: str) -> str:
+    """Assemble the artifact object key (issue #208, AC-5).
+
+    Shape: ``artifacts/{tenant_id}/{sha256(data)}/{safe_filename}`` — the same
+    tenant-prefixed, content-addressed construction as :func:`build_key`, under
+    the dedicated ``artifacts/`` namespace so agent output never collides with an
+    uploaded document. Reuses :func:`validate_tenant_id` (a forged/traversing
+    tenant id is refused) and :func:`safe_filename` (no path traversal in the
+    final segment).
+    """
+    return (
+        f"{_ARTIFACT_PREFIX}/{validate_tenant_id(tenant_id)}/"
+        f"{sha256_hex(data)}/{safe_filename(filename)}"
+    )
+
+
 def assert_key_owned_by(key: str, tenant_id: str) -> None:
     """Enforce the tenant-prefix isolation seam (AC-5).
 
@@ -97,5 +121,25 @@ def assert_key_owned_by(key: str, tenant_id: str) -> None:
     if not key.startswith(prefix):
         raise ForbiddenError(
             "object key is outside the caller's tenant prefix",
+            code="cross_tenant_denied",
+        )
+
+
+def assert_artifact_key_owned_by(key: str, tenant_id: str) -> None:
+    """Enforce the tenant-prefix isolation seam for an **artifact** key (#208 AC-5).
+
+    Artifact keys live under ``artifacts/{tenant_id}/…`` (:func:`build_artifact_key`),
+    so the tenant segment is the *second* path component, not the first. Raise
+    :class:`ForbiddenError` unless ``key`` starts with ``artifacts/{tenant_id}/``.
+    This blocks a forged cross-tenant artifact key before any read/delete/presign,
+    exactly as :func:`assert_key_owned_by` does for uploads — and it also refuses a
+    key missing the ``artifacts/`` prefix (e.g. an upload key smuggled in), so the
+    two namespaces can never be confused. Refusing with 403 (not 404) is the
+    existence-blind tenant boundary at the adapter.
+    """
+    prefix = f"{_ARTIFACT_PREFIX}/{validate_tenant_id(tenant_id)}/"
+    if not key.startswith(prefix):
+        raise ForbiddenError(
+            "artifact key is outside the caller's tenant prefix",
             code="cross_tenant_denied",
         )

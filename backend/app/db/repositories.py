@@ -33,6 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
 from app.domain.entities import (
+    Artifact,
+    ArtifactProducedBy,
     AuditEvent,
     AuditOutcome,
     Chunk,
@@ -55,6 +57,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    ToolInvocation,
     User,
     UserPreferences,
 )
@@ -141,6 +144,25 @@ def _to_document(row: models.Document) -> Document:
         error=row.error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _to_artifact(row: models.Artifact) -> Artifact:
+    return Artifact(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        produced_by=ArtifactProducedBy(row.produced_by),
+        filename=row.filename,
+        mime_type=row.mime_type,
+        size_bytes=row.size_bytes,
+        storage_key=row.storage_key,
+        sha256=row.sha256,
+        session_id=row.session_id,
+        run_id=row.run_id,
+        tool_invocation_id=row.tool_invocation_id,
+        retention_expires_at=row.retention_expires_at,
+        created_at=row.created_at,
     )
 
 
@@ -272,6 +294,22 @@ def _to_audit_event(row: models.AuditEvent) -> AuditEvent:
     )
 
 
+def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
+    return ToolInvocation(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        session_id=row.session_id,
+        message_id=row.message_id,
+        run_id=row.run_id,
+        tool_name=row.tool_name,
+        args_hash=row.args_hash,
+        ok=row.ok,
+        error=row.error,
+        duration_ms=row.duration_ms,
+        created_at=row.created_at,
+    )
+
+
 class _TenantScopedRepository:
     """Base for repositories bound to one tenant.
 
@@ -309,6 +347,19 @@ class TenantRepository:
     async def get(self, tenant_id: UUID) -> Tenant | None:
         row = await self._session.get(models.Tenant, tenant_id)
         return _to_tenant(row) if row is not None else None
+
+    async def list_all(self) -> list[Tenant]:
+        """Every tenant in stable order — for operator sweeps only.
+
+        Powers cross-tenant maintenance like the search reindex backfill
+        (ADR-0010 §5, ``python -m app.search.reindex``); never a request path
+        (requests are always tenant-scoped).
+        """
+        stmt = select(models.Tenant).order_by(
+            models.Tenant.created_at.asc(), models.Tenant.id.asc()
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_tenant(r) for r in rows]
 
     async def update(self, tenant_id: UUID, *, max_tool_turns: int | None) -> Tenant | None:
         """Set the tenant's per-tenant chat tool-turn budget override (issue #148).
@@ -846,6 +897,21 @@ class DocumentRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_document(row) if row is not None else None
 
+    async def list_ids_page(self, *, after_id: UUID | None, limit: int) -> list[UUID]:
+        """One keyset page of this tenant's document ids, ascending by id.
+
+        The enumeration primitive for cross-corpus sweeps (the search reindex
+        backfill, ADR-0010 §5): tenant-scoped (INV-1), ordered by ``id`` so a
+        re-run resumes deterministically from the last id seen. ``after_id``
+        is exclusive; ``None`` starts from the beginning.
+        """
+        stmt = select(models.Document.id).where(models.Document.tenant_id == self._tenant_id)
+        if after_id is not None:
+            stmt = stmt.where(models.Document.id > after_id)
+        stmt = stmt.order_by(models.Document.id.asc()).limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
+
     async def list_in_collection(self, collection_id: UUID) -> list[Document]:
         stmt = (
             select(models.Document)
@@ -974,6 +1040,156 @@ class DocumentRepository(_TenantScopedRepository):
         # reload so the mapper reads the new value without a lazy emit.
         await self._session.refresh(row)
         return _to_document(row)
+
+
+class ArtifactRepository(_TenantScopedRepository):
+    """Agent/run-produced artifacts within one tenant (issue #208).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``artifact_id``
+    resolves to ``None``/no rows, so the existence-non-disclosure 404 is enforced
+    one layer up (``services.artifacts_service``) off the ``None`` return.
+    Ownership (deny-by-default, spec 0004 §2.2) is layered in the service.
+    Artifacts are **immutable** — there is deliberately no ``update``/``set_*``
+    method (a new version is a new row). Writes are flushed not committed (the
+    caller owns the transaction boundary).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        produced_by: ArtifactProducedBy,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+        storage_key: str,
+        sha256: str,
+        session_id: UUID | None = None,
+        run_id: UUID | None = None,
+        tool_invocation_id: UUID | None = None,
+        retention_expires_at: datetime | None = None,
+    ) -> Artifact:
+        row = models.Artifact(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            produced_by=produced_by.value,
+            filename=filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            storage_key=storage_key,
+            sha256=sha256,
+            session_id=session_id,
+            run_id=run_id,
+            tool_invocation_id=tool_invocation_id,
+            retention_expires_at=retention_expires_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_artifact(row)
+
+    async def get(self, artifact_id: UUID) -> Artifact | None:
+        stmt = select(models.Artifact).where(
+            models.Artifact.tenant_id == self._tenant_id,
+            models.Artifact.id == artifact_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_artifact(row) if row is not None else None
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        produced_by: ArtifactProducedBy | None = None,
+        session_id: UUID | None = None,
+    ) -> list[Artifact]:
+        """A keyset page of an owner's artifacts (newest first), optionally filtered.
+
+        Owner- *and* tenant-scoped (deny-by-default ownership, spec 0004 §2.2 +
+        INV-1): a caller only ever sees their own artifacts. Ordered by
+        ``(created_at, id)`` **descending** with ``id`` the stable tiebreaker, so
+        the order is deterministic even when two rows share a timestamp.
+        ``after_id`` is the decoded cursor (previous page's last id); rows strictly
+        after it are returned, capped at ``limit``. The optional ``produced_by`` /
+        ``session_id`` narrow the result. The boundary's ``created_at`` is resolved
+        by a correlated scalar subquery so the comparison is exact on Postgres and
+        on the offline SQLite (mirrors the documents keyset).
+        """
+        conditions = [
+            models.Artifact.tenant_id == self._tenant_id,
+            models.Artifact.owner_id == owner_id,
+        ]
+        if produced_by is not None:
+            conditions.append(models.Artifact.produced_by == produced_by.value)
+        if session_id is not None:
+            conditions.append(models.Artifact.session_id == session_id)
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Artifact.created_at)
+                .where(
+                    models.Artifact.tenant_id == self._tenant_id,
+                    models.Artifact.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Artifact.created_at < boundary_created_at,
+                    and_(
+                        models.Artifact.created_at == boundary_created_at,
+                        models.Artifact.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Artifact)
+            .where(*conditions)
+            .order_by(models.Artifact.created_at.desc(), models.Artifact.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_artifact(r) for r in rows]
+
+    async def delete(self, artifact_id: UUID) -> bool:
+        """Delete an artifact **row** (tenant-scoped); returns ``False`` if absent.
+
+        ``False`` when no row matches in this tenant (the service maps that to
+        404). Ownership is enforced one layer up — this only guarantees tenancy.
+        The stored object is removed by the service via the object store; this
+        removes only the ``artifacts`` row.
+        """
+        stmt = select(models.Artifact).where(
+            models.Artifact.tenant_id == self._tenant_id,
+            models.Artifact.id == artifact_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
+    async def list_expired(self, *, now: datetime, limit: int = 100) -> list[Artifact]:
+        """List artifacts whose retention window has elapsed (the janitor sweep, #208).
+
+        Tenant-scoped (INV-1). Returns rows with a non-null ``retention_expires_at``
+        strictly before ``now``, oldest-expiry first, capped at ``limit`` so the
+        janitor purges in bounded batches. Rows with ``retention_expires_at IS
+        NULL`` (keep forever) are never returned. The retention janitor
+        (``app.tasks.artifact_retention``) drives this; it is a stub in this issue.
+        """
+        stmt = (
+            select(models.Artifact)
+            .where(
+                models.Artifact.tenant_id == self._tenant_id,
+                models.Artifact.retention_expires_at.is_not(None),
+                models.Artifact.retention_expires_at < now,
+            )
+            .order_by(models.Artifact.retention_expires_at.asc(), models.Artifact.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_artifact(r) for r in rows]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1966,6 +2182,62 @@ class AuditEventRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_audit_event(r) for r in rows]
+
+
+class ToolInvocationRepository(_TenantScopedRepository):
+    """The ``tool_invocations`` trace within one tenant (CC-7 / issue #207 §4).
+
+    One ``record`` per governed tool invocation — a success, an
+    off-allow-list/unapproved **denial**, or a tool **failure** — so the per-run
+    trace never has a silent gap. Tenant-scoped (INV-1): a call in tenant A is
+    invisible to a tenant-B repository. This is a trace/analytics table, not the
+    append-only audit log (that stays :class:`AuditEventRepository`), so it is an
+    ordinary table (no UPDATE/DELETE revoke). Writes are flushed not committed —
+    the caller (the runner, within the chat runtime's transaction) owns the commit
+    so the invocation row lands atomically with the answer turn it belongs to.
+    """
+
+    async def record(
+        self,
+        *,
+        tool_name: str,
+        args_hash: str,
+        ok: bool,
+        duration_ms: int,
+        session_id: UUID | None = None,
+        message_id: UUID | None = None,
+        run_id: UUID | None = None,
+        error: str | None = None,
+    ) -> ToolInvocation:
+        """Append one tool-invocation record for this tenant, returning it."""
+        row = models.ToolInvocation(
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            run_id=run_id,
+            tool_name=tool_name,
+            args_hash=args_hash,
+            ok=ok,
+            error=error,
+            duration_ms=max(0, duration_ms),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_tool_invocation(row)
+
+    async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[ToolInvocation]:
+        """The tool trace for one chat session (tenant-scoped), oldest first."""
+        stmt = (
+            select(models.ToolInvocation)
+            .where(
+                models.ToolInvocation.tenant_id == self._tenant_id,
+                models.ToolInvocation.session_id == session_id,
+            )
+            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_tool_invocation(r) for r in rows]
 
 
 def normalize_query(query: str) -> str:

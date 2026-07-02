@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.connectors.base import ConnectorError, FetchedDoc
 from app.connectors.registry import UnknownConnectorError, get_connector
 from app.core.config import Settings, get_settings
+from app.core.errors import DependencyError
 from app.db import models
 from app.db.repositories import DocumentRepository, SourceRepository
 from app.db.session import session_scope
@@ -47,6 +48,7 @@ from app.domain.entities import DocumentStatus, SourceStatus, WebSourceMode
 from app.llm import LLMGateway
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
+from app.tasks.index_sync import sync_document_index_async
 from app.tasks.ingest import ingest_document_async
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 from app.tasks.runner import run_task
@@ -132,6 +134,22 @@ async def sync_source_async(
         prior = await documents.list_for_source(source_id)
         for stale in prior:
             await documents.delete(stale.id)
+
+    # Clear the replaced documents' chunk docs from the search index (ADR-0010
+    # §5) — after the reconcile transaction committed, so the sync reads the
+    # deleted state. Best-effort: the index is derived and repairable (`python
+    # -m app.search.reindex`), and slice 3's hydration re-check drops any stale
+    # hit anyway, so an engine outage must not fail an otherwise-good re-sync.
+    for stale in prior:
+        try:
+            await sync_document_index_async(tenant_id, stale.id, settings=settings)
+        except DependencyError as exc:
+            log.warning(
+                "source_sync.index_cleanup_failed",
+                source_id=str(source_id),
+                document_id=str(stale.id),
+                error=exc.code,
+            )
 
     for index, fetched_doc in enumerate(fetched):
         try:

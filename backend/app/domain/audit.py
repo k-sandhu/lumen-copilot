@@ -69,6 +69,23 @@ class AuditAction(str, enum.Enum):
     SECRET_CREATED = "secret.created"
     SECRET_ACCESSED = "secret.accessed"
     SECRET_DELETED = "secret.deleted"
+    # Agent/run-produced artifacts (issue #208, CC-12). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Writing an artifact is a T1 action (spec 0004 §2.5 — owner-gated,
+    # audited, no extra approval); every create/download/delete emits one event.
+    ARTIFACT_CREATED = "artifact.created"
+    ARTIFACT_DOWNLOADED = "artifact.downloaded"
+    ARTIFACT_DELETED = "artifact.deleted"
+    # Governed tool platform (CC-7 / issue #207). Additive to the §2.4 taxonomy —
+    # deny-by-default is preserved (the set only grows; no action is relaxed).
+    # Every tool invocation emits BOTH: ``tool.invoked`` before the handler runs
+    # (the intent, incl. an off-allow-list/unapproved denial) and ``tool.result``
+    # after (the outcome — ok/error, duration). These are the trace + audit half
+    # of the tool gateway (INV-6); ``retrieval.query`` still records the retrieval
+    # semantics for the three retrieval tools, so a retrieval tool emits both the
+    # generic tool events and the retrieval event.
+    TOOL_INVOKED = "tool.invoked"
+    TOOL_RESULT = "tool.result"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"

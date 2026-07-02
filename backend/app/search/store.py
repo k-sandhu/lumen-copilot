@@ -49,10 +49,21 @@ log = get_logger(__name__)
 # Bulk NDJSON content type (the _bulk endpoint rejects application/json).
 _NDJSON = "application/x-ndjson"
 
+# Chunks per _bulk request (#258). Bounds the request body no matter how large a
+# document is — 1024-dim vectors make each chunk ~20KB of NDJSON, so an
+# unbatched 40+-chunk document blew past the request timeout deterministically.
+_BULK_BATCH_SIZE = 32
+
 
 @dataclass(frozen=True, slots=True)
 class IndexedChunk:
-    """One chunk document to (re)index — the citation unit (ADR-0010 §5)."""
+    """One chunk document to (re)index — the citation unit (ADR-0010 §5).
+
+    ``embedding`` is optional: a chunk whose vector is still pending (or was
+    ingested before embeddings existed) indexes WITHOUT the ``knn_vector`` field
+    — it stays lexically searchable via BM25 and simply never matches the kNN
+    leg, rather than being invisible or blocking the write.
+    """
 
     chunk_id: UUID
     tenant_id: UUID
@@ -61,7 +72,7 @@ class IndexedChunk:
     collection_id: UUID
     ord: int
     text: str
-    embedding: tuple[float, ...]
+    embedding: tuple[float, ...] | None
     char_start: int
     char_end: int
 
@@ -195,6 +206,9 @@ class OpenSearchStore:
         self._index = index
         self._pipeline = f"{index}-hybrid"
         self._dimensions = dimensions
+        # Instance-level "schema is in place" latch so hot paths can call
+        # ensure_index() unconditionally without paying HEAD+PUT per call.
+        self._ensured = False
         auth = (username, password) if username else None
         self._client = client or httpx.AsyncClient(
             base_url=base_url,
@@ -277,9 +291,18 @@ class OpenSearchStore:
 
         A concurrent-create race (two workers booting) surfaces as the engine's
         ``resource_already_exists`` 400 — treated as success, matching the
-        "safe on every boot" contract.
+        "safe on every boot" contract. Latched per instance after the first
+        success so callers on a hot path may invoke it unconditionally.
         """
-        head = await self._client.request("HEAD", f"/{self._index}")
+        if self._ensured:
+            return
+        try:
+            head = await self._client.request("HEAD", f"/{self._index}")
+        except httpx.HTTPError as exc:
+            log.warning("opensearch.unreachable", method="HEAD", error=type(exc).__name__)
+            raise DependencyError(
+                "The search engine is unreachable.", code="search_unavailable"
+            ) from exc
         if head.status_code == 404:
             await self._request(
                 "PUT",
@@ -296,6 +319,7 @@ class OpenSearchStore:
         await self._request(
             "PUT", f"/_search/pipeline/{self._pipeline}", json_body=_pipeline_body()
         )
+        self._ensured = True
 
     async def health(self) -> bool:
         """True iff the cluster answers its health endpoint (readiness probe)."""
@@ -315,7 +339,19 @@ class OpenSearchStore:
         refresh cadence alone. A partial bulk failure fails the call (the
         ingestion task retries as a unit; the index must never silently hold a
         subset).
+
+        The write is issued in bounded sub-batches of ``_BULK_BATCH_SIZE``
+        chunks (#258): each chunk carries a ~20KB embedding, so one request per
+        *document* grows unboundedly with document size and a chunk-heavy
+        document deterministically outlives the request timeout. Batches run
+        sequentially in order; the first failing batch fails the whole call
+        (the caller's retry re-runs the idempotent sync, converging).
         """
+        for start in range(0, len(chunks), _BULK_BATCH_SIZE):
+            await self._bulk_batch(chunks[start : start + _BULK_BATCH_SIZE], refresh=refresh)
+
+    async def _bulk_batch(self, chunks: Sequence[IndexedChunk], *, refresh: bool) -> None:
+        """Issue one bounded ``_bulk`` request for ``chunks`` (fail closed)."""
         if not chunks:
             return
         lines: list[str] = []
@@ -331,22 +367,22 @@ class OpenSearchStore:
                     }
                 )
             )
-            lines.append(
-                json.dumps(
-                    {
-                        "chunk_id": str(chunk.chunk_id),
-                        "tenant_id": str(chunk.tenant_id),
-                        "document_id": str(chunk.document_id),
-                        "owner_id": str(chunk.owner_id),
-                        "collection_id": str(chunk.collection_id),
-                        "ord": chunk.ord,
-                        "text": chunk.text,
-                        "embedding": list(chunk.embedding),
-                        "char_start": chunk.char_start,
-                        "char_end": chunk.char_end,
-                    }
-                )
-            )
+            doc: dict[str, Any] = {
+                "chunk_id": str(chunk.chunk_id),
+                "tenant_id": str(chunk.tenant_id),
+                "document_id": str(chunk.document_id),
+                "owner_id": str(chunk.owner_id),
+                "collection_id": str(chunk.collection_id),
+                "ord": chunk.ord,
+                "text": chunk.text,
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+            }
+            # A pending-embedding chunk indexes without the knn_vector field —
+            # BM25-searchable now, kNN-matchable once re-synced with a vector.
+            if chunk.embedding is not None:
+                doc["embedding"] = list(chunk.embedding)
+            lines.append(json.dumps(doc))
         body = ("\n".join(lines) + "\n").encode("utf-8")
         result = await self._request(
             "POST",

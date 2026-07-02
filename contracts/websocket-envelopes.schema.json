@@ -133,14 +133,13 @@
     "ChatToolCall": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=tool_call — the agent invoked a retrieval tool (CC-6 #24). Surfaced so the UI can show 'searching…'. Permission-filtered inside retrieval/ (INV-2).",
+      "description": "`event.data` for name=tool_call — the agent invoked a governed tool (CC-6 #24 / CC-7 #207). Surfaced so the UI can show 'searching…'. Every call is permission-filtered + allow-list-checked + audited via the tool registry (INV-2/INV-6).",
       "required": ["callId", "tool", "args"],
       "properties": {
         "callId": { "type": "string" },
         "tool": {
           "type": "string",
-          "description": "search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; get_document = fetch a permitted document's text.",
-          "enum": ["search_text", "search_documents", "get_document"]
+          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended). MVP tools: search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; get_document = fetch a permitted document's text."
         },
         "args": { "type": "object", "description": "Tool arguments (shape per tool)." }
       }
@@ -148,13 +147,18 @@
     "ChatToolResult": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=tool_result — outcome of a tool_call.",
+      "description": "`event.data` for name=tool_result — outcome of a tool_call (CC-7 #207). A denied (off-allow-list / unapproved) or failing tool is reported as ok=false with a typed error, never a crashed stream.",
       "required": ["callId", "tool", "hitCount"],
       "properties": {
         "callId": { "type": "string" },
-        "tool": { "type": "string", "enum": ["search_text", "search_documents", "get_document"] },
+        "tool": {
+          "type": "string",
+          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended)."
+        },
         "hitCount": { "type": "integer", "minimum": 0 },
-        "summary": { "type": "string", "description": "Optional human-readable result summary." }
+        "summary": { "type": "string", "description": "Optional human-readable result summary." },
+        "ok": { "type": "boolean", "description": "Whether the tool succeeded. Absent ⇒ treat as ok (back-compat). Additive (CC-7 #207)." },
+        "error": { "type": "string", "description": "Typed error code when ok=false (e.g. tool_not_permitted, approval_denied, tool_error, tool_timeout). Additive (CC-7 #207)." }
       }
     },
     "ChatDoneData": {

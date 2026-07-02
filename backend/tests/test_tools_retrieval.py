@@ -1,13 +1,14 @@
-"""Chat retrieval-tool tests — dispatch + the INV-2 permission filter (CC-6 #24).
+"""Retrieval tools behind the governed registry — dispatch + INV-2 filter (CC-7 #207).
 
-The tools (``search_text`` / ``search_documents`` / ``get_document``) are the
-model-callable bridge to ``retrieval/``. These offline (in-memory SQLite) tests
-assert the dispatch (a model ``ToolCall`` → the right retrieval method, args
-mapped) and — the headline — that the permission filter rides through: a tool
-call as user A never returns user B's data (same tenant) nor another tenant's
-(INV-2 / CC-11 AC-4). The semantic ``search_text`` path needs pgvector (live
-only), so the permission assertions here use the relational tools, which run on
-SQLite and exercise the same allow-set chokepoint.
+The three retrieval tools (``search_text`` / ``search_documents`` / ``get_document``)
+migrated onto the tool registry (issue #207 AC-1): these offline (in-memory SQLite)
+tests assert the handlers still map a model's args onto the right permission-filtered
+``retrieval/`` method and render the reply — and the headline INV-2 regression, that
+a tool call as user A never returns user B's data (same tenant) nor another tenant's.
+The semantic ``search_text`` path needs pgvector (live only), so the permission
+assertions here use the relational tools, which run on SQLite and exercise the same
+allow-set chokepoint. Registry discovery + governance metadata are asserted too, so
+"adding a tool is a new file in impls/" (AC-1) has a mechanism.
 """
 
 from __future__ import annotations
@@ -30,9 +31,11 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import DocumentStatus, Role
-from app.domain.llm import Embedding, ToolCall
+from app.domain.llm import Embedding
+from app.domain.tools import ERROR_BAD_ARGS, RiskTier
 from app.retrieval import RetrievalService
-from app.services.chat_tools import TOOL_SPECS, run_tool
+from app.services.tools.registry import default_allowlist, get_tool, registered_names, tool_specs
+from app.services.tools.types import ToolContext
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -136,16 +139,44 @@ async def _doc(
     return doc.id
 
 
-def _service(session: AsyncSession) -> RetrievalService:
-    return RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+def _ctx(session: AsyncSession, principal: Principal) -> ToolContext:
+    service = RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+    return ToolContext(principal=principal, retrieval=service, collection_ids=None, default_k=6)
 
 
-# --- Tool spec sanity -------------------------------------------------------
+async def _call(session: AsyncSession, principal: Principal, name: str, args: dict[str, object]):
+    """Invoke a registered tool's handler directly (unit-level, no runner)."""
+    handler = get_tool(name).handler
+    return await handler(dict(args), _ctx(session, principal))
 
 
-def test_tool_specs_match_ws_vocabulary() -> None:
-    names = {spec.name for spec in TOOL_SPECS}
+# --- Registry discovery + governance metadata (AC-1) ------------------------
+
+
+def test_registry_discovers_the_three_retrieval_tools() -> None:
+    assert {"search_text", "search_documents", "get_document"} <= registered_names()
+
+
+def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
+    for name in ("search_text", "search_documents", "get_document"):
+        defn = get_tool(name)
+        assert defn.risk_tier is RiskTier.T0
+        assert defn.read_only is True
+        assert defn.requires_approval is False
+
+
+def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
+    # Ad-hoc chat's default allow-list = the three read-only retrieval tools.
+    assert default_allowlist() == frozenset({"search_text", "search_documents", "get_document"})
+
+
+def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
+    specs = tool_specs(default_allowlist())
+    names = {s.name for s in specs}
     assert names == {"search_text", "search_documents", "get_document"}
+    # Each spec carries the JSON-Schema parameters the model fills in.
+    by_name = {s.name: s for s in specs}
+    assert by_name["search_text"].parameters["required"] == ["query"]
 
 
 # --- search_documents -------------------------------------------------------
@@ -155,32 +186,31 @@ async def test_search_documents_returns_only_callers_docs(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
     session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c1", name="search_documents", arguments={"name_or_query": "txt"}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "search_documents",
+        {"name_or_query": "txt"},
     )
     # Alice sees only her own doc — never Bob's (same tenant) or Carol's (other).
-    assert world.alice_doc in outcome.document_ids
-    assert world.bob_doc not in outcome.document_ids
-    assert world.carol_doc not in outcome.document_ids
-    assert outcome.hit_count == 1
+    assert world.alice_doc in result.document_ids
+    assert world.bob_doc not in result.document_ids
+    assert world.carol_doc not in result.document_ids
+    assert result.hit_count == 1
 
 
 async def test_search_documents_blank_query_returns_nothing(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
     session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="search_documents", arguments={"name_or_query": "  "}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "search_documents",
+        {"name_or_query": "  "},
     )
-    assert outcome.hit_count == 0
+    assert result.hit_count == 0
+    assert result.ok is True
 
 
 # --- get_document (INV-2 existence non-disclosure) --------------------------
@@ -190,15 +220,14 @@ async def test_get_document_returns_own_document(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
     session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.alice_doc)}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(world.alice_doc)},
     )
-    assert outcome.hit_count == 1
-    assert "Alice tax notes" in outcome.content
+    assert result.hit_count == 1
+    assert "Alice tax notes" in result.content
 
 
 async def test_get_document_other_owner_same_tenant_is_not_found(
@@ -206,59 +235,41 @@ async def test_get_document_other_owner_same_tenant_is_not_found(
 ) -> None:
     session, world = session_and_world
     # Alice asks for Bob's document (same tenant) — must be "not found" (INV-2).
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.bob_doc)}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(world.bob_doc)},
     )
-    assert outcome.hit_count == 0
-    assert "not found" in outcome.content.lower()
+    assert result.hit_count == 0
+    assert "not found" in result.content.lower()
 
 
 async def test_get_document_cross_tenant_is_not_found(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
     session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="get_document", arguments={"document_id": str(world.carol_doc)}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(world.carol_doc)},
     )
-    assert outcome.hit_count == 0
+    assert result.hit_count == 0
 
 
-async def test_get_document_invalid_id_is_handled(
+async def test_get_document_invalid_id_is_a_bad_args_rejection(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
     session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="get_document", arguments={"document_id": "not-a-uuid"}),
-        collection_ids=None,
-        default_k=6,
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "not-a-uuid"},
     )
-    assert outcome.hit_count == 0
-    assert "invalid" in outcome.content.lower()
-
-
-# --- unknown tool -----------------------------------------------------------
-
-
-async def test_unknown_tool_returns_recoverable_outcome(
-    session_and_world: tuple[AsyncSession, _World],
-) -> None:
-    session, world = session_and_world
-    outcome = await run_tool(
-        _service(session),
-        principal=_principal(world.alice, world.tenant_a),
-        call=ToolCall(id="c", name="delete_everything", arguments={}),
-        collection_ids=None,
-        default_k=6,
-    )
-    assert outcome.hit_count == 0
-    assert "Unknown tool" in outcome.content
+    # A malformed id is a tool-specific rejection the runner passes through, not a
+    # crash: the handler returns ok=False with the bad-args code.
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert "invalid" in result.content.lower()

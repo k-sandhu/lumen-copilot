@@ -45,7 +45,7 @@ Reversible (backend/AGENTS.md): ``downgrade`` drops the policy, disables RLS, an
 drops the table, restoring the pre-#209 state. Offline DDL render asserts the
 shape; the live apply runs against a disposable throwaway database (#70 lesson).
 
-Revision ID: 0013_secrets
+Revision ID: 0015_secrets
 Revises: 0012_tenant_max_tool_turns
 Create Date: 2026-07-02 00:00:00+00:00
 """
@@ -58,8 +58,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0013_secrets"
-down_revision: str | None = "0012_tenant_max_tool_turns"
+revision: str = "0015_secrets"
+down_revision: str | None = "0014_artifacts"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Iterable, Sequence
 from importlib import import_module
+from typing import ClassVar
 
 import pytest
 import pytest_asyncio
@@ -102,6 +103,43 @@ class _FakeGateway:
 
     async def embed(self, inputs: Sequence[str], *, model: str | None = None) -> list[Embedding]:
         return [Embedding(vector=[float(len(t) % 5)] * _DIM, model="fake") for t in inputs]
+
+
+class _FakeIndexStore:
+    """Offline stand-in for ``app.search.OpenSearchStore`` in the index-sync core.
+
+    The ingest/re-sync paths dual-write to the search index (ADR-0010 §5); this
+    keeps that write offline and records the ordered (op, document_id) events so
+    the stale-cleanup behaviour is assertable.
+    """
+
+    events: ClassVar[list[tuple[str, uuid.UUID]]] = []
+
+    @classmethod
+    def from_settings(cls, settings: object) -> _FakeIndexStore:
+        return cls()
+
+    async def ensure_index(self) -> None:
+        return None
+
+    async def upsert_chunks(self, chunks: Sequence[object], *, refresh: bool = False) -> None:
+        for chunk in chunks:
+            type(self).events.append(("upsert", chunk.document_id))  # type: ignore[attr-defined]
+
+    async def delete_document(
+        self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
+    ) -> None:
+        type(self).events.append(("delete", document_id))
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _offline_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the index-sync core at the fake store — no engine, tests stay offline."""
+    _FakeIndexStore.events = []
+    monkeypatch.setattr("app.tasks.index_sync.OpenSearchStore", _FakeIndexStore)
 
 
 @pytest_asyncio.fixture
@@ -272,6 +310,8 @@ async def test_resync_replaces_prior_docs(
         [FetchedDoc(title="Old", text=body, url="http://93.184.216.34/old")],
     )
     await _run(tenant_id, source_id)
+    async with db_session.session_scope() as session:
+        [old_doc] = await DocumentRepository(session, tenant_id).list_for_source(source_id)
 
     # Second sync returns a different single doc — must replace, not accumulate.
     _patch_sync(
@@ -286,6 +326,12 @@ async def test_resync_replaces_prior_docs(
         assert docs[0].filename.endswith("New.txt")
         source = await SourceRepository(session, tenant_id).get(source_id)
         assert source is not None and source.indexed_count == 1
+
+    # ADR-0010 §5: the replaced document's chunk docs were cleaned from the
+    # search index — its LAST recorded index event is a delete with no upsert
+    # after it (the stale-cleanup pass runs after the reconcile transaction).
+    old_events = [op for op, doc_id in _FakeIndexStore.events if doc_id == old_doc.id]
+    assert old_events and old_events[-1] == "delete"
 
 
 # --- failure path -----------------------------------------------------------
