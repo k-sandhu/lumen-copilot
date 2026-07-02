@@ -168,6 +168,13 @@ class Settings(BaseSettings):
     s3_access_key: str = Field(alias="S3_ACCESS_KEY")
     s3_secret_key: str = Field(alias="S3_SECRET_KEY")
     s3_bucket: str = Field(alias="S3_BUCKET")
+    # Browser-reachable base URL used ONLY for minting presigned URLs (#241).
+    # SigV4 binds the signature to the Host header, so presigning must happen
+    # against the URL the client will actually fetch — inside compose that
+    # differs from the in-network S3_ENDPOINT_URL (http://minio:9000 internally
+    # vs the published host port from a browser). Unset ⇒ presign against
+    # S3_ENDPOINT_URL (single-network deployments where one URL serves both).
+    s3_public_endpoint_url: str | None = Field(default=None, alias="S3_PUBLIC_ENDPOINT_URL")
 
     # --- Upload sandbox (CC-12 / issue #22) ---
     # TTL for presigned PUT/GET URLs. Short by design: a leaked URL expires fast,
