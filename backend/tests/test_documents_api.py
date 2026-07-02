@@ -35,20 +35,24 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.deps import get_db_session, get_object_store_dep
+from app.api.deps import get_db_session, get_object_store_dep, get_settings_dep
 from app.auth import hash_password
+from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
+    ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import Role
+from app.domain.entities import DocumentStatus, Role
+from app.ingestion.chunking import chunk_text
 from app.main import create_app
+from app.services.document_service import reassemble_chunk_texts
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
 
@@ -995,3 +999,232 @@ async def test_get_malformed_uuid_is_422(client: AsyncClient, seeded: _Seeded) -
     token = await _login(client, seeded.alice_email)
     resp = await client.get("/api/v1/documents/not-a-uuid", headers=_auth(token))
     assert resp.status_code == 422
+
+
+# --- Extracted text: GET /documents/{id}/text (#244) ------------------------
+#
+# The text surface for formats a browser cannot render (DOCX/PPTX/XLSX): the
+# ingestion parser output, reassembled EXACTLY from the stored (overlapping)
+# chunks. Same visibility as /content (INV-1/INV-2 -> 404); a visible document
+# that is not ready yet is a 409 (document_not_ready, INV-8).
+
+
+async def _make_ready_with_chunks(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    source: str,
+    chunk_size: int = 48,
+    overlap: int = 12,
+) -> int:
+    """Chunk ``source`` with the REAL chunker, persist, mark ready; return count."""
+    pieces = chunk_text(source, chunk_size=chunk_size, overlap=overlap)
+    async with sessionmaker() as session:
+        await ChunkRepository(session, tenant_id).replace_for_document(
+            document_id,
+            [
+                ChunkInput(text=p.text, char_start=p.char_start, char_end=p.char_end)
+                for p in pieces
+            ],
+        )
+        updated = await DocumentRepository(session, tenant_id).set_status(
+            document_id, DocumentStatus.READY
+        )
+        assert updated is not None
+        await session.commit()
+    return len(pieces)
+
+
+def test_reassemble_round_trips_the_real_chunker() -> None:
+    # The reassembly must invert chunking EXACTLY, overlap included — this is
+    # the correctness core of /text. Uses the real chunker, no fixtures.
+    source = (
+        "Lumen Copilot answers questions over your documents. "
+        "Each answer is permissioned, cited, and auditable. "
+    ) * 20
+    for chunk_size, overlap in [(40, 0), (48, 12), (64, 32), (500, 100), (10_000, 0)]:
+        pieces = chunk_text(source, chunk_size=chunk_size, overlap=overlap)
+        assert reassemble_chunk_texts(pieces) == source, (chunk_size, overlap)
+
+
+def test_reassemble_empty_is_empty() -> None:
+    assert reassemble_chunk_texts([]) == ""
+
+
+async def test_text_returns_reassembled_source_exactly(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )
+    source = "The quarterly revenue grew fourteen percent over the prior period. " * 12
+    count = await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source=source
+    )
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text"] == source  # exact — overlap must not duplicate
+    assert body["chunk_count"] == count
+    assert body["truncated"] is False
+
+
+async def test_text_404_for_other_users_document(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    # INV-2: same-tenant, different owner -> 404 (existence non-disclosure).
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )
+    await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source="secret text"
+    )
+
+    token = await _login(client, seeded.bob_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert resp.status_code == 404
+
+
+async def test_text_404_for_foreign_tenant(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    # INV-1: another tenant's document -> 404, never 403.
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )
+    await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source="tenant A text"
+    )
+
+    token = await _login(client, seeded.carol_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert resp.status_code == 404
+
+
+async def test_text_409_when_not_ready(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    # INV-8: exists + visible but no text yet -> 409 with a stable code.
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )  # stays status=pending
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "document_not_ready"
+
+
+async def test_text_truncates_at_the_configured_cap(
+    app: FastAPI,
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )
+    source = "abcdefghij" * 10  # 100 chars
+    await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source=source
+    )
+
+    base = get_settings()
+    app.dependency_overrides[get_settings_dep] = lambda: base.model_copy(
+        update={"document_text_max_bytes": 25}
+    )
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["truncated"] is True
+    assert body["text"] == source[:25]  # pure-ASCII source: 25 bytes == 25 chars
+    assert body["chunk_count"] > 0
+
+
+async def test_text_emits_document_viewed_audit(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    doc_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+    )
+    await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source="audited text"
+    )
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert resp.status_code == 200
+
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    assert any(e.action == "document.viewed" and e.resource_id == str(doc_id) for e in events)
+
+
+async def test_text_requires_auth(client: AsyncClient) -> None:
+    resp = await client.get(f"/api/v1/documents/{uuid.uuid4()}/text")
+    assert resp.status_code == 401
