@@ -354,38 +354,45 @@
   border-color: var(--accent-line);
   background: var(--surface);
 }
-/* the whole row is one button (single tab stop); the permission pill is a
-   non-interactive sibling so it stays outside the button. */
-.lc-source-row__btn {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: calc(11px * var(--space));
-  text-align: left;
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  color: inherit;
-}
+/* One card per document (#248): the title block flexes, the passage-number
+   buttons and the permission pill are fixed siblings. */
 .lc-source-row__main {
   display: block;
   min-width: 0;
   flex: 1;
 }
-.lc-source-row__num {
+/* The cited-passage number chips for one document (each opens the inspector). */
+.lc-source-row__passages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(5px * var(--space));
+  flex: none;
+}
+.lc-source-row__num-btn {
   flex: none;
   display: grid;
   place-items: center;
-  width: calc(20px * var(--fs));
-  height: calc(20px * var(--fs));
+  min-width: calc(22px * var(--fs));
+  height: calc(22px * var(--fs));
+  padding: 0 calc(5px * var(--fs));
   border-radius: var(--r-sm);
+  border: 1px solid transparent;
   font-family: var(--ds-font-mono);
   font-size: calc(11px * var(--fs));
   font-weight: 700;
   background: var(--accent-weak);
   color: var(--accent-strong);
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-source-row__num-btn:hover {
+  border-color: var(--accent-line);
+}
+.lc-source-row__num-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .lc-source-row__title {
   display: block;
