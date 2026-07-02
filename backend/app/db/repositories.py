@@ -291,6 +291,19 @@ class TenantRepository:
         row = await self._session.get(models.Tenant, tenant_id)
         return _to_tenant(row) if row is not None else None
 
+    async def list_all(self) -> list[Tenant]:
+        """Every tenant in stable order — for operator sweeps only.
+
+        Powers cross-tenant maintenance like the search reindex backfill
+        (ADR-0010 §5, ``python -m app.search.reindex``); never a request path
+        (requests are always tenant-scoped).
+        """
+        stmt = select(models.Tenant).order_by(
+            models.Tenant.created_at.asc(), models.Tenant.id.asc()
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_tenant(r) for r in rows]
+
     async def update(self, tenant_id: UUID, *, max_tool_turns: int | None) -> Tenant | None:
         """Set the tenant's per-tenant chat tool-turn budget override (issue #148).
 
@@ -826,6 +839,21 @@ class DocumentRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_document(row) if row is not None else None
+
+    async def list_ids_page(self, *, after_id: UUID | None, limit: int) -> list[UUID]:
+        """One keyset page of this tenant's document ids, ascending by id.
+
+        The enumeration primitive for cross-corpus sweeps (the search reindex
+        backfill, ADR-0010 §5): tenant-scoped (INV-1), ordered by ``id`` so a
+        re-run resumes deterministically from the last id seen. ``after_id``
+        is exclusive; ``None`` starts from the beginning.
+        """
+        stmt = select(models.Document.id).where(models.Document.tenant_id == self._tenant_id)
+        if after_id is not None:
+            stmt = stmt.where(models.Document.id > after_id)
+        stmt = stmt.order_by(models.Document.id.asc()).limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
 
     async def list_in_collection(self, collection_id: UUID) -> list[Document]:
         stmt = (

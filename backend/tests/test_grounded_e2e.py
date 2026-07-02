@@ -85,6 +85,39 @@ def _settings() -> Settings:
 # --- Fakes for the network edges (storage + model) --------------------------
 
 
+class _FakeIndexStore:
+    """Offline stand-in for ``app.search.OpenSearchStore`` in the index-sync core.
+
+    Ingestion dual-writes to the search index (ADR-0010 §5); patching the store
+    class keeps this end-to-end offline. Write-path behaviour is asserted in
+    ``test_index_sync.py``; the live engine round-trip in ``test_search_store.py``.
+    """
+
+    @classmethod
+    def from_settings(cls, settings: object) -> _FakeIndexStore:
+        return cls()
+
+    async def ensure_index(self) -> None:
+        return None
+
+    async def upsert_chunks(self, chunks: object, *, refresh: bool = False) -> None:
+        return None
+
+    async def delete_document(
+        self, *, tenant_id: object, document_id: object, refresh: bool = False
+    ) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _offline_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the index-sync core at the fake store — no engine, tests stay offline."""
+    monkeypatch.setattr("app.tasks.index_sync.OpenSearchStore", _FakeIndexStore)
+
+
 class _FakeObjectStore:
     """An in-memory object store keyed by ``(tenant, key)`` — no MinIO needed."""
 

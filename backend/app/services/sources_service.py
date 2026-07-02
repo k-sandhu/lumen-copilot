@@ -359,6 +359,9 @@ class SourcesService:
                     "source_id": str(source_id),
                 },
             )
+            # Clear the removed document's chunk docs from the search index
+            # (ADR-0010 §5) — after-commit, mirroring DocumentService.delete.
+            self._enqueue_index_sync_after_commit(document.id)
 
         # Reclaim the auto-created backing collection only when it held nothing
         # but this source's documents — otherwise the user uploaded their own
@@ -407,6 +410,24 @@ class SourcesService:
 
         def _on_commit(_session: object) -> None:
             tasks.enqueue_source_sync(tenant_id, source_id)
+
+        event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
+
+    def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
+        """Schedule a search-index sync to fire after the request commits.
+
+        The deletion twin of :meth:`_enqueue_sync_after_commit`, one listener per
+        removed document, through ``tasks.enqueue_index_sync`` — the single
+        enqueue point (ADR-0004; ADR-0010 §5). Never fires on rollback.
+        """
+        from sqlalchemy import event
+
+        import app.tasks as tasks
+
+        tenant_id = self._tenant_id
+
+        def _on_commit(_session: object) -> None:
+            tasks.enqueue_index_sync(tenant_id, document_id)
 
         event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
 
