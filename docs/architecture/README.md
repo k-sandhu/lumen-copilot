@@ -19,5 +19,6 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0008](0008-conflict-free-parallel-delivery.md) | Conflict-free parallel delivery (vertical slices, serialized seams, auto-discovery) — extends 0006 | Accepted |
 | [0009](0009-connector-framework-and-web-source.md) | Connector framework + Web URL source (first connector) | Accepted |
 | [0010](0010-dedicated-text-search-engine.md) | Dedicated text-search engine (OpenSearch, single store) behind the retrieval seam | Accepted |
+| [0011](0011-assistant-and-agent-runtime.md) | Assistant & agent-runtime — configured single-agent chat (reuses `chat_runtime`) | Accepted |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.
