@@ -19,6 +19,7 @@ from app.db.repositories import (
     GrantRepository,
     MessageRepository,
     TenantRepository,
+    ToolInvocationRepository,
     UserRepository,
 )
 from app.db.session import (
@@ -41,6 +42,7 @@ __all__ = [
     "GrantRepository",
     "MessageRepository",
     "TenantRepository",
+    "ToolInvocationRepository",
     "UserRepository",
     "bind_bypass",
     "bind_tenant",
