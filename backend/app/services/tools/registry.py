@@ -94,14 +94,17 @@ def default_allowlist() -> frozenset[str]:
 
     The three read-only retrieval tools every ad-hoc chat session gets when no
     assistant/session-specific allow-list is configured (E1 ``tool_allowlist``).
-    Kept as the registered read-only, T0 tools — so a newly added *non*-retrieval
-    tool is NOT silently granted to ad-hoc chat; enabling it is a deliberate
-    allow-list change, preserving deny-by-default.
+    Kept as the registered read-only, T0, **default-offered** tools — so a newly
+    added tool that is off-by-default and admin/assistant-gated (``web_search``,
+    which reaches outside the tenant's corpus and needs an explicit web-mode
+    enable — ADR-0014 §5 / issue #219, marks ``default_offered=False``) is NOT
+    silently granted to ad-hoc chat; enabling it is a deliberate allow-list
+    change, preserving deny-by-default.
     """
     return frozenset(
         name
         for name, defn in _registry().items()
-        if defn.read_only and not defn.requires_approval
+        if defn.read_only and not defn.requires_approval and defn.default_offered
     )
 
 

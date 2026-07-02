@@ -108,6 +108,16 @@ class ToolDefinition:
     ``requires_approval`` (INV-7 — no consequential action without approval). The
     ``timeout_seconds`` bounds a single invocation so a slow tool cannot stall the
     run (issue #207 §7).
+
+    ``default_offered`` governs whether the tool is part of the **ad-hoc chat
+    default allow-list** (``registry.default_allowlist``). It defaults ``True`` so
+    the read-only retrieval tools stay the ad-hoc default; a tool that is
+    **off-by-default and admin/assistant-gated** (e.g. ``web_search`` — reaches
+    outside the tenant's corpus and needs an explicit web-mode enable per ADR-0014
+    §5) sets it ``False``, so a newly added T0 tool is NOT silently granted to
+    every ad-hoc session — enabling it is a deliberate allow-list change
+    (deny-by-default; issue #219). The runner's allow-list is still the hard
+    chokepoint; this only decides what the *default* set offers.
     """
 
     name: str
@@ -118,6 +128,7 @@ class ToolDefinition:
     requires_approval: bool = False
     read_only: bool = True
     timeout_seconds: float = 15.0
+    default_offered: bool = True
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
