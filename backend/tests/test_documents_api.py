@@ -1036,9 +1036,9 @@ async def _make_ready_with_chunks(
     return len(pieces)
 
 
-def test_reassemble_round_trips_the_real_chunker() -> None:
-    # The reassembly must invert chunking EXACTLY, overlap included — this is
-    # the correctness core of /text. Uses the real chunker, no fixtures.
+def test_reassemble_is_lossless_for_non_blank_text() -> None:
+    # For text with no whitespace-only windows, reassembly inverts chunking
+    # EXACTLY (overlap included) — the correctness core of /text. Real chunker.
     source = (
         "Lumen Copilot answers questions over your documents. "
         "Each answer is permissioned, cited, and auditable. "
@@ -1046,6 +1046,22 @@ def test_reassemble_round_trips_the_real_chunker() -> None:
     for chunk_size, overlap in [(40, 0), (48, 12), (64, 32), (500, 100), (10_000, 0)]:
         pieces = chunk_text(source, chunk_size=chunk_size, overlap=overlap)
         assert reassemble_chunk_texts(pieces) == source, (chunk_size, overlap)
+
+
+def test_reassemble_drops_whitespace_only_windows_the_chunker_skips() -> None:
+    # The chunker skips a window whose strip() is empty (chunking.py), so a long
+    # run of blank lines is not in any chunk and reassembly collapses it. Pin
+    # this: reassembly reproduces the NON-BLANK content, not a byte-exact inverse.
+    # (Acceptable for a human-readable text preview; the docstring says so.)
+    source = "First paragraph." + ("\n" * 60) + "Second paragraph."
+    pieces = chunk_text(source, chunk_size=20, overlap=0)
+    reassembled = reassemble_chunk_texts(pieces)
+    assert "First paragraph." in reassembled
+    assert "Second paragraph." in reassembled
+    # The 60-blank-line run (longer than a full window) is collapsed, so the
+    # result is shorter than the source and does not contain the full blank run.
+    assert len(reassembled) < len(source)
+    assert "\n" * 60 not in reassembled
 
 
 def test_reassemble_empty_is_empty() -> None:
