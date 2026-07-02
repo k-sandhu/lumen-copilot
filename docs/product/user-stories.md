@@ -6,11 +6,11 @@ Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
 
 Comprehensive, **product-agnostic** user stories for a knowledge-work-automation product, consolidated from the research in [knowledge-work-automation-research.md](knowledge-work-automation-research.md). Vendor and product names are deliberately **removed here** (they live in the research doc); these stories describe capabilities, not any one competitor. **17 epics** — EPIC 17 was appended 2026-07-02 to cover capabilities the original 16-epic sweep missed (see that epic's header). Stories are the **why** behind Features on the board; the claim unit is the Feature ([spec 0002](../specs/0002-feature-issue-structure.md)).
 
-This document is discovery input. It does **not** decide final product scope, stack, architecture, security invariants, or launch order, and it does **not** close OD-1 in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md).
+This document was discovery input; **OD-1 (product scope) and OD-2 (stack) have since closed** ([0001-open-decisions.md](../specs/0001-open-decisions.md); [spec 0003](../specs/0003-product-scope-and-mission.md), [ADR-0003](../architecture/0003-application-stack.md)). It no longer decides scope or launch order — it is now the **traceability + roadmap** corpus behind the Features on the board (the MVP and committed agents program are carved from it; the rest is the sponsor-gated roadmap).
 
 ## How to read this document
 
-Every story uses: **As a [persona], I want [capability], so that [benefit].** Stories carry an ID (`E<epic>-<n>`) and one or more **AC** (acceptance-criteria) bullets. The format is intentionally aligned with `scripts/stories-to-issues.ps1` so this file can seed one issue per story (`-StoriesFile docs/product/user-stories.md`). Acceptance criteria are implementation-agnostic because the stack is an open decision (OD-2).
+Every story uses: **As a [persona], I want [capability], so that [benefit].** Stories carry an ID (`E<epic>-<n>`) and one or more **AC** (acceptance-criteria) bullets. The format is intentionally aligned with `scripts/stories-to-issues.ps1` so this file can seed stories for a fresh epic (`-StoriesFile docs/product/user-stories.md`) — though the fleet cuts Features by hand, not one-issue-per-story (see [../WORK_TRACKING.md](../WORK_TRACKING.md)). Acceptance criteria are written implementation-agnostic; the stack is now decided ([ADR-0003](../architecture/0003-application-stack.md)) but stories stay stack-neutral so they trace to any Feature that satisfies them.
 
 ## Global acceptance criteria
 
@@ -746,7 +746,7 @@ Stories that turn the product's core adjectives — *permissioned, cited, audita
 
 # Backlog Conversion Notes
 
-When product scope (OD-1) is confirmed, convert these into tracked issues in smaller slices via `scripts/stories-to-issues.ps1 -StoriesFile docs/product/user-stories.md` (dry-run first). Suggested first slices (high value, clear safety boundary):
+Product scope (OD-1) is now closed ([spec 0003](../specs/0003-product-scope-and-mission.md)) and much of the early ladder has shipped (M0–M2 done; M2.5 + M3/M4 active). These original slice suggestions are retained as a historical prioritization record; the live sequencing is the milestone/wave map in [../WORK_TRACKING.md](../WORK_TRACKING.md):
 
 - Context foundation and permission-aware search (Epic 1, E2-1/E2-2).
 - Cited answer experience and feedback loop (E2-2, E2-10).
