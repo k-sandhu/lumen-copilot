@@ -35,6 +35,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -635,6 +636,63 @@ class Grant(TenantScopedMixin, Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Secret(TenantScopedMixin, TimestampMixin, Base):
+    """An encrypted per-tenant credential — the secrets vault row (issue #209).
+
+    The credential seam for MCP registration (E3) and a hosted web-search key
+    (SPIKE-4). Tenant- and owner-scoped, deny-by-default (INV-1/§2.2): only the
+    owner (or a tenant admin) may see or use it, and a cross-tenant id is
+    invisible. **No column ever holds plaintext** — the credential lives only as
+    ``ciphertext`` + ``nonce`` under ``key_version`` (AES-256-GCM envelope
+    encryption, ``app.core.crypto``); ``hint`` is a non-reversing masked tail (e.g.
+    the last four chars) so the UI can show *which* secret without the value.
+
+    ``ciphertext``/``nonce`` are ``LargeBinary`` → ``bytea`` on Postgres, ``BLOB``
+    on the SQLite test engine (portable, like ``db/types``). ``kind`` is a
+    ``CheckConstraint``-pinned enum domain so a bad kind can never be stored. The
+    ``UNIQUE(tenant_id, owner_id, name)`` makes a secret name a per-owner singleton
+    (a stable handle an adapter can look up + the re-store/rotate target).
+    Tenant-scoped like every table (INV-1); the ``0013`` migration also puts it
+    under the RLS backstop and denies the app role nothing extra — reads/writes go
+    through the write-only service, never a router.
+    """
+
+    __tablename__ = "secrets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "owner_id", "name", name="uq_secrets_owner_name"),
+        Index("ix_secrets_tenant_owner", "tenant_id", "owner_id"),
+        CheckConstraint(
+            "kind in ('mcp_auth', 'search_api', 'other')",
+            name="ck_secrets_kind",
+        ),
+        CheckConstraint("key_version >= 1", name="ck_secrets_key_version_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The envelope: encrypted bytes (with GCM's auth tag) + the per-encryption
+    # nonce + the key version that produced it. Never the plaintext (issue #209).
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # A non-reversing masked tail for the UI (e.g. last 4 chars). Not the value.
+    hint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Who created it (owner or a tenant admin); SET NULL so removing that user does
+    # not cascade-delete the secret.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
 

@@ -136,6 +136,19 @@ class Settings(BaseSettings):
         default=14 * 24 * 3600, alias="REFRESH_TOKEN_TTL_SECONDS"
     )
 
+    # --- Secrets vault master key (CC / issue #209, spec 0004 "deny by default") ---
+    # Base64 of a 32-byte (AES-256) master key for the per-tenant secrets vault's
+    # envelope encryption (``app.core.crypto``). A dev default lets the skeleton
+    # boot locally; OUTSIDE ``local`` the app refuses to start unless this is
+    # overridden — the same fail-fast rule as ``JWT_SECRET`` (validator below), so
+    # a deployed vault never encrypts under a publicly-known key. The value is
+    # validated to be base64 of exactly 32 bytes at construction (fail fast) rather
+    # than deep in a store/retrieve call.
+    secrets_encryption_key: str = Field(
+        default="bHVtZW4tbG9jYWwtZGV2LXNlY3JldHMta2V5LTAwMDA=",
+        alias="SECRETS_ENCRYPTION_KEY",
+    )
+
     @field_validator("access_token_ttl_seconds")
     @classmethod
     def _cap_access_ttl(cls, value: int) -> int:
@@ -493,6 +506,9 @@ class Settings(BaseSettings):
         return bool(self.openrouter_api_key.strip())
 
     _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
+    # The base64 dev vault key baked into the ``secrets_encryption_key`` default —
+    # obviously insecure and refused outside ``local`` (mirrors the JWT rule).
+    _DEV_SECRETS_KEY = "bHVtZW4tbG9jYWwtZGV2LXNlY3JldHMta2V5LTAwMDA="
 
     @model_validator(mode="after")
     def _reject_dev_jwt_secret_in_prod(self) -> Settings:
@@ -505,6 +521,44 @@ class Settings(BaseSettings):
         if self.environment != "local" and self.jwt_secret == self._DEV_JWT_SECRET:
             raise ValueError(
                 "JWT_SECRET must be overridden outside the local environment (spec 0004 §2.3)"
+            )
+        return self
+
+    @field_validator("secrets_encryption_key")
+    @classmethod
+    def _secrets_key_is_valid_material(cls, value: str) -> str:
+        """Reject a vault key that is not base64 of exactly 32 bytes (fail fast).
+
+        The secrets vault (issue #209) encrypts with AES-256, which needs a 32-byte
+        key. Validating the shape here means a malformed ``SECRETS_ENCRYPTION_KEY``
+        refuses to boot rather than failing the first store/retrieve — the same
+        fail-fast posture as every other required config value. Delegates to the
+        crypto module's loader so the one definition of "valid key material" is not
+        duplicated.
+        """
+        # Local import avoids a core→core import cycle at module load and keeps the
+        # cipher's key rules the single source of truth for validity.
+        from app.core.crypto import SecretsCryptoError, load_master_key
+
+        try:
+            load_master_key(value)
+        except SecretsCryptoError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
+
+    @model_validator(mode="after")
+    def _reject_dev_secrets_key_in_prod(self) -> Settings:
+        """Fail fast if the insecure dev vault key leaks into a deployed env.
+
+        Mirrors the ``JWT_SECRET`` rule (issue #209 AC-5): the dev default lets the
+        skeleton boot locally, but any non-``local`` environment still carrying it
+        is a misconfiguration that must refuse to start rather than encrypt tenant
+        credentials under a publicly-known key.
+        """
+        if self.environment != "local" and self.secrets_encryption_key == self._DEV_SECRETS_KEY:
+            raise ValueError(
+                "SECRETS_ENCRYPTION_KEY must be overridden outside the local environment "
+                "(issue #209)"
             )
         return self
 

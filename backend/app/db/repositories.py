@@ -52,6 +52,8 @@ from app.domain.entities import (
     RefreshToken,
     Role,
     SavedSearch,
+    Secret,
+    SecretKind,
     Source,
     SourceStatus,
     Tenant,
@@ -256,6 +258,23 @@ def _to_grant(row: models.Grant) -> Grant:
         role=GrantRole(row.role),
         granted_by=row.granted_by,
         created_at=row.created_at,
+    )
+
+
+def _to_secret(row: models.Secret) -> Secret:
+    return Secret(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        name=row.name,
+        kind=SecretKind(row.kind),
+        ciphertext=bytes(row.ciphertext),
+        nonce=bytes(row.nonce),
+        key_version=row.key_version,
+        hint=row.hint,
+        created_by=row.created_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -1985,6 +2004,137 @@ class GrantRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_grant(r) for r in rows]
+
+
+class SecretRepository(_TenantScopedRepository):
+    """Encrypted per-tenant credentials within one tenant (issue #209, INV-1).
+
+    The persistence seam for the secrets vault. Every method is tenant-scoped: a
+    secret stored in tenant A is invisible to a tenant-B repository, so a
+    cross-tenant id resolves to ``None`` (the 404 seam the service enforces).
+    Rows only ever hold **ciphertext + nonce + key_version + hint** — the cipher
+    (``app.core.crypto``) is applied one layer up in
+    :class:`~app.services.secrets_service.SecretsService`, the sole caller. Reads
+    return the full :class:`Secret` (ciphertext included) because the service needs
+    the envelope to decrypt for an in-process adapter; the service never lets that
+    ciphertext (or the plaintext) reach a router. Writes are flushed not committed —
+    the caller owns the transaction boundary (audits atomically with the write).
+    """
+
+    async def get(self, secret_id: UUID) -> Secret | None:
+        """Fetch one secret by id (tenant-scoped), or ``None``.
+
+        Returns the full envelope (ciphertext/nonce/key_version) so the service can
+        decrypt it internally; a foreign-tenant id returns ``None`` (INV-1), which
+        the service maps to 404 (existence non-disclosure).
+        """
+        stmt = select(models.Secret).where(
+            models.Secret.tenant_id == self._tenant_id,
+            models.Secret.id == secret_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_secret(row) if row is not None else None
+
+    async def get_by_owner_name(self, *, owner_id: UUID, name: str) -> Secret | None:
+        """Fetch an owner's secret by its ``name`` handle (tenant-scoped), or ``None``.
+
+        The stable lookup an in-process adapter uses ("the MCP-auth secret named
+        ``…`` for this user"). Scoped to ``(tenant_id, owner_id, name)`` — the
+        per-owner unique key.
+        """
+        stmt = select(models.Secret).where(
+            models.Secret.tenant_id == self._tenant_id,
+            models.Secret.owner_id == owner_id,
+            models.Secret.name == name,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_secret(row) if row is not None else None
+
+    async def upsert(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        kind: SecretKind,
+        ciphertext: bytes,
+        nonce: bytes,
+        key_version: int,
+        hint: str,
+        created_by: UUID | None,
+    ) -> Secret:
+        """Store a secret, replacing an owner's existing one of the same ``name``.
+
+        A secret name is a per-owner singleton (the ``UNIQUE(tenant_id, owner_id,
+        name)``): storing the same name again **rotates the value** in place
+        (new ciphertext/nonce/hint) rather than raising a duplicate-key error, so
+        an adapter's handle stays stable across a credential change. The row is
+        created in this repository's tenant with the given ``owner_id`` (both from
+        the resolved principal, never request input — INV-1).
+        """
+        stmt = select(models.Secret).where(
+            models.Secret.tenant_id == self._tenant_id,
+            models.Secret.owner_id == owner_id,
+            models.Secret.name == name,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            row = models.Secret(
+                tenant_id=self._tenant_id,
+                owner_id=owner_id,
+                name=name,
+                kind=kind.value,
+                ciphertext=ciphertext,
+                nonce=nonce,
+                key_version=key_version,
+                hint=hint,
+                created_by=created_by,
+            )
+            self._session.add(row)
+        else:
+            row.kind = kind.value
+            row.ciphertext = ciphertext
+            row.nonce = nonce
+            row.key_version = key_version
+            row.hint = hint
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_secret(row)
+
+    async def list_for_owner(self, owner_id: UUID) -> list[Secret]:
+        """List an owner's secrets (tenant-scoped), oldest first.
+
+        Returns full rows; the *service* projects them to the plaintext-free
+        :class:`~app.domain.entities.SecretRef` before anything leaves — the
+        repository does not decide the wire shape.
+        """
+        stmt = (
+            select(models.Secret)
+            .where(
+                models.Secret.tenant_id == self._tenant_id,
+                models.Secret.owner_id == owner_id,
+            )
+            .order_by(models.Secret.created_at.asc(), models.Secret.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_secret(r) for r in rows]
+
+    async def delete(self, secret_id: UUID) -> bool:
+        """Delete a secret by id (tenant-scoped); ``True`` if one was removed.
+
+        Idempotent — ``False`` if no such secret exists in this tenant. Ownership
+        is enforced one layer up in the service (owner-or-admin); a foreign-tenant
+        id simply matches nothing here (INV-1).
+        """
+        stmt = select(models.Secret).where(
+            models.Secret.tenant_id == self._tenant_id,
+            models.Secret.id == secret_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
 
 
 class AuditEventRepository(_TenantScopedRepository):
