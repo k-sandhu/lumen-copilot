@@ -56,6 +56,34 @@ services:
       timeout: 5s
       retries: 10
 
+  opensearch:
+    # The single retrieval store (ADR-0010): BM25 lexical + kNN vectors in one
+    # engine, part of the BASE stack (sponsor decision — not an opt-in profile).
+    # Single-node local config: security plugin disabled (HTTP, no TLS/auth —
+    # local dev only), bounded JVM heap so the stack stays laptop-sized.
+    image: opensearchproject/opensearch:2.19.1
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "${OPENSEARCH_PORT:-47186}:9200"
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    healthcheck:
+      # yellow is healthy for a single node before replicas-0 indices exist.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
   backend:
     build:
       context: ./backend
@@ -78,6 +106,9 @@ services:
       redis:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      # The single retrieval store (ADR-0010) is a base-stack boot dependency.
+      opensearch:
         condition: service_healthy
     healthcheck:
       test:
@@ -106,6 +137,9 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      # The worker indexes into the retrieval store (ADR-0010) during ingestion.
+      opensearch:
+        condition: service_healthy
       # Wait for the web service (which runs `alembic upgrade head` on boot) so the
       # worker's identical entrypoint migration is a no-op — never a concurrent upgrade.
       backend:
@@ -130,4 +164,5 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
+  osdata:
   frontend_node_modules:
