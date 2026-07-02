@@ -34,18 +34,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.errors import DependencyError
 from app.db.base import Base
 from app.db.repositories import (
     ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
+    GrantRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import DocumentStatus, Role
+from app.domain.entities import (
+    Chunk,
+    DocumentStatus,
+    GrantPrincipalType,
+    GrantResourceType,
+    GrantRole,
+    Role,
+)
 from app.domain.llm import Embedding
 from app.retrieval import RetrievalService
+from app.search import IndexedChunk, OpenSearchStore, SearchAllowFilter, SearchHit
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -302,13 +312,186 @@ async def test_get_document_missing_id_returns_none(
 async def test_search_text_empty_query_returns_empty(
     session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
-    """A blank query short-circuits before any DB/model call — no passages."""
+    """A blank query short-circuits before any DB/model/engine call — no passages."""
     tenant_a, _ = two_tenants
     user_a, _ = await _seed_user_with_document(
         session, tenant_id=tenant_a, email="a@x.test", filename="a.txt", chunk_texts=["a"]
     )
     svc = RetrievalService(session, gateway=_FakeGateway())
     assert await svc.search_text(principal=_principal(user_a, tenant_a), query="   ", k=5) == []
+
+
+# ---------------------------------------------------------------------------
+# Engine wiring (offline; a fake store stands in for OpenSearch — ADR-0010).
+# ---------------------------------------------------------------------------
+
+
+class _FakeSearchStore:
+    """Records the hybrid query the service issues; scripted hits / failure."""
+
+    def __init__(self, *, hits: list[SearchHit] | None = None, fail: bool = False) -> None:
+        self.hits = hits or []
+        self.fail = fail
+        self.calls: list[dict[str, object]] = []
+
+    async def ensure_index(self) -> None:
+        return None
+
+    async def hybrid_search(
+        self,
+        *,
+        query_text: str,
+        embedding: object,
+        allow: SearchAllowFilter,
+        k: int,
+        collection_ids: list[uuid.UUID] | None = None,
+    ) -> list[SearchHit]:
+        if self.fail:
+            raise DependencyError("engine down", code="search_unavailable")
+        self.calls.append(
+            {"query": query_text, "allow": allow, "k": k, "collection_ids": collection_ids}
+        )
+        return list(self.hits)
+
+
+async def test_search_builds_grant_aware_engine_filter(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """ADR-0010 §4: the engine filter carries tenant + owner + RESOLVED grant id-sets.
+
+    The SQL grant ``EXISTS`` becomes per-request id-sets: a document grant and a
+    collection grant to the caller must both appear in the
+    :class:`SearchAllowFilter` the service hands the engine, and the optional
+    collection narrowing is forwarded alongside (never merged into) it.
+    """
+    tenant_a, _ = two_tenants
+    user_a, _doc_a = await _seed_user_with_document(
+        session, tenant_id=tenant_a, email="a@x.test", filename="a.txt", chunk_texts=["a"]
+    )
+    user_b, doc_b = await _seed_user_with_document(
+        session, tenant_id=tenant_a, email="b@x.test", filename="b.txt", chunk_texts=["b"]
+    )
+    coll_b = (await CollectionRepository(session, tenant_a).create(owner_id=user_b, name="CB")).id
+    grants = GrantRepository(session, tenant_a)
+    await grants.create(
+        resource_type=GrantResourceType.DOCUMENT,
+        resource_id=doc_b,
+        principal_type=GrantPrincipalType.USER,
+        principal_id=user_a,
+        role=GrantRole.VIEWER,
+        granted_by=user_b,
+    )
+    await grants.create(
+        resource_type=GrantResourceType.COLLECTION,
+        resource_id=coll_b,
+        principal_type=GrantPrincipalType.USER,
+        principal_id=user_a,
+        role=GrantRole.VIEWER,
+        granted_by=user_b,
+    )
+    store = _FakeSearchStore()
+    svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
+    narrowing = uuid.uuid4()
+
+    await svc.search(
+        principal=_principal(user_a, tenant_a), query="budget", k=7, collection_ids=[narrowing]
+    )
+
+    [call] = store.calls
+    allow = call["allow"]
+    assert isinstance(allow, SearchAllowFilter)
+    assert allow.tenant_id == tenant_a
+    assert allow.owner_ids == frozenset({user_a})
+    assert allow.granted_document_ids == frozenset({doc_b})
+    assert allow.granted_collection_ids == frozenset({coll_b})
+    assert call["k"] == 7
+    assert call["collection_ids"] == [narrowing]
+
+
+async def test_search_engine_failure_fails_closed(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Single-store (ADR-0010): engine down → DependencyError, never a fallback."""
+    tenant_a, _ = two_tenants
+    user_a, _ = await _seed_user_with_document(
+        session, tenant_id=tenant_a, email="a@x.test", filename="a.txt", chunk_texts=["a"]
+    )
+    svc = RetrievalService(
+        session,
+        gateway=_FakeGateway(),
+        store=_FakeSearchStore(fail=True),  # type: ignore[arg-type]
+    )
+    with pytest.raises(DependencyError):
+        await svc.search(principal=_principal(user_a, tenant_a), query="q", k=5)
+
+
+async def test_search_hydrates_in_engine_order_and_drops_unknown_hits(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Hits hydrate from Postgres in engine ranking order; ghost ids are dropped."""
+    tenant_a, _ = two_tenants
+    user_a = (
+        await UserRepository(session, tenant_a).create(
+            email="a@x.test", password_hash="h", roles=[Role.MEMBER]
+        )
+    ).id
+    coll = (await CollectionRepository(session, tenant_a).create(owner_id=user_a, name="C")).id
+    doc = await DocumentRepository(session, tenant_a).create(
+        owner_id=user_a,
+        collection_id=coll,
+        filename="f.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        storage_key="k",
+        status=DocumentStatus.READY,
+    )
+    chunks = await ChunkRepository(session, tenant_a).replace_for_document(
+        doc.id,
+        [
+            ChunkInput(text="first chunk", char_start=0, char_end=11),
+            ChunkInput(text="second chunk", char_start=11, char_end=23),
+        ],
+    )
+    # Engine ranks chunk 2 first, then a ghost id (deleted after indexing), then chunk 1.
+    store = _FakeSearchStore(
+        hits=[
+            SearchHit(chunk_id=chunks[1].id, document_id=doc.id, score=0.9),
+            SearchHit(chunk_id=uuid.uuid4(), document_id=uuid.uuid4(), score=0.5),
+            SearchHit(chunk_id=chunks[0].id, document_id=doc.id, score=0.4),
+        ]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
+
+    passages = await svc.search(principal=_principal(user_a, tenant_a), query="chunk", k=5)
+
+    assert [p.chunk_id for p in passages] == [chunks[1].id, chunks[0].id]
+    assert [p.text for p in passages] == ["second chunk", "first chunk"]
+    assert [p.score for p in passages] == [0.9, 0.4]
+    assert passages[0].document_name == "f.txt"
+
+
+async def test_search_hydration_recheck_blocks_foreign_engine_hit(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Defense in depth (ADR-0010 §4): a rogue/stale engine hit for another user's
+    chunk is dropped by the SQL permission re-check during hydration — even a
+    compromised index cannot leak a passage past Postgres."""
+    tenant_a, _ = two_tenants
+    user_a, _doc_a = await _seed_user_with_document(
+        session, tenant_id=tenant_a, email="a@x.test", filename="a.txt", chunk_texts=["mine"]
+    )
+    _user_b, doc_b = await _seed_user_with_document(
+        session, tenant_id=tenant_a, email="b@x.test", filename="b.txt", chunk_texts=["secret b"]
+    )
+    b_chunks = await ChunkRepository(session, tenant_a).list_for_document(doc_b)
+    store = _FakeSearchStore(
+        hits=[SearchHit(chunk_id=b_chunks[0].id, document_id=doc_b, score=0.99)]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
+
+    passages = await svc.search(principal=_principal(user_a, tenant_a), query="secret", k=5)
+
+    assert passages == []
 
 
 # ---------------------------------------------------------------------------
@@ -331,11 +514,26 @@ def _pg_reachable(url: str) -> bool:
         return False
 
 
+_OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
+
+
+def _os_reachable(url: str) -> bool:
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection(
+            (parsed.hostname or "localhost", parsed.port or 9200), timeout=1.0
+        ):
+            return True
+    except OSError:
+        return False
+
+
 _live = pytest.mark.skipif(
-    not _pg_reachable(_PG_URL),
+    not (_pg_reachable(_PG_URL) and _os_reachable(_OS_URL)),
     reason=(
-        f"Postgres not reachable for {_PG_URL}; live hybrid-retrieval test skipped "
-        "(offline-safe). The real pgvector + full-text path runs only here."
+        f"Postgres ({_PG_URL}) and OpenSearch ({_OS_URL}) must both be reachable; "
+        "live hybrid-retrieval test skipped (offline-safe). The real engine-backed "
+        "path (ADR-0010) runs only here."
     ),
 )
 
@@ -347,20 +545,47 @@ def _unit_vector(dim: int, hot: int) -> list[float]:
     return v
 
 
+def _to_indexed(
+    chunks: list[Chunk], *, owner_id: uuid.UUID, collection_id: uuid.UUID
+) -> list[IndexedChunk]:
+    """Project persisted Chunk entities into the engine's write shape (test helper)."""
+    return [
+        IndexedChunk(
+            chunk_id=c.id,
+            tenant_id=c.tenant_id,
+            document_id=c.document_id,
+            owner_id=owner_id,
+            collection_id=collection_id,
+            ord=c.ord,
+            text=c.text,
+            embedding=c.embedding,
+            char_start=c.char_start,
+            char_end=c.char_end,
+        )
+        for c in chunks
+    ]
+
+
 @_live
 async def test_live_hybrid_search_is_permission_filtered() -> None:
-    """End-to-end on real Postgres: hybrid fusion AND the INV-2 permission filter.
+    """End-to-end on Postgres + OpenSearch: hybrid ranking AND the INV filters.
 
     Seeds two users in two tenants, each owning a document whose chunk text and
-    embedding match the query. User A's hybrid ``search`` must return only user
-    A's passage — never user B's, even though both match the query text/vector.
-    Proves the pgvector + full-text legs and the permission filter together.
+    embedding match the query, indexes both into a per-test engine index, and
+    proves user A's engine-backed ``search`` returns only user A's passage —
+    never user B's (INV-1) — hydrated from Postgres with citation offsets.
     """
     from sqlalchemy import text as sql_text
     from sqlalchemy.ext.asyncio import create_async_engine as _create
 
     engine = _create(_PG_URL)
     schema = f"ret_test_{uuid.uuid4().hex[:8]}"
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-test-{uuid.uuid4().hex[:8]}",
+        dimensions=_EMBED_DIM,
+        timeout_seconds=30.0,
+    )
     try:
         # Isolated schema so the live test never collides with app data.
         async with engine.begin() as conn:
@@ -394,7 +619,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                 storage_key="k",
                 status=DocumentStatus.READY,
             )
-            await ChunkRepository(sess, tenant_a).replace_for_document(
+            chunks_a = await ChunkRepository(sess, tenant_a).replace_for_document(
                 doc_a.id,
                 [
                     ChunkInput(
@@ -420,7 +645,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                 storage_key="k",
                 status=DocumentStatus.READY,
             )
-            await ChunkRepository(sess, tenant_b).replace_for_document(
+            chunks_b = await ChunkRepository(sess, tenant_b).replace_for_document(
                 doc_b.id,
                 [
                     ChunkInput(
@@ -433,22 +658,36 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
             )
             await sess.commit()
 
-            gateway = _FakeGateway(_unit_vector(_EMBED_DIM, hot))
-            svc = RetrievalService(sess, gateway=gateway)
+            # Index both corpora into the per-test engine index (ADR-0010).
+            await store.ensure_index()
+            await store.upsert_chunks(
+                _to_indexed(list(chunks_a), owner_id=user_a.id, collection_id=coll_a.id)
+                + _to_indexed(list(chunks_b), owner_id=user_b.id, collection_id=coll_b.id),
+                refresh=True,
+            )
 
-            # User A's hybrid search returns their passage with source + offsets.
+            gateway = _FakeGateway(_unit_vector(_EMBED_DIM, hot))
+            svc = RetrievalService(sess, gateway=gateway, store=store)
+
+            # User A's engine-backed search returns their passage with offsets.
             passages = await svc.search(
                 principal=_principal(user_a.id, tenant_a), query=query_text, k=5
             )
             assert [p.document_id for p in passages] == [doc_a.id]
             assert passages[0].document_name == "a.txt"
             assert passages[0].char_start == 0 and passages[0].char_end == 43
-            assert passages[0].score > 0
+            assert passages[0].score is not None and passages[0].score >= 0
 
-            # INV-2 end-to-end: user A never sees user B's matching passage.
+            # INV-1 end-to-end: user A never sees user B's matching passage.
             returned_docs = {p.document_id for p in passages}
             assert doc_b.id not in returned_docs
     finally:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(base_url=_OS_URL, timeout=15.0) as cleanup:
+            await cleanup.delete(f"/{store._index}")  # noqa: SLF001 — test teardown
+            await cleanup.delete(f"/_search/pipeline/{store._index}-hybrid")  # noqa: SLF001
+        await store.aclose()
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()

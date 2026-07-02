@@ -80,6 +80,7 @@ async def sync_document_index_async(
     *,
     settings: Settings,
     store: OpenSearchStore | None = None,
+    refresh: bool = False,
 ) -> IndexSyncResult:
     """Make the search index match Postgres for one document (idempotent).
 
@@ -89,7 +90,9 @@ async def sync_document_index_async(
     mints new ids every run — never linger as orphans.
 
     ``store`` is injectable for tests/backfill; when omitted the store is built
-    from settings and closed here.
+    from settings and closed here. ``refresh=True`` makes the result immediately
+    searchable — for tests only; production paths leave the engine's refresh
+    cadence alone.
 
     Raises:
         DependencyError: the engine is unreachable or rejected the write. The
@@ -108,10 +111,12 @@ async def sync_document_index_async(
     active = store or OpenSearchStore.from_settings(settings)
     try:
         await active.ensure_index()
-        await active.delete_document(tenant_id=tenant_id, document_id=document_id)
+        await active.delete_document(
+            tenant_id=tenant_id, document_id=document_id, refresh=refresh
+        )
         if document is None or not chunks:
             return IndexSyncResult(document_id, 0, deleted=True)
-        await active.upsert_chunks(_to_indexed(document, chunks))
+        await active.upsert_chunks(_to_indexed(document, chunks), refresh=refresh)
         return IndexSyncResult(document_id, len(chunks), deleted=False)
     finally:
         if owns_store:

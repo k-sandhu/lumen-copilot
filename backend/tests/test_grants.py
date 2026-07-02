@@ -648,11 +648,26 @@ def _pg_reachable(url: str) -> bool:
         return False
 
 
+_OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
+
+
+def _os_reachable(url: str) -> bool:
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection(
+            (parsed.hostname or "localhost", parsed.port or 9200), timeout=1.0
+        ):
+            return True
+    except OSError:
+        return False
+
+
 _live = pytest.mark.skipif(
-    not _pg_reachable(_PG_URL),
+    not (_pg_reachable(_PG_URL) and _os_reachable(_OS_URL)),
     reason=(
-        f"Postgres not reachable for {_PG_URL}; live grant-retrieval test skipped "
-        "(offline-safe). The real pgvector + full-text path runs only here."
+        f"Postgres ({_PG_URL}) and OpenSearch ({_OS_URL}) must both be reachable; "
+        "live grant-retrieval test skipped (offline-safe). The engine-backed path "
+        "(ADR-0010) runs only here."
     ),
 )
 
@@ -665,20 +680,30 @@ def _unit_vector(dim: int, hot: int) -> list[float]:
 
 @_live
 async def test_live_hybrid_search_honors_grant() -> None:
-    """End-to-end on real Postgres: a granted document is returned by hybrid search.
+    """End-to-end on Postgres + OpenSearch: a granted document is retrievable — and
+    a revoked one excluded again.
 
-    User A owns a document whose chunk text + embedding match the query. User B is
-    in the same tenant and does **not** own it. Before any grant B's hybrid
-    ``search`` returns nothing; after an explicit grant to B, the **fused
-    semantic+lexical** search returns A's passage to B with source + offsets (so it
-    is citable). Proves the widened filter holds across the pgvector + full-text
-    legs, not just the plain-SQL tools.
+    User A owns a document whose chunk text + embedding match the query, indexed
+    into a per-test engine index. User B (same tenant, non-owner): before any
+    grant, the engine-backed ``search`` returns nothing (the per-request grant
+    id-sets are empty); after an explicit grant to B it returns A's passage with
+    source + offsets (citable); after revoke it returns nothing again — the
+    id-sets are resolved fresh every request, so deny-by-default is restored
+    without any index change (ADR-0010 §4).
     """
     from sqlalchemy import text as sql_text
     from sqlalchemy.ext.asyncio import create_async_engine as _create
 
+    from app.search import IndexedChunk, OpenSearchStore
+
     engine = _create(_PG_URL)
     schema = f"grant_test_{uuid.uuid4().hex[:8]}"
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-test-{uuid.uuid4().hex[:8]}",
+        dimensions=_EMBED_DIM,
+        timeout_seconds=30.0,
+    )
     try:
         async with engine.begin() as conn:
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -710,7 +735,7 @@ async def test_live_hybrid_search_honors_grant() -> None:
                 storage_key="k",
                 status=DocumentStatus.READY,
             )
-            await ChunkRepository(sess, tenant).replace_for_document(
+            chunks_a = await ChunkRepository(sess, tenant).replace_for_document(
                 doc_a.id,
                 [
                     ChunkInput(
@@ -723,10 +748,30 @@ async def test_live_hybrid_search_honors_grant() -> None:
             )
             await sess.commit()
 
-            gateway = _FakeGateway(_unit_vector(_EMBED_DIM, hot))
-            svc = RetrievalService(sess, gateway=gateway)
+            await store.ensure_index()
+            await store.upsert_chunks(
+                [
+                    IndexedChunk(
+                        chunk_id=c.id,
+                        tenant_id=c.tenant_id,
+                        document_id=c.document_id,
+                        owner_id=user_a.id,
+                        collection_id=coll_a.id,
+                        ord=c.ord,
+                        text=c.text,
+                        embedding=c.embedding,
+                        char_start=c.char_start,
+                        char_end=c.char_end,
+                    )
+                    for c in chunks_a
+                ],
+                refresh=True,
+            )
 
-            # Before the grant: B's hybrid search returns nothing (deny-by-default).
+            gateway = _FakeGateway(_unit_vector(_EMBED_DIM, hot))
+            svc = RetrievalService(sess, gateway=gateway, store=store)
+
+            # Before the grant: B's engine-backed search returns nothing.
             before = await svc.search(
                 principal=_principal(user_b.id, tenant), query=query_text, k=5
             )
@@ -750,12 +795,33 @@ async def test_live_hybrid_search_honors_grant() -> None:
             )
             await sess.commit()
 
-            # After the grant: B's hybrid search returns A's passage, citable.
+            # After the grant: B's search returns A's passage, citable.
             after = await svc.search(principal=_principal(user_b.id, tenant), query=query_text, k=5)
             assert [p.document_id for p in after] == [doc_a.id]
             assert after[0].document_name == "a.txt"
             assert after[0].char_start == 0 and after[0].char_end == 43
+
+            # Revoke → excluded again, with NO index change (deny-by-default).
+            await grants.revoke_grant(
+                resource_type=GrantResourceType.DOCUMENT,
+                resource_id=doc_a.id,
+                principal_id=user_b.id,
+            )
+            await sess.commit()
+            revoked = await svc.search(
+                principal=_principal(user_b.id, tenant), query=query_text, k=5
+            )
+            assert revoked == []
+            # The owner is unaffected throughout.
+            own = await svc.search(principal=_principal(user_a.id, tenant), query=query_text, k=5)
+            assert [p.document_id for p in own] == [doc_a.id]
     finally:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(base_url=_OS_URL, timeout=15.0) as cleanup:
+            await cleanup.delete(f"/{store._index}")  # noqa: SLF001 — test teardown
+            await cleanup.delete(f"/_search/pipeline/{store._index}-hybrid")  # noqa: SLF001
+        await store.aclose()
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()

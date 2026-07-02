@@ -42,6 +42,7 @@ from app.db.repositories import (
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.retrieval import RetrievalService
+from app.search import OpenSearchStore
 from tests.eval.golden import GOLDEN_DOCUMENTS
 from tests.eval.harness import run_eval, seed_corpus
 from tests.eval.scoring import Thresholds, aggregate, assert_meets
@@ -64,15 +65,30 @@ def _pg_reachable(url: str) -> bool:
         return False
 
 
+_OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
+
+
+def _os_reachable(url: str) -> bool:
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection(
+            (parsed.hostname or "localhost", parsed.port or 9200), timeout=1.0
+        ):
+            return True
+    except OSError:
+        return False
+
+
 _has_key = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
 _pg_up = _pg_reachable(_PG_URL)
+_os_up = _os_reachable(_OS_URL)
 
 _live = pytest.mark.skipif(
-    not (_has_key and _pg_up),
+    not (_has_key and _pg_up and _os_up),
     reason=(
-        "live eval needs OPENROUTER_API_KEY + a reachable Postgres "
-        f"(key={'set' if _has_key else 'unset'}, pg@{_PG_URL}={'up' if _pg_up else 'down'}); "
-        "skipped (offline-safe)."
+        "live eval needs OPENROUTER_API_KEY + reachable Postgres + OpenSearch "
+        f"(key={'set' if _has_key else 'unset'}, pg@{_PG_URL}={'up' if _pg_up else 'down'}, "
+        f"os@{_OS_URL}={'up' if _os_up else 'down'}); skipped (offline-safe)."
     ),
 )
 
@@ -92,6 +108,15 @@ async def test_live_eval_meets_thresholds() -> None:
 
     engine = create_async_engine(_PG_URL)
     schema = f"eval_{uuid.uuid4().hex[:8]}"
+    # A per-run engine index (ADR-0010): the corpus is indexed here at seed time
+    # and retrieval reads it, dropped in teardown so the eval never pollutes the
+    # shared index.
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-eval-{uuid.uuid4().hex[:8]}",
+        dimensions=settings.llm_embedding_dimensions,
+        timeout_seconds=30.0,
+    )
     try:
         async with engine.begin() as conn:
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -100,6 +125,7 @@ async def test_live_eval_meets_thresholds() -> None:
             # in public) resolves while new tables are created in the eval schema.
             await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
             await conn.run_sync(Base.metadata.create_all)
+        await store.ensure_index()
 
         # Pin the search_path to the isolated schema on every new DB connection,
         # so the runtime's own sessions (persistence) and the read sessions
@@ -121,13 +147,15 @@ async def test_live_eval_meets_thresholds() -> None:
                 email="kw@acme.test", password_hash="x", roles=[Role.MEMBER]
             )
             principal = Principal(user_id=user.id, tenant_id=tenant.id, roles=(Role.MEMBER,))
-            # Real embeddings (the gateway) so the pgvector leg is meaningful.
+            # Real embeddings (the gateway) so the kNN leg is meaningful; the
+            # store indexes each doc's chunks as they're seeded (ADR-0010).
             await seed_corpus(
                 seed,
                 tenant_id=tenant.id,
                 owner_id=user.id,
                 documents=GOLDEN_DOCUMENTS,
                 embed=gateway.embed,
+                store=store,
             )
             await seed.commit()
 
@@ -140,7 +168,7 @@ async def test_live_eval_meets_thresholds() -> None:
                 return row.id
 
         async with factory() as retrieval_session:
-            retrieval = RetrievalService(retrieval_session, gateway=gateway)
+            retrieval = RetrievalService(retrieval_session, gateway=gateway, store=store)
             scores = await run_eval(
                 sessionmaker=factory,
                 retrieval=retrieval,
@@ -153,6 +181,12 @@ async def test_live_eval_meets_thresholds() -> None:
         score = aggregate(scores)
         assert_meets(score, Thresholds.live())
     finally:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(base_url=_OS_URL, timeout=15.0) as cleanup:
+            await cleanup.delete(f"/{store._index}")  # noqa: SLF001 — test teardown
+            await cleanup.delete(f"/_search/pipeline/{store._index}-hybrid")  # noqa: SLF001
+        await store.aclose()
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()

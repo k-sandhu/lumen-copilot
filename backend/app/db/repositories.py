@@ -1941,6 +1941,32 @@ class GrantRepository(_TenantScopedRepository):
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def granted_resource_ids(
+        self, principal_id: UUID
+    ) -> tuple[frozenset[UUID], frozenset[UUID]]:
+        """The ``(document_ids, collection_ids)`` granted to a ``user`` principal.
+
+        The resolved-id-set form of the SQL grant ``EXISTS`` (ADR-0010 §4): the
+        retrieval chokepoint resolves the requester's grants per request and
+        folds them into the engine's :class:`~app.search.filters.SearchAllowFilter`.
+        Tenant-scoped (INV-1 — a cross-tenant grant never widens the filter) and
+        ``user``-principal only (the MVP grant kind, spec 0004 §2.2). A revoked
+        grant (row deleted) vanishes from the sets — deny-by-default restored.
+        """
+        stmt = select(models.Grant.resource_type, models.Grant.resource_id).where(
+            models.Grant.tenant_id == self._tenant_id,
+            models.Grant.principal_type == GrantPrincipalType.USER.value,
+            models.Grant.principal_id == principal_id,
+        )
+        documents: set[UUID] = set()
+        collections: set[UUID] = set()
+        for resource_type, resource_id in (await self._session.execute(stmt)).all():
+            if resource_type == GrantResourceType.DOCUMENT.value:
+                documents.add(resource_id)
+            elif resource_type == GrantResourceType.COLLECTION.value:
+                collections.add(resource_id)
+        return frozenset(documents), frozenset(collections)
+
     async def revoke(
         self,
         *,
