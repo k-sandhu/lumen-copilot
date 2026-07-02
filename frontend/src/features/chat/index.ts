@@ -4,6 +4,7 @@
  * deep imports).
  */
 export { ChatView } from './components/ChatView';
+export { ModelPicker, type ModelPickerProps } from './components/ModelPicker';
 export { KnowledgeModeChips, type KnowledgeMode } from './components/KnowledgeModeChips';
 export { useChatStore } from './model/chatStore';
 export { useChatStream } from './model/useChatStream';

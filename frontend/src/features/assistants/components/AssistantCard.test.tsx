@@ -1,0 +1,92 @@
+/**
+ * AssistantCard (#212) — one library card. Asserts it surfaces name, status,
+ * resolved owner + model labels, and tool badges; that Edit links to the editor;
+ * that "Start chat" is a keyboard-reachable button wired to its callback and
+ * disabled for a disabled assistant; and that a per-card start error renders.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import type { Assistant, ChatModelInfo, Member } from '@/api';
+import { AssistantCard } from './AssistantCard';
+
+const models: ChatModelInfo[] = [
+  { id: 'anthropic/claude', label: 'Claude', provider: 'anthropic', tier: 'frontier', is_default: true },
+];
+const members: Member[] = [{ id: 'u1', email: 'ada@acme.com', role: ['member'] }];
+
+function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
+  return {
+    id: 'a1',
+    name: 'Benefits helper',
+    description: 'Answers HR questions',
+    instructions: null,
+    model: 'anthropic/claude',
+    knowledgeScope: { collectionIds: [], sourceIds: [], modes: [] },
+    toolAllowlist: ['search_text', 'get_document'],
+    autonomyLevel: 'suggest',
+    owner: 'u1',
+    backupOwner: 'u2',
+    status: 'published',
+    version: 1,
+    created_at: '2026-07-01T00:00:00Z',
+    updated_at: '2026-07-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
+function renderCard(props: Partial<Parameters<typeof AssistantCard>[0]> = {}) {
+  return render(
+    <MemoryRouter>
+      <AssistantCard
+        assistant={makeAssistant()}
+        models={models}
+        members={members}
+        starting={false}
+        onStart={() => {}}
+        {...props}
+      />
+    </MemoryRouter>,
+  );
+}
+
+describe('AssistantCard', () => {
+  it('shows name, status, resolved owner + model, and tool badges', () => {
+    renderCard();
+    const card = screen.getByRole('article', { name: /benefits helper/i });
+    expect(within(card).getByRole('heading', { name: /benefits helper/i })).toBeInTheDocument();
+    expect(within(card).getByText(/published/i)).toBeInTheDocument();
+    expect(within(card).getByText('ada@acme.com')).toBeInTheDocument();
+    expect(within(card).getByText('Claude')).toBeInTheDocument();
+    expect(within(card).getByText('search_text')).toBeInTheDocument();
+  });
+
+  it('resolves a null model to "Smart default"', () => {
+    renderCard({ assistant: makeAssistant({ model: null }) });
+    expect(screen.getByText('Smart default')).toBeInTheDocument();
+  });
+
+  it('links Edit to the editor route', () => {
+    renderCard();
+    expect(screen.getByRole('link', { name: /edit/i })).toHaveAttribute('href', '/assistants/a1');
+  });
+
+  it('fires onStart from a keyboard-reachable button', async () => {
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    renderCard({ onStart });
+    await user.click(screen.getByRole('button', { name: /start chat/i }));
+    expect(onStart).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }));
+  });
+
+  it('disables Start chat for a disabled assistant', () => {
+    renderCard({ assistant: makeAssistant({ status: 'disabled' }), startDisabled: true });
+    expect(screen.getByRole('button', { name: /start chat/i })).toBeDisabled();
+  });
+
+  it('renders a per-card start error', () => {
+    renderCard({ startError: 'Could not start a chat with this assistant.' });
+    expect(screen.getByRole('alert')).toHaveTextContent(/could not start a chat/i);
+  });
+});
