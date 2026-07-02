@@ -704,6 +704,220 @@ export interface AssistantVersionList {
   next_cursor?: string | null;
 }
 
+// --- Schedules & runs (contracts/openapi.yaml §schedules, §runs; ADR-0015) ---
+// Hand-authored mirror of the FROZEN contract (frontend/AGENTS.md: `api/types.ts`
+// is the documented stopgap; the generated `schema.ts` is gitignored). Kept in
+// lock-step with `pnpm gen:api` — the contract wins.
+
+/** The recurrence period for a structured cadence (ADR-0015 §2). */
+export type CadenceUnit = 'hour' | 'day' | 'week' | 'month';
+
+/**
+ * A structured recurrence — the human-friendly alternative to a raw cron
+ * expression (ADR-0015 §2). e.g. `{ every: 'day', at: '08:00' }` = every day at
+ * 08:00 local (in the schedule's `timezone`). `day_of_week` (0=Sunday..6=Saturday)
+ * applies when `every` is `week`; `day_of_month` (1..31) when `every` is `month`.
+ */
+export interface StructuredCadence {
+  every: CadenceUnit;
+  /** Local time-of-day HH:MM (24h) in the schedule's timezone. */
+  at: string;
+  /** 0=Sunday..6=Saturday; used when `every` is `week`. */
+  day_of_week?: number | null;
+  /** 1..31; used when `every` is `month`. */
+  day_of_month?: number | null;
+}
+
+/**
+ * A schedule's recurrence — exactly one form (ADR-0015 §2): either a raw `cron`
+ * expression OR a `StructuredCadence`. The server normalizes both to one stored
+ * form and computes `next_run_at` tz/DST-correct. A malformed cron is a 422
+ * (`invalid_cron`).
+ */
+export type Cadence = { cron: string } | { structured: StructuredCadence };
+
+/** In-app digest cadence for a schedule's delivery, or none. */
+export type ScheduleDigest = 'none' | 'daily' | 'weekly' | null;
+
+/**
+ * Where a completed run's result lands (ADR-0015 §6). v1 is in-app only — the run
+ * inbox and an optional digest; external channels (email/Slack) are deferred.
+ */
+export interface ScheduleDelivery {
+  /** Land the completed run in the owner's in-app run inbox (default true). */
+  inbox: boolean;
+  /** Roll recent runs into a periodic in-app digest, or null/none for no digest. */
+  digest?: ScheduleDigest;
+}
+
+/**
+ * What happens when a schedule fires while its previous run is still active
+ * (ADR-0015 §5). `skip` (default) records a skipped fire; `queue` enqueues behind
+ * the active run; `allow` runs concurrently.
+ */
+export type OverlapPolicy = 'skip' | 'queue' | 'allow';
+
+/**
+ * The run state machine (ADR-0015 §2). Terminal states are `succeeded`, `failed`,
+ * and `escalated` (a first-class terminal, distinct from failed — the run needs a
+ * human). An illegal transition is a 409 (INV-8).
+ */
+export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'escalated';
+
+/** Why the run fired (ADR-0015 §2). `schedule` = a cadence fire; `manual` = run-now. */
+export type RunTrigger = 'schedule' | 'manual';
+
+/**
+ * A user-defined recurring run of a saved assistant, tenant- and owner-scoped
+ * (ADR-0015 §2/§8, INV-1/INV-2). The `owner_id` is the run's principal — a fired
+ * run retrieves only what the owner could retrieve interactively (INV-2).
+ */
+export interface Schedule {
+  id: string;
+  /** The saved assistant this schedule runs. */
+  assistant_id: string;
+  /** The schedule's owner — the run's principal (INV-2). */
+  owner_id: string;
+  cadence: Cadence;
+  /** IANA timezone name (e.g. America/New_York); drives DST-correct next_run_at. */
+  timezone: string;
+  /** The assistant's inputs applied to each fire (the prompt-template values). */
+  input_params?: Record<string, unknown>;
+  delivery: ScheduleDelivery;
+  overlap_policy: OverlapPolicy;
+  /** True = firing; false = paused (the derived RedBeat entry is removed). */
+  enabled: boolean;
+  /** The upcoming fire (computed tz/DST-correct); null when paused. */
+  next_run_at?: string | null;
+  /** When this schedule last fired, or null before the first fire. */
+  last_run_at?: string | null;
+  /** The status of the last fire, or null before the first fire. */
+  last_status?: RunStatus | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * POST /schedules body — create a recurring run (ADR-0015 §8). An invalid cron or
+ * unknown IANA timezone is 422 (`invalid_cron` / `invalid_timezone`, INV-8); an
+ * unknown assistant is 404 (INV-1/INV-2).
+ */
+export interface ScheduleCreate {
+  assistant_id: string;
+  cadence: Cadence;
+  /** IANA timezone name (e.g. America/New_York). An unknown name is 422. */
+  timezone: string;
+  input_params?: Record<string, unknown>;
+  delivery?: ScheduleDelivery;
+  /** Overlap handling; omitted defaults to skip. */
+  overlap_policy?: OverlapPolicy;
+  /** Create paused by setting false; omitted defaults to true. */
+  enabled?: boolean;
+}
+
+/**
+ * PATCH /schedules/{id} body — edit a schedule (ADR-0015 §8). All fields optional;
+ * at least one must be present (minProperties: 1). Any invalid cron / IANA
+ * timezone is 422.
+ */
+export interface ScheduleUpdate {
+  cadence?: Cadence;
+  timezone?: string;
+  input_params?: Record<string, unknown>;
+  delivery?: ScheduleDelivery;
+  overlap_policy?: OverlapPolicy;
+  enabled?: boolean;
+}
+
+/** 200 from GET /schedules — a cursor page of the caller's schedules. */
+export interface ScheduleList {
+  items: Schedule[];
+  next_cursor?: string | null;
+}
+
+/** 202 from POST /schedules/{id}/run-now — the id of the just-enqueued run. */
+export interface RunEnqueued {
+  /** The new run's id — also its WS streamId for live attach (ADR-0015 §3). */
+  run_id: string;
+}
+
+/**
+ * A typed run failure / escalation reason (ADR-0015 §2) — never a raw vendor
+ * string. Present on `failed` and `escalated` runs.
+ */
+export interface RunError {
+  /** Stable machine-readable reason (e.g. model_unavailable, ambiguous, tool_failed). */
+  code: string;
+  /** Human-readable explanation for the owner's inbox. */
+  message: string;
+}
+
+/**
+ * A transcript step kind (ADR-0015 §2) — the durable analogue of the WS envelope
+ * type set: `delta` (incremental output), `tool_call` / `tool_result` (a tool
+ * turn), `citation` (a grounded passage), `error` (a failure step).
+ */
+export type RunStepKind = 'delta' | 'tool_call' | 'tool_result' | 'citation' | 'error';
+
+/**
+ * One ordered step of a run's persisted transcript (ADR-0015 §2), the durable
+ * equivalent of a WS envelope. `seq` is monotonic per run. `payload` carries the
+ * envelope `data` (tool args/results, delta text, or citation fields), typed per
+ * `kind`.
+ */
+export interface RunStep {
+  /** Monotonic per-run sequence — the transcript ordering (matches the WS seq). */
+  seq: number;
+  kind: RunStepKind;
+  /** The step data (the envelope `data`), typed per `kind`. */
+  payload?: Record<string, unknown>;
+  created_at: string;
+}
+
+/**
+ * One execution of an assistant — scheduled or manual (ADR-0015 §2/§8), tenant-
+ * and owner-scoped (INV-1/INV-2). The full detail carries the ordered transcript
+ * (`steps`), the grounded `citations` (permitted, retrieved passages only —
+ * INV-3), the `outputs`, and the typed `error` on a failed/escalated run. `id`
+ * doubles as the WS `streamId` for live attach (ADR-0015 §3).
+ */
+export interface Run {
+  /** The run id — also its WS streamId for live attach (ADR-0015 §3). */
+  id: string;
+  /** The schedule that fired this run, or null for a manual/run-now run. */
+  schedule_id?: string | null;
+  assistant_id: string;
+  /** The pinned assistant version executed — a run is reproducible after edits. */
+  assistant_version_id?: string | null;
+  trigger: RunTrigger;
+  status: RunStatus;
+  /** The resolved input_params snapshotted for this fire. */
+  inputs?: Record<string, unknown>;
+  /** Short digest line for the inbox (ADR-0015 §6). */
+  summary?: string | null;
+  /** The assistant message the transcript produced (reuses chat message/citation tables). */
+  message_id?: string | null;
+  /** The ordered persisted transcript (empty on the list view; present on detail). */
+  steps?: RunStep[];
+  /** The grounded citations of the run's answer — permitted passages only (INV-3). */
+  citations?: Citation[];
+  /** The run's structured outputs, when the assistant produces them. */
+  outputs?: Record<string, unknown>;
+  /** The typed failure / escalation reason on a failed or escalated run; else null. */
+  error?: RunError | null;
+  /** When the run started executing, or null while queued. */
+  started_at?: string | null;
+  /** When the run reached a terminal status, or null while not terminal. */
+  finished_at?: string | null;
+  created_at: string;
+}
+
+/** 200 from GET /runs — a cursor page of runs (newest first). */
+export interface RunList {
+  items: Run[];
+  next_cursor?: string | null;
+}
+
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
 // Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
 export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';

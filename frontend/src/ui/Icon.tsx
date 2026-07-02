@@ -38,7 +38,12 @@ export type IconName =
   | 'plus'
   | 'send'
   | 'pencil'
-  | 'trash';
+  | 'trash'
+  | 'play'
+  | 'pause'
+  | 'settings'
+  | 'calendar'
+  | 'inbox';
 
 const PATHS: Record<IconName, string> = {
   'shield-check': 'M12 3 4 6v6c0 4.5 3.3 7.5 8 9 4.7-1.5 8-4.5 8-9V6l-8-3ZM9 12l2 2 4-4',
@@ -76,6 +81,13 @@ const PATHS: Record<IconName, string> = {
   send: 'M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z',
   pencil: 'M4 20h4L19 9l-4-4L4 16v4ZM14 6l4 4',
   trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6',
+  play: 'M6 4l14 8-14 8V4Z',
+  pause: 'M8 5v14M16 5v14',
+  settings:
+    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z',
+  calendar: 'M7 3v4M17 3v4M4 8h16M5 6h14v14H5V6Z',
+  inbox:
+    'M4 13h4l2 3h4l2-3h4M4 13 6 5h12l2 8M4 13v6h16v-6',
 };
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

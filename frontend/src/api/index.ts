@@ -55,6 +55,19 @@ export {
 } from './assistants';
 export type { AssistantPageQuery } from './assistants';
 export {
+  listSchedules,
+  createSchedule,
+  getSchedule,
+  updateSchedule,
+  deleteSchedule,
+  pauseSchedule,
+  resumeSchedule,
+  runScheduleNow,
+} from './schedules';
+export type { SchedulePageQuery } from './schedules';
+export { listRuns, getRun } from './runs';
+export type { RunPageQuery } from './runs';
+export {
   getAccessToken,
   hasAccessToken,
   setAccessToken,
