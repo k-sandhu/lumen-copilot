@@ -1,7 +1,7 @@
 # 10. Dedicated text-search engine behind the retrieval seam
 
-- **Status:** Accepted *(sponsor decisions recorded 2026-06-28; supersedes the retrieval-store choice in [ADR-0003](0003-application-stack.md) and the "Vector + lexical retrieval → `retrieval/`" boundary row in [ADR-0004](0004-architecture-boundaries-and-adapters.md))*
-- **Date:** 2026-06-28
+- **Status:** Accepted *(sponsor decisions recorded 2026-07-02; supersedes the retrieval-store choice in [ADR-0003](0003-application-stack.md) and the "Vector + lexical retrieval → `retrieval/`" boundary row in [ADR-0004](0004-architecture-boundaries-and-adapters.md))*
+- **Date:** 2026-06-28 *(proposed)* · 2026-07-02 *(accepted)*
 - **Builds on:** [ADR-0003](0003-application-stack.md) (the stack reserved this seam), [ADR-0004](0004-architecture-boundaries-and-adapters.md) (module boundaries), [ADR-0005](0005-local-run-and-developer-workflow.md) (one-command local stack), [ADR-0008](0008-conflict-free-parallel-delivery.md) (serialized seam → parallel build), [spec 0004](../specs/0004-security-and-domain-invariants.md) (INV-1 tenant isolation, INV-2 owner-or-grant, INV-3 citations)
 
 ## Context
@@ -81,7 +81,7 @@ Serialized seam → parallel build, main green at each step:
   - The **permission guarantee must be re-proven at the engine** with negative tests — the main correctness risk.
 - **Delivery:** a multi-slice epic per [ADR-0008](0008-conflict-free-parallel-delivery.md) (§7 sequence above), each slice its own issue/PR with `Closes #`.
 
-## Resolved decisions (sponsor, 2026-06-28)
+## Resolved decisions (sponsor, 2026-07-02)
 
 1. **Go / no-go:** **Go** — adopt a dedicated engine now.
 2. **Engine:** **OpenSearch.**
