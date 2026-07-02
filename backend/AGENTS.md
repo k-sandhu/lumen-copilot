@@ -20,6 +20,7 @@ backend/
     db/                # SQLAlchemy models + repositories + Alembic env. The only SQL.
     llm/               # LiteLLM gateway. The only model caller.
     retrieval/         # hybrid search + rerank. The only pgvector/full-text caller.
+    search/            # OpenSearch adapter — the single retrieval store (ADR-0010). The only engine caller.
     storage/           # S3/MinIO adapter. The only object-store caller.
     tasks/             # Celery app + tasks. The only place tasks are defined/enqueued.
     realtime/          # WebSocket handlers + Redis pub/sub backplane.
