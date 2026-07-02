@@ -66,7 +66,7 @@ from app.domain.entities import AuditOutcome
 from app.domain.llm import ChatMessage, Role
 from app.domain.retrieval import RetrievedPassage
 from app.llm import LLMGateway
-from app.retrieval import RetrievalService
+from app.retrieval import MAX_K, RetrievalService
 from app.services.audit import AuditSink
 
 log = get_logger(__name__)
@@ -313,10 +313,11 @@ class SearchService:
         )
 
         passages: list[RetrievedPassage] = []
-        if not corpus_excluded:
+        if not corpus_excluded and offset < MAX_K:
             # Over-fetch the page window + 1 so we can tell whether a next page
-            # exists; the chokepoint clamps its own ceiling so this stays bounded.
-            wanted = offset + page_size + 1
+            # exists; retrieval ranks at most ``MAX_K`` results, so cap the ask
+            # there (retrieval clamps anyway) — the reachable band is [0, MAX_K).
+            wanted = min(offset + page_size + 1, MAX_K)
             collection_ids = [collection_id] if collection_id is not None else None
             passages = await self._retrieval.search(
                 principal=self._principal,
@@ -325,9 +326,16 @@ class SearchService:
                 collection_ids=collection_ids,
             )
 
-        window = passages[offset : offset + page_size]
-        has_next = len(passages) > offset + page_size
-        next_cursor = _encode_cursor(offset + page_size) if has_next else None
+        window_end = offset + page_size
+        window = passages[offset:window_end]
+        # A next page exists only if retrieval returned more than this window AND
+        # the next window would still start inside the reachable band. Without
+        # the ``< MAX_K`` guard the service could hand back a next_cursor whose
+        # offset sits at the retrieval ceiling, yielding a silently-empty page
+        # (#270). Results past rank MAX_K are unreachable by design; the cap is
+        # explicit here rather than a silent truncation.
+        has_next = len(passages) > window_end and window_end < MAX_K
+        next_cursor = _encode_cursor(window_end) if has_next else None
 
         results = await self._to_results(query, window)
         direct_answer = (
