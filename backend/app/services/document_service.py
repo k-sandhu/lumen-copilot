@@ -47,17 +47,20 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import (
+    ConflictError,
     PayloadTooLargeError,
     UnsupportedMediaTypeError,
     ValidationError,
 )
-from app.db.repositories import CollectionRepository, DocumentRepository
+from app.db.repositories import ChunkRepository, CollectionRepository, DocumentRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Document, DocumentStatus
 from app.services.audit import AuditSink
@@ -105,6 +108,53 @@ class DocumentContent:
     filename: str
     mime_type: str
     data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentText:
+    """The extracted plain text of a ready document (contract ``DocumentText``).
+
+    ``text`` is the ingestion parser's output reassembled exactly from the
+    stored chunks (#244); ``truncated`` flags an over-cap document cut at the
+    ``DOCUMENT_TEXT_MAX_BYTES`` limit.
+    """
+
+    text: str
+    chunk_count: int
+    truncated: bool
+
+
+class _ChunkSpan(Protocol):
+    """The span shape reassembly needs — satisfied by both the domain
+    :class:`~app.domain.entities.Chunk` and the chunker's ``TextChunk``."""
+
+    @property
+    def text(self) -> str: ...
+    @property
+    def char_start(self) -> int: ...
+    @property
+    def char_end(self) -> int: ...
+
+
+def reassemble_chunk_texts(chunks: Iterable[_ChunkSpan]) -> str:
+    """Invert chunking exactly: rebuild the parser output from its chunks.
+
+    Chunks are produced by a sliding window with **overlap** (``chunk.text ==
+    source[char_start:char_end]``, adjacent chunks sharing ``overlap`` chars —
+    ``app.ingestion.chunking``), so naive concatenation would duplicate every
+    overlap. Walk the chunks in document order and append only the part of each
+    chunk past the furthest character already emitted. Pure; unit-tested as a
+    round-trip against the real chunker.
+    """
+    parts: list[str] = []
+    prev_end = 0
+    for chunk in chunks:
+        if chunk.char_end <= prev_end:
+            continue  # fully covered by what we already emitted
+        skip = max(prev_end - chunk.char_start, 0)
+        parts.append(chunk.text[skip:])
+        prev_end = chunk.char_end
+    return "".join(parts)
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -185,6 +235,7 @@ class DocumentService:
         self._session = session
         self._documents = DocumentRepository(session, tenant_id)
         self._collections = CollectionRepository(session, tenant_id)
+        self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._store = object_store
@@ -423,6 +474,46 @@ class DocumentService:
             mime_type=document.mime_type,
             data=data,
         )
+
+    async def get_text(self, document_id: UUID, *, max_bytes: int) -> DocumentText | None:
+        """Serve the extracted plain text of a ready document (#244).
+
+        Visibility first (INV-1/INV-2): not the caller's → ``None`` → 404 at
+        the router, indistinguishable from missing. A **visible** document that
+        is not ``ready`` has no text yet → :class:`ConflictError`
+        (``document_not_ready`` → 409, INV-8's illegal-state arm). The text is
+        the ingestion parser output reassembled exactly from the stored chunks
+        (:func:`reassemble_chunk_texts` — overlap-aware), capped at
+        ``max_bytes`` UTF-8 bytes on a character boundary with ``truncated``
+        set. Audited ``document.viewed`` (INV-6).
+        """
+        document = await self._visible(document_id)
+        if document is None:
+            return None
+        if document.status is not DocumentStatus.READY:
+            raise ConflictError(
+                "Document has not finished ingestion; no text is available yet.",
+                code="document_not_ready",
+            )
+        chunks = await self._chunks.list_for_document(document_id)
+        text = reassemble_chunk_texts(chunks)
+        truncated = False
+        encoded = text.encode("utf-8")
+        if len(encoded) > max_bytes:
+            # Cut on a byte budget, then drop any half character at the edge.
+            text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+            truncated = True
+        await self._audit.emit(
+            action=AuditAction.DOCUMENT_VIEWED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="document",
+            resource_id=str(document.id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={"filename": document.filename, "form": "text"},
+        )
+        return DocumentText(text=text, chunk_count=len(chunks), truncated=truncated)
 
     async def presign_content(self, document_id: UUID) -> str | None:
         """Mint a short-TTL presigned GET URL for one of the caller's documents.

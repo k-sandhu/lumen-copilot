@@ -85,6 +85,16 @@ class DocumentListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class DocumentTextResponse(BaseModel):
+    """``#/components/schemas/DocumentText`` — extracted plain text (#244)."""
+
+    model_config = {"extra": "forbid"}
+
+    text: str
+    chunk_count: int
+    truncated: bool
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -318,6 +328,44 @@ async def get_document_content(
             "Content-Disposition": f'inline; filename="{content.filename}"',
             "Content-Length": str(len(content.data)),
         },
+    )
+
+
+@router.get("/{document_id}/text", response_model=DocumentTextResponse)
+async def get_document_text(
+    document_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
+    settings: SettingsDep,
+) -> DocumentTextResponse:
+    """The extracted plain text of a ready document (contract 0.6.0, #244).
+
+    The viewer's text surface for formats a browser cannot render natively
+    (DOCX/PPTX/XLSX). Visibility identical to ``/content`` (INV-1/INV-2 → 404);
+    a visible document that is not ``ready`` → 409 ``document_not_ready``
+    (INV-8), raised by the service as a typed ``ConflictError``.
+    """
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        object_store=object_store,
+        settings=settings,
+        request=request,
+    )
+    result = await service.get_text(document_id, max_bytes=settings.document_text_max_bytes)
+    if result is None:
+        raise NotFoundError("Document not found.")
+    await session.commit()
+    return DocumentTextResponse(
+        text=result.text,
+        chunk_count=result.chunk_count,
+        truncated=result.truncated,
     )
 
 
