@@ -117,6 +117,69 @@ class GrantRole(str, enum.Enum):
     VIEWER = "viewer"
 
 
+class SecretKind(str, enum.Enum):
+    """What a stored secret is *for* (issue #209).
+
+    The consumer seam: ``MCP_AUTH`` is an MCP server's auth token/header (E3),
+    ``SEARCH_API`` a hosted web-search provider key (SPIKE-4), ``OTHER`` a
+    forward-compatible catch-all for future connector/action credentials. The
+    column admits more kinds without a schema change.
+    """
+
+    MCP_AUTH = "mcp_auth"
+    SEARCH_API = "search_api"
+    OTHER = "other"
+
+
+@dataclass(frozen=True, slots=True)
+class Secret:
+    """One stored credential — the full ``secrets`` row (issue #209).
+
+    Tenant- and owner-scoped (INV-1/§2.2). **No field holds plaintext**: the
+    credential lives only as ``ciphertext`` + ``nonce`` under ``key_version``
+    (envelope encryption, ``app.core.crypto``); ``hint`` is a non-reversing masked
+    tail (e.g. the last four characters) for the UI. This full entity — including
+    the ciphertext bytes — is returned by the repository *inside the service
+    only*; the service hands callers the plaintext-free :class:`SecretRef` for
+    metadata/list, and decrypts to a bare ``str`` solely for an in-process
+    adapter's ``get_secret_plaintext`` (never a router).
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    kind: SecretKind
+    ciphertext: bytes
+    nonce: bytes
+    key_version: int
+    hint: str
+    created_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SecretRef:
+    """The plaintext-free projection of a secret (issue #209 — the safe shape).
+
+    What ``store_secret`` returns and ``list_secrets`` yields: identity +
+    metadata + the masked ``hint``, and **never** the value, the ciphertext, or
+    the nonce. This is the only secret shape any HTTP surface may serialize (AC-1,
+    AC-3); the plaintext is reachable exclusively through the service's internal
+    ``get_secret_plaintext`` for in-process adapters.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    kind: SecretKind
+    hint: str
+    created_at: datetime
+    updated_at: datetime
+
+
 @dataclass(frozen=True, slots=True)
 class Tenant:
     """A customer boundary. The root of every isolation predicate (INV-1)."""

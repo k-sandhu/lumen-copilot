@@ -52,8 +52,9 @@ _MVP_TABLES = {
 
 # Every table the ORM registry now carries: the MVP set plus refresh_tokens
 # (0003, issue #19, spec 0004 §2.3), sources (0006, issue #109, ADR-0009 §4),
-# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants), and the spec-0005
-# preferences/saved-search/recent tables (0009–0011, epic #144).
+# grants (0008, issue #18, spec 0004 §2.2 — explicit ACL grants), the spec-0005
+# preferences/saved-search/recent tables (0009–0011, epic #144), and secrets
+# (0013, issue #209 — the encrypted per-tenant secrets vault).
 _ALL_TABLES = _MVP_TABLES | {
     "refresh_tokens",
     "sources",
@@ -61,6 +62,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "user_preferences",
     "saved_searches",
     "recent_searches",
+    "secrets",
 }
 
 
@@ -85,7 +87,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0012_tenant_max_tool_turns"]
+    assert list(script.get_heads()) == ["0013_secrets"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -119,6 +121,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     tts = script.get_revision("0012_tenant_max_tool_turns")
     assert tts is not None
     assert tts.down_revision == "0011_recent_searches"
+    secrets = script.get_revision("0013_secrets")
+    assert secrets is not None
+    assert secrets.down_revision == "0012_tenant_max_tool_turns"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -391,6 +396,52 @@ def test_offline_tenant_max_tool_turns_migration_round_trips(
     command.downgrade(cfg, "0012_tenant_max_tool_turns:0011_recent_searches", sql=True)
     down = capsys.readouterr().out.lower()
     assert "alter table tenants drop column max_tool_turns" in down
+
+
+def test_offline_secrets_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0013 creates the tenant/owner-scoped ``secrets`` table + RLS; down() reverses (#209).
+
+    AC (issue #209 §1): the upgrade renders the ``secrets`` table with its
+    ``bytea`` ``ciphertext``/``nonce`` envelope columns, ``key_version``, the
+    ``kind`` check, the per-owner-name UNIQUE, the tenant/owner index, and the same
+    fail-closed RLS policy the 0007 backstop uses (``secrets`` is tenant-scoped,
+    INV-1). The downgrade drops the policy, disables RLS, and drops the table.
+    Offline DDL render (Postgres dialect) — structural reversibility without a DB
+    (#70 lesson); the behavioural proof is the crypto + service tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0012_tenant_max_tool_turns:0013_secrets", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped secrets table + its FKs.
+    assert "create table secrets" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id + created_by FKs
+    # The envelope columns are bytea — never a plaintext column (#209).
+    assert "ciphertext bytea" in up
+    assert "nonce bytea" in up
+    assert "key_version" in up
+    # The kind enum domain is pinned at the DB; key_version must be >= 1.
+    assert "ck_secrets_kind" in up
+    assert "ck_secrets_key_version_positive" in up
+    # A secret name is a per-owner singleton (re-store rotates in place).
+    assert "uq_secrets_owner_name" in up
+    assert "create index ix_secrets_tenant_owner on secrets (tenant_id, owner_id)" in up
+    # The RLS backstop (secrets is tenant-scoped) — same fail-closed GUC policy as 0007.
+    assert "alter table secrets enable row level security" in up
+    assert "alter table secrets force row level security" in up
+    assert "create policy rls_secrets on secrets" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0013_secrets:0012_tenant_max_tool_turns", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_secrets on secrets" in down
+    assert "alter table secrets disable row level security" in down
+    assert "drop index ix_secrets_tenant_owner" in down
+    assert "drop table secrets" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

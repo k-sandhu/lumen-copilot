@@ -24,6 +24,11 @@ dependencies = [
     "pgvector==0.4.2",  # SQLAlchemy `vector` column type for chunk embeddings (#44)
     "argon2-cffi==23.1.0",
     "pyjwt==2.10.1",
+    # Envelope encryption for the per-tenant secrets vault (#209): AES-256-GCM
+    # (an authenticated cipher) via the maintained OSS `cryptography` lib. Imported
+    # only by app/core/crypto.py — the single module that owns the cipher (ADR-0004
+    # chokepoint); nothing else touches it.
+    "cryptography==44.0.0",
     # Ingestion parsers (CC-5 #21), pinned. Each is imported lazily inside its
     # helper in app/ingestion/parsers.py so the dependency stays localized.
     "pypdf==5.1.0",  # PDF text extraction

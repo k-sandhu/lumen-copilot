@@ -1,7 +1,10 @@
-"""Auth-config guardrails (issue #19, spec 0004 §2.3).
+"""Auth-config guardrails (issue #19, spec 0004 §2.3; issue #209).
 
 The access-token TTL ceiling (<= 15 min) and the refusal to boot a non-local
 environment on the insecure dev JWT secret are security-load-bearing — pin them.
+The same fail-fast posture guards the secrets-vault master key (issue #209): a
+malformed ``SECRETS_ENCRYPTION_KEY`` never boots, and the dev default is refused
+outside ``local`` (mirroring the JWT rule) — pinned here too.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.core.crypto import generate_master_key
 
 # A minimal valid base env so Settings constructs; individual tests override one
 # field to exercise a single guardrail.
@@ -23,6 +27,10 @@ _BASE = {
     "S3_SECRET_KEY": "tt",
     "S3_BUCKET": "b",
 }
+
+# A valid, non-dev vault key (base64 of 32 random bytes) for the production-boot
+# tests, which must override BOTH the JWT secret and the vault key.
+_PROD_SECRETS_KEY = generate_master_key()
 
 
 def test_access_ttl_ceiling_is_enforced() -> None:
@@ -53,8 +61,50 @@ def test_overridden_secret_boots_in_production() -> None:
         **_BASE,
         ENVIRONMENT="production",
         JWT_SECRET="a-real-production-secret",
+        # A deployed env must also override the vault key (issue #209).
+        SECRETS_ENCRYPTION_KEY=_PROD_SECRETS_KEY,
     )
     assert s.environment == "production"
+
+
+# --- Secrets-vault master key (issue #209 AC-5) ----------------------------
+
+
+def test_dev_secrets_key_rejected_outside_local() -> None:
+    # ENVIRONMENT != local while still carrying the dev vault key → refuse to boot
+    # (mirrors the JWT rule). A real JWT secret is supplied so ONLY the vault-key
+    # guard can be what fails.
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_BASE,
+            ENVIRONMENT="production",
+            JWT_SECRET="a-real-production-secret",
+        )
+
+
+def test_dev_secrets_key_allowed_in_local() -> None:
+    s = Settings(_env_file=None, **_BASE, ENVIRONMENT="local")
+    # The dev vault key is fine locally; the skeleton boots and the key is usable.
+    assert s.secrets_encryption_key
+
+
+def test_malformed_secrets_key_is_rejected_at_boot() -> None:
+    # Not base64 of 32 bytes → refuse to boot (fail fast), even locally, rather
+    # than failing the first store/retrieve. "short" is valid base64 but too few
+    # bytes once decoded.
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, ENVIRONMENT="local", SECRETS_ENCRYPTION_KEY="short")
+
+
+def test_valid_overridden_secrets_key_boots() -> None:
+    s = Settings(
+        _env_file=None,
+        **_BASE,
+        ENVIRONMENT="local",
+        SECRETS_ENCRYPTION_KEY=_PROD_SECRETS_KEY,
+    )
+    assert s.secrets_encryption_key == _PROD_SECRETS_KEY
 
 
 def test_version_is_sourced_from_package_single_source() -> None:

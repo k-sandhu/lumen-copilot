@@ -32,7 +32,8 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
     relaxed): ADR-0009 §5 (the connector framework) requires an audit event on
     every source add / sync / delete (``source.*``), and CC-1 / issue #18 (explicit
     ACL grants, spec 0004 §2.2) audits every share grant / revoke
-    (``permission.granted`` / ``permission.revoked``).
+    (``permission.granted`` / ``permission.revoked``); the per-tenant secrets vault
+    (issue #209) audits every credential create / access / delete (``secret.*``).
     """
     assert {a.value for a in AuditAction} == {
         "auth.login",
@@ -57,6 +58,12 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # /admin write, a reversible T1 action audited like every consequential
         # action (mission filter #4 "auditable").
         "tenant.settings_updated",
+        # Per-tenant secrets vault (issue #209) — additive; store/access/delete of
+        # an encrypted credential. ``secret.accessed`` records who/what read it,
+        # never the value (mission filter #4 "auditable").
+        "secret.created",
+        "secret.accessed",
+        "secret.deleted",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
