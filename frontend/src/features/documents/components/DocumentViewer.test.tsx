@@ -1,10 +1,11 @@
 /**
- * DocumentViewer (#49 AC-3, re-skinned #89): a drawer that surfaces the ingestion
- * trace (parse → chunk → embed → ready) and an optional cited passage, then
- * resolves GET /documents/{id}/content, following a 302 to a presigned URL, and
- * renders it in a sandboxed iframe. States: loading, success (iframe src =
- * presigned URL), and the not-permitted 404 negative (INV-2) → a clear "no
- * longer available" message with no retry.
+ * DocumentViewer (#49 AC-3, re-skinned #89; preview unified in #242/#245): a
+ * drawer that surfaces the ingestion trace (parse → chunk → embed → ready) and
+ * an optional cited passage. The document region is the shared
+ * `DocumentPreviewBody` (its own unit test covers the fetch branches); here we
+ * assert the drawer chrome (trace, cited passage, focus trap, close) and that a
+ * ready document mounts the preview body while a non-ready one shows the
+ * ingestion-pending message and fetches nothing.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
@@ -29,16 +30,18 @@ const doc: Document = {
 afterEach(() => vi.restoreAllMocks());
 
 describe('DocumentViewer', () => {
-  it('follows a 302 and renders the presigned URL in a sandboxed iframe (AC-3)', async () => {
-    const presigned = 'https://minio.example/bucket/obj?sig=abc';
+  it('mounts the shared preview body for a ready document (blob iframe)', async () => {
+    // The body fetches the bytes through the api/ boundary; a 200 blob → iframe.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(null, { status: 302, headers: { Location: presigned } }),
+      new Response(new Blob([new Uint8Array([1, 2, 3])], { type: 'application/pdf' }), {
+        status: 200,
+      }),
     );
     renderWithQuery(<DocumentViewer doc={doc} onClose={() => {}} />);
 
     const frame = await screen.findByTitle(/preview of msa.pdf/i);
-    expect(frame).toHaveAttribute('src', presigned);
     expect(frame).toHaveAttribute('sandbox', '');
+    expect(frame.getAttribute('src')).toMatch(/^blob:/);
   });
 
   it('shows a clear message and no retry when the document is not permitted (404 — INV-2)', async () => {

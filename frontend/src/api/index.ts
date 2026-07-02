@@ -15,8 +15,8 @@ export {
   getDocument,
   deleteDocument,
   uploadDocument,
-  resolveDocumentContentUrl,
   fetchDocumentContent,
+  fetchDocumentText,
 } from './documents';
 export type { PageQuery, UploadDocumentArgs, DocumentContent } from './documents';
 export {

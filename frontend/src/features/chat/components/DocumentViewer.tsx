@@ -18,17 +18,16 @@
  * AUTH (INV-4): `GET /documents/{id}/content` is a `bearerAuth` endpoint — it is
  * authorized by the in-memory access JWT, not a cookie. A browser-initiated
  * `<iframe src>` / `<a href>` GET cannot attach an `Authorization: Bearer`
- * header, so we cannot point them at the bare endpoint (it would 401). Instead
- * we fetch the bytes through the api/ boundary (`fetchDocumentContent`, bearer
- * attached, the contract's optional 302→presigned redirect followed) and render
- * the resulting `blob:` object URL. The backend enforces permission: a document
- * the caller may not see returns 404 (spec 0004 INV-2), surfaced here as an
- * actionable error — the UI never fabricates access. The object URL is revoked
- * on unmount / when the citation changes.
+ * header, so we cannot point them at the bare endpoint (it would 401). The
+ * document region is the shared `DocumentPreviewBody` (#242/#245): it fetches
+ * through the api/ boundary (bearer attached, 302→presigned followed), renders
+ * a `blob:` URL for browser-renderable types, server-extracted text for office
+ * types (the chat wire carries no mime type — the blob's content-type decides),
+ * and always offers the original download. 404 (INV-2) renders as unavailable;
+ * object URLs are revoked on unmount / citation change.
  */
-import { useEffect, useState } from 'react';
-import { fetchDocumentContent } from '@/api';
 import { Icon, SourceInspector } from '@/ui';
+import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 import { cn } from '@/lib/cn';
 import type { UiCitation } from '../model/citation';
 import { passageFromCitation, sourceMetadataRows } from '../model/presentation';
@@ -56,11 +55,6 @@ export interface DocumentViewerProps {
   onClose: () => void;
 }
 
-type ContentState =
-  | { status: 'loading' }
-  | { status: 'ready'; url: string }
-  | { status: 'error'; message: string };
-
 export function DocumentViewer({
   citation,
   owner,
@@ -75,39 +69,6 @@ export function DocumentViewer({
   // unless a source actually carries it. We never present the answer time as a
   // source-indexing timestamp (#120 GUARD against fabricated provenance).
   const metadataRows = sourceMetadataRows({ owner, lastModified, lastIndexed });
-  const [content, setContent] = useState<ContentState>({ status: 'loading' });
-  // Bumping this retries the load (AC-2: errors are actionable, not dead ends).
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    let revoke: (() => void) | null = null;
-    const abort = new AbortController();
-    setContent({ status: 'loading' });
-
-    fetchDocumentContent(documentId, abort.signal)
-      .then((result) => {
-        if (cancelled) {
-          // Lost the race (unmount / citation change): release immediately.
-          result.revoke();
-          return;
-        }
-        revoke = result.revoke;
-        setContent({ status: 'ready', url: result.url });
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        const message =
-          error instanceof Error ? error.message : 'Could not load the document.';
-        setContent({ status: 'error', message });
-      });
-
-    return () => {
-      cancelled = true;
-      abort.abort();
-      if (revoke) revoke();
-    };
-  }, [documentId, attempt]);
 
   return (
     <section
@@ -172,54 +133,10 @@ export function DocumentViewer({
           ))}
         </dl>
 
-        {content.status === 'ready' && (
-          <a
-            href={content.url}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="mt-1 inline-block text-xs text-accent underline underline-offset-2"
-          >
-            Open original in a new tab
-          </a>
-        )}
       </div>
 
       <div className="min-h-0 flex-1">
-        {content.status === 'loading' && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="flex h-full items-center justify-center p-4 text-sm text-foreground-muted"
-          >
-            Loading document…
-          </div>
-        )}
-
-        {content.status === 'error' && (
-          <div
-            role="alert"
-            className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-sm"
-          >
-            <p className="text-foreground">Could not open this document.</p>
-            <p className="text-[11px] text-foreground-muted">{content.message}</p>
-            <button
-              type="button"
-              onClick={() => setAttempt((n) => n + 1)}
-              className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {content.status === 'ready' && (
-          <iframe
-            title={`Document: ${citation.documentName}`}
-            src={content.url}
-            sandbox=""
-            className="h-full w-full border-0 bg-surface"
-          />
-        )}
+        <DocumentPreviewBody documentId={documentId} filename={citation.documentName} />
       </div>
     </section>
   );

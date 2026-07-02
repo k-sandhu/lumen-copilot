@@ -18,8 +18,8 @@ import {
   getDocument,
   uploadDocument,
   deleteDocument,
-  resolveDocumentContentUrl,
   fetchDocumentContent,
+  fetchDocumentText,
   ApiError,
   registerRefreshHandler,
 } from './index';
@@ -319,82 +319,35 @@ describe('uploadDocument (multipart + progress, XHR)', () => {
   });
 });
 
-describe('resolveDocumentContentUrl (follow 302 → presigned URL)', () => {
+describe('fetchDocumentText (extracted text, #245)', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('returns the same-origin content URL when the server streams bytes (200)', async () => {
-    // A plain manual-redirect fetch that comes back 200 (no redirect) → use the
-    // endpoint URL directly as the viewer src.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
-    const url = await resolveDocumentContentUrl(sampleDocument.id);
-    expect(url).toContain(`/documents/${sampleDocument.id}/content`);
+  it('returns the DocumentText body on 200', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ text: 'extracted body', chunk_count: 4, truncated: false }),
+    );
+    const result = await fetchDocumentText(sampleDocument.id);
+    expect(result).toEqual({ text: 'extracted body', chunk_count: 4, truncated: false });
   });
 
-  it('follows a 302 and returns the presigned Location URL (AC-3)', async () => {
-    const presigned = 'https://minio.example/bucket/obj?sig=abc';
+  it('carries the flag through when the server truncated the text', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(null, { status: 302, headers: { Location: presigned } }),
+      jsonResponse({ text: 'partial…', chunk_count: 900, truncated: true }),
     );
-    const url = await resolveDocumentContentUrl(sampleDocument.id);
-    expect(url).toBe(presigned);
+    const result = await fetchDocumentText(sampleDocument.id);
+    expect(result.truncated).toBe(true);
   });
 
   it('throws ApiError on a 404 (not permitted / cross-tenant — INV-2)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(404, 'Not Found'));
-    await expect(resolveDocumentContentUrl('nope')).rejects.toMatchObject({ status: 404 });
+    await expect(fetchDocumentText('nope')).rejects.toMatchObject({ status: 404 });
   });
 
-  it('refreshes once, retries, and returns the presigned URL after an expired-token 401', async () => {
-    setAccessToken('expired');
-    const presigned = 'https://minio.example/bucket/obj?sig=fresh';
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(problem(401, 'Unauthorized'))
-      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: presigned } }));
-    const handler = vi.fn(async () => {
-      setAccessToken('fresh');
-    });
-    registerRefreshHandler(handler);
-
-    const url = await resolveDocumentContentUrl(sampleDocument.id);
-
-    expect(url).toBe(presigned);
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const retryInit = fetchSpy.mock.calls[1]?.[1] as RequestInit;
-    const retryHeaders = new Headers(retryInit.headers);
-    expect(retryInit.redirect).toBe('manual');
-    expect(retryHeaders.get('Authorization')).toBe('Bearer fresh');
-  });
-
-  it('propagates the original 401 when refresh fails', async () => {
-    setAccessToken('expired');
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401, 'Unauthorized'));
-    const handler = vi.fn(async () => {
-      clearAccessToken();
-      throw new Error('refresh failed');
-    });
-    registerRefreshHandler(handler);
-
-    await expect(resolveDocumentContentUrl(sampleDocument.id)).rejects.toMatchObject({
-      status: 401,
-    });
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
-  it('only retries once when the content endpoint keeps returning 401', async () => {
-    setAccessToken('expired');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401, 'Unauthorized'));
-    const handler = vi.fn(async () => {
-      setAccessToken('still-bad');
-    });
-    registerRefreshHandler(handler);
-
-    await expect(resolveDocumentContentUrl(sampleDocument.id)).rejects.toMatchObject({
-      status: 401,
-    });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(handler).toHaveBeenCalledTimes(1);
+  it('throws ApiError on a 409 (document not ready yet)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      problem(409, 'Conflict', 'not ready', 'document_not_ready'),
+    );
+    await expect(fetchDocumentText(sampleDocument.id)).rejects.toMatchObject({ status: 409 });
   });
 });
 
