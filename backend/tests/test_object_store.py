@@ -211,24 +211,26 @@ def test_validate_upload_rejects_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _unit_settings() -> Settings:
-    return Settings(
-        DATABASE_URL="postgresql+asyncpg://t:t@localhost:5432/t",
-        REDIS_URL="redis://localhost:6379/0",
-        CELERY_BROKER_URL="redis://localhost:6379/1",
-        CELERY_RESULT_BACKEND="redis://localhost:6379/2",
-        S3_ENDPOINT_URL="http://localhost:9000",
-        S3_ACCESS_KEY="key",
-        S3_SECRET_KEY="secret",
-        S3_BUCKET="unit-bucket",
-        UPLOAD_ALLOWED_CONTENT_TYPES="text/plain,application/pdf",
-        MAX_UPLOAD_BYTES=100,
-        S3_PRESIGN_TTL_SECONDS=120,
+def _unit_settings(**overrides: object) -> Settings:
+    kwargs: dict[str, object] = {
+        "DATABASE_URL": "postgresql+asyncpg://t:t@localhost:5432/t",
+        "REDIS_URL": "redis://localhost:6379/0",
+        "CELERY_BROKER_URL": "redis://localhost:6379/1",
+        "CELERY_RESULT_BACKEND": "redis://localhost:6379/2",
+        "S3_ENDPOINT_URL": "http://localhost:9000",
+        "S3_ACCESS_KEY": "key",
+        "S3_SECRET_KEY": "secret",
+        "S3_BUCKET": "unit-bucket",
+        "UPLOAD_ALLOWED_CONTENT_TYPES": "text/plain,application/pdf",
+        "MAX_UPLOAD_BYTES": 100,
+        "S3_PRESIGN_TTL_SECONDS": 120,
         # Artifact allowlist/cap (issue #208) — broader types + its own cap so the
         # adapter's artifact methods validate against the right config.
-        ARTIFACT_ALLOWED_CONTENT_TYPES="text/csv,application/json,image/png",
-        MAX_ARTIFACT_BYTES=200,
-    )  # type: ignore[call-arg]
+        "ARTIFACT_ALLOWED_CONTENT_TYPES": "text/csv,application/json,image/png",
+        "MAX_ARTIFACT_BYTES": 200,
+    }
+    kwargs.update(overrides)
+    return Settings(**kwargs)  # type: ignore[arg-type]
 
 
 def _install_mock_client(store: ObjectStore, client: MagicMock) -> None:
@@ -498,6 +500,65 @@ async def test_presign_get_artifact_returns_url_for_owning_tenant(store: ObjectS
     call = client.generate_presigned_url.await_args
     assert call.args[0] == "get_object"
     assert call.kwargs["ExpiresIn"] == 120
+# Presigned URLs are minted against the PUBLIC endpoint (issue #241).
+#
+# SigV4 binds the signature to the Host header, so a URL presigned against the
+# in-network endpoint (http://minio:9000 inside compose) is unreachable AND
+# unfixable from a browser — rewriting the host breaks the signature. When
+# S3_PUBLIC_ENDPOINT_URL is set, presign_get/presign_put must sign against it;
+# everything else (put/get/delete) stays on the internal endpoint. Presigning
+# is pure client-side signing, so these tests use the REAL client — no mocks,
+# no network.
+# ---------------------------------------------------------------------------
+
+
+async def test_presign_get_uses_public_endpoint_when_configured() -> None:
+    store_public = ObjectStore(
+        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
+    )
+    key = build_key("tenant-a", b"data", "f.txt")
+
+    url = await store_public.presign_get("tenant-a", key)
+
+    assert url.startswith("http://public.example:47184/")
+    assert "unit-bucket" in url
+    assert "X-Amz-Signature=" in url
+
+
+async def test_presign_put_uses_public_endpoint_when_configured() -> None:
+    store_public = ObjectStore(
+        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
+    )
+
+    _key, url = await store_public.presign_put("tenant-a", b"data", "text/plain", "f.txt")
+
+    assert url.startswith("http://public.example:47184/")
+
+
+async def test_presign_get_defaults_to_internal_endpoint_when_unset() -> None:
+    # No S3_PUBLIC_ENDPOINT_URL ⇒ single-network deployment: presign against
+    # the (only) configured endpoint, exactly as before.
+    store_internal = ObjectStore(_unit_settings())
+    key = build_key("tenant-a", b"data", "f.txt")
+
+    url = await store_internal.presign_get("tenant-a", key)
+
+    assert url.startswith("http://localhost:9000/")
+
+
+async def test_put_keeps_internal_endpoint_when_public_configured() -> None:
+    # Only URL MINTING moves to the public endpoint; object I/O stays on the
+    # in-network client (the API/worker cannot necessarily reach the public URL).
+    store_public = ObjectStore(
+        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
+    )
+    client = MagicMock()
+    client.put_object = AsyncMock()
+    _install_mock_client(store_public, client)
+
+    await store_public.put("tenant-a", b"body", "text/plain", "notes.txt")
+
+    client.put_object.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
