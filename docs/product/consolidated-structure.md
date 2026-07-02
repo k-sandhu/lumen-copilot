@@ -1,10 +1,12 @@
 # Lumen Copilot — Consolidated Feature / Epic / Story Structure (multi-model reconciliation)
 
-Status: candidate product-scope input (reconciliation of parallel planning artifacts).
-Last updated: 2026-06-16.
+Status: **adopted** (was discovery input; the structure it proposed is now the operating model).
+Last updated: 2026-07-02.
 Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/3.
 
-This document **reconciles the product-discovery planning artifacts authored in parallel by three different models** into one coherent structure for building the product. It is discovery input only and **does not close OD-1** (product scope) in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Adopting any board/label/milestone change here still requires a tracked `type:chore`/`type:docs` issue + PR per [AGENTS.md](../../AGENTS.md) §7.
+> **Adoption status (2026-07-02).** When written this was discovery input; it has since been adopted. OD-1 closed using this doc as an input ([spec 0003](../specs/0003-product-scope-and-mission.md)); the layer model (§2), reconciled labels (§8), and 6-state board (§9) are live ([spec 0002](../specs/0002-feature-issue-structure.md) is marked adopted). **Divergences from what's below:** milestones are **thematic waves** with descriptive names (`M2 Trust Surfaces`, `M3 Agents & Extensibility`, `M2.5 Stabilization`) rather than §10's numbered ladder, though the *sequencing logic* (read-only value first, write-back behind approval, autonomy last) held. The §11 generator blocker is **moot** — the fleet cuts Features by hand (the mass story→issue path was not taken; see [../WORK_TRACKING.md](../WORK_TRACKING.md)). The story corpus grew to **17 epics** (EPIC 17 appended 2026-07-02). The current backlog beyond the committed M3 program is a set of **sponsor-gated next-wave epics** (connector breadth, knowledge trust, collaboration/trust, actions, proactive, research, AgentOps) mapped onto the roadmap below.
+
+This document **reconciles the product-discovery planning artifacts authored in parallel by three different models** into one coherent structure for building the product. It was discovery input; adopting its board/label/milestone changes was done via tracked `type:chore`/`type:docs` issues + PRs per [AGENTS.md](../../AGENTS.md) §7 (fleet-tooling [#7](https://github.com/k-sandhu/lumen-copilot/issues/7)/[#9](https://github.com/k-sandhu/lumen-copilot/issues/9)).
 
 ## 1. Inputs reconciled (who contributed what)
 
