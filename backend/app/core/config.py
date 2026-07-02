@@ -191,6 +191,65 @@ class Settings(BaseSettings):
             return frozenset(item.strip() for item in value.split(",") if item.strip())
         return value
 
+    # --- Artifact store (CC-12 / issue #208) --------------------------------
+    # Files agents/runs *produce* (distinct from uploaded documents): stored via
+    # the same ObjectStore under an ``artifacts/`` prefix, but with their own cap
+    # and a **broader** allowlist (agent output is more varied than an upload).
+    # Hard upper bound on a single produced artifact (bytes). Default 50 MiB.
+    # Validated before storing so an over-cap artifact is a typed 422, never a
+    # silent drop or a 500 (#208 AC-2).
+    max_artifact_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_ARTIFACT_BYTES")
+    # Allowlisted artifact content-types (#208 AC-2). Broader than the upload set:
+    # also csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
+    # tool or code sandbox typically emits. The declared type is checked against
+    # this set before storing (a client-declared type is a usability/allowlist
+    # check, not a security guarantee — sniffing is fenced OUT, OD-4). Comma-
+    # separated override via ARTIFACT_ALLOWED_CONTENT_TYPES.
+    artifact_allowed_content_types: frozenset[str] = Field(
+        default=frozenset(
+            {
+                "text/csv",
+                "application/json",
+                "image/png",
+                "image/svg+xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
+                "text/markdown",
+                "text/plain",
+                "text/html",
+            }
+        ),
+        alias="ARTIFACT_ALLOWED_CONTENT_TYPES",
+    )
+    # Default retention window for a produced artifact, in days. NULL/absent (the
+    # default) ⇒ **keep** (no expiry); a positive value stamps
+    # ``retention_expires_at = created_at + N days`` at creation, and the retention
+    # janitor (``app.tasks.artifact_retention``) may purge rows past it. Kept
+    # config, not a literal at the call site (backend/AGENTS.md).
+    artifact_retention_days: int | None = Field(default=None, alias="ARTIFACT_RETENTION_DAYS")
+
+    @field_validator("artifact_allowed_content_types", mode="before")
+    @classmethod
+    def _split_artifact_content_types(cls, value: object) -> object:
+        """Accept a comma-separated env string as the artifact content-type allowlist."""
+        if isinstance(value, str):
+            return frozenset(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("artifact_retention_days")
+    @classmethod
+    def _artifact_retention_days_positive(cls, value: int | None) -> int | None:
+        """A retention window must be positive when set; ``None`` = keep forever.
+
+        A zero/negative window would either purge every artifact immediately or be
+        meaningless, so a misconfiguration fails fast at startup rather than
+        silently deleting agent output (#208).
+        """
+        if value is not None and value <= 0:
+            raise ValueError("ARTIFACT_RETENTION_DAYS must be a positive number of days, or unset")
+        return value
+
     # When true (default), GET /documents/{id}/content responds 302 to a
     # short-TTL presigned GET URL (CC-12, the contract's primary path) so the
     # bytes transfer directly from storage, not through the API process. When

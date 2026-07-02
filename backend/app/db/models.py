@@ -39,6 +39,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
@@ -501,6 +502,81 @@ class AuditEvent(TenantScopedMixin, Base):
     )
     event_metadata: Mapped[dict[str, object]] = mapped_column(
         "metadata", _JSON, nullable=False, default=dict
+    )
+
+
+class Artifact(TenantScopedMixin, Base):
+    """A file an agent/run produced — tenant/owner-scoped, immutable (issue #208).
+
+    Distinct from the user-uploaded ``documents`` table: this is where the
+    file-writing tool and the code sandbox persist their output (CC-12). Mirrors
+    the ``documents`` tenant/owner + storage-key pattern, but is **immutable** —
+    no ``updated_at`` (a new version is a new row), and no ``status`` (the bytes
+    exist the moment the row does). ``produced_by`` (chat_session|run|tool) is the
+    write origin; the three nullable link ids let the artifact point back at the
+    producing session/run/tool invocation.
+
+    Only ``session_id`` is a real FK (``chat_sessions`` exists and is tenant-scoped
+    + CASCADE like the other links). ``run_id`` and ``tool_invocation_id`` are
+    plain nullable UUID columns rather than FKs because their referent tables (the
+    run/agent framework, CC-A) do not exist yet — mirroring how ``grants`` keeps
+    ``resource_id``/``principal_id`` FK-less because the referent varies; the
+    service validates linkage. They become FKs when those tables land.
+
+    Tenant-scoped (INV-1) with the same ``0007``-style RLS backstop applied in the
+    ``0013`` migration. ``retention_expires_at`` (nullable ⇒ keep) is the janitor
+    purge boundary; ``ix_artifacts_retention`` serves the sweep.
+    """
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        Index("ix_artifacts_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_artifacts_session_id", "session_id"),
+        # The retention janitor's sweep predicate: rows whose retention has
+        # elapsed. Partial index (retention_expires_at IS NOT NULL) on Postgres so
+        # the common "keep forever" rows (NULL) do not bloat it; a plain index
+        # elsewhere (SQLite test runs ignore the WHERE clause harmlessly).
+        Index(
+            "ix_artifacts_retention",
+            "retention_expires_at",
+            postgresql_where=text("retention_expires_at IS NOT NULL"),
+        ),
+        CheckConstraint("size_bytes >= 0", name="ck_artifacts_size_nonneg"),
+        CheckConstraint(
+            "produced_by in ('chat_session', 'run', 'tool')",
+            name="ck_artifacts_produced_by",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    produced_by: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Optional back-links to the producing context. Only session_id is an FK (its
+    # table exists); run_id / tool_invocation_id are plain UUIDs until CC-A lands.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    tool_invocation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The object-store key (tenant-prefixed, content-addressed; app.storage.keys),
+    # under the ``artifacts/`` prefix.
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    retention_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 

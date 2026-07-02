@@ -24,9 +24,16 @@ Exposes:
 * :meth:`ensure_bucket` — create ``S3_BUCKET`` if missing; called at startup so
   the bucket exists from day one.
 * :meth:`ping` — a cheap reachability check used by the readiness probe.
+* :meth:`put_artifact` / :meth:`get_artifact` / :meth:`delete_artifact` /
+  :meth:`presign_get_artifact` — the parallel lifecycle for **agent/run-produced
+  artifacts** (issue #208): keys namespaced under ``artifacts/`` and validated
+  against the broader *artifact* allowlist/limit, the tenant-prefix seam enforced
+  against ``artifacts/{tenant_id}/``.
 
-Scope note: retention/lifecycle, DLP/malware scanning, KMS/SSE, and the parsing
-sandbox are fenced **OUT** of #22 (OD-4 data invariants / CC-5 #21).
+Scope note: DLP/malware scanning, KMS/SSE, and the parsing sandbox are fenced
+**OUT** of #22 (OD-4 data invariants / CC-5 #21). Artifact **retention** (a
+janitor purging past ``retention_expires_at``) is #208's, stubbed in
+:mod:`app.tasks.artifact_retention`.
 """
 
 from __future__ import annotations
@@ -40,7 +47,13 @@ from botocore.exceptions import ClientError
 
 from app.core.config import Settings
 from app.core.errors import NotFoundError
-from app.storage.keys import assert_key_owned_by, build_key, sha256_hex
+from app.storage.keys import (
+    assert_artifact_key_owned_by,
+    assert_key_owned_by,
+    build_artifact_key,
+    build_key,
+    sha256_hex,
+)
 from app.storage.validation import validate_upload
 
 
@@ -221,6 +234,101 @@ class ObjectStore:
         be issued for another tenant's object.
         """
         assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            url: str = await client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": key},
+                ExpiresIn=self._settings.s3_presign_ttl_seconds,
+            )
+        return url
+
+    # --- Agent/run-produced artifacts (issue #208) ---------------------------
+    #
+    # A parallel object lifecycle for files agents/runs *produce* (CC-12),
+    # distinct from uploads: the key is namespaced under ``artifacts/`` and the
+    # allowlist/limit come from the **artifact** config (broader types, its own
+    # cap), while the tenant-prefix seam is enforced against
+    # ``artifacts/{tenant_id}/`` (:func:`assert_artifact_key_owned_by`). The
+    # ownership/visibility layer (owner-or-grant, cross-tenant → 404) lives in
+    # ``services.artifacts_service``; this adapter only guarantees the tenant
+    # prefix and the allowlist/limit, like the upload path.
+
+    async def put_artifact(
+        self,
+        tenant_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+    ) -> StoredObject:
+        """Validate, content-address, and store an artifact; return its descriptor.
+
+        The declared ``content_type`` and byte length are validated against the
+        **artifact** allowlist/limit (``ARTIFACT_ALLOWED_CONTENT_TYPES`` /
+        ``MAX_ARTIFACT_BYTES``) **before** any write (#208 AC-2); a rejection is a
+        typed ``ValidationError`` (→ 422). The key is
+        ``artifacts/{tenant_id}/{sha256(data)}/{safe_filename}`` (AC-5), so
+        identical agent output dedupes and every object is tenant-scoped.
+        """
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.artifact_allowed_content_types,
+            max_bytes=self._settings.max_artifact_bytes,
+        )
+        key = build_artifact_key(tenant_id, data, filename)
+        async with self._client() as client:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+        return StoredObject(
+            key=key,
+            sha256=sha256_hex(data),
+            size_bytes=len(data),
+            content_type=content_type,
+        )
+
+    async def get_artifact(self, tenant_id: str, key: str) -> bytes:
+        """Read back the bytes of an artifact at ``key`` for ``tenant_id`` (#208).
+
+        Enforces the artifact tenant-prefix seam first (AC-5): a key outside the
+        caller's ``artifacts/{tenant_id}/`` prefix is refused with
+        ``ForbiddenError`` before any I/O. A missing object maps to a typed
+        ``NotFoundError`` (never a leaked vendor error).
+        """
+        assert_artifact_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            try:
+                response = await client.get_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in {"NoSuchKey", "404", "NotFound"}:
+                    raise NotFoundError("object not found", code="object_not_found") from exc
+                raise
+            async with response["Body"] as stream:
+                body: bytes = await stream.read()
+        return body
+
+    async def delete_artifact(self, tenant_id: str, key: str) -> None:
+        """Remove the artifact object at ``key`` (#208).
+
+        Artifact tenant-prefix checked like :meth:`get_artifact`. Idempotent:
+        deleting an absent key is a no-op on S3/MinIO.
+        """
+        assert_artifact_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            await client.delete_object(Bucket=self._bucket, Key=key)
+
+    async def presign_get_artifact(self, tenant_id: str, key: str) -> str:
+        """Return a short-TTL presigned ``GET`` URL for an artifact ``key`` (#208 AC-1).
+
+        Artifact tenant-prefix checked first (AC-5): a cross-prefix key is refused
+        with ``ForbiddenError`` before any URL is minted, so a presigned URL can
+        never be issued for another tenant's artifact.
+        """
+        assert_artifact_key_owned_by(key, tenant_id)
         async with self._client() as client:
             url: str = await client.generate_presigned_url(
                 "get_object",

@@ -81,6 +81,22 @@ class AuditOutcome(str, enum.Enum):
     ERROR = "error"
 
 
+class ArtifactProducedBy(str, enum.Enum):
+    """What produced an artifact (issue #208) — the write origin.
+
+    An artifact is a file an agent/run *produced* (distinct from a user-uploaded
+    ``document``). ``CHAT_SESSION`` = written during an interactive chat turn,
+    ``RUN`` = produced by a background run, ``TOOL`` = emitted by a tool/code
+    invocation. The value is fixed at creation from the producing context, never
+    from request input, and pins which nullable link id (``session_id`` /
+    ``run_id`` / ``tool_invocation_id``) the row carries.
+    """
+
+    CHAT_SESSION = "chat_session"
+    RUN = "run"
+    TOOL = "tool"
+
+
 class GrantResourceType(str, enum.Enum):
     """What kind of resource an explicit grant is on (spec 0004 §2.2).
 
@@ -358,6 +374,38 @@ class AuditEvent:
     source_ip: str | None
     metadata: dict[str, object] = field(default_factory=dict)
     ts: datetime = field(default_factory=lambda: datetime.min)
+
+
+@dataclass(frozen=True, slots=True)
+class Artifact:
+    """A file an agent/run produced — the ``artifacts`` table row (issue #208).
+
+    Distinct from a user-uploaded :class:`Document`: this is the persistence seam
+    for the file-writing tool and the code sandbox's output files (CC-12). Tenant-
+    and owner-scoped, deny-by-default (spec 0004 §2.1/§2.2, INV-1/INV-2): a
+    caller sees only their own artifacts (plus any explicitly granted). Immutable
+    — a new version is a new row (no ``updated_at``). ``produced_by`` records the
+    write origin and pins which nullable link id is set (``session_id`` /
+    ``run_id`` / ``tool_invocation_id``). ``storage_key`` is the tenant-prefixed,
+    content-addressed object key under the ``artifacts/`` prefix
+    (:mod:`app.storage.keys`); ``sha256`` is that content address.
+    ``retention_expires_at`` (nullable = keep) is when a janitor may purge it.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    produced_by: ArtifactProducedBy
+    filename: str
+    mime_type: str
+    size_bytes: int
+    storage_key: str
+    sha256: str
+    created_at: datetime
+    session_id: UUID | None = None
+    run_id: UUID | None = None
+    tool_invocation_id: UUID | None = None
+    retention_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
