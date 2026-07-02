@@ -62,7 +62,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
         async with factory() as sess:
             yield sess
     finally:
@@ -468,7 +468,11 @@ async def test_document_count_by_storage_key(
     assert await docs_a.count_by_storage_key(shared) == 2  # unchanged by tenant B
 
     # Deleting one leaves the object still referenced by the other → guard keeps it.
+    # The count must run AFTER the delete is flushed: the app sessionmaker uses
+    # autoflush=False (db/session.py) and DocumentRepository.delete does not flush,
+    # so callers (DocumentService.delete, the sync reconcile) flush before counting.
     await docs_a.delete(d1.id)
+    await session.flush()
     assert await docs_a.count_by_storage_key(shared) == 1
 
 

@@ -556,17 +556,24 @@ class DocumentService:
         adapter, then ``document.deleted`` is audited (INV-6). Returns ``False``
         when the document is not visible to the caller.
 
-        Order: the object is deleted first (idempotent on S3/MinIO — a missing key
-        is a no-op), then the row, so a row never outlives its bytes silently; both
-        commit within this request's transaction at the router.
+        Order: delete the row first, ``flush`` it, then remove the object **only
+        if no other document (this tenant) still references the content-addressed
+        key** (#269). Objects are keyed by ``{tenant}/{sha256}/{filename}``, so two
+        identical uploads share one object — deleting it unconditionally would
+        break the survivor's ``/content``. The flush is required because the app
+        sessionmaker runs ``autoflush=False`` (``db/session.py``); without it the
+        ``count_by_storage_key`` read would still see the just-deleted row. All of
+        this commits within this request's transaction at the router.
         """
         document = await self._visible(document_id)
         if document is None:
             return False
-        await self._store.delete(str(self._tenant_id), document.storage_key)
         deleted = await self._documents.delete(document_id)
         if not deleted:  # pragma: no cover — visibility already established
             return False
+        await self._session.flush()
+        if await self._documents.count_by_storage_key(document.storage_key) == 0:
+            await self._store.delete(str(self._tenant_id), document.storage_key)
         # Clear the document's chunk docs from the search index (ADR-0010 §5):
         # enqueued after-commit so the worker reads the already-deleted state and
         # the index never resurrects a rolled-back delete. Best-effort — the
