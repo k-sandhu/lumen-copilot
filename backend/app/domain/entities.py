@@ -147,6 +147,118 @@ class SecretKind(str, enum.Enum):
     OTHER = "other"
 
 
+class AutonomyLevel(str, enum.Enum):
+    """How much an assistant may act on its own (ADR-0011 §3, contract ``AutonomyLevel``).
+
+    Capped by the risk tier of the assistant's allowed tools; at MVP the whole
+    product is T0/T1, so autonomy governs only app-local tools through the CC-A
+    approval seam. ``SUGGEST`` is the default for a new assistant.
+    """
+
+    SUGGEST = "suggest"
+    DRAFT = "draft"
+    ACT_WITH_APPROVAL = "act_with_approval"
+    ACT_AUTO = "act_auto"
+
+
+class AssistantStatus(str, enum.Enum):
+    """Assistant lifecycle (ADR-0011 §1, contract ``AssistantStatus``).
+
+    ``DRAFT`` = the working head, never published; ``PUBLISHED`` = has at least
+    one immutable version and may start sessions; ``DISABLED`` = cannot start new
+    sessions (an orphaned/retired assistant).
+    """
+
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    DISABLED = "disabled"
+
+
+class KnowledgeMode(str, enum.Enum):
+    """A retrieval source class an assistant's scope may draw from (contract ``KnowledgeMode``)."""
+
+    COMPANY = "company"
+    UPLOADED = "uploaded"
+    WEB = "web"
+    MODEL = "model"
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeScope:
+    """The assistant's retrieval filter (ADR-0011 §1/§2, contract ``KnowledgeScope``).
+
+    A **narrowing** set layered on top of the per-user INV-2 permission predicate
+    inside ``retrieval/`` — it can only *intersect*, never widen, what the running
+    principal may already retrieve. Empty lists ⇒ no narrowing on that axis.
+    ``collection_ids``/``source_ids`` scope retrieval to owned/granted collections
+    or connected sources; ``modes`` selects which source classes the scope draws
+    from.
+    """
+
+    collection_ids: tuple[UUID, ...] = ()
+    source_ids: tuple[UUID, ...] = ()
+    modes: tuple[KnowledgeMode, ...] = ()
+
+    @classmethod
+    def empty(cls) -> KnowledgeScope:
+        """The no-narrowing scope (a fresh draft's default)."""
+        return cls()
+
+
+@dataclass(frozen=True, slots=True)
+class Assistant:
+    """A saved, named, governed chat configuration — the ``assistants`` head row (#211).
+
+    The **mutable head** / working definition (ADR-0011 §1): the three inputs the
+    chat runtime already consumes (``instructions`` → system prompt,
+    ``tool_allowlist`` → the CC-A allowed-tool set, ``knowledge_scope`` → the
+    retrieval filter) plus a ``model`` default, an accountable ``owner_id`` +
+    a ``backup_owner_id`` (required before publish), an ``autonomy_level``, and a
+    lifecycle ``status``. Tenant- and owner-scoped (INV-1/INV-2): a caller sees
+    only their own (or granted) assistants; a cross-tenant/non-owned id is 404.
+    ``current_version`` is the published head version number (``None`` while never
+    published) — a projection the service fills, not a stored column.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    backup_owner_id: UUID | None
+    name: str
+    description: str | None
+    instructions: str | None
+    model: str | None
+    knowledge_scope: KnowledgeScope
+    tool_allowlist: tuple[str, ...]
+    autonomy_level: AutonomyLevel
+    status: AssistantStatus
+    created_at: datetime
+    updated_at: datetime
+    current_version: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantVersion:
+    """An immutable published snapshot — an ``assistant_versions`` row (#211).
+
+    Write-once (append-only): the full frozen definition a session/run pins to
+    (ADR-0011 §1). ``config`` is the complete assistant config at publish time; a
+    rollback creates a **new** version whose ``config`` copies a prior one — history
+    is never mutated or deleted. ``author_id`` is who published (or rolled back to
+    create) it; ``notes``/``diff_summary`` are advisory release metadata.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    assistant_id: UUID
+    version: int
+    author_id: UUID | None
+    config: dict[str, object]
+    notes: str | None
+    diff_summary: str | None
+    created_at: datetime
+
+
 @dataclass(frozen=True, slots=True)
 class Secret:
     """One stored credential — the full ``secrets`` row (issue #209).
@@ -326,7 +438,14 @@ class Chunk:
 
 @dataclass(frozen=True, slots=True)
 class ChatSession:
-    """A conversation thread. Ownership-bearing (spec 0004 §2.2)."""
+    """A conversation thread. Ownership-bearing (spec 0004 §2.2).
+
+    ``assistant_id``/``assistant_version_id`` are the optional assistant pin
+    (ADR-0011 §1): a session started from an assistant records both the assistant
+    and the exact published version it ran, so the transcript is reproducible after
+    the assistant is edited/rolled back. Both ``None`` ⇒ ad-hoc chat (the default,
+    unchanged path).
+    """
 
     id: UUID
     tenant_id: UUID
@@ -335,6 +454,8 @@ class ChatSession:
     model: str
     created_at: datetime
     updated_at: datetime
+    assistant_id: UUID | None = None
+    assistant_version_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

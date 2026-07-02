@@ -73,6 +73,13 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # invocation emits both the intent and the outcome (INV-6).
         "tool.invoked",
         "tool.result",
+        # Custom assistants (ADR-0011 / issue #211) — additive; every assistant
+        # lifecycle mutation (create/update/delete/publish/rollback) is audited.
+        "assistant.created",
+        "assistant.updated",
+        "assistant.deleted",
+        "assistant.published",
+        "assistant.rolled_back",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",

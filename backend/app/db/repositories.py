@@ -35,8 +35,12 @@ from app.db import models
 from app.domain.entities import (
     Artifact,
     ArtifactProducedBy,
+    Assistant,
+    AssistantStatus,
+    AssistantVersion,
     AuditEvent,
     AuditOutcome,
+    AutonomyLevel,
     Chunk,
     Citation,
     Collection,
@@ -46,6 +50,8 @@ from app.domain.entities import (
     GrantPrincipalType,
     GrantResourceType,
     GrantRole,
+    KnowledgeMode,
+    KnowledgeScope,
     Message,
     MessageRole,
     RecentSearch,
@@ -189,6 +195,8 @@ def _to_chat_session(row: models.ChatSession) -> ChatSessionEntity:
         model=row.model,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        assistant_id=row.assistant_id,
+        assistant_version_id=row.assistant_version_id,
     )
 
 
@@ -306,6 +314,85 @@ def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
         ok=row.ok,
         error=row.error,
         duration_ms=row.duration_ms,
+        created_at=row.created_at,
+    )
+
+
+def _to_knowledge_scope(raw: object) -> KnowledgeScope:
+    """Map a stored ``knowledge_scope`` jsonb blob to the domain value object.
+
+    Defensive against a partial/legacy row: a missing or malformed key degrades to
+    the empty axis rather than raising, and an unrecognised mode is dropped — the
+    stored scope can never make retrieval *widen* (a bad value narrows to nothing,
+    never to "everything"). Ids are parsed as UUIDs; a non-uuid is skipped.
+    """
+    data = raw if isinstance(raw, dict) else {}
+
+    def _uuids(key: str) -> tuple[UUID, ...]:
+        values = data.get(key)
+        if not isinstance(values, list):
+            return ()
+        out: list[UUID] = []
+        for v in values:
+            try:
+                out.append(UUID(str(v)))
+            except (ValueError, TypeError):
+                continue
+        return tuple(out)
+
+    modes_raw = data.get("modes")
+    modes: list[KnowledgeMode] = []
+    if isinstance(modes_raw, list):
+        for m in modes_raw:
+            try:
+                modes.append(KnowledgeMode(str(m)))
+            except ValueError:
+                continue
+    return KnowledgeScope(
+        collection_ids=_uuids("collection_ids"),
+        source_ids=_uuids("source_ids"),
+        modes=tuple(modes),
+    )
+
+
+def _knowledge_scope_to_json(scope: KnowledgeScope) -> dict[str, object]:
+    """Serialise a :class:`KnowledgeScope` to the stored jsonb shape (uuids → str)."""
+    return {
+        "collection_ids": [str(c) for c in scope.collection_ids],
+        "source_ids": [str(s) for s in scope.source_ids],
+        "modes": [m.value for m in scope.modes],
+    }
+
+
+def _to_assistant(row: models.Assistant) -> Assistant:
+    return Assistant(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        backup_owner_id=row.backup_owner_id,
+        name=row.name,
+        description=row.description,
+        instructions=row.instructions,
+        model=row.model,
+        knowledge_scope=_to_knowledge_scope(row.knowledge_scope),
+        tool_allowlist=tuple(str(t) for t in (row.tool_allowlist or [])),
+        autonomy_level=AutonomyLevel(row.autonomy_level),
+        status=AssistantStatus(row.status),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_assistant_version(row: models.AssistantVersion) -> AssistantVersion:
+    return AssistantVersion(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        assistant_id=row.assistant_id,
+        version=row.version,
+        author_id=row.author_id,
+        config=dict(row.config or {}),
+        notes=row.notes,
+        diff_summary=row.diff_summary,
         created_at=row.created_at,
     )
 
@@ -1307,12 +1394,22 @@ class ChunkRepository(_TenantScopedRepository):
 class ChatSessionRepository(_TenantScopedRepository):
     """Chat sessions within one tenant."""
 
-    async def create(self, *, owner_id: UUID, model: str, title: str = "") -> ChatSessionEntity:
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        model: str,
+        title: str = "",
+        assistant_id: UUID | None = None,
+        assistant_version_id: UUID | None = None,
+    ) -> ChatSessionEntity:
         row = models.ChatSession(
             tenant_id=self._tenant_id,
             owner_id=owner_id,
             model=model,
             title=title,
+            assistant_id=assistant_id,
+            assistant_version_id=assistant_version_id,
         )
         self._session.add(row)
         await self._session.flush()
@@ -2264,6 +2361,271 @@ class ToolInvocationRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_tool_invocation(r) for r in rows]
+
+
+class AssistantRepository(_TenantScopedRepository):
+    """Assistants (the mutable head) within one tenant (ADR-0011 §1, #211).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``assistant_id``
+    resolves to ``None``/no rows, so the existence-non-disclosure 404 is enforced
+    one layer up off the ``None`` return. Ownership/grant visibility is layered in
+    ``services.assistants_service`` (deny-by-default, spec 0004 §2.2). Persists via
+    the session but does not commit — the caller owns the transaction boundary.
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        description: str | None = None,
+        instructions: str | None = None,
+        model: str | None = None,
+        knowledge_scope: KnowledgeScope | None = None,
+        tool_allowlist: Sequence[str] = (),
+        autonomy_level: AutonomyLevel = AutonomyLevel.SUGGEST,
+        backup_owner_id: UUID | None = None,
+    ) -> Assistant:
+        """Create a ``draft`` assistant owned by ``owner_id`` (ADR-0011 §1)."""
+        row = models.Assistant(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            backup_owner_id=backup_owner_id,
+            name=name,
+            description=description,
+            instructions=instructions,
+            model=model,
+            knowledge_scope=_knowledge_scope_to_json(knowledge_scope or KnowledgeScope.empty()),
+            tool_allowlist=list(tool_allowlist),
+            autonomy_level=autonomy_level.value,
+            status=AssistantStatus.DRAFT.value,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_assistant(row)
+
+    async def get(self, assistant_id: UUID) -> Assistant | None:
+        stmt = select(models.Assistant).where(
+            models.Assistant.tenant_id == self._tenant_id,
+            models.Assistant.id == assistant_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_assistant(row) if row is not None else None
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        status: AssistantStatus | None = None,
+    ) -> list[Assistant]:
+        """A keyset page of an owner's assistants (newest first).
+
+        Owner- *and* tenant-scoped (deny-by-default ownership, spec 0004 §2.2 +
+        INV-1): a caller only ever sees their own here (sharing via grants is a
+        follow-up, ADR-0011 §1). Ordered by ``(created_at, id)`` **descending**
+        with ``id`` the stable tiebreaker; ``after_id`` is the decoded cursor and
+        the boundary ``created_at`` is resolved by a correlated scalar subquery so
+        the comparison is exact on Postgres + the offline SQLite (mirrors the
+        collections/sources keyset). An optional ``status`` filters the page.
+        """
+        conditions = [
+            models.Assistant.tenant_id == self._tenant_id,
+            models.Assistant.owner_id == owner_id,
+        ]
+        if status is not None:
+            conditions.append(models.Assistant.status == status.value)
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Assistant.created_at)
+                .where(
+                    models.Assistant.tenant_id == self._tenant_id,
+                    models.Assistant.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Assistant.created_at < boundary_created_at,
+                    and_(
+                        models.Assistant.created_at == boundary_created_at,
+                        models.Assistant.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Assistant)
+            .where(*conditions)
+            .order_by(models.Assistant.created_at.desc(), models.Assistant.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assistant(r) for r in rows]
+
+    async def update(
+        self,
+        assistant_id: UUID,
+        *,
+        fields: dict[str, object],
+    ) -> Assistant | None:
+        """Apply a partial update to the mutable head, tenant-scoped.
+
+        ``fields`` carries only the attributes to change (already validated by the
+        service). ``knowledge_scope`` is expected as a :class:`KnowledgeScope` and
+        is serialised here; ``autonomy_level`` as an :class:`AutonomyLevel`;
+        ``status`` as an :class:`AssistantStatus`; ``tool_allowlist`` as a
+        sequence of strings. Returns the updated entity, or ``None`` if no row
+        matches in this tenant (the service maps that to 404). Ownership is
+        enforced one layer up.
+        """
+        stmt = select(models.Assistant).where(
+            models.Assistant.tenant_id == self._tenant_id,
+            models.Assistant.id == assistant_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        for key, value in fields.items():
+            if key == "knowledge_scope" and isinstance(value, KnowledgeScope):
+                row.knowledge_scope = _knowledge_scope_to_json(value)
+            elif key == "tool_allowlist" and isinstance(value, list | tuple):
+                row.tool_allowlist = [str(t) for t in value]
+            elif key == "autonomy_level" and isinstance(value, AutonomyLevel):
+                row.autonomy_level = value.value
+            elif key == "status" and isinstance(value, AssistantStatus):
+                row.status = value.value
+            else:
+                setattr(row, key, value)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_assistant(row)
+
+    async def delete(self, assistant_id: UUID) -> bool:
+        """Delete an assistant head (cascades to its version history), tenant-scoped."""
+        stmt = select(models.Assistant).where(
+            models.Assistant.tenant_id == self._tenant_id,
+            models.Assistant.id == assistant_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        return True
+
+
+class AssistantVersionRepository(_TenantScopedRepository):
+    """The immutable, append-only ``assistant_versions`` history within one tenant.
+
+    Exposes only ``add`` (append), reads, and the monotonic ``next_version``
+    helper — there is intentionally no update or delete method; the table also
+    denies UPDATE/DELETE at the DB role (the ``0016`` migration). A rollback is an
+    ``add`` of a **new** version copying a prior config — history is never
+    rewritten. Tenant-scoped (INV-1).
+    """
+
+    async def add(
+        self,
+        *,
+        assistant_id: UUID,
+        version: int,
+        author_id: UUID | None,
+        config: dict[str, object],
+        notes: str | None = None,
+        diff_summary: str | None = None,
+    ) -> AssistantVersion:
+        """Append one immutable version snapshot for an assistant, returning it."""
+        row = models.AssistantVersion(
+            tenant_id=self._tenant_id,
+            assistant_id=assistant_id,
+            version=version,
+            author_id=author_id,
+            config=config,
+            notes=notes,
+            diff_summary=diff_summary,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_assistant_version(row)
+
+    async def next_version(self, assistant_id: UUID) -> int:
+        """The next monotonic version number for an assistant (``max+1``, min 1)."""
+        stmt = select(func.max(models.AssistantVersion.version)).where(
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.assistant_id == assistant_id,
+        )
+        current = (await self._session.execute(stmt)).scalar_one_or_none()
+        return int(current) + 1 if current is not None else 1
+
+    async def get(self, version_id: UUID) -> AssistantVersion | None:
+        stmt = select(models.AssistantVersion).where(
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.id == version_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_assistant_version(row) if row is not None else None
+
+    async def get_by_number(
+        self, assistant_id: UUID, version: int
+    ) -> AssistantVersion | None:
+        """The specific numbered version of an assistant (for rollback), tenant-scoped."""
+        stmt = select(models.AssistantVersion).where(
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.assistant_id == assistant_id,
+            models.AssistantVersion.version == version,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_assistant_version(row) if row is not None else None
+
+    async def get_head(self, assistant_id: UUID) -> AssistantVersion | None:
+        """The current (highest-numbered) published version, or ``None`` if never published."""
+        stmt = (
+            select(models.AssistantVersion)
+            .where(
+                models.AssistantVersion.tenant_id == self._tenant_id,
+                models.AssistantVersion.assistant_id == assistant_id,
+            )
+            .order_by(models.AssistantVersion.version.desc())
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_assistant_version(row) if row is not None else None
+
+    async def list_for_assistant_page(
+        self,
+        assistant_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[AssistantVersion]:
+        """A keyset page of an assistant's versions (newest version first), tenant-scoped.
+
+        Ordered by ``version`` **descending** (a total order per assistant — the
+        UNIQUE guarantees no ties), so the id-only cursor resolves the boundary's
+        version by a correlated scalar subquery (exact on Postgres + SQLite).
+        """
+        conditions = [
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.assistant_id == assistant_id,
+        ]
+        if after_id is not None:
+            boundary_version = (
+                select(models.AssistantVersion.version)
+                .where(
+                    models.AssistantVersion.tenant_id == self._tenant_id,
+                    models.AssistantVersion.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(models.AssistantVersion.version < boundary_version)
+        stmt = (
+            select(models.AssistantVersion)
+            .where(*conditions)
+            .order_by(models.AssistantVersion.version.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assistant_version(r) for r in rows]
 
 
 def normalize_query(query: str) -> str:

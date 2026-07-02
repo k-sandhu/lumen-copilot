@@ -37,16 +37,19 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import ValidationError
+from app.core.errors import NotFoundError, ValidationError
 from app.db.repositories import (
+    AssistantRepository,
+    AssistantVersionRepository,
     ChatSessionRepository,
     CitationRepository,
     CitationView,
     MessageRepository,
     UserPreferenceRepository,
 )
-from app.domain.entities import ChatSession, Message, MessageRole
+from app.domain.entities import AssistantStatus, ChatSession, Message, MessageRole
 from app.realtime.backplane import Backplane, StreamOwner
+from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.models_service import is_allowed_model
 
 _MIN_LIMIT = 1
@@ -96,12 +99,15 @@ class SendResult:
 
     The router serialises ``user_message`` into the 202 ``SendMessageResponse``
     and uses ``stream_id`` / ``model`` / ``history`` to launch the answer runtime.
+    ``assistant_config`` is the assembled run config when the session is pinned to
+    an assistant version (ADR-0011 §2), else ``None`` (ad-hoc chat).
     """
 
     user_message: Message
     stream_id: str
     model: str
     history: tuple[Message, ...]
+    assistant_config: AssistantRunConfig | None = None
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -154,6 +160,8 @@ class ChatService:
         self._messages = MessageRepository(session, tenant_id)
         self._citations = CitationRepository(session, tenant_id)
         self._prefs = UserPreferenceRepository(session, tenant_id)
+        self._assistants = AssistantRepository(session, tenant_id)
+        self._versions = AssistantVersionRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
@@ -208,18 +216,68 @@ class ChatService:
 
     # --- session use-cases --------------------------------------------------
 
-    async def create_session(self, *, title: str | None, model: str | None) -> SessionView:
+    async def create_session(
+        self, *, title: str | None, model: str | None, assistant_id: UUID | None = None
+    ) -> SessionView:
         """Create a session owned by the caller.
 
         With no explicit ``model`` the caller's saved **default-model preference**
         seeds it (spec 0005 AC-P4), falling back to the server default; an explicit
         model is validated against the allow-list (unknown → 422, INV-8).
+
+        With an ``assistant_id`` (ADR-0011 §5) the server resolves the assistant
+        (cross-tenant / non-owned / non-granted → 404, existence non-disclosure),
+        **pins its current published version** (a non-published / disabled
+        assistant → 422), and stamps both FKs on the session. The assistant's
+        model default seeds the session model when the caller supplied none. Ad-hoc
+        (no ``assistant_id``) is unchanged.
         """
-        resolved = (
-            await self._resolved_default_model() if model is None else self._resolve_model(model)
-        )
+        if assistant_id is None:
+            resolved = (
+                await self._resolved_default_model()
+                if model is None
+                else self._resolve_model(model)
+            )
+            session = await self._sessions.create(
+                owner_id=self._owner_id, model=resolved, title=title or ""
+            )
+            return SessionView(session=session, message_count=0)
+
+        assistant = await self._assistants.get(assistant_id)
+        if assistant is None or assistant.owner_id != self._owner_id:
+            # Cross-tenant / non-owned / non-granted → 404 (INV-1/INV-2). Sharing
+            # via grants is a follow-up (ADR-0011 §1); for now only the owner may
+            # start a session from an assistant.
+            raise NotFoundError("Assistant not found.")
+        if assistant.status is not AssistantStatus.PUBLISHED:
+            raise ValidationError(
+                "Only a published assistant can start a session.",
+                code="assistant_not_published",
+            )
+        head = await self._versions.get_head(assistant.id)
+        if head is None:  # pragma: no cover — published implies a version exists
+            raise ValidationError(
+                "The assistant has no published version.", code="assistant_not_published"
+            )
+        # Model precedence: an explicit request model wins; else the assistant's
+        # frozen model default; else the caller's / server default (fail-closed).
+        if model is not None:
+            resolved = self._resolve_model(model)
+        else:
+            frozen_model = head.config.get("model")
+            resolved = (
+                frozen_model
+                if isinstance(frozen_model, str)
+                and frozen_model
+                and is_allowed_model(frozen_model, self._settings)
+                else await self._resolved_default_model()
+            )
         session = await self._sessions.create(
-            owner_id=self._owner_id, model=resolved, title=title or ""
+            owner_id=self._owner_id,
+            model=resolved,
+            title=title or "",
+            assistant_id=assistant.id,
+            assistant_version_id=head.id,
         )
         return SessionView(session=session, message_count=0)
 
@@ -325,6 +383,11 @@ class ChatService:
         # Per-turn override validated against the allow-list; else the session's
         # default (itself a validated allow-list id at create/update time).
         resolved_model = self._resolve_model(model) if model is not None else session.model
+        # If the session is pinned to an assistant version, assemble its run config
+        # (ADR-0011 §2): instructions → system prompt, tool_allowlist → allowed set,
+        # knowledge_scope → the narrowing retrieval filter. Load the exact pinned
+        # version so the run is reproducible even after the assistant is edited.
+        assistant_config = await self._load_assistant_config(session.assistant_version_id)
         prior = await self._messages.list_for_session(session_id)
         user_message = await self._messages.add(
             session_id=session_id,
@@ -343,7 +406,26 @@ class ChatService:
             stream_id=stream_id,
             model=resolved_model,
             history=tuple(prior[-_HISTORY_TURNS:]),
+            assistant_config=assistant_config,
         )
+
+    async def _load_assistant_config(
+        self, assistant_version_id: UUID | None
+    ) -> AssistantRunConfig | None:
+        """Assemble the run config for a session's pinned assistant version (or None).
+
+        Tenant-scoped (the repository); a version pinned in this tenant is loaded
+        and assembled into the three run inputs. A missing/foreign version id
+        (e.g. the assistant was deleted, nulling the FK) degrades to ``None`` — the
+        turn runs as ad-hoc rather than failing, fail-open on availability but never
+        on permission (the per-user retrieval filter still runs).
+        """
+        if assistant_version_id is None:
+            return None
+        version = await self._versions.get(assistant_version_id)
+        if version is None:
+            return None
+        return assemble_run_config(version.config)
 
 
 __all__ = [

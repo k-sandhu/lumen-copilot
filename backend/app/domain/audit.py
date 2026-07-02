@@ -86,6 +86,17 @@ class AuditAction(str, enum.Enum):
     # generic tool events and the retrieval event.
     TOOL_INVOKED = "tool.invoked"
     TOOL_RESULT = "tool.result"
+    # Custom assistants (ADR-0011, issue #211). Additive to the §2.4 taxonomy —
+    # deny-by-default is preserved (the set only grows; no action is relaxed). An
+    # assistant is a governed config; every lifecycle mutation is audited (INV-6):
+    # create/update/delete the mutable head, publish (freeze an immutable version),
+    # and rollback (append a new version from a prior snapshot). Ownership transfer
+    # + autonomy caps get their own actions when #217/#218 land (ADR-0011 §3/§4).
+    ASSISTANT_CREATED = "assistant.created"
+    ASSISTANT_UPDATED = "assistant.updated"
+    ASSISTANT_DELETED = "assistant.deleted"
+    ASSISTANT_PUBLISHED = "assistant.published"
+    ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"
