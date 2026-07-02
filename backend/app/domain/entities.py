@@ -382,3 +382,34 @@ class Grant:
     role: GrantRole
     granted_by: UUID | None
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocation:
+    """One governed tool-call record — the ``tool_invocations`` table row (CC-7 #207).
+
+    The durable trace of a single tool invocation through the governed registry
+    (issue #207 §4): which tool ran in which session, for which assistant message,
+    whether it succeeded, and how long it took. Written **per invocation** — a
+    governance denial (off-allow-list / unapproved) and a tool failure are recorded
+    too, with ``ok=False`` + the ``error`` code — so the trace never has a silent
+    gap (feeds the WS trace now and AgentOps analytics later, E14).
+
+    Tenant-scoped (INV-1). ``args_hash`` is a stable non-reversible hash of the
+    call arguments (not the raw args — same discipline as the audit query hash,
+    spec 0004 §2.4) so a reviewer can correlate identical calls without storing
+    potentially sensitive argument text. ``run_id`` is reserved for a future
+    multi-step agent-run grouping; the MVP leaves it ``None``.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    session_id: UUID | None
+    message_id: UUID | None
+    tool_name: str
+    args_hash: str
+    ok: bool
+    error: str | None
+    duration_ms: int
+    run_id: UUID | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.min)

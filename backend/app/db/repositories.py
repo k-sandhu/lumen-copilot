@@ -53,6 +53,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    ToolInvocation,
     User,
     UserPreferences,
 )
@@ -250,6 +251,22 @@ def _to_audit_event(row: models.AuditEvent) -> AuditEvent:
         source_ip=row.source_ip,
         metadata=dict(row.event_metadata),
         ts=row.ts,
+    )
+
+
+def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
+    return ToolInvocation(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        session_id=row.session_id,
+        message_id=row.message_id,
+        run_id=row.run_id,
+        tool_name=row.tool_name,
+        args_hash=row.args_hash,
+        ok=row.ok,
+        error=row.error,
+        duration_ms=row.duration_ms,
+        created_at=row.created_at,
     )
 
 
@@ -1844,6 +1861,62 @@ class AuditEventRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_audit_event(r) for r in rows]
+
+
+class ToolInvocationRepository(_TenantScopedRepository):
+    """The ``tool_invocations`` trace within one tenant (CC-7 / issue #207 §4).
+
+    One ``record`` per governed tool invocation — a success, an
+    off-allow-list/unapproved **denial**, or a tool **failure** — so the per-run
+    trace never has a silent gap. Tenant-scoped (INV-1): a call in tenant A is
+    invisible to a tenant-B repository. This is a trace/analytics table, not the
+    append-only audit log (that stays :class:`AuditEventRepository`), so it is an
+    ordinary table (no UPDATE/DELETE revoke). Writes are flushed not committed —
+    the caller (the runner, within the chat runtime's transaction) owns the commit
+    so the invocation row lands atomically with the answer turn it belongs to.
+    """
+
+    async def record(
+        self,
+        *,
+        tool_name: str,
+        args_hash: str,
+        ok: bool,
+        duration_ms: int,
+        session_id: UUID | None = None,
+        message_id: UUID | None = None,
+        run_id: UUID | None = None,
+        error: str | None = None,
+    ) -> ToolInvocation:
+        """Append one tool-invocation record for this tenant, returning it."""
+        row = models.ToolInvocation(
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            run_id=run_id,
+            tool_name=tool_name,
+            args_hash=args_hash,
+            ok=ok,
+            error=error,
+            duration_ms=max(0, duration_ms),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_tool_invocation(row)
+
+    async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[ToolInvocation]:
+        """The tool trace for one chat session (tenant-scoped), oldest first."""
+        stmt = (
+            select(models.ToolInvocation)
+            .where(
+                models.ToolInvocation.tenant_id == self._tenant_id,
+                models.ToolInvocation.session_id == session_id,
+            )
+            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_tool_invocation(r) for r in rows]
 
 
 def normalize_query(query: str) -> str:

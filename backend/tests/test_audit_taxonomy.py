@@ -57,6 +57,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # /admin write, a reversible T1 action audited like every consequential
         # action (mission filter #4 "auditable").
         "tenant.settings_updated",
+        # Governed tool platform (CC-7 / issue #207) — additive; every tool
+        # invocation emits both the intent and the outcome (INV-6).
+        "tool.invoked",
+        "tool.result",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
