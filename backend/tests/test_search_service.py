@@ -11,12 +11,12 @@ Two layers, both honouring the offline-safe pattern of the retrieval tests (#45)
   and only re-checks the tenant scope (INV-1): a passage whose document is in
   another tenant is dropped, but a same-tenant non-owned passage the chokepoint
   surfaced (e.g. a grant) is projected — it is not re-narrowed to ownership.
-* **Live (compose Postgres + pgvector)** — the headline INV-1/INV-2 cases run
-  end-to-end through the **real** ``RetrievalService.search`` (the permission
-  chokepoint): the negatives prove results exclude another user's / another
-  tenant's matching passage, and the grant positive proves a document granted to
-  the caller *does* come back from ``/search`` (matching what suggest surfaces).
-  Skips automatically when Postgres is unreachable.
+* **Live (Postgres + OpenSearch)** — the headline INV-1/INV-2 cases run
+  end-to-end through the **real** ``RetrievalService.search`` (the engine-backed
+  permission chokepoint, ADR-0010): the negatives prove results exclude another
+  user's / another tenant's matching passage, and the grant positive proves a
+  document granted to the caller *does* come back from ``/search`` (matching what
+  suggest surfaces). Skips automatically when Postgres or OpenSearch is unreachable.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from app.db.repositories import (
 from app.domain.entities import DocumentStatus, GrantResourceType, Role
 from app.domain.llm import ChatMessage, Completion, Embedding, TokenUsage
 from app.domain.retrieval import RetrievedPassage
+from app.search import OpenSearchStore
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
 from app.services.search_service import SearchService
@@ -573,11 +574,26 @@ def _pg_reachable(url: str) -> bool:
         return False
 
 
+_OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
+
+
+def _os_reachable(url: str) -> bool:
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection(
+            (parsed.hostname or "localhost", parsed.port or 9200), timeout=1.0
+        ):
+            return True
+    except OSError:
+        return False
+
+
 _live = pytest.mark.skipif(
-    not _pg_reachable(_PG_URL),
+    not (_pg_reachable(_PG_URL) and _os_reachable(_OS_URL)),
     reason=(
-        f"Postgres not reachable for {_PG_URL}; live search permission test skipped "
-        "(offline-safe). The real pgvector + full-text chokepoint runs only here."
+        f"Postgres ({_PG_URL}) and OpenSearch ({_OS_URL}) must both be reachable; "
+        "live search permission test skipped (offline-safe). The engine-backed "
+        "chokepoint (ADR-0010) runs only here."
     ),
 )
 
@@ -586,6 +602,54 @@ def _unit_vector(dim: int, hot: int) -> list[float]:
     v = [0.0] * dim
     v[hot % dim] = 1.0
     return v
+
+
+async def _index_document_chunks(
+    store: OpenSearchStore,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    collection_id: uuid.UUID,
+) -> None:
+    """Index a seeded document's chunks into the per-test engine index (ADR-0010).
+
+    The live tests seed chunks straight through the repository (no ingestion
+    task), so they must mirror the write-path into OpenSearch themselves before
+    the engine-backed search can find them.
+    """
+    from app.search import IndexedChunk
+
+    chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+    await store.upsert_chunks(
+        [
+            IndexedChunk(
+                chunk_id=c.id,
+                tenant_id=c.tenant_id,
+                document_id=c.document_id,
+                owner_id=owner_id,
+                collection_id=collection_id,
+                ord=c.ord,
+                text=c.text,
+                embedding=c.embedding,
+                char_start=c.char_start,
+                char_end=c.char_end,
+            )
+            for c in chunks
+        ],
+        refresh=True,
+    )
+
+
+async def _drop_index(store: OpenSearchStore) -> None:
+    """Delete the per-test index + pipeline and close the store (teardown)."""
+    import httpx as _httpx
+
+    async with _httpx.AsyncClient(base_url=_OS_URL, timeout=15.0) as cleanup:
+        await cleanup.delete(f"/{store._index}")  # noqa: SLF001 — test teardown
+        await cleanup.delete(f"/_search/pipeline/{store._index}-hybrid")  # noqa: SLF001
+    await store.aclose()
 
 
 class _LiveGateway:
@@ -619,9 +683,16 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine as _create
 
     from app.retrieval import RetrievalService
+    from app.search import OpenSearchStore
 
     engine = _create(_PG_URL)
     schema = f"search_test_{uuid.uuid4().hex[:8]}"
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-test-{uuid.uuid4().hex[:8]}",
+        dimensions=_EMBED_DIM,
+        timeout_seconds=30.0,
+    )
     hot = 11
     query_text = "annual revenue growth strategy"
     matching = "annual revenue growth strategy for the year"
@@ -631,6 +702,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
             await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
             await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
             await conn.run_sync(Base.metadata.create_all)
+        await store.ensure_index()
 
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
@@ -640,7 +712,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
 
             async def _seed(
                 tenant: uuid.UUID, email: str, fname: str
-            ) -> tuple[uuid.UUID, uuid.UUID]:
+            ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
                 user = await UserRepository(sess, tenant).create(
                     email=email, password_hash="h", roles=[Role.MEMBER]
                 )
@@ -665,15 +737,25 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
                         )
                     ],
                 )
-                return user.id, doc.id
+                return user.id, doc.id, coll.id
 
-            user_a, doc_a = await _seed(tenant_a, "a@x.test", "a.txt")
-            _user_b, doc_b = await _seed(tenant_b, "b@y.test", "b.txt")  # other tenant
-            _user_c, doc_c = await _seed(tenant_a, "c@x.test", "c.txt")  # other owner, same tenant
+            user_a, doc_a, coll_a = await _seed(tenant_a, "a@x.test", "a.txt")
+            user_b, doc_b, coll_b = await _seed(tenant_b, "b@y.test", "b.txt")  # other tenant
+            user_c, doc_c, coll_c = await _seed(tenant_a, "c@x.test", "c.txt")  # other owner
             await sess.commit()
 
+            # Index all three corpora into the per-test engine index (ADR-0010).
+            for tid, did, oid, cid in (
+                (tenant_a, doc_a, user_a, coll_a),
+                (tenant_b, doc_b, user_b, coll_b),
+                (tenant_a, doc_c, user_c, coll_c),
+            ):
+                await _index_document_chunks(
+                    store, sess, tenant_id=tid, document_id=did, owner_id=oid, collection_id=cid
+                )
+
             gateway = _LiveGateway(_unit_vector(_EMBED_DIM, hot))
-            retrieval = RetrievalService(sess, gateway=gateway)  # type: ignore[arg-type]
+            retrieval = RetrievalService(sess, gateway=gateway, store=store)  # type: ignore[arg-type]
             audit = AuditSink(AuditEventRepository(sess, tenant_a))
             svc = SearchService(
                 sess,
@@ -694,6 +776,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
             assert all(r.permission == "allowed" for r in page.results)
             assert all(r.owner == user_a for r in page.results)
     finally:
+        await _drop_index(store)
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()
@@ -719,9 +802,16 @@ async def test_live_search_returns_granted_document_passages() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine as _create
 
     from app.retrieval import RetrievalService
+    from app.search import OpenSearchStore
 
     engine = _create(_PG_URL)
     schema = f"search_grant_test_{uuid.uuid4().hex[:8]}"
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-test-{uuid.uuid4().hex[:8]}",
+        dimensions=_EMBED_DIM,
+        timeout_seconds=30.0,
+    )
     hot = 13
     query_text = "annual revenue growth strategy"
     matching = "annual revenue growth strategy for the year"
@@ -731,6 +821,7 @@ async def test_live_search_returns_granted_document_passages() -> None:
             await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
             await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
             await conn.run_sync(Base.metadata.create_all)
+        await store.ensure_index()
 
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
@@ -765,9 +856,13 @@ async def test_live_search_returns_granted_document_passages() -> None:
                 ],
             )
             await sess.commit()
+            await _index_document_chunks(
+                store, sess, tenant_id=tenant, document_id=doc.id,
+                owner_id=owner.id, collection_id=coll.id,
+            )
 
             gateway = _LiveGateway(_unit_vector(_EMBED_DIM, hot))
-            retrieval = RetrievalService(sess, gateway=gateway)  # type: ignore[arg-type]
+            retrieval = RetrievalService(sess, gateway=gateway, store=store)  # type: ignore[arg-type]
 
             def _search_as(user_id: uuid.UUID) -> SearchService:
                 audit = AuditSink(AuditEventRepository(sess, tenant))
@@ -812,6 +907,7 @@ async def test_live_search_returns_granted_document_passages() -> None:
             assert result.permission == "allowed"
             assert result.title == "a.txt"
     finally:
+        await _drop_index(store)
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()

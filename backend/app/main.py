@@ -36,6 +36,7 @@ from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
+from app.search import aclose_search_store
 
 log = get_logger(__name__)
 
@@ -93,6 +94,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await _drain_answer_tasks(app, grace_seconds=settings.chat_shutdown_grace_seconds)
+    # Release the shared retrieval-store HTTP client (ADR-0010). Created lazily
+    # on the serving loop by the first search — a no-op if never created (e.g.
+    # offline tests) — so create/close stay on one event loop (#140 hygiene).
+    await aclose_search_store()
     await dispose_engine()
     log.info("shutdown.complete")
 

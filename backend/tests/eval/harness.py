@@ -42,6 +42,7 @@ from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.ingestion import chunk_text
 from app.realtime.backplane import InMemoryBackplane
+from app.search import IndexedChunk, OpenSearchStore
 from app.services.chat_runtime import ChatRuntime
 from tests.eval.golden import GOLDEN_QUESTIONS, GoldenDocument, GoldenQuestion
 from tests.eval.metrics import ItemScore, ObservedAnswer, ObservedPassage
@@ -80,6 +81,7 @@ async def seed_corpus(
     owner_id: UUID,
     documents: Sequence[GoldenDocument],
     embed: object | None = None,
+    store: OpenSearchStore | None = None,
 ) -> SeededCorpus:
     """Ingest the golden documents for ``owner_id`` using the real chunker (#21).
 
@@ -89,6 +91,11 @@ async def seed_corpus(
     :class:`ChunkRepository` writes them — exactly the rows retrieval reads. When
     ``embed`` is supplied (offline), each chunk gets a deterministic vector so the
     faked retrieval can rank by it; live ingestion embeds for real elsewhere.
+
+    When ``store`` is supplied (the live eval), each document's chunks are also
+    indexed into OpenSearch (ADR-0010) — the eval seeds via the repository rather
+    than the ingestion task, so it mirrors the write-path itself so the
+    engine-backed :class:`RetrievalService` can find them.
     """
     collection = await CollectionRepository(session, tenant_id).create(
         owner_id=owner_id, name="Golden corpus"
@@ -119,6 +126,25 @@ async def seed_corpus(
                 )
             )
         rows = await ChunkRepository(session, tenant_id).replace_for_document(document.id, inputs)
+        if store is not None:
+            await store.upsert_chunks(
+                [
+                    IndexedChunk(
+                        chunk_id=r.id,
+                        tenant_id=r.tenant_id,
+                        document_id=r.document_id,
+                        owner_id=owner_id,
+                        collection_id=collection.id,
+                        ord=r.ord,
+                        text=r.text,
+                        embedding=r.embedding,
+                        char_start=r.char_start,
+                        char_end=r.char_end,
+                    )
+                    for r in rows
+                ],
+                refresh=True,
+            )
         seeded[golden.doc_id] = SeededDocument(
             doc_id=golden.doc_id,
             document_id=document.id,

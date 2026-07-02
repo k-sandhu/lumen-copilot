@@ -11,11 +11,19 @@ only — never an OpenSearch response shape.
 """
 
 from app.search.filters import SearchAllowFilter
-from app.search.store import IndexedChunk, OpenSearchStore, SearchHit
+from app.search.store import (
+    IndexedChunk,
+    OpenSearchStore,
+    SearchHit,
+    aclose_search_store,
+    get_search_store,
+)
 
 __all__ = [
     "IndexedChunk",
     "OpenSearchStore",
     "SearchAllowFilter",
     "SearchHit",
+    "aclose_search_store",
+    "get_search_store",
 ]
