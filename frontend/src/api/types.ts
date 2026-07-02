@@ -135,6 +135,15 @@ export interface DocumentListQuery {
   limit?: number;
 }
 
+/** 200 from GET /documents/{id}/text — extracted plain text (contract 0.6.0). */
+export interface DocumentText {
+  /** The ingestion parser output, reassembled from the stored chunks. */
+  text: string;
+  chunk_count: number;
+  /** True when the server capped the text (DOCUMENT_TEXT_MAX_BYTES). */
+  truncated: boolean;
+}
+
 // --- Shared error model: Problem (RFC-9457 application/problem+json) ---
 export interface ProblemFieldError {
   field: string;
