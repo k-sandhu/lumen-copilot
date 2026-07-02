@@ -61,6 +61,7 @@ Decided in [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapter
 |---|---|
 | LLM providers (chat, stream, embeddings, tools) | `backend/app/llm/` (LiteLLM gateway) |
 | Vector + lexical retrieval | `backend/app/retrieval/` |
+| Dedicated text-search index (OpenSearch — the single retrieval store, [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md)) | `backend/app/search/` |
 | Relational database | `backend/app/db/` (models + repositories) |
 | Object storage (uploads, artifacts) | `backend/app/storage/` (S3/MinIO) |
 | Background jobs | `backend/app/tasks/` (Celery) |
