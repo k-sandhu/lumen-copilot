@@ -124,6 +124,39 @@ class _FakeGateway:
         return [Embedding(vector=[float(len(t) % 7)] * _DIM, model="fake") for t in inputs]
 
 
+class _FakeIndexStore:
+    """Offline stand-in for ``app.search.OpenSearchStore`` in the index-sync core.
+
+    Ingestion dual-writes to the search index after persisting chunks
+    (ADR-0010 §5); patching the store class keeps that write offline. The
+    write-path behaviour itself is asserted in ``test_index_sync.py``.
+    """
+
+    @classmethod
+    def from_settings(cls, settings: object) -> _FakeIndexStore:
+        return cls()
+
+    async def ensure_index(self) -> None:
+        return None
+
+    async def upsert_chunks(self, chunks: Sequence[object], *, refresh: bool = False) -> None:
+        return None
+
+    async def delete_document(
+        self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
+    ) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _offline_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the index-sync core at the fake store — no engine, tests stay offline."""
+    monkeypatch.setattr("app.tasks.index_sync.OpenSearchStore", _FakeIndexStore)
+
+
 # --- SQLite-backed session_scope override -----------------------------------
 
 
