@@ -1,10 +1,10 @@
 # Lumen Copilot — User Stories
 
-Status: candidate product-scope input.
-Last updated: 2026-06-16.
+Status: adopted product-discovery corpus (OD-1 closed via [spec 0003](../specs/0003-product-scope-and-mission.md)); still the source of *traceability*, not the unit of work.
+Last updated: 2026-07-02 (added EPIC 17 — collaboration/trust/reach surfaces).
 Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
 
-Comprehensive, **product-agnostic** user stories for a knowledge-work-automation product, consolidated from the research in [knowledge-work-automation-research.md](knowledge-work-automation-research.md). Vendor and product names are deliberately **removed here** (they live in the research doc); these stories describe capabilities, not any one competitor.
+Comprehensive, **product-agnostic** user stories for a knowledge-work-automation product, consolidated from the research in [knowledge-work-automation-research.md](knowledge-work-automation-research.md). Vendor and product names are deliberately **removed here** (they live in the research doc); these stories describe capabilities, not any one competitor. **17 epics** — EPIC 17 was appended 2026-07-02 to cover capabilities the original 16-epic sweep missed (see that epic's header). Stories are the **why** behind Features on the board; the claim unit is the Feature ([spec 0002](../specs/0002-feature-issue-structure.md)).
 
 This document is discovery input. It does **not** decide final product scope, stack, architecture, security invariants, or launch order, and it does **not** close OD-1 in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md).
 
@@ -697,6 +697,50 @@ Let agents operate software through its interface when no clean API exists. **Hi
 **E16-4.** As an **OPS** owner, I want UI-automation agents to self-correct on failure (retry, recover, find another path) and escalate when stuck, so that automations don't silently fail halfway.
 - **AC:** On a failed step (page won't load, element missing, error returned), the agent retries within limits, then escalates with context.
 - **AC:** Repeated failures pause the run and notify the owner rather than looping indefinitely.
+
+# EPIC 17 — Collaboration, Trust, And Reach Surfaces
+
+Stories that turn the product's core adjectives — *permissioned, cited, auditable* — into capabilities users can feel, and extend the assistant to the surfaces where people actually work. Added 2026-07-02 (planner backlog pass, tracking issue #301); several map to the gated next-wave epics filed the same day (#294 Collaboration & Personal Trust; reach surfaces sequence behind #298 Proactive and the M3/M4 agent runtime).
+
+**E17-1.** As a **KW**, I want to share a conversation (read-only) with teammates, where each citation is re-checked against **the viewer's** permissions and anything they can't read is shown as a redacted placeholder, so that I can hand a colleague an answer-with-evidence without leaking anything their own access wouldn't already show them.
+- **AC:** A shared conversation renders every persisted turn read-only; each cited passage is permission-checked per viewer at view time, not at share time.
+- **AC:** A citation the viewer lacks access to appears as a labeled placeholder (no title, filename, or snippet); inline reference markers stay correctly numbered.
+- **AC:** Revoking the underlying access after sharing redacts that citation on the next view; revoking the share makes the link non-disclosing (indistinguishable from unknown).
+
+**E17-2.** As a **KW**, I want to pin an answer and have it tell me when its cited evidence has changed or gone stale, so that a decision I rely on doesn't silently drift out of date.
+- **AC:** A pinned answer surfaces a "sources changed / may be stale" signal when a cited document is updated, re-synced, or passes a staleness threshold.
+- **AC:** The user can re-run the pinned question in one action and see what changed versus the pinned version.
+- **AC:** The staleness signal derives from real source recency, never a fabricated timestamp.
+
+**E17-3.** As a **KW**, I want to see what the assistant did on my behalf — what it retrieved, answered, and touched — so that I can trust the product without needing an admin or auditor role.
+- **AC:** A self-service activity view lists the user's own retrieval/answer/document/chat events, newest first, paginated.
+- **AC:** No parameter combination returns another user's or another tenant's events; the admin audit surface is unchanged.
+- **AC:** The user can control or clear personal context/memory the assistant retains about them, within admin policy.
+
+**E17-4.** As a **KW**, I want a mobile companion for the assistant, so that I can read my brief, approve pending actions, and ask grounded questions away from my desk.
+- **AC:** Core read surfaces (ask + cited answer, daily brief, approval inbox) work on a phone-sized viewport.
+- **AC:** Approvals performed on mobile flow through the same approval engine, tiers, and audit as the web app (no privileged shortcut).
+- **AC:** Notifications respect the same batching and per-type mute controls as the in-app notification center.
+
+**E17-5.** As a **KW**, I want to email the assistant (e.g. `assistant@<tenant>`) and get a grounded, cited reply, so that I can reach it from the tool I already live in without opening a new app.
+- **AC:** An inbound message from a verified tenant user is answered as that user, enforcing their permissions at retrieval time.
+- **AC:** The reply carries citations/links back to the sources, degrading gracefully to plain text where rich formatting isn't available.
+- **AC:** Messages from unverified or unknown senders are rejected without disclosing tenant content.
+
+**E17-6.** As a **KW**, I want to talk to the assistant and hear answers back, so that I can work hands-free or when typing is impractical.
+- **AC:** Dictated questions are transcribed and answered with the same grounding and citations as typed questions.
+- **AC:** Spoken answers are available with the cited sources still inspectable in the accompanying transcript.
+- **AC:** Voice is an input/output surface only — it changes no permission, grounding, or audit behavior.
+
+**E17-7.** As a **NH**, I want a role-based onboarding journey — a curated, sequenced set of grounded answers and checkpoints about my team, tools, and history — so that I ramp up without knowing what to ask.
+- **AC:** An admin or manager can define a journey (ordered topics + checkpoints) scoped to a role or team.
+- **AC:** The new hire progresses through the journey with grounded, cited answers over company context, at their own pace, with progress tracked.
+- **AC:** Every answer respects the new hire's own permissions; the journey never surfaces content they aren't entitled to.
+
+**E17-8.** As a **BLD**, I want a governed marketplace of shareable assistant, skill, and connector templates (definitions, not data), so that teams can adopt proven automations without rebuilding them and without crossing the tenancy boundary.
+- **AC:** Templates package configuration only (instructions, tool allow-lists, knowledge-scope shape) — never tenant data, credentials, or indexed content.
+- **AC:** Importing a template instantiates it against the importer's own sources and permissions; nothing is shared across tenants except the definition.
+- **AC:** Admins can review, approve, or block templates before they are usable in their tenant.
 
 ---
 

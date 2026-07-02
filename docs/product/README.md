@@ -1,17 +1,17 @@
 # Product Research And User Stories
 
-Status: candidate product-scope input.
-Last updated: 2026-06-16.
+Status: product-discovery corpus — **OD-1 now closed** (via [spec 0003](../specs/0003-product-scope-and-mission.md)); retained as traceability + roadmap.
+Last updated: 2026-07-02.
 Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
 
-These docs collect research and candidate user stories for Lumen Copilot. They are intentionally written as product discovery input, not as final product scope. They do not close OD-1 in `docs/specs/0001-open-decisions.md`; that still requires human confirmation and a dedicated scope/spec decision.
+These docs collect research and candidate user stories for Lumen Copilot. They began as product-discovery input; **OD-1 (product scope) closed 2026-06-17** ([spec 0003](../specs/0003-product-scope-and-mission.md)) using them as the source corpus. They remain the **traceability + roadmap** layer: the MVP and the committed agents program are carved from them, and the rest is the sponsor-gated roadmap. The stories are the *why* behind Features on the board — not the unit of claim (that's the Feature; [spec 0002](../specs/0002-feature-issue-structure.md)). `user-stories.md` now carries **17 epics** (EPIC 17 added 2026-07-02).
 
 ## Files
 
 These two files are the **consolidated, comprehensive** product-discovery docs. They merge the root research notes (below) with a 22-vendor competitive sweep.
 
 - [knowledge-work-automation-research.md](knowledge-work-automation-research.md) — research synthesis on Glean and ~22 adjacent enterprise-AI products, the seven-layer category pattern, category-wide shifts, capability deep-dives, metrics, mental models, candidate product shape, feature taxonomy, prioritization, and risks. **Vendor and product names are retained here** (it's research).
-- [user-stories.md](user-stories.md) — comprehensive candidate user stories grouped by 16 epics, persona, and acceptance criteria. **Vendor/product names are deliberately removed** (capability-level, product-agnostic). Written in the `scripts/stories-to-issues.ps1`-parseable format (`# EPIC <n> — …`, `**E<n>-<m>.** As a **TAG**, …`, bolded persona legend) so it can seed issues via `-StoriesFile docs/product/user-stories.md`.
+- [user-stories.md](user-stories.md) — comprehensive candidate user stories grouped by 17 epics (EPIC 17 added 2026-07-02), persona, and acceptance criteria. **Vendor/product names are deliberately removed** (capability-level, product-agnostic). Written in the `scripts/stories-to-issues.ps1`-parseable format (`# EPIC <n> — …`, `**E<n>-<m>.** As a **TAG**, …`, bolded persona legend) so it can seed issues via `-StoriesFile docs/product/user-stories.md`.
 
 - [feature-build-plan.md](feature-build-plan.md) - dry-run plan for structuring epics, story issues, cross-cutting contract issues, labels, and workstreams for high-parallelism feature delivery.
 - [consolidated-structure.md](consolidated-structure.md) — **multi-model reconciliation** (Claude Opus 4.8 + gpt-5.5 + minimax-m3): the unified Epic→Feature→Story→Cross-cutting→Spike structure, reconciled labels/milestones/board, workstreams, and build sequencing.
