@@ -207,6 +207,62 @@ async def test_upsert_empty_is_noop() -> None:
     await store.upsert_chunks([])
 
 
+async def test_upsert_batches_large_chunk_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression #258: a chunk-heavy document is written in bounded sub-bulks.
+
+    One request per document grows unboundedly (each chunk carries a ~20KB
+    embedding) and deterministically outlived the request timeout on a
+    42-chunk document. The store must cap actions per ``_bulk`` request,
+    preserve order across batches, and keep every batch individually
+    fail-closed.
+    """
+    import app.search.store as store_module
+
+    monkeypatch.setattr(store_module, "_BULK_BATCH_SIZE", 4)
+    requests: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        lines = request.content.decode("utf-8").strip().split("\n")
+        # Every other NDJSON line is an action header; cap = 4 actions/batch.
+        requests.append([json.loads(line)["index"]["_id"] for line in lines[0::2]])
+        return httpx.Response(200, json={"errors": False, "items": []})
+
+    store = _store(httpx.MockTransport(handler))
+    tenant, owner = uuid.uuid4(), uuid.uuid4()
+    chunks = [_chunk(tenant_id=tenant, owner_id=owner) for _ in range(10)]
+
+    await store.upsert_chunks(chunks)
+
+    assert [len(batch) for batch in requests] == [4, 4, 2]
+    flattened = [cid for batch in requests for cid in batch]
+    assert flattened == [str(c.chunk_id) for c in chunks]  # order preserved
+
+
+async def test_upsert_failing_later_batch_fails_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression #258: batching must not soften fail-closed — batch 2 fails ⇒ call fails."""
+    import app.search.store as store_module
+
+    monkeypatch.setattr(store_module, "_BULK_BATCH_SIZE", 4)
+    seen = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["count"] += 1
+        if seen["count"] == 2:
+            return httpx.Response(200, json={"errors": True, "items": []})
+        return httpx.Response(200, json={"errors": False, "items": []})
+
+    store = _store(httpx.MockTransport(handler))
+    tenant, owner = uuid.uuid4(), uuid.uuid4()
+    chunks = [_chunk(tenant_id=tenant, owner_id=owner) for _ in range(10)]
+
+    with pytest.raises(DependencyError) as excinfo:
+        await store.upsert_chunks(chunks)
+    assert excinfo.value.code == "search_index_error"
+    assert seen["count"] == 2  # stopped at the failing batch, no batch 3
+
+
 # --- Live round-trip against the base-stack engine (skips when offline) ------
 
 _OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
