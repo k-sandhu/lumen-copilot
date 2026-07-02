@@ -148,14 +148,21 @@ def _hybrid_body(
     embedding: Sequence[float],
     allow: SearchAllowFilter,
     k: int,
+    collection_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
     """The hybrid query body with the permission filter in BOTH legs.
 
     The filter appears twice by design: hybrid sub-queries score independently,
     so each leg must be individually incapable of surfacing an out-of-allow-set
-    candidate (INV-1/INV-2 hold per leg, not just post-merge).
+    candidate (INV-1/INV-2 hold per leg, not just post-merge). The optional
+    ``collection_ids`` narrowing is ANDed alongside the permission clauses in
+    both legs — narrowing can only ever shrink the permitted set, never widen it.
     """
-    permission = allow.to_engine_filter()
+    filters: list[dict[str, Any]] = list(allow.to_engine_filter())
+    if collection_ids:
+        filters.append(
+            {"terms": {"collection_id": sorted(str(c) for c in collection_ids)}}
+        )
     return {
         "size": k,
         "_source": ["chunk_id", "document_id"],
@@ -165,7 +172,7 @@ def _hybrid_body(
                     {
                         "bool": {
                             "must": [{"match": {"text": {"query": query_text}}}],
-                            "filter": permission,
+                            "filter": filters,
                         }
                     },
                     {
@@ -173,7 +180,7 @@ def _hybrid_body(
                             "embedding": {
                                 "vector": list(embedding),
                                 "k": k,
-                                "filter": {"bool": {"filter": permission}},
+                                "filter": {"bool": {"filter": filters}},
                             }
                         }
                     },
@@ -430,12 +437,14 @@ class OpenSearchStore:
         embedding: Sequence[float],
         allow: SearchAllowFilter,
         k: int,
+        collection_ids: Sequence[UUID] | None = None,
     ) -> list[SearchHit]:
         """Run the permission-filtered hybrid query (BM25 ⊕ kNN), best first.
 
         ``allow`` is required — there is no engine read without the INV-1/INV-2
         filter, and the filter is applied inside **both** legs (see
-        :func:`_hybrid_body`). Only the ``retrieval/`` chokepoint calls this
+        :func:`_hybrid_body`). ``collection_ids`` optionally narrows within the
+        allow-set (never widens). Only the ``retrieval/`` chokepoint calls this
         (ADR-0010 §3); results are hydrated + re-checked against Postgres there
         (defense in depth).
         """
@@ -443,7 +452,11 @@ class OpenSearchStore:
             "POST",
             f"/{self._index}/_search",
             json_body=_hybrid_body(
-                query_text=query_text, embedding=embedding, allow=allow, k=k
+                query_text=query_text,
+                embedding=embedding,
+                allow=allow,
+                k=k,
+                collection_ids=collection_ids,
             ),
             params={
                 "search_pipeline": self._pipeline,
@@ -463,4 +476,40 @@ class OpenSearchStore:
         return hits
 
 
-__all__ = ["IndexedChunk", "OpenSearchStore", "SearchHit"]
+# --- app-process store (the API server's one client) -------------------------
+
+_app_store: OpenSearchStore | None = None
+
+
+def get_search_store() -> OpenSearchStore:
+    """The API process's shared store (one HTTP client, created lazily).
+
+    For the request path only (``retrieval/`` — one event loop for the process,
+    so the pooled client is loop-safe). Celery tasks build a per-run store via
+    :meth:`OpenSearchStore.from_settings` instead — ``run_task`` gives every task
+    a fresh loop (#140) and a cached client must never straddle loops. Closed on
+    app shutdown via :func:`aclose_search_store`.
+    """
+    global _app_store
+    if _app_store is None:
+        from app.core.config import get_settings
+
+        _app_store = OpenSearchStore.from_settings(get_settings())
+    return _app_store
+
+
+async def aclose_search_store() -> None:
+    """Release the shared store's HTTP client (app lifespan shutdown)."""
+    global _app_store
+    if _app_store is not None:
+        await _app_store.aclose()
+        _app_store = None
+
+
+__all__ = [
+    "IndexedChunk",
+    "OpenSearchStore",
+    "SearchHit",
+    "aclose_search_store",
+    "get_search_store",
+]

@@ -7,15 +7,25 @@ folding it into every query**. The permission filter is applied inside this
 module (via :mod:`app.retrieval.queries`), keyed off the identity resolved in
 ``auth/`` — there is no unfiltered path (ADR-0004, mission filter #1).
 
-Composition (the adapter wires three collaborators, none of which it *is*):
+Composition (the adapter wires four collaborators, none of which it *is*):
 
-* the SQLAlchemy async session + the search queries in
-  :mod:`app.retrieval.queries` (the only pgvector/full-text issuer);
-* the pure fusion/ranking in :mod:`app.retrieval.fusion` (RRF + a flagged
-  cross-encoder re-rank fast-follow);
+* the ``app/search/`` OpenSearch store — **the single retrieval store**
+  (ADR-0010): ranked hybrid candidates (BM25 ⊕ kNN, engine-normalized) come
+  from ONE engine query whose
+  :class:`~app.search.filters.SearchAllowFilter` this service builds — tenant
+  + owner-or-grant, the grant id-sets resolved from the ``grants`` table per
+  request — so an unfiltered engine query is unrepresentable;
+* the SQLAlchemy async session + :mod:`app.retrieval.queries` for **hydration**
+  (every ranked hit is re-read and permission-re-checked against Postgres, the
+  source of truth, before becoming a citable passage — defense in depth) and
+  for the relational agent tools (``search_documents`` / ``get_document``);
 * the #36 ``llm/`` gateway ``embed()`` to embed the query (bge-m3) — the only
   model caller (ADR-0004); the gateway is injected so the service is testable
   with a fake and never imports LiteLLM.
+
+**Fail closed (single-store, ADR-0010).** An unreachable engine raises
+:class:`~app.core.errors.DependencyError` (→ 503); there is no Postgres
+fallback for ranked search — never an unfiltered or silently-degraded result.
 
 It returns the domain types in :mod:`app.domain.retrieval`
 (:class:`RetrievedPassage`, :class:`DocumentMatch`, :class:`DocumentText`),
@@ -37,41 +47,67 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
+from app.db.repositories import GrantRepository
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import queries
-from app.retrieval.fusion import reciprocal_rank_fusion, rerank, rrf_score
+from app.retrieval.fusion import rrf_score
 from app.retrieval.permissions import AllowSet
+from app.search import OpenSearchStore, SearchAllowFilter, get_search_store
 
-# Per-signal candidate fan-out: each of the semantic/lexical legs pulls a wider
-# slate than the final ``k`` so fusion has overlap to work with before the cut.
-# A small multiplier keeps the two queries cheap while giving RRF room to reorder.
-_CANDIDATE_MULTIPLIER = 4
-# A floor so a tiny ``k`` (e.g. 1–2) still fetches enough candidates per leg for
-# fusion to be meaningful.
-_MIN_CANDIDATES = 20
 # Hard ceilings so a hostile/large ``k`` cannot turn into an unbounded scan.
 _MAX_K = 100
 _MAX_DOCUMENT_HITS = 50
 
 
-def _candidate_pool(k: int) -> int:
-    """How many candidates each leg fetches for a final top-``k`` (bounded)."""
-    return min(_MAX_K * _CANDIDATE_MULTIPLIER, max(_MIN_CANDIDATES, k * _CANDIDATE_MULTIPLIER))
-
-
 class RetrievalService:
     """Permission-filtered hybrid retrieval + the agent search tools.
 
-    Constructed per-request with the async session and the #36 LLM gateway. Every
-    public method takes the resolved :class:`Principal`; the allow-set is derived
-    from it on each call (never cached across principals) and folded into every
-    query, so the permission filter is structural and unskippable (INV-2).
+    Constructed per-request with the async session and the #36 LLM gateway; the
+    OpenSearch store defaults to the app-process client
+    (:func:`app.search.get_search_store`) and is injectable so tests target a
+    per-test index. Every public method takes the resolved :class:`Principal`;
+    the allow-set is derived from it on each call (never cached across
+    principals) and folded into every query — engine and SQL alike — so the
+    permission filter is structural and unskippable (INV-2).
     """
 
-    def __init__(self, session: AsyncSession, *, gateway: LLMGateway) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        gateway: LLMGateway,
+        store: OpenSearchStore | None = None,
+    ) -> None:
         self._session = session
         self._gateway = gateway
+        self._store = store
+
+    def _search_store(self) -> OpenSearchStore:
+        """The engine client — injected (tests) or the app-process default.
+
+        Resolved lazily at call time so constructing the service for the
+        relational tools never touches engine plumbing.
+        """
+        return self._store if self._store is not None else get_search_store()
+
+    async def _allow_filter(self, allow_set: AllowSet) -> SearchAllowFilter:
+        """Build the engine-side INV-1/INV-2 filter for this request.
+
+        The SQL grant ``EXISTS`` becomes resolved id-sets (ADR-0010 §4): the
+        requester's ``user``-principal grants are read from the tenant-scoped
+        ``grants`` table **per request**, so a revoked grant vanishes from the
+        very next query — deny-by-default is preserved on the engine path.
+        """
+        granted_docs, granted_colls = await GrantRepository(
+            self._session, allow_set.tenant_id
+        ).granted_resource_ids(allow_set.grant_principal_id)
+        return SearchAllowFilter(
+            tenant_id=allow_set.tenant_id,
+            owner_ids=allow_set.owner_ids,
+            granted_document_ids=granted_docs,
+            granted_collection_ids=granted_colls,
+        )
 
     # --- core hybrid search -------------------------------------------------
 
@@ -85,11 +121,12 @@ class RetrievalService:
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
-        Embeds ``query`` via the #36 gateway (bge-m3), runs the pgvector semantic
-        leg and the Postgres full-text leg over the **same** allow-set-filtered
-        candidate set, fuses the two rankings with reciprocal-rank fusion, applies
-        the cross-encoder re-rank (a flagged fast-follow stub today), then hydrates
-        the top-``k`` fused ids into :class:`RetrievedPassage` objects carrying
+        Embeds ``query`` via the #36 gateway (bge-m3), then runs **one**
+        OpenSearch hybrid query (BM25 ⊕ kNN, score-normalized by the engine's
+        search pipeline — ADR-0010) carrying the INV-1/INV-2
+        :class:`SearchAllowFilter` in both legs, and hydrates the ranked hits
+        into :class:`RetrievedPassage` objects from Postgres — where the
+        permission predicate is applied **again** (defense in depth) — carrying
         source + char offsets for citations.
 
         Args:
@@ -97,51 +134,55 @@ class RetrievalService:
                 ownership allow-set is derived from it — never from request input.
             query: the natural-language query to ground against.
             k: the number of passages to return (clamped to a safe ceiling).
-            collection_ids: optional narrowing to specific collections (still
-                permission-filtered — a foreign collection contributes nothing).
+            collection_ids: optional narrowing to specific collections (ANDed
+                inside the permission filter — narrowing never widens; a foreign
+                collection contributes nothing).
 
         Returns:
             Up to ``k`` ranked passages the principal is permitted to see, best
             first. An empty query, or a principal with no matching permitted
             chunks, yields ``[]`` — never another user's passages (INV-2).
+
+        Raises:
+            DependencyError: the engine is unreachable (single-store; fails
+                closed → 503, never an unfiltered fallback).
         """
         k = _clamp_k(k)
         if not query.strip():
             return []
         allow_set = AllowSet.for_principal(principal)
-        pool = _candidate_pool(k)
+        allow = await self._allow_filter(allow_set)
 
         # Embed the query (the only model call; the gateway returns a domain
         # Embedding — no LiteLLM type crosses the boundary).
         embeddings = await self._gateway.embed([query])
         query_vector = embeddings[0].vector
 
-        semantic_ids = await queries.semantic_search(
-            self._session,
-            allow_set=allow_set,
-            query_embedding=query_vector,
-            k=pool,
+        store = self._search_store()
+        # Latched per store instance (one HEAD on the first search per process):
+        # a fresh deployment self-heals the index/pipeline instead of 404ing
+        # until the first ingest creates them.
+        await store.ensure_index()
+        hits = await store.hybrid_search(
+            query_text=query,
+            embedding=query_vector,
+            allow=allow,
+            k=k,
             collection_ids=collection_ids,
         )
-        lexical_ids = await queries.lexical_search(
-            self._session,
-            allow_set=allow_set,
-            query=query,
-            k=pool,
-            collection_ids=collection_ids,
-        )
-
-        fused = reciprocal_rank_fusion(semantic_ids, lexical_ids)
-        fused = rerank(query, fused)[:k]
-        if not fused:
+        if not hits:
             return []
 
-        rows = await queries.load_passages(self._session, allow_set=allow_set, chunk_ids=fused)
-        # Restore the fused order and drop any id the (re-checked) permission
-        # filter excluded during hydration (defense in depth — INV-2).
+        # Hydrate from Postgres — the source of truth — re-applying the SQL
+        # permission predicate (defense in depth — INV-2): a hit the re-check
+        # excludes (deleted/revoked between index and read) is dropped, and the
+        # citation offsets come from the relational row, never the index.
+        rows = await queries.load_passages(
+            self._session, allow_set=allow_set, chunk_ids=[h.chunk_id for h in hits]
+        )
         passages: list[RetrievedPassage] = []
-        for position, chunk_id in enumerate(fused):
-            row = rows.get(chunk_id)
+        for hit in hits:  # engine ranking order preserved
+            row = rows.get(hit.chunk_id)
             if row is None:
                 continue
             passages.append(
@@ -153,7 +194,7 @@ class RetrievalService:
                     text=row.text,
                     char_start=row.char_start,
                     char_end=row.char_end,
-                    score=rrf_score(position),
+                    score=hit.score,
                 )
             )
         return passages
