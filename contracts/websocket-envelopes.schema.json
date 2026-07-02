@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229)."
         },
         "data": {}
       },
@@ -180,12 +180,76 @@
           }
         }
       }
+    },
+
+    "CodeOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=code_output — one streamed chunk of a sandbox code run's output (ADR-0013 §4, epic #200). Emitted within the chat answer stream while the agent's `run_python` tool (CC-A #207) executes: it lets the inspector UI (#232) show stdout/stderr live (E6-5 debuggable runs). `stream` says whether the chunk is stdout or stderr; multiple code_output events per `runId` arrive in `seq` order. Non-terminal — the run's outcome arrives as a single code_result. Chunks are output-size-capped (§2/G7); a truncating run still terminates with code_result.",
+      "required": ["runId", "stream", "text"],
+      "properties": {
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The code_runs.id this output belongs to (matches GET /code-runs/{codeRunId})."
+        },
+        "callId": {
+          "type": "string",
+          "description": "Correlates to the originating tool_call (ChatToolCall.callId) when the run was launched by a run_python tool call. Optional."
+        },
+        "stream": {
+          "type": "string",
+          "enum": ["stdout", "stderr"],
+          "description": "Which output stream this chunk came from."
+        },
+        "text": {
+          "type": "string",
+          "description": "The chunk of captured output (may be truncated at the output-size cap, G7)."
+        }
+      }
+    },
+    "CodeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=code_result — the terminal-ish outcome of a sandbox code run (ADR-0013 §4). Exactly one arrives per `runId` after its code_output chunks, carrying the run's final `status`, `exitCode`, `durationMs`, and the ids of any emitted artifacts (`artifactIds`, collected via CC-B #208). This is a run-level terminal event, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full record (code, stdout/stderr, resource usage) is inspectable via GET /code-runs/{runId}.",
+      "required": ["runId", "status", "artifactIds"],
+      "properties": {
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The code_runs.id this result finalizes (matches GET /code-runs/{codeRunId})."
+        },
+        "callId": {
+          "type": "string",
+          "description": "Correlates to the originating tool_call (ChatToolCall.callId) when applicable. Optional."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["succeeded", "failed", "timeout", "killed", "denied"],
+          "description": "The run's terminal status (mirrors openapi CodeRunStatus, minus the non-terminal queued/running)."
+        },
+        "exitCode": {
+          "type": ["integer", "null"],
+          "description": "Process exit code; null when killed/timeout/denied before producing one."
+        },
+        "durationMs": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Wall-clock execution time in milliseconds; null when the run never started (denied)."
+        },
+        "artifactIds": {
+          "type": "array",
+          "description": "Ids of artifacts the run emitted (files collected + persisted via CC-B #208, tenant-scoped). Empty when the run produced none.",
+          "items": { "type": "string", "format": "uuid" }
+        }
+      }
     }
   },
 
   "x-chatStream": {
-    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) )* -> done(ChatDoneData) | error(Problem)",
+    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via the run_python tool (CC-A #207, ADR-0013 #229), the sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) )* -> done(ChatDoneData) | error(Problem)",
+    "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full, output-size-capped run record (code, stdout/stderr, resource_usage) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
       "start.data": "#/$defs/ChatStartData",
@@ -193,6 +257,8 @@
       "event.data[name=citation]": "#/$defs/ChatCitation",
       "event.data[name=tool_call]": "#/$defs/ChatToolCall",
       "event.data[name=tool_result]": "#/$defs/ChatToolResult",
+      "event.data[name=code_output]": "#/$defs/CodeOutput",
+      "event.data[name=code_result]": "#/$defs/CodeResult",
       "done.data": "#/$defs/ChatDoneData"
     }
   },
