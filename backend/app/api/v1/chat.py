@@ -64,6 +64,11 @@ class ChatSessionCreate(BaseModel):
 
     title: str | None = Field(default=None, max_length=200)
     model: str | None = None
+    # Optional (additive; ADR-0011 §5): start the session from an assistant. The
+    # server resolves it, pins its current published version, and injects its
+    # instructions/tool-allowlist/knowledge-scope into the existing chat runtime.
+    # Omitted ⇒ an ad-hoc session, unchanged.
+    assistant_id: UUID | None = None
 
 
 class ChatSessionUpdate(BaseModel):
@@ -298,7 +303,9 @@ async def create_session(
     service = _build_service(
         session=session, principal=principal, tenant_id=tenant_id, settings=settings
     )
-    view = await service.create_session(title=body.title, model=body.model)
+    view = await service.create_session(
+        title=body.title, model=body.model, assistant_id=body.assistant_id
+    )
     await session.commit()
     return _session_to_response(view)
 
@@ -491,6 +498,7 @@ def _schedule_answer(
             model=result.model,
             history=history,
             collection_ids=collection_ids,
+            assistant_config=result.assistant_config,
         )
 
     tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks

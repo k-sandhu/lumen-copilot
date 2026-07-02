@@ -62,6 +62,7 @@ from app.llm import LLMGateway
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
+from app.services.assistant_runtime import AssistantRunConfig
 from app.services.audit import AuditSink
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
 from app.services.tools.impls import retrieval as _retrieval_impl
@@ -160,6 +161,7 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        assistant_config: AssistantRunConfig | None = None,
     ) -> None:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
@@ -169,6 +171,12 @@ class ChatRuntime:
         problem and published as the terminal ``error`` envelope (the vendor
         error never escapes). The assistant message id is minted up front so it
         rides ``start`` and is the row the citations attach to.
+
+        When ``assistant_config`` is set (a session started from an assistant,
+        ADR-0011 §2) the run uses its instructions-augmented system prompt, its
+        allowed-tool subset, and its knowledge scope as an **additional narrowing**
+        filter over any send-time ``collection_ids`` (scope may only narrow, never
+        widen — INV-2). ``assistant_config=None`` is ad-hoc chat, unchanged.
         """
         state = _StreamState(stream_id=stream_id)
         assistant_message_id = uuid.uuid4()
@@ -201,6 +209,7 @@ class ChatRuntime:
                     model=model,
                     history=history,
                     collection_ids=collection_ids,
+                    assistant_config=assistant_config,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -267,19 +276,38 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        assistant_config: AssistantRunConfig | None = None,
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
         # The per-run allow-list (issue #207 §2): for ad-hoc chat this is the
-        # default read-only retrieval tools; an assistant/session-specific
-        # ``tool_allowlist`` (E1) would narrow/extend it. The governed runner is
-        # the single chokepoint every tool call passes through — it enforces the
-        # allow-list + approval seam, bounds each call, records a
+        # default read-only retrieval tools; a session started from an assistant
+        # (E1) narrows/selects it from the registry (ADR-0011 §2). The governed
+        # runner is the single chokepoint every tool call passes through — it
+        # enforces the allow-list + approval seam, bounds each call, records a
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
-        allowed = default_allowlist()
+        allowed = (
+            assistant_config.allowed if assistant_config is not None else default_allowlist()
+        )
+        # The assistant's knowledge scope is an ADDITIONAL narrowing filter over
+        # any send-time collection_ids — it can only intersect (narrow), never widen
+        # (INV-2). The per-user permission predicate still runs inside retrieval/,
+        # keyed off the running principal.
+        effective_collection_ids = _narrow_collection_ids(
+            collection_ids,
+            assistant_config.collection_ids if assistant_config is not None else None,
+        )
+        # The system prompt: the assistant's instructions-augmented grounded prompt
+        # when a config is present (grounding/citation rules preserved), else the
+        # bare grounded prompt (ad-hoc chat, unchanged).
+        system_prompt = (
+            assistant_config.system_prompt
+            if assistant_config is not None
+            else GROUNDED_SYSTEM_PROMPT
+        )
         runner = ToolRunner(
             allowed=allowed,
             invocations=ToolInvocationRepository(session, tenant_id),
@@ -298,7 +326,7 @@ class ChatRuntime:
         max_tool_turns = await self._resolve_max_tool_turns(session, tenant_id)
 
         messages: list[ChatMessage] = [
-            ChatMessage(role=Role.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=Role.SYSTEM, content=system_prompt),
             *history,
             ChatMessage(role=Role.USER, content=question),
         ]
@@ -328,7 +356,7 @@ class ChatRuntime:
         tool_context = ToolContext(
             principal=self._principal,
             retrieval=retrieval,
-            collection_ids=collection_ids,
+            collection_ids=effective_collection_ids,
             default_k=_DEFAULT_K,
         )
 
@@ -700,6 +728,32 @@ class _RunResult:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
+
+def _narrow_collection_ids(
+    send_ids: list[UUID] | None, assistant_ids: list[UUID] | None
+) -> list[UUID] | None:
+    """Intersect the send-time and assistant scopes — narrow only, never widen (INV-2).
+
+    An assistant's ``knowledge_scope`` is an *additional narrowing* filter over any
+    per-send ``collection_ids``. The rules (each a narrowing):
+
+    * neither set ⇒ ``None`` (no collection filter — ad-hoc default);
+    * only one set ⇒ that set (it narrows from "all permitted" to those ids);
+    * both set ⇒ their **intersection** (the assistant can only remove collections
+      the send named, never add ones outside its own scope).
+
+    A both-set intersection that is empty stays an **empty list** (not ``None``):
+    that is the strictest narrowing — "no collection is in both scopes" must return
+    nothing, never fall back to the unfiltered set. The per-user permission filter
+    inside ``retrieval/`` still runs on top, keyed off the running principal.
+    """
+    if assistant_ids is None:
+        return send_ids
+    if send_ids is None:
+        return list(assistant_ids)
+    allowed = set(assistant_ids)
+    return [cid for cid in send_ids if cid in allowed]
 
 
 def _hash_query(query: str) -> str:
