@@ -113,8 +113,11 @@ async def test_me_returns_current_user_after_login(client: AsyncClient) -> None:
     resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"id", "email", "tenant_id", "roles", "created_at"}
+    assert set(body) == {"id", "email", "tenant_id", "tenant_name", "roles", "created_at"}
     assert body["email"] == _DEV_EMAIL
+    # The human-readable tenant name (the tenants.name column) rides alongside the
+    # raw id so the UI never has to surface the UUID (#247).
+    assert body["tenant_name"] == "Acme"
     assert body["roles"] == ["member"]
 
 

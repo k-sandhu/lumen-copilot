@@ -52,8 +52,8 @@ export function AccountMenu() {
             ) : (
               <>
                 <div className="lc-menu__name">{me.data.email}</div>
-                <div className="lc-menu__meta">
-                  Tenant {me.data.tenant_id} · {me.data.roles.join(', ')}
+                <div className="lc-menu__meta" title={`Tenant ID: ${me.data.tenant_id}`}>
+                  {me.data.tenant_name} · {me.data.roles.join(', ')}
                 </div>
               </>
             )}

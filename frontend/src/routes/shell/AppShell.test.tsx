@@ -18,7 +18,8 @@ import { AppShell } from './AppShell';
 const ME = {
   id: '11111111-1111-1111-1111-111111111111',
   email: 'avery.madison@northwind.test',
-  tenant_id: 'northwind',
+  tenant_id: 'northwind-uuid-0001',
+  tenant_name: 'Northwind',
   roles: ['member'],
   created_at: '2026-06-18T00:00:00Z',
 };
@@ -131,9 +132,11 @@ describe('AppShell', () => {
     expect(screen.getByRole('button', { name: /account menu/i })).toBeInTheDocument();
   });
 
-  it('shows the tenant from /auth/me with a hard-isolation tooltip', async () => {
+  it('shows the tenant NAME (not the raw id) from /auth/me with a hard-isolation tooltip', async () => {
     renderShell();
-    expect(await screen.findByText('northwind')).toBeInTheDocument();
+    expect(await screen.findByText('Northwind')).toBeInTheDocument();
+    // The raw id is kept out of the visible pill (tooltip only, #247).
+    expect(screen.queryByText('northwind-uuid-0001')).not.toBeInTheDocument();
   });
 
   it('exposes a focus-revealed "Skip to content" link targeting #main-content (#163)', () => {
