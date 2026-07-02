@@ -1190,6 +1190,183 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+
+  # --- merged: /assistants, /assistants/{assistantId}, /assistants/{assistantId}/publish, /assistants/{assistantId}/versions, /assistants/{assistantId}/rollback ---
+  /assistants:
+    get:
+      operationId: listAssistants
+      summary: List the caller's assistants (owned + shared) — paginated.
+      description: >
+        Tenant- and permission-scoped (INV-1/INV-2): the caller's own assistants
+        plus those granted to them (the `grants` pattern, ADR-0011 §1). Never
+        another tenant's or an unshared assistant.
+      tags: [assistants]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/AssistantStatus" }
+          description: Optional filter by lifecycle status.
+      responses:
+        "200":
+          description: A page of assistants.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    post:
+      operationId: createAssistant
+      summary: Create a draft assistant.
+      description: >
+        Creates a `draft` assistant owned by the caller (ADR-0011 §1). A backup
+        owner is not required at draft time (it is required before publish). A
+        malformed body → 422 (INV-8).
+      tags: [assistants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantCreate" }
+      responses:
+        "201":
+          description: Created (draft).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Assistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /assistants/{assistantId}:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    get:
+      operationId: getAssistant
+      summary: Get an assistant.
+      description: >
+        Cross-tenant / non-owned / non-granted id → 404 (existence
+        non-disclosure, INV-1/INV-2).
+      tags: [assistants]
+      responses:
+        "200":
+          description: The assistant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Assistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateAssistant
+      summary: Update a draft assistant's working definition.
+      description: >
+        Edits the mutable head (ADR-0011 §1). Only the owner (or a tenant admin)
+        may edit; a non-owned/cross-tenant id → 404. A malformed body → 422.
+      tags: [assistants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Assistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteAssistant
+      summary: Delete an assistant.
+      description: >
+        Removes the assistant head (immutable version history is preserved per
+        ADR-0011 §1). Non-owned / cross-tenant id → 404.
+      tags: [assistants]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /assistants/{assistantId}/publish:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: publishAssistant
+      summary: Publish a draft assistant (draft → published).
+      description: >
+        Freezes the current head into a new immutable `AssistantVersion`
+        (`version = max+1`) and sets `status = published` (ADR-0011 §1). Requires
+        both an owner and a distinct backup owner to be present — publishing
+        without a backup owner is rejected as **422** (INV-8). Only the owner (or
+        a tenant admin) may publish; a non-owned / cross-tenant id → 404.
+      tags: [assistants]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantPublishRequest" }
+      responses:
+        "200":
+          description: Published; the newly created head version is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantVersion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /assistants/{assistantId}/versions:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    get:
+      operationId: listAssistantVersions
+      summary: List an assistant's immutable published versions (newest first).
+      description: >
+        The append-only version history (ADR-0011 §1), paginated. Non-owned /
+        cross-tenant id → 404.
+      tags: [assistants]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of versions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantVersionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /assistants/{assistantId}/rollback:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: rollbackAssistant
+      summary: Roll the head back to a prior version.
+      description: >
+        Creates a **new** head version whose config copies the named prior
+        version (history is never mutated or deleted; ADR-0011 §1). Only the
+        owner (or a tenant admin) may roll back; a non-owned / cross-tenant id →
+        404. An unknown or malformed `version` → 422.
+      tags: [assistants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantRollbackRequest" }
+      responses:
+        "200":
+          description: Rolled back; the newly created head version is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantVersion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
 components:
   parameters:
     Cursor:
@@ -1231,6 +1408,12 @@ components:
       schema: { type: string, format: uuid }
     McpServerId:
       name: serverId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    AssistantId:
+      name: assistantId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1388,6 +1571,18 @@ components:
       type: object
       additionalProperties: false
       properties:
+        assistant_id:
+          type: string
+          format: uuid
+          description: >
+            Optional (additive; ADR-0011 §5). Start the session from an assistant:
+            the server resolves the assistant, pins its current published version,
+            and stamps both `assistant_id`/`assistant_version_id` on the session,
+            injecting its instructions/tool-allowlist/knowledge-scope into the
+            existing chat runtime. Omitted ⇒ an ad-hoc session, unchanged. A
+            cross-tenant / non-owned / non-granted id → 404; a non-published or
+            disabled assistant → 422.
+
         title: { type: string, maxLength: 200 }
         model:
           type: string
@@ -2348,6 +2543,229 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RecentSearch" }
 
+    # --- merged schemas: AutonomyLevel, AssistantStatus, KnowledgeMode, KnowledgeScope, Assistant, AssistantCreate, AssistantUpdate, AssistantVersion, AssistantVersionConfig, AssistantPublishRequest, AssistantRollbackRequest, AssistantList, AssistantVersionList ---
+    AutonomyLevel:
+      type: string
+      description: >
+        How much an assistant may act on its own (ADR-0011 §3). Capped by the risk
+        tier of its allowed tools; at MVP the product is T0/T1 only.
+      enum: [suggest, draft, act_with_approval, act_auto]
+
+    AssistantStatus:
+      type: string
+      description: Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions.
+      enum: [draft, published, disabled]
+
+    KnowledgeMode:
+      type: string
+      description: A retrieval source class the assistant's scope may draw from.
+      enum: [company, uploaded, web, model]
+
+    KnowledgeScope:
+      type: object
+      additionalProperties: false
+      description: >
+        The retrieval filter (ADR-0011 §1/§2). A *narrowing* set layered on top of
+        the per-user INV-2 permission predicate inside `retrieval/` — it can only
+        intersect, never widen, what the running principal may already retrieve.
+      properties:
+        collectionIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Collections to scope retrieval to (empty ⇒ no collection narrowing).
+        sourceIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Connected sources to scope retrieval to.
+        modes:
+          type: array
+          items: { $ref: "#/components/schemas/KnowledgeMode" }
+          description: Which source classes the scope may draw from.
+
+    Assistant:
+      type: object
+      additionalProperties: false
+      description: >
+        A saved, named, governed chat configuration (ADR-0011 §1) — the mutable
+        head. Tenant- and owner-scoped (INV-1/INV-2).
+      required:
+        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        description:
+          type: [string, "null"]
+          description: Optional human description.
+        instructions:
+          type: [string, "null"]
+          description: System-prompt text injected at run time (persona/role; never removes grounding rules).
+        model:
+          type: [string, "null"]
+          description: A model id from GET /models; null ⇒ the smart server default resolved at run time.
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+          description: Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands).
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        owner:
+          type: string
+          format: uuid
+          description: The accountable owner's user id.
+        backupOwner:
+          type: [string, "null"]
+          format: uuid
+          description: The backup owner's user id; required before publish (ADR-0011 §4).
+        status: { $ref: "#/components/schemas/AssistantStatus" }
+        version:
+          type: [integer, "null"]
+          description: The current published head version number (null while never published).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AssistantCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Create a draft assistant (ADR-0011 §1). Only `name` is required; the
+        server owns `owner`/`status`/timestamps. A malformed body → 422 (INV-8).
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string }
+        instructions: { type: string }
+        model:
+          type: string
+          description: A model id from GET /models; omitted ⇒ the smart server default.
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        backupOwner:
+          type: string
+          format: uuid
+          description: Optional at draft time; required before publish.
+
+    AssistantUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        Patch the mutable head (ADR-0011 §1). All fields optional; at least one
+        must be present. A malformed body → 422 (INV-8).
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, "null"] }
+        instructions: { type: [string, "null"] }
+        model:
+          type: [string, "null"]
+          description: A model id from GET /models, or null to clear (⇒ smart server default).
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        backupOwner:
+          type: [string, "null"]
+          format: uuid
+          description: Set or clear the backup owner (must be distinct from owner, same tenant).
+
+    AssistantVersion:
+      type: object
+      additionalProperties: false
+      description: >
+        An immutable published snapshot (ADR-0011 §1) — the full frozen definition
+        a session/run pins to. Write-once; never mutated or deleted.
+      required: [id, assistant_id, version, config, author, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        assistant_id: { type: string, format: uuid }
+        version:
+          type: integer
+          minimum: 1
+          description: Monotonic per assistant (unique within the assistant).
+        config:
+          $ref: "#/components/schemas/AssistantVersionConfig"
+        author:
+          type: string
+          format: uuid
+          description: The user id who published (or rolled back to create) this version.
+        notes:
+          type: [string, "null"]
+          description: Release note the author supplied.
+        diff_summary:
+          type: [string, "null"]
+          description: Human-readable delta from the prior version (advisory).
+        created_at: { type: string, format: date-time }
+
+    AssistantVersionConfig:
+      type: object
+      additionalProperties: false
+      description: The full frozen assistant definition captured at publish time (ADR-0011 §1).
+      required: [name, model, knowledgeScope, toolAllowlist, autonomyLevel]
+      properties:
+        name: { type: string }
+        description: { type: [string, "null"] }
+        instructions: { type: [string, "null"] }
+        model:
+          type: [string, "null"]
+          description: The model id frozen at publish (null ⇒ smart server default at run time).
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+
+    AssistantPublishRequest:
+      type: object
+      additionalProperties: false
+      description: Optional release metadata for a publish (ADR-0011 §1).
+      properties:
+        notes:
+          type: string
+          description: A release note attached to the new version.
+
+    AssistantRollbackRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Roll the head back to a prior version (ADR-0011 §1) — creates a new head
+        version from that snapshot. An unknown/malformed `version` → 422.
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: The prior version number to roll back to.
+        notes:
+          type: string
+          description: Optional release note for the rollback version.
+
+    AssistantList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Assistant" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    AssistantVersionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AssistantVersion" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
   responses:
     Problem:
       description: Error (problem+json).
@@ -2429,3 +2847,6 @@ tags:
     description: >-
       Registered MCP (Model Context Protocol) servers — register / manage remote
       tool-providing endpoints, probe health + discover tools (ADR-0012).
+  - name: assistants
+    description: "Saved, governed chat configurations (ADR-0011) \u2014 create/edit drafts, publish\
+  \ immutable versions, list versions, and roll back."
