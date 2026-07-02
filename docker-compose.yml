@@ -60,6 +60,12 @@ services:
     build:
       context: ./backend
     restart: unless-stopped
+    environment:
+      # Always prefer the host's OPENROUTER_API_KEY (so an exported/User env var
+      # configures the LLM gateway without editing .env). `environment` wins over
+      # `env_file`, and ${...} interpolates from the host shell then .env, so a
+      # blank value in .env never shadows a real host key. .env stays the fallback.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     env_file:
       - .env
     ports:
@@ -87,6 +93,10 @@ services:
       context: ./backend
     restart: unless-stopped
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info"]
+    environment:
+      # Mirror the backend: the host OPENROUTER_API_KEY always wins, .env is the
+      # fallback (the worker embeds/queries through the same LLM gateway).
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     env_file:
       - .env
     volumes:
