@@ -135,11 +135,16 @@ async def sync_source_async(
         prior = await documents.list_for_source(source_id)
         for stale in prior:
             await documents.delete(stale.id)
+        # Flush the queued deletes so the count below sees the POST-delete state.
+        # The app sessionmaker runs autoflush=False (db/session.py), and
+        # DocumentRepository.delete does not flush, so without this explicit flush
+        # count_by_storage_key would still see the just-deleted rows, find every
+        # key still referenced, and skip all cleanup — i.e. never delete anything.
+        await session.flush()
         # Collect the prior objects that NO surviving document (any source, this
         # tenant) still references, so they can be removed after this delete
-        # commits. count_by_storage_key runs in-transaction (autoflush applies the
-        # pending row deletes first), so it sees the post-delete state. Objects
-        # are content-addressed, so a distinct key set dedupes shared bytes.
+        # commits. Objects are content-addressed, so a distinct key set dedupes
+        # shared bytes.
         for storage_key in {stale.storage_key for stale in prior}:
             if await documents.count_by_storage_key(storage_key) == 0:
                 orphaned_keys.append(storage_key)

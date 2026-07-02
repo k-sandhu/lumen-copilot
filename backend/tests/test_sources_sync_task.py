@@ -159,7 +159,9 @@ async def sqlite_engine() -> AsyncIterator[None]:
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
     db_session._engine = engine
-    db_session._sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+    db_session._sessionmaker = async_sessionmaker(
+        bind=engine, expire_on_commit=False, autoflush=False
+    )
     try:
         yield
     finally:
