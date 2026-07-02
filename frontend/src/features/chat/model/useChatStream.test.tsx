@@ -137,6 +137,19 @@ describe('useChatStream', () => {
     expect(result.current.text).toBe('half');
   });
 
+  it('closes the client on an unexpected disconnect so it cannot zombie-reconnect (#273)', () => {
+    const h = harness();
+    renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().drop(); // server-side drop with no terminal envelope
+    });
+    // The hook must close() the client on the terminal disconnect (like the
+    // done/error/watchdog paths) — otherwise WsClient keeps auto-reconnecting
+    // behind the terminal UI. FakeSocket.close() flips `closed`.
+    expect(h.get().closed).toBe(true);
+  });
+
   it('treats an open-but-silent stream as terminal error with retry', () => {
     vi.useFakeTimers();
     const h = harness();
