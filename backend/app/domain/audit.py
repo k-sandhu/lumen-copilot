@@ -60,6 +60,15 @@ class AuditAction(str, enum.Enum):
     # a reversible, tenant-scoped T1 action (spec 0004 §2.5 — "authorized owner;
     # audited; no extra approval"), audited like every consequential action.
     TENANT_SETTINGS_UPDATED = "tenant.settings_updated"
+    # Per-tenant secrets vault (issue #209). Additive to the §2.4 taxonomy —
+    # deny-by-default is preserved (the set only grows). Credential handling is a
+    # single-chokepoint concern like auth/audit: storing, *reading* (which
+    # adapter/actor read it — never the value), and deleting a secret each emit an
+    # event. ``secret.accessed`` is what makes an in-process plaintext read
+    # provable after the fact (AC-5 / INV-6).
+    SECRET_CREATED = "secret.created"
+    SECRET_ACCESSED = "secret.accessed"
+    SECRET_DELETED = "secret.deleted"
     # Agent/run-produced artifacts (issue #208, CC-12). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Writing an artifact is a T1 action (spec 0004 §2.5 — owner-gated,
