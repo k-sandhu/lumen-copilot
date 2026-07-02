@@ -22,6 +22,11 @@ Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 6. **Advance status** ``pending → processing → ready`` and set ``chunk_count``;
    any parse/embed/persist failure marks the document ``failed`` with the reason
    (AC-6) and **does not crash silently**.
+7. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
+   chunk docs in OpenSearch via :func:`app.tasks.index_sync.sync_document_index_async`
+   — retrieval serves from the engine (single-store), so ``ready`` must imply
+   retrievable. An engine fault is a *transient* fault like storage/model: the
+   run fails and Celery retries the (idempotent) pipeline as a unit.
 
 Idempotency, retry-with-backoff, and dead-lettering (backend/AGENTS.md): the
 task replaces (never duplicates) chunks; transient faults (storage/model/db
@@ -50,8 +55,10 @@ from app.domain.entities import DocumentStatus
 from app.domain.llm import Embedding
 from app.ingestion import DocumentParseError, chunk_text, parse_document
 from app.llm import LLMGateway
+from app.search import OpenSearchStore
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
+from app.tasks.index_sync import sync_document_index_async
 from app.tasks.runner import run_task
 
 
@@ -104,6 +111,7 @@ async def ingest_document_async(
     settings: Settings,
     object_store: ObjectStore,
     gateway: LLMGateway,
+    search_store: OpenSearchStore | None = None,
 ) -> IngestionResult:
     """Run the full ingestion pipeline for one document (the async core).
 
@@ -165,6 +173,9 @@ async def ingest_document_async(
             await DocumentRepository(session, tenant_id).set_status(
                 document_id, DocumentStatus.READY, error=None
             )
+        # Clear any prior chunks from the search index too (a re-ingest of a
+        # now-empty document must not leave stale index entries — ADR-0010 §5).
+        await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
         return IngestionResult(document_id, DocumentStatus.READY, 0)
 
     try:
@@ -197,7 +208,36 @@ async def ingest_document_async(
         await DocumentRepository(session, tenant_id).set_status(
             document_id, DocumentStatus.READY, error=None
         )
+
+    # --- Phase 4: sync the search index (dual-write, ADR-0010 §5). -----------
+    # Retrieval serves from the engine (single-store), so a document that
+    # reports `ready` must be retrievable there. The sync is in-band and a
+    # failure fails this (idempotent) run — the Celery wrapper retries the
+    # whole pipeline as a unit; Postgres state is already durable and a re-run
+    # replaces chunks + re-syncs, converging.
+    await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
     return IngestionResult(document_id, DocumentStatus.READY, len(persisted))
+
+
+async def _sync_index(
+    tenant_id: UUID,
+    document_id: UUID,
+    *,
+    settings: Settings,
+    store: OpenSearchStore | None,
+) -> None:
+    """Sync one document's index entries; translate engine faults to retryable.
+
+    :class:`DependencyError` (engine unreachable / rejected) becomes
+    :class:`IngestionError` so the Celery wrapper's existing transient-fault
+    retry/backoff/dead-letter machinery applies unchanged.
+    """
+    try:
+        await sync_document_index_async(
+            tenant_id, document_id, settings=settings, store=store
+        )
+    except DependencyError as exc:
+        raise IngestionError(f"could not index chunks: {exc.code}") from exc
 
 
 async def _fail(tenant_id: UUID, document_id: UUID, reason: str) -> IngestionResult:
