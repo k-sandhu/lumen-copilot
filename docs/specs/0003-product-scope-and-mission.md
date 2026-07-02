@@ -2,7 +2,7 @@
 
 > Closes **OD-1** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-17**. This spec defines *what Lumen Copilot is*, the *first buildable scope*, and the *decision-filters* that let an agent make novel calls aligned with intent (it fills [AGENTS.md](../../AGENTS.md) §2).
 
-**Status:** adopted. **Last reviewed:** 2026-06-17. **Tracking issue:** [#11](https://github.com/k-sandhu/lumen-copilot/issues/11).
+**Status:** adopted. **Last reviewed:** 2026-07-02 *(§4.1 records the [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) committed E6/E7/E15 scope expansion; mission filters and invariants unchanged)*. **Tracking issue:** [#11](https://github.com/k-sandhu/lumen-copilot/issues/11).
 
 ---
 
@@ -43,15 +43,29 @@ The MVP spine is **grounded chat over connected + uploaded content**. Concretely
 Deferred to later iterations; named here so agents don't silently pull them in (file a sibling issue, never widen):
 
 - **Write-back / consequential actions** into external systems (E5) — beyond *read before write*; any write lands later, behind approval (CC-7).
-- **Autonomous, scheduled & event-driven agents** (E7) and the **agent builder / reusable skills** (E6).
 - **Computer use & browser/desktop automation** (E16).
 - **Proactive work intelligence** (E4) and **meetings/communication intelligence** (E10).
 - **Departmental automation packs** (E12).
 - **Deep research & artifact-generation suites** (E8, E9) beyond in-chat summarize/draft.
-- **Public developer platform / external API & embedding** (E15).
 - **Advanced governance & AgentOps** (E14) beyond the M0 audit log.
 
 The full 16-epic vision in [consolidated-structure.md](../product/consolidated-structure.md) remains the **roadmap**; this spec sets only the *first* demoable scope.
+
+### 4.1 Committed scope expansion — agents & extensibility (program epic [#196](https://github.com/k-sandhu/lumen-copilot/issues/196))
+
+**Update (2026-07-02, M3).** The sponsor has committed a **defined slice** of the roadmap epics **E6 (Agent Builder / reusable skills)**, **E7 (Autonomous & scheduled agents)**, and **E15 (Developer Platform, incl. sandboxed code execution)** — previously listed above as out of the MVP. The committed slice is the [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) program:
+
+- **Custom assistants & agent builder** — define, configure, version, and share assistants; pick their knowledge scope + tools (E6).
+- **Agent tool platform** — a governed tool registry (CC-7) with two new tools: **internet / web search** and **file-writing → artifacts** (part E15, part E2 tooling).
+- **MCP server integration** — per-tenant Model Context Protocol servers whose tools enter the same governed registry (E15 extensibility).
+- **Code-execution sandbox** — agent-authored Python run in an isolated sandbox (E15-7).
+- **Scheduled & headless agent runs** — run an assistant on a schedule without a user present (E7).
+
+**This slice is governed by the *unchanged* mission filters (§2) and the existing risk tiers ([spec 0004](0004-security-and-domain-invariants.md) §2.5) — this update records scope only and changes no filter and no invariant.** Concretely: retrieval inside a headless run still enforces the §2 *permissioned* filter as the run's owner; agent **file-writing to the app's own tenant-scoped storage is T1** (owner-gated, audited, no extra approval); web search and MCP/sandbox egress ride the existing deny-by-default egress stance; and every new tool declares its tier.
+
+**Architecture record.** The five subsystems' costly, non-obvious choices are decided in the [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) spikes — agent runtime ([#202](https://github.com/k-sandhu/lumen-copilot/issues/202)), MCP transport/boundary/egress ([#203](https://github.com/k-sandhu/lumen-copilot/issues/203)), sandbox technology ([#204](https://github.com/k-sandhu/lumen-copilot/issues/204)), web-search provider/egress ([#205](https://github.com/k-sandhu/lumen-copilot/issues/205)), and scheduling/headless-run design ([#206](https://github.com/k-sandhu/lumen-copilot/issues/206)). Each closes to its own ADR (the next sequential slots, **ADR-0011 … ADR-0015**, per [architecture/README.md](../architecture/README.md)); each new external system (MCP, sandbox, search provider) gets **one owning module + a boundary-table row** in the ADR that introduces it ([ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) §6). Link the ADRs from here as they land.
+
+**What stays out** (the remainder of E6/E7/E15 — file a sibling issue, never widen): **T2+ external write-back / consequential actions** (E5/CC-7, still approval-gated — see §4 above and [spec 0004](0004-security-and-domain-invariants.md) §2.5); **event-driven / webhook triggers** (E7-2) beyond scheduled runs; **computer use / browser automation** (E16); and **third-party OAuth connectors** (routed via their own ADRs).
 
 ## 5. Personas
 
