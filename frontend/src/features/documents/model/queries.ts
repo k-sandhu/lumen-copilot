@@ -12,6 +12,7 @@
  * surface without hammering the backend.
  */
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -112,6 +113,10 @@ export function useDocuments(filters: DocumentFilters): UseQueryResult<DocumentL
     queryFn: ({ signal }) => listDocuments(query, signal),
     enabled: Boolean(filters.collectionId),
     staleTime: 0,
+    // Keep the previous rows on screen while a refined filter/status loads, so
+    // typing in the filename filter never flashes the whole table to skeletons
+    // on every keystroke (#272) — matching useSearch / useAuditEvents.
+    placeholderData: keepPreviousData,
     refetchInterval: (q) => (hasUnsettled(q.state.data) ? INGEST_POLL_INTERVAL_MS : false),
   });
 }
