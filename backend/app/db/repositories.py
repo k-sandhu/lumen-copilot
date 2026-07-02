@@ -1222,13 +1222,37 @@ class DocumentRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def count_by_storage_key(self, storage_key: str) -> int:
+        """Count this tenant's documents backed by ``storage_key``.
+
+        Objects are content-addressed (``{tenant}/{sha256}/{filename}``), so two
+        documents with identical bytes+filename share one object. Before deleting
+        a stored object for a removed document, a caller checks this is ``0`` so
+        it never deletes bytes another live document still references (INV-1:
+        tenant-scoped, so a foreign tenant's identical bytes are a different key
+        anyway).
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.storage_key == storage_key,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
     async def delete(self, document_id: UUID) -> bool:
         """Delete a document (tenant-scoped); cascades to its chunks.
 
         Returns ``False`` when no row matches in this tenant (the service maps
         that to 404). Ownership is enforced one layer up — this only guarantees
         tenancy. The ORM ``delete-orphan`` cascade removes the document's chunks
-        in the same transaction (INV-1: same-tenant chunks only).
+        in the same transaction (INV-1: same-tenant chunks only). The backing
+        object is NOT removed here — the caller owns object cleanup (the single-
+        document path in ``DocumentService.delete``; the sync-reconcile path in
+        ``app.tasks.sync_source``), because only it knows whether the content-
+        addressed object is still referenced by another document.
         """
         stmt = select(models.Document).where(
             models.Document.tenant_id == self._tenant_id,
