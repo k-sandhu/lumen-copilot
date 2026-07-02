@@ -137,14 +137,20 @@ class _ChunkSpan(Protocol):
 
 
 def reassemble_chunk_texts(chunks: Iterable[_ChunkSpan]) -> str:
-    """Invert chunking exactly: rebuild the parser output from its chunks.
+    """Rebuild the document's readable text from its stored chunks.
 
     Chunks are produced by a sliding window with **overlap** (``chunk.text ==
     source[char_start:char_end]``, adjacent chunks sharing ``overlap`` chars —
     ``app.ingestion.chunking``), so naive concatenation would duplicate every
     overlap. Walk the chunks in document order and append only the part of each
-    chunk past the furthest character already emitted. Pure; unit-tested as a
-    round-trip against the real chunker.
+    chunk past the furthest character already emitted.
+
+    This reproduces the parser output **except for whitespace-only windows the
+    chunker deliberately drops** (``chunking.chunk_text`` skips a window whose
+    ``strip()`` is empty), so a long run of blank lines between two paragraphs is
+    collapsed. That is exactly what a human-readable text preview wants — it is
+    NOT a byte-exact inverse of the original file. Pure; unit-tested against the
+    real chunker for both the lossless case and the dropped-blank-run case.
     """
     parts: list[str] = []
     prev_end = 0
