@@ -1594,6 +1594,50 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /assistants/{assistantId}/test:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: testAssistant
+      summary: Preview/test/debug a draft assistant with NO real side effect (E6-5).
+      description: >
+        Runs the assistant's **working (draft) config** against a sample input with
+        **write-tier tools forced into simulate/deny mode** (CC-A #207 read-only
+        demotion), and returns the debug trace (ADR-0011, issue #215). A T1
+        file-writing tool (`write_file`) builds + validates but persists **no**
+        artifact; the T2 code-execution tool (`run_python`) is denied — no container
+        launches. So a test run produces **no artifact, no code run, and no external
+        effect** — it is a safe preview before publishing.
+
+
+        The trace carries the effective system `prompt` (persona-augmented), the
+        sample `input`, the resolved `model`, the `retrieval` grounding (permitted
+        passages only — INV-3, keyed off the caller so a preview can never surface a
+        passage the caller could not retrieve), each `toolCalls` entry (args +
+        result), the streamed `outputs`, any typed `errors`, whether the run
+        `succeeded`, and the wall-clock `durationMs`.
+
+
+        Owner-scoped (owner-or-admin, the same rule the CRUD surface uses): a
+        non-owned / cross-tenant id → **404** (existence non-disclosure,
+        INV-1/INV-2). A malformed body → 422 (INV-8). Audited `assistant.tested`
+        (INV-6); no other row is persisted (the internal transcript is rolled back).
+      tags: [assistants]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantTestRequest" }
+      responses:
+        "200":
+          description: The debug trace of the read-only test run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantTestTrace" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
 
   # --- merged: /code-runs/{codeRunId} ---
   /code-runs/{codeRunId}:
@@ -3587,6 +3631,92 @@ components:
         notes:
           type: string
           description: Optional release note for the rollback version.
+
+    AssistantTestRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        A sample input for a read-only assistant test run (E6-5, issue #215).
+        Optional — omitting `input` runs the assistant against a stable default
+        request (the persona-augmented system prompt still carries the real task).
+      properties:
+        input:
+          type: string
+          maxLength: 8000
+          description: The sample user input the assistant is tested against.
+
+    AssistantTestToolCall:
+      type: object
+      additionalProperties: false
+      description: >
+        One tool call captured in a test run's debug trace (E6-5). `args` are the
+        model-supplied arguments; `result` is the governed runner's outcome (`ok`,
+        `summary`, `hitCount`, and an `error` code on failure/denial). A write-tier
+        tool's `result` reflects the simulate/deny outcome — no real write occurred.
+      required: [callId]
+      properties:
+        callId:
+          type: string
+          description: The tool-call id correlating the call with its result.
+        tool:
+          type: [string, "null"]
+          description: The tool name invoked.
+        args:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The model-supplied arguments for the call.
+        result:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The governed runner's result (ok/summary/hitCount/error).
+
+    AssistantTestTrace:
+      type: object
+      additionalProperties: false
+      description: >
+        The debug trace of a read-only assistant test run (E6-5, issue #215) — what
+        the builder debug view renders. Reuses the runtime's own trace vocabulary
+        (retrieval citations + tool-call/result envelopes). NO real side effect was
+        produced (write-tier tools simulate/deny).
+      required: [prompt, input, model, retrieval, toolCalls, outputs, errors, succeeded, durationMs]
+      properties:
+        prompt:
+          type: string
+          description: The effective system prompt (persona-augmented; grounding rules preserved).
+        input:
+          type: string
+          description: The sample input the run answered.
+        model:
+          type: string
+          description: The resolved model id the test run used.
+        retrieval:
+          type: array
+          description: >
+            The grounded citations the run produced — only permitted, retrieved
+            passages (INV-3). Each entry mirrors the citation envelope shape.
+          items:
+            type: object
+            additionalProperties: true
+        toolCalls:
+          type: array
+          description: Each tool call the run made, with its args + result.
+          items: { $ref: "#/components/schemas/AssistantTestToolCall" }
+        outputs:
+          type: string
+          description: The streamed answer text the run produced.
+        errors:
+          type: array
+          description: Any typed problem envelope(s) if the run failed (never a raw vendor string).
+          items:
+            type: object
+            additionalProperties: true
+        succeeded:
+          type: boolean
+          description: Whether the run completed with a terminal `done` and no error.
+        durationMs:
+          type: integer
+          minimum: 0
+          description: Wall-clock duration of the test run in milliseconds.
 
     AssistantList:
       type: object
