@@ -30,10 +30,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-import app.db.models as models
 from app.auth.principal import Principal
 from app.core.errors import NotFoundError
-from app.db import models as _models  # noqa: F401  isort: skip — register mappers
+from app.db import models
 from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
@@ -43,7 +42,6 @@ from app.db.repositories import (
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
-    MessageRepository,
     TenantRepository,
     UserRepository,
 )
@@ -58,7 +56,6 @@ from app.llm import LLMGateway
 from app.services import assistant_test_service
 from app.services.assistant_test_service import AssistantTestService
 from app.services.audit import AuditSink
-
 
 # --- Fakes ------------------------------------------------------------------
 
@@ -266,7 +263,9 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, gateway: object, retrieva
     monkeypatch.setattr(assistant_test_service, "ChatRuntime", _factory)
 
 
-async def _service(ctx: _Ctx, session: AsyncSession, *, principal: Principal) -> AssistantTestService:
+async def _service(
+    ctx: _Ctx, session: AsyncSession, *, principal: Principal
+) -> AssistantTestService:
     return AssistantTestService(
         session,
         principal=principal,

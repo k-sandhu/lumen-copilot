@@ -371,3 +371,127 @@ async def test_start_chat_from_cross_tenant_assistant_is_404(
         "/api/v1/chat/sessions", headers=_auth(carol_token), json={"assistant_id": aid}
     )
     assert resp.status_code == 404
+
+
+# --- Read-only test/preview/debug harness (E6-5, issue #215) ----------------
+
+
+class _TestHarnessGateway:
+    """A scripted gateway that answers directly (no tools) — the preview happy path."""
+
+    async def stream_tools(
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+    ):  # noqa: ANN201 — async generator
+        from app.domain.llm import StreamEvent
+
+        yield StreamEvent(text="This is a preview answer.")
+        yield StreamEvent(finish_reason="stop")
+
+
+def _wire_test_harness(monkeypatch: pytest.MonkeyPatch, factory: object) -> None:
+    """Point the test service's runtime at the offline engine + a scripted gateway.
+
+    The ``/assistants/{id}/test`` endpoint builds a real ``ChatRuntime`` inside the
+    service using ``get_sessionmaker()`` and ``get_llm_gateway()``. Offline, we patch
+    the sessionmaker to the SQLite factory and swap the runtime's gateway + retrieval
+    for fakes (no live model, no pgvector) — the same shape the runs/chat API tests use.
+    """
+    import app.services.assistant_test_service as svc
+
+    monkeypatch.setattr("app.db.session.get_sessionmaker", lambda settings=None: factory)
+    real_cls = svc.ChatRuntime
+
+    class _Retrieval:
+        async def search_text(self, *, principal, query, k, collection_ids=None):  # noqa: ANN001
+            return []
+
+        async def search_documents(self, *, principal, name_or_query, k=10):  # noqa: ANN001
+            return []
+
+        async def get_document(self, *, principal, document_id):  # noqa: ANN001
+            return None
+
+    def _runtime_factory(**kwargs: object) -> object:
+        kwargs["gateway"] = _TestHarnessGateway()
+        kwargs["retrieval_factory"] = lambda _session: _Retrieval()
+        return real_cls(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(svc, "ChatRuntime", _runtime_factory)
+
+
+async def test_test_draft_assistant_returns_trace(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-1/AC-3: POST /assistants/{id}/test returns a debug trace for a DRAFT (no publish)."""
+    _wire_test_harness(monkeypatch, sessionmaker)
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/assistants",
+        headers=_auth(token),
+        json={"name": "Preview me", "instructions": "Be helpful."},
+    )
+    aid = created.json()["id"]
+
+    resp = await client.post(
+        f"/api/v1/assistants/{aid}/test", headers=_auth(token), json={"input": "hello?"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The contract trace shape (camelCase toolCalls/durationMs).
+    assert "Be helpful." in body["prompt"]
+    assert body["input"] == "hello?"
+    assert body["model"]
+    assert body["outputs"] == "This is a preview answer."
+    assert body["succeeded"] is True
+    assert body["toolCalls"] == []
+    assert body["durationMs"] >= 0
+
+
+async def test_test_assistant_no_body_uses_default_input(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test run with no body runs against a stable default input (optional request body)."""
+    _wire_test_harness(monkeypatch, sessionmaker)
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/assistants", headers=_auth(token), json={"name": "Defaults"}
+    )
+    aid = created.json()["id"]
+    resp = await client.post(f"/api/v1/assistants/{aid}/test", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["input"]  # a non-empty default directive
+
+
+async def test_test_cross_tenant_assistant_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-1/INV-2 (negative): testing a foreign tenant's assistant → 404 (non-disclosure)."""
+    _wire_test_harness(monkeypatch, sessionmaker)
+    alice_token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/assistants", headers=_auth(alice_token), json={"name": "A-only"}
+    )
+    aid = created.json()["id"]
+
+    carol_token = await _login(client, seeded.carol_email)
+    resp = await client.post(
+        f"/api/v1/assistants/{aid}/test", headers=_auth(carol_token), json={"input": "x"}
+    )
+    assert resp.status_code == 404
+
+
+async def test_test_without_token_is_401(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-4: an unauthenticated test request is 401."""
+    resp = await client.post(f"/api/v1/assistants/{uuid.uuid4()}/test", json={"input": "x"})
+    assert resp.status_code == 401
