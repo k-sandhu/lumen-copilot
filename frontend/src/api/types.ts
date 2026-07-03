@@ -507,6 +507,41 @@ export interface RiskTierList {
   items: RiskTier[];
 }
 
+// --- Admin tool-governance policy (contracts §admin, #223) ---
+
+/**
+ * The effective governance for one registered tool in this tenant (issue #223).
+ * `risk_tier` / `read_only` are the tool's static registry metadata (for display);
+ * `enabled` / `requires_approval` are the effective per-tenant flags — an admin
+ * override, else the tool's built-in default. `is_default` is true when no override
+ * exists. A gated tool executes only when `enabled && !requires_approval` (the admin
+ * pre-approved it); otherwise the approval gate denies it (deny-by-default).
+ */
+export interface ToolPolicyEntry {
+  tool_name: string;
+  risk_tier: RiskTierId;
+  read_only: boolean;
+  enabled: boolean;
+  requires_approval: boolean;
+  is_default: boolean;
+}
+
+/** 200 from GET/PATCH /admin/tool-policy — one entry per registered tool. */
+export interface ToolPolicy {
+  items: ToolPolicyEntry[];
+}
+
+/**
+ * PATCH /admin/tool-policy body — set the per-tenant flags for one registered tool
+ * (issue #223). Both flags required; the tool name is validated against the
+ * registry server-side (an unknown tool → 422).
+ */
+export interface ToolPolicyUpdate {
+  tool_name: string;
+  enabled: boolean;
+  requires_approval: boolean;
+}
+
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
 
 /**

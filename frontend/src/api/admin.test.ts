@@ -10,6 +10,8 @@ import {
   listMembers,
   getModelGovernance,
   getRiskTiers,
+  getToolPolicy,
+  updateToolPolicy,
   setAccessToken,
   clearAccessToken,
 } from '@/api';
@@ -92,10 +94,55 @@ describe('admin api boundary', () => {
     expect(res.items.map((t) => t.tier)).toEqual(['T0', 'T3']);
   });
 
+  it('GET /admin/tool-policy returns one entry per registered tool (#223)', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      json({
+        items: [
+          {
+            tool_name: 'run_python',
+            risk_tier: 'T2',
+            read_only: false,
+            enabled: true,
+            requires_approval: true,
+            is_default: true,
+          },
+        ],
+      }),
+    );
+    const res = await getToolPolicy();
+    expect(lastCall(spy).url).toContain('/admin/tool-policy');
+    expect(res.items[0]?.tool_name).toBe('run_python');
+    expect(res.items[0]?.risk_tier).toBe('T2');
+  });
+
+  it('PATCH /admin/tool-policy sends both flags + the tool name (#223)', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [] }));
+    await updateToolPolicy({ tool_name: 'run_python', enabled: true, requires_approval: false });
+    const { url, init } = lastCall(spy);
+    expect(url).toContain('/admin/tool-policy');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({
+      tool_name: 'run_python',
+      enabled: true,
+      requires_approval: false,
+    });
+  });
+
+  it('an unknown tool name → 422 ApiError (INV-8)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(422, 'Unprocessable Entity'));
+    await expect(
+      updateToolPolicy({ tool_name: 'nope', enabled: true, requires_approval: false }),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
   it('non-admin caller → 403 ApiError on every admin surface (INV-5)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(403, 'Forbidden'));
     await expect(listMembers()).rejects.toMatchObject({ status: 403 });
     await expect(getModelGovernance()).rejects.toBeInstanceOf(ApiError);
     await expect(getRiskTiers()).rejects.toMatchObject({ status: 403 });
+    await expect(getToolPolicy()).rejects.toMatchObject({ status: 403 });
+    await expect(
+      updateToolPolicy({ tool_name: 'run_python', enabled: true, requires_approval: false }),
+    ).rejects.toMatchObject({ status: 403 });
   });
 });
