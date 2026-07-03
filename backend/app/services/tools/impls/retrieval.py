@@ -9,10 +9,14 @@ the model's args onto the right method and renders the reply) — identical beha
 to the old ``services/chat_tools.py`` so the migration is a pure regression
 (issue #207 AC-1).
 
-**Coordinate with #192** (ADR-0010 slice 4 moves ``search_text`` onto OpenSearch
-via ``retrieval/``): these handlers call the ``retrieval`` service's public methods
-only, so when #192 lands it changes what those methods do *inside* ``retrieval/``
-and this file does not move — one registry, no fork of the tool layer.
+**ADR-0010 (done, #192/#193):** ``search_text`` now runs on OpenSearch (the single
+retrieval store) and ``search_documents``/``get_document`` stay relational — but
+all three share the identical owner-or-grant permission predicate inside
+``retrieval/`` (a document owned by the caller *or* granted to them, directly or
+via its collection). These handlers call the service's public methods only, so
+that swap changed what the methods do *inside* ``retrieval/`` and this file did
+not move — one registry, no fork of the tool layer. The three-tool parity is
+proven live in ``test_grants.py``.
 
 All three are **T0, read-only, no approval** (spec 0004 §2.5 — the entire MVP is
 T0), so they bypass the approval gate; the runner still enforces the allow-list +
@@ -139,10 +143,11 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="search_text",
         description=(
-            "Hybrid semantic + keyword search over the user's own document "
-            "passages. Use this to find evidence for the question. Returns ranked "
-            "passages with their source document and a snippet. Search again with "
-            "a refined query if results are thin."
+            "Hybrid semantic + keyword search over the documents the user can "
+            "access (their own and any shared with them). Use this to find "
+            "evidence for the question. Returns ranked passages with their source "
+            "document and a snippet. Search again with a refined query if results "
+            "are thin."
         ),
         json_schema={
             "type": "object",
@@ -167,8 +172,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="search_documents",
         description=(
-            "Find the user's documents by filename or metadata. Use this to "
-            "locate a specific document before reading it with get_document."
+            "Find documents the user can access (their own or shared with them) "
+            "by filename or metadata. Use this to locate a specific document "
+            "before reading it with get_document."
         ),
         json_schema={
             "type": "object",
@@ -188,9 +194,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="get_document",
         description=(
-            "Fetch the full text of one of the user's documents by id (from "
-            "search_documents). Returns nothing if the document is not the "
-            "user's."
+            "Fetch the full text of a document the user can access by id (from "
+            "search_documents). Returns nothing if the document is not one the "
+            "user can access."
         ),
         json_schema={
             "type": "object",
