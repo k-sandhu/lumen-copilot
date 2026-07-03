@@ -15,7 +15,10 @@ const TOOL_LABEL: Record<ChatTool, string> = {
 };
 
 function describe(item: ToolActivityItem): string {
-  const label = TOOL_LABEL[item.tool];
+  // A tool value outside the known union (a renamed/new backend tool ahead of a
+  // types.ts update, or a model-hallucinated name) must not render the literal
+  // "undefined…" — fall back to a generic, honest label (#280).
+  const label = TOOL_LABEL[item.tool] ?? 'Searching sources';
   if (item.status === 'running') return `${label}…`;
   if (item.summary) return `${label} — ${item.summary}`;
   const n = item.hitCount ?? 0;
