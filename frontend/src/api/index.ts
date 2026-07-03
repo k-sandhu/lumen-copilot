@@ -56,6 +56,7 @@ export { listSources, createSource, syncSource, deleteSource } from './sources';
 export {
   listAssistants,
   createAssistant,
+  draftAssistant,
   getAssistant,
   updateAssistant,
   deleteAssistant,
