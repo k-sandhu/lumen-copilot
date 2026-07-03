@@ -30,6 +30,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    ObjectStoreDep,
     extract_request_id,
 )
 from app.core.errors import NotFoundError
@@ -132,10 +133,13 @@ def _build_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
     request: Request,
 ) -> CollectionsService:
-    """Assemble the per-request service from the identity + audit seams.
+    """Assemble the per-request service from the identity + adapter + audit seams.
 
+    The object store is the injected #22 adapter (the only object-store caller),
+    used by ``delete`` to remove the cascaded documents' backing objects (#269).
     The audit sink is bound to the caller's tenant (the factory closes over this
     request's session); ``request_id``/``source_ip`` thread the correlation
     context into audit envelopes without the service touching the request.
@@ -144,6 +148,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        object_store=object_store,
         audit=make_audit_sink(tenant_id),
         # The audit envelope requires a non-empty request_id / source_ip (spec
         # 0004 §2.4); fall back to a sentinel when the client supplied neither so
@@ -163,6 +168,7 @@ async def list_collections(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> CollectionListResponse:
@@ -172,6 +178,7 @@ async def list_collections(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     page = await service.list_page(cursor=cursor, limit=limit)
@@ -191,6 +198,7 @@ async def create_collection(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> CollectionResponse:
     """Create a collection owned by the caller (audited: ``collection.created``)."""
     service = _build_service(
@@ -198,6 +206,7 @@ async def create_collection(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     view = await service.create(name=body.name, description=body.description)
@@ -213,6 +222,7 @@ async def get_collection(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> CollectionResponse:
     """Get one of the caller's collections; not visible → 404 (INV-1/INV-2)."""
     service = _build_service(
@@ -220,6 +230,7 @@ async def get_collection(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     view = await service.get(collection_id)
@@ -239,6 +250,7 @@ async def update_collection(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> CollectionResponse:
     """Rename / re-describe one of the caller's collections; not visible → 404."""
     service = _build_service(
@@ -246,6 +258,7 @@ async def update_collection(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     view = await service.update(
@@ -269,13 +282,15 @@ async def delete_collection(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> Response:
-    """Delete one of the caller's collections (cascades); not visible → 404."""
+    """Delete one of the caller's collections (cascades + objects); not visible → 404."""
     service = _build_service(
         session=session,
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     deleted = await service.delete(collection_id)

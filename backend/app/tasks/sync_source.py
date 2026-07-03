@@ -129,11 +129,42 @@ async def sync_source_async(
     # --- Phase 3: reconcile (replace prior docs) then ingest each fetched doc. -
     detected_mode = _detect_mode(source_type, fetched, config)
     indexed = 0
+    orphaned_keys: list[str] = []
     async with session_scope() as session:
         documents = DocumentRepository(session, tenant_id)
         prior = await documents.list_for_source(source_id)
         for stale in prior:
             await documents.delete(stale.id)
+        # Flush the queued deletes so the count below sees the POST-delete state.
+        # The app sessionmaker runs autoflush=False (db/session.py), and
+        # DocumentRepository.delete does not flush, so without this explicit flush
+        # count_by_storage_key would still see the just-deleted rows, find every
+        # key still referenced, and skip all cleanup — i.e. never delete anything.
+        await session.flush()
+        # Collect the prior objects that NO surviving document (any source, this
+        # tenant) still references, so they can be removed after this delete
+        # commits. Objects are content-addressed, so a distinct key set dedupes
+        # shared bytes.
+        for storage_key in {stale.storage_key for stale in prior}:
+            if await documents.count_by_storage_key(storage_key) == 0:
+                orphaned_keys.append(storage_key)
+
+    # Remove the orphaned objects AFTER the row-delete transaction commits — a
+    # re-sync re-stores content under NEW content-addressed keys, so a bare row
+    # delete would leak the prior bytes into the bucket without bound (#269).
+    # Best-effort and post-commit (mirrors the index cleanup below): a storage
+    # blip must not fail an otherwise-good re-sync, and a stray object is a
+    # benign leak, never a row pointing at missing bytes.
+    for storage_key in orphaned_keys:
+        try:
+            await object_store.delete(str(tenant_id), storage_key)
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+            log.warning(
+                "source_sync.object_cleanup_failed",
+                source_id=str(source_id),
+                storage_key=storage_key,
+                error=type(exc).__name__,
+            )
 
     # Clear the replaced documents' chunk docs from the search index (ADR-0010
     # §5) — after the reconcile transaction committed, so the sync reads the

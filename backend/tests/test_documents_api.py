@@ -140,7 +140,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
             tenant_b = await TenantRepository(seed).create(name="Globex")
@@ -666,6 +666,49 @@ async def test_delete_removes_row_chunks_and_object(
     async with sessionmaker() as session:
         chunks = await ChunkRepository(session, seeded.tenant_a).list_for_document(doc_id)
         assert chunks == []
+
+
+async def test_delete_keeps_object_shared_by_another_document(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """Two documents with identical bytes+filename share one content-addressed
+    object. Deleting ONE must NOT remove the shared object — else the survivor's
+    /content would 404 (#269 shared-content-address guard on the single-doc path).
+    Runs under autoflush=False (like production), so this also proves the delete-
+    then-count ordering works without an implicit flush."""
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    # Same data+filename ⇒ same storage key ⇒ one object referenced by both docs.
+    doc_a = await _seed_document(
+        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        collection_id=coll, filename="same.txt", data=b"identical bytes",
+    )
+    doc_b = await _seed_document(
+        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        collection_id=coll, filename="same.txt", data=b"identical bytes",
+    )
+    assert len(store.objects) == 1  # deduped by content address
+    shared_key = next(iter(store.objects))
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.delete(f"/api/v1/documents/{doc_a}", headers=_auth(token))
+    assert resp.status_code == 204
+
+    # The shared object survives (doc_b still references it) and remains fetchable.
+    assert shared_key in store.objects
+    assert store.deleted == []
+    other = await client.get(f"/api/v1/documents/{doc_b}", headers=_auth(token))
+    assert other.status_code == 200
+
+    # Deleting the LAST referencing document finally removes the object.
+    resp2 = await client.delete(f"/api/v1/documents/{doc_b}", headers=_auth(token))
+    assert resp2.status_code == 204
+    assert store.objects == {}
+    assert store.deleted == [shared_key]
 
 
 # --- Audit emission (INV-6, spec 0004 §2.4) --------------------------------
