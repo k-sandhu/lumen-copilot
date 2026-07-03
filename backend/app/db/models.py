@@ -876,3 +876,137 @@ class AssistantVersion(TenantScopedMixin, Base):
     )
 
     assistant: Mapped[Assistant] = relationship(back_populates="versions")
+
+
+class Run(TenantScopedMixin, Base):
+    """One execution of an assistant — scheduled or manual — the ``runs`` row (ADR-0015 §2, #235).
+
+    The headless-run record: an assistant run that executes with **no WebSocket
+    client present**, persisting a full transcript. Tenant- and owner-scoped
+    (INV-1/INV-2): ``owner_id`` is the run's principal, so ``retrieval/`` admits
+    exactly what that user could retrieve interactively — a headless run can never
+    read what its runner can't. It pins the exact ``assistant_version_id`` executed
+    (reproducible after edits) and links its cited answer through the shared
+    ``messages`` chain (``message_id``), so INV-3 holds identically to interactive
+    chat. ``schedule_id`` is null for a manual/run-now run. ``status`` walks the
+    :class:`~app.domain.entities.RunStatus` state machine; the two enum domains are
+    ``CheckConstraint``-pinned so a bad value can never be stored. Tenant-scoped
+    like every table (INV-1); the ``0017`` migration puts it under the RLS backstop.
+
+    No ``TimestampMixin``/``updated_at``: a run's lifecycle is expressed by
+    ``started_at``/``finished_at`` + ``status``, not a generic updated stamp.
+    """
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        Index("ix_runs_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_runs_tenant_assistant", "tenant_id", "assistant_id"),
+        Index("ix_runs_tenant_schedule", "tenant_id", "schedule_id"),
+        Index("ix_runs_tenant_status", "tenant_id", "status"),
+        CheckConstraint("trigger in ('schedule', 'manual')", name="ck_runs_trigger"),
+        CheckConstraint(
+            "status in ('queued', 'running', 'succeeded', 'failed', 'escalated')",
+            name="ck_runs_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The run's principal — retrieval runs *as* this user (INV-2). SET NULL on
+    # user delete so a completed run's record survives deprovisioning (like the
+    # assistant owner), never cascade-deleted.
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    assistant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The pinned version executed — a run is reproducible after the assistant is
+    # edited (E1 versioning). SET NULL so pruning history does not delete the run.
+    assistant_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistant_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Null ⇒ a manual/run-now run. The FK lands with the scheduler (#236 owns the
+    # ``schedules`` table); until then it is a plain nullable uuid column so #235
+    # ships independently (ADR-0015 §4 — run-now takes the identical task path).
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    # The internal chat session the headless runtime persists its message/citations
+    # against (ADR-0015 §2 — "citations reuse the existing chain"). SET NULL so the
+    # run record outlives a pruned session.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    # The resolved input_params snapshotted for this fire.
+    inputs: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    # The assistant message the transcript produced (the shared messages chain).
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Typed failure/escalation reason {code, message} — never a raw vendor string.
+    error: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    steps: Mapped[list[RunStep]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class RunStep(TenantScopedMixin, Base):
+    """One ordered step of a run's persisted transcript — a ``run_steps`` row (ADR-0015 §2, #235).
+
+    The durable analogue of the WS envelope stream: the :class:`RunTranscriptSink`
+    appends one row per published chat envelope so an **unwatched** run's stream is
+    fully reconstructable. ``seq`` is monotonic per run — the same ordering
+    guarantee as the WS ``seq``; ``(run_id, seq)`` is UNIQUE so a step can never be
+    duplicated or reordered. ``payload`` carries the envelope ``data`` typed per
+    ``kind``. Tenant-scoped (INV-1); the ``0017`` migration puts it under RLS.
+
+    No ``TimestampMixin``/``updated_at``: a transcript step is written once and
+    never re-described (append-only, like an audit event).
+    """
+
+    __tablename__ = "run_steps"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_run_steps_run_seq"),
+        Index("ix_run_steps_tenant_run", "tenant_id", "run_id"),
+        CheckConstraint("seq >= 0", name="ck_run_steps_seq_nonneg"),
+        CheckConstraint(
+            "kind in ('delta', 'tool_call', 'tool_result', 'citation', 'error')",
+            name="ck_run_steps_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[Run] = relationship(back_populates="steps")

@@ -97,6 +97,15 @@ class AuditAction(str, enum.Enum):
     ASSISTANT_DELETED = "assistant.deleted"
     ASSISTANT_PUBLISHED = "assistant.published"
     ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
+    # Headless agent runs (ADR-0015 §4, issue #235). Additive to the §2.4 taxonomy
+    # — deny-by-default is preserved (the set only grows; no action is relaxed).
+    # Every run is bracketed by ``run.started``/``run.finished`` (INV-6) so the
+    # trail shows who a scheduled/manual run ran *as* (the owner) and how it
+    # terminated (succeeded/failed/escalated) — automation is auditable, never a
+    # silent side-channel. The per-retrieval ``retrieval.query`` + ``answer.generated``
+    # events the shared runtime already emits still fire inside a run.
+    RUN_STARTED = "run.started"
+    RUN_FINISHED = "run.finished"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"
