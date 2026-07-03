@@ -38,6 +38,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    ObjectStoreDep,
     extract_request_id,
 )
 from app.core.errors import NotFoundError
@@ -149,13 +150,19 @@ def _build_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
     request: Request,
 ) -> SourcesService:
-    """Assemble the per-request service from the identity + audit seams."""
+    """Assemble the per-request service from the identity + adapter + audit seams.
+
+    The object store is the injected #22 adapter (the only object-store caller),
+    used by ``delete`` to remove the ingested documents' backing objects (#269).
+    """
     return SourcesService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        object_store=object_store,
         audit=make_audit_sink(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
@@ -172,6 +179,7 @@ async def list_sources(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SourceListResponse:
@@ -181,6 +189,7 @@ async def list_sources(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     page = await service.list_page(cursor=cursor, limit=limit)
@@ -200,6 +209,7 @@ async def create_source(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> SourceResponse:
     """Add a source (first connector — a Web URL); enqueue its first sync.
 
@@ -214,6 +224,7 @@ async def create_source(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     source = await service.add(source_type=body.type, url=body.url)
@@ -230,6 +241,7 @@ async def sync_source(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> SourceResponse:
     """Re-sync one of the caller's sources (re-fetch + re-index); else 404.
 
@@ -242,6 +254,7 @@ async def sync_source(
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     result = await service.resync(source_id)
@@ -262,13 +275,15 @@ async def delete_source(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
+    object_store: ObjectStoreDep,
 ) -> Response:
-    """Delete a source; removes its docs (+ the backing collection if otherwise empty), else 404."""
+    """Delete a source; removes its docs + objects (+ backing collection if empty), else 404."""
     service = _build_service(
         session=session,
         principal=principal,
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
+        object_store=object_store,
         request=request,
     )
     deleted = await service.delete(source_id)

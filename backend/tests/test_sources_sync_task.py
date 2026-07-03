@@ -181,6 +181,7 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
             session,
             tenant_id=tenant.id,
             owner_id=user.id,
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
             request_id="r",
             source_ip="203.0.113.1",
@@ -540,6 +541,7 @@ async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: u
             session,
             tenant_id=tenant_id,
             owner_id=owner_id,
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
             request_id="r",
             source_ip="203.0.113.1",
