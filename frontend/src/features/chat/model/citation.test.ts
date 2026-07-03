@@ -1,0 +1,105 @@
+/**
+ * Citation normalization + web-vs-document classification (#221). The wire does
+ * not YET type a web citation distinctly, so the UI distinguishes by (safe) URL
+ * presence — these tests pin that heuristic and the URL-safety gate that keeps a
+ * web citation from ever producing an unsafe outbound link.
+ */
+import { describe, it, expect } from 'vitest';
+import type { ChatCitation, Citation } from '@/api';
+import {
+  fromRestCitation,
+  fromWsCitation,
+  hostOf,
+  isSafeHttpUrl,
+  kindOfCitation,
+  type WebCitationExtras,
+} from './citation';
+
+describe('kindOfCitation', () => {
+  it('classifies a citation with a safe http(s) url as web', () => {
+    expect(kindOfCitation({ url: 'https://example.com/a' })).toBe('web');
+    expect(kindOfCitation({ url: 'http://example.com' })).toBe('web');
+  });
+
+  it('classifies a citation with no url as a document', () => {
+    expect(kindOfCitation({})).toBe('document');
+    expect(kindOfCitation({ url: '' })).toBe('document');
+    expect(kindOfCitation({ url: '   ' })).toBe('document');
+  });
+
+  it('never promotes an unsafe (non-http) url to a web citation', () => {
+    expect(kindOfCitation({ url: 'javascript:alert(1)' })).toBe('document');
+    expect(kindOfCitation({ url: 'data:text/html,<x>' })).toBe('document');
+    expect(kindOfCitation({ url: 'not a url' })).toBe('document');
+  });
+});
+
+describe('hostOf', () => {
+  it('returns the registrable host with www stripped', () => {
+    expect(hostOf('https://www.en.wikipedia.org/wiki/X?y=1')).toBe('en.wikipedia.org');
+    expect(hostOf('http://example.com:8080/path')).toBe('example.com');
+  });
+
+  it('returns null for an unparseable or non-http url', () => {
+    expect(hostOf(undefined)).toBeNull();
+    expect(hostOf('javascript:alert(1)')).toBeNull();
+    expect(hostOf('nonsense')).toBeNull();
+  });
+});
+
+describe('isSafeHttpUrl', () => {
+  it('accepts only http(s) urls', () => {
+    expect(isSafeHttpUrl('https://a.com')).toBe(true);
+    expect(isSafeHttpUrl('http://a.com')).toBe(true);
+    expect(isSafeHttpUrl('ftp://a.com')).toBe(false);
+    expect(isSafeHttpUrl('javascript:void(0)')).toBe(false);
+    expect(isSafeHttpUrl(undefined)).toBe(false);
+  });
+});
+
+describe('normalization carries additive web fields', () => {
+  it('fromRestCitation keeps url + webTitle when present', () => {
+    const rest: Citation & WebCitationExtras = {
+      id: 'c1',
+      document_id: '',
+      document_name: 'A page',
+      chunk_id: '',
+      snippet: 'text',
+      char_start: 0,
+      char_end: 4,
+      url: 'https://example.com/x',
+      webTitle: 'A page',
+    };
+    const ui = fromRestCitation(rest);
+    expect(ui.url).toBe('https://example.com/x');
+    expect(ui.webTitle).toBe('A page');
+    expect(kindOfCitation(ui)).toBe('web');
+  });
+
+  it('fromWsCitation keeps url when present, omits it for a plain document', () => {
+    const web: ChatCitation & WebCitationExtras = {
+      id: 'w1',
+      documentId: '',
+      documentName: 'A page',
+      chunkId: '',
+      snippet: 'text',
+      charStart: 0,
+      charEnd: 4,
+      url: 'https://example.com/x',
+    };
+    expect(fromWsCitation(web).url).toBe('https://example.com/x');
+
+    const doc: ChatCitation & WebCitationExtras = {
+      id: 'd1',
+      documentId: 'doc-1',
+      documentName: 'Doc.pdf',
+      chunkId: 'k',
+      snippet: 'text',
+      charStart: 0,
+      charEnd: 4,
+    };
+    const ui = fromWsCitation(doc);
+    expect(ui.url).toBeUndefined();
+    expect(kindOfCitation(ui)).toBe('document');
+  });
+});

@@ -62,8 +62,10 @@ export function AssistantLibrary() {
     setStartError(null);
     startChat.mutate(assistant, {
       onSuccess: (session) => {
-        // Bind the chat workspace to the new session, then navigate to it.
-        useChatStore.getState().openSession(session.id);
+        // Bind the chat workspace to the new session, then navigate to it. Seed
+        // the session with the assistant's knowledge modes (#221) so the composer
+        // shows the active modes — the running session wire doesn't carry them.
+        useChatStore.getState().openSession(session.id, assistant.knowledgeScope.modes ?? []);
         navigate('/');
       },
       onError: (error) =>

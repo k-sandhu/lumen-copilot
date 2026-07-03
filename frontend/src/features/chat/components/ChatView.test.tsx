@@ -139,6 +139,7 @@ beforeEach(() => {
     activeStreamId: null,
     pendingModel: null,
     viewer: null,
+    sessionScope: null,
   });
   liveSocket = null;
   restoreFactory = setDefaultStreamClientFactory((opts) => {
@@ -322,5 +323,102 @@ describe('ChatView (critical flow)', () => {
     });
 
     expect(await screen.findByText(/no sources were cited/i)).toBeInTheDocument();
+  });
+
+  it('shows Web mode DISABLED with a reason for an ad-hoc chat (#221 AC-3)', async () => {
+    installFetch(() => EMPTY_MESSAGES);
+    const user = userEvent.setup();
+    renderView();
+    // Opening from the sidebar seeds NO scope → web fails closed.
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    // Wait for models so the control is enabled — then Web is disabled by
+    // AVAILABILITY (not by the loading state), with its reason.
+    await waitFor(() => expect(screen.getByLabelText('Message')).not.toBeDisabled());
+    const web = await screen.findByRole('button', { name: 'Web' });
+    expect(web).toBeDisabled();
+    expect(web.getAttribute('title')).toMatch(/not enabled|off/i);
+  });
+
+  it('reflects a web-enabled assistant scope and renders a web citation + disclosure (#221 AC-1/AC-2)', async () => {
+    installFetch(() => EMPTY_MESSAGES);
+    const user = userEvent.setup();
+    renderView();
+
+    // Simulate launching this session FROM an assistant whose scope includes web
+    // (AssistantLibrary calls openSession(id, modes)); the composer must reflect it.
+    act(() => {
+      useChatStore.getState().openSession('sess-1', ['company', 'web']);
+    });
+
+    // Wait for models to load so the composer (and its mode control) is enabled.
+    await waitFor(() => expect(screen.getByLabelText('Message')).not.toBeDisabled());
+    const web = await screen.findByRole('button', { name: 'Web' });
+    expect(web).not.toBeDisabled();
+    expect(web).toHaveAttribute('aria-pressed', 'true');
+
+    // Send a message and stream a web-search tool + a web citation.
+    await user.type(screen.getByLabelText('Message'), 'latest AI regulations?');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(liveSocket).not.toBeNull());
+
+    act(() => {
+      liveSocket!.emit({ type: 'start', streamId: 'stream-1', seq: 0, data: {} });
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 1,
+        name: 'tool_call',
+        data: { callId: 'w1', tool: 'web_search', args: { query: 'AI regulations' } },
+      });
+    });
+    // The web tool activity reads distinctly from document search.
+    expect(screen.getByText(/searching the web/i)).toBeInTheDocument();
+
+    act(() => {
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 2,
+        name: 'tool_result',
+        data: { callId: 'w1', tool: 'web_search', hitCount: 1 },
+      });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 3,
+        data: { text: 'The EU AI Act phases in through 2026.' },
+      });
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 4,
+        name: 'citation',
+        // A web citation: url + no documentId (the additive shape #219 emits).
+        data: {
+          id: 'web-cite-1',
+          documentName: 'EU AI Act overview',
+          snippet: 'The Act enters into force in stages through 2026.',
+          charStart: 0,
+          charEnd: 49,
+          url: 'https://www.example.org/eu-ai-act',
+          webTitle: 'EU AI Act overview',
+        },
+      });
+      liveSocket!.emit({
+        type: 'done',
+        streamId: 'stream-1',
+        seq: 5,
+        data: { messageId: 'am-web', finishReason: 'stop', citationCount: 1 },
+      });
+    });
+
+    // The web citation renders DISTINCTLY (a "Web sources" block + host), the
+    // outbound link is safe, and the "web sources were used" disclosure shows.
+    expect(await screen.findByText('Web sources')).toBeInTheDocument();
+    expect(screen.getByText('example.org')).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /open .* in a new tab/i });
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(screen.getByText(/web sources were used/i)).toBeInTheDocument();
   });
 });

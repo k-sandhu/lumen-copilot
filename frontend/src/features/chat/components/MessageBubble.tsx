@@ -22,8 +22,8 @@ import { memo } from 'react';
 import { MarkdownView } from '@/lib/markdown';
 import { FreshnessPill, Icon, PermissionPill, RetrievalTrace, type TraceStep } from '@/ui';
 import type { MessageRole } from '@/api';
-import type { UiCitation } from '../model/citation';
-import { groupCitationsByDocument } from '../model/presentation';
+import { hostOf, isSafeHttpUrl, type UiCitation } from '../model/citation';
+import { groupCitationsByDocument, partitionCitations } from '../model/presentation';
 import { ToolActivity } from './ToolActivity';
 import { AnswerFooter } from './AnswerFooter';
 import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
@@ -61,6 +61,12 @@ export interface MessageBubbleProps {
   answeredAt?: string | undefined;
   /** True once a completed assistant turn produced zero citations (AC-5). */
   showNoCitationsNotice?: boolean;
+  /**
+   * True when this answer used web search (#221, E3-12) — a web citation was
+   * present or the `web_search` tool ran. Drives the "web sources were used"
+   * disclosure. Only meaningful on a settled assistant turn.
+   */
+  webUsed?: boolean;
   /** Open the citation in the inspector; `meta` carries the source's freshness. */
   onOpenCitation: (citation: UiCitation, meta?: SourceMeta) => void;
 }
@@ -78,10 +84,13 @@ function MessageBubbleComponent({
   streaming = false,
   answeredAt,
   showNoCitationsNotice = false,
+  webUsed = false,
   onOpenCitation,
 }: MessageBubbleProps) {
   const isUser = role === 'user';
   const badge = !isUser ? (modelLabel ?? model) : undefined;
+  // Web citations render distinctly from corpus-document citations (#221 AC-2).
+  const { web: webCitations, documents: docCitations } = partitionCitations(citations);
 
   return (
     <article
@@ -144,7 +153,7 @@ function MessageBubbleComponent({
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>
 
-            {citations.length > 0 && (
+            {docCitations.length > 0 && (
               <>
                 <p className="lc-sources__label">Sources used</p>
                 {/* One card per DOCUMENT (#248): a grounded answer often cites
@@ -152,7 +161,7 @@ function MessageBubbleComponent({
                     the document N times. Each passage keeps its FLAT number so the
                     inline [n] markers still line up. */}
                 <ol className="lc-sources">
-                  {groupCitationsByDocument(citations).map((group) => {
+                  {groupCitationsByDocument(docCitations).map((group) => {
                     const meta = sourceMeta?.[group.documentId];
                     return (
                       <li key={group.documentId} className="lc-source-row">
@@ -197,6 +206,19 @@ function MessageBubbleComponent({
               </>
             )}
 
+            {webCitations.length > 0 && (
+              <WebSources citations={webCitations} onOpen={onOpenCitation} />
+            )}
+
+            {/* "Web sources were used" disclosure (#221, E3-12): discloses which
+                modes an answer used, shown on a settled turn that ran web search. */}
+            {webUsed && (
+              <p className="lc-web-disclosure" role="note">
+                <Icon name="globe" />
+                Web sources were used for this answer.
+              </p>
+            )}
+
             {showNoCitationsNotice && (
               <p className="lc-no-sources">No sources were cited for this answer.</p>
             )}
@@ -218,6 +240,80 @@ function MessageBubbleComponent({
         )}
       </div>
     </article>
+  );
+}
+
+/**
+ * Web citations, rendered DISTINCTLY from corpus-document sources (#221 AC-2):
+ * each shows the page title, its host (+ a favicon affordance), the cited
+ * snippet, and an external-link that opens the page in a new tab with
+ * `rel="noopener noreferrer"`. Clicking the row opens the web-source inspector
+ * pane (host + snippet + safe link) — the same click-through corpus sources get.
+ * A URL that isn't safe http(s) renders no outbound link (never an unsafe link).
+ */
+function WebSources({
+  citations,
+  onOpen,
+}: {
+  citations: UiCitation[];
+  onOpen: (citation: UiCitation) => void;
+}) {
+  return (
+    <>
+      <p className="lc-sources__label">Web sources</p>
+      <ul className="lc-web-sources" aria-label="Web sources">
+        {citations.map((citation) => {
+          const host = hostOf(citation.url);
+          const title = citation.webTitle ?? citation.documentName ?? host ?? 'Web result';
+          const safeHref = isSafeHttpUrl(citation.url) ? citation.url : undefined;
+          return (
+            <li key={citation.id} className="lc-web-source">
+              <button
+                type="button"
+                className="lc-web-source__btn"
+                aria-label={`Web source: ${title}`}
+                onClick={() => onOpen(citation)}
+              >
+                <span className="lc-web-source__icon" aria-hidden="true">
+                  {/* Favicon affordance: the site's favicon by host, with the
+                      globe glyph as the always-present fallback beneath it. */}
+                  {host ? (
+                    <img
+                      src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`}
+                      alt=""
+                      width={16}
+                      height={16}
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                      className="lc-web-source__favicon"
+                    />
+                  ) : null}
+                  <Icon name="globe" className="lc-web-source__globe" />
+                </span>
+                <span className="lc-web-source__main">
+                  <span className="lc-web-source__title">{title}</span>
+                  {host ? <span className="lc-web-source__host">{host}</span> : null}
+                  {citation.snippet.trim() ? (
+                    <span className="lc-web-source__snippet">{citation.snippet}</span>
+                  ) : null}
+                </span>
+              </button>
+              {safeHref ? (
+                <a
+                  className="lc-web-source__link"
+                  href={safeHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${title} in a new tab`}
+                >
+                  <Icon name="link" />
+                </a>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </>
   );
 }
 

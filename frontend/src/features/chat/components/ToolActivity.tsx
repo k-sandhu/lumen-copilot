@@ -12,6 +12,7 @@ const TOOL_LABEL: Record<ChatTool, string> = {
   search_text: 'Searching documents',
   search_documents: 'Looking up documents',
   get_document: 'Reading a document',
+  web_search: 'Searching the web',
 };
 
 function describe(item: ToolActivityItem): string {

@@ -21,6 +21,18 @@ const CITATION: UiCitation = {
   charEnd: 140,
 };
 
+const WEB_CITATION: UiCitation = {
+  id: 'w1',
+  documentId: '',
+  documentName: 'Latest AI regulations',
+  chunkId: '',
+  snippet: 'The EU AI Act enters into force in stages through 2026.',
+  charStart: 0,
+  charEnd: 54,
+  url: 'https://www.example.org/ai/regulations?ref=1',
+  webTitle: 'Latest AI regulations',
+};
+
 describe('MessageBubble', () => {
   it('renders assistant markdown (rendered, not raw)', () => {
     render(
@@ -255,5 +267,84 @@ describe('MessageBubble', () => {
     );
     // The asterisks are shown literally; there is no <strong>.
     expect(screen.getByText('**not bold**')).toBeInTheDocument();
+  });
+
+  it('renders a web citation DISTINCTLY, with host + snippet + a safe link (#221 AC-2)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Per the latest guidance, the rules phase in through 2026."
+        citations={[WEB_CITATION]}
+        onOpenCitation={() => {}}
+      />,
+    );
+    // Under a distinct "Web sources" label (not the corpus "Sources used").
+    expect(screen.getByText('Web sources')).toBeInTheDocument();
+    expect(screen.queryByText('Sources used')).not.toBeInTheDocument();
+    // Host is surfaced (www. stripped) and the snippet is shown.
+    expect(screen.getByText('example.org')).toBeInTheDocument();
+    expect(screen.getByText(/EU AI Act enters into force/i)).toBeInTheDocument();
+    // The external link opens in a new tab with rel="noopener noreferrer".
+    const link = screen.getByRole('link', { name: /open .* in a new tab/i });
+    expect(link).toHaveAttribute('href', WEB_CITATION.url);
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('routes a web-citation row click to the inspector (#221)', async () => {
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={[WEB_CITATION]}
+        onOpenCitation={onOpen}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /web source: latest ai regulations/i }));
+    // Web rows carry no per-document freshness meta, so only the citation is passed.
+    expect(onOpen).toHaveBeenCalledWith(WEB_CITATION);
+  });
+
+  it('shows the "web sources were used" disclosure ONLY when web was used (#221 AC-1)', () => {
+    const { rerender } = render(
+      <MessageBubble
+        role="assistant"
+        content="Answer grounded on a document."
+        citations={[CITATION]}
+        webUsed={false}
+        onOpenCitation={() => {}}
+      />,
+    );
+    // A document-only answer makes no web disclosure.
+    expect(screen.queryByText(/web sources were used/i)).not.toBeInTheDocument();
+
+    // A web-using answer discloses it.
+    rerender(
+      <MessageBubble
+        role="assistant"
+        content="Answer grounded on the web."
+        citations={[WEB_CITATION]}
+        webUsed
+        onOpenCitation={() => {}}
+      />,
+    );
+    expect(screen.getByText(/web sources were used/i)).toBeInTheDocument();
+  });
+
+  it('never renders an outbound link for an unsafe (non-http) web citation URL (#221)', () => {
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={[{ ...WEB_CITATION, id: 'w-bad', url: 'javascript:alert(1)' }]}
+        onOpenCitation={() => {}}
+      />,
+    );
+    // A javascript: URL is not classified as web (no host) → it isn't rendered as
+    // a web source at all, and certainly no outbound link is produced.
+    expect(screen.queryByText('Web sources')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /open .* in a new tab/i })).not.toBeInTheDocument();
   });
 });

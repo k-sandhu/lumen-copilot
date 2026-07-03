@@ -18,10 +18,15 @@ import {
   dayBucket,
   groupSessionsByDay,
   sessionMeta,
+  initialModes,
+  modeAvailability,
+  usedWebSearch,
+  partitionCitations,
+  DEFAULT_CHAT_MODES,
 } from './presentation';
 import type { UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
-import type { ChatSession } from '@/api';
+import type { ChatSession, KnowledgeMode } from '@/api';
 
 const NOW = Date.parse('2026-06-19T12:00:00Z');
 
@@ -274,5 +279,66 @@ describe('sessionMeta', () => {
 
   it('singularises one message', () => {
     expect(sessionMeta(session({ message_count: 1 }), noon)).toMatch(/^1 message ·/);
+  });
+});
+
+/* ── web knowledge modes + disclosure (#221, epic E3-12) ─────────────────── */
+
+function tool(over: Partial<ToolActivity> = {}): ToolActivity {
+  return { callId: 't1', tool: 'search_text', status: 'done', ...over };
+}
+
+describe('initialModes', () => {
+  it('seeds an assistant session with its declared modes', () => {
+    const scope: KnowledgeMode[] = ['company', 'web'];
+    expect(initialModes(scope)).toEqual(['company', 'web']);
+    // A copy, not the same reference (so per-chat toggling doesn't mutate scope).
+    expect(initialModes(scope)).not.toBe(scope);
+  });
+
+  it('falls back to the corpus default for an ad-hoc chat', () => {
+    expect(initialModes(undefined)).toEqual([...DEFAULT_CHAT_MODES]);
+    expect(initialModes([])).toEqual([...DEFAULT_CHAT_MODES]);
+  });
+});
+
+describe('modeAvailability', () => {
+  it('marks web AVAILABLE only when the scope includes it', () => {
+    expect(modeAvailability(['company', 'web']).web?.available).toBe(true);
+  });
+
+  it('marks web UNAVAILABLE with a reason when the scope omits it (AC-3)', () => {
+    const web = modeAvailability(['company']).web;
+    expect(web?.available).toBe(false);
+    expect(web?.reason).toMatch(/not enabled/i);
+  });
+
+  it('fails web closed for an ad-hoc chat (no scope)', () => {
+    expect(modeAvailability(undefined).web?.available).toBe(false);
+  });
+});
+
+describe('usedWebSearch', () => {
+  it('is true when a web citation is present', () => {
+    expect(usedWebSearch([cite({ url: 'https://example.com/a' })], [])).toBe(true);
+  });
+
+  it('is true when the web_search tool ran (even with no citation)', () => {
+    expect(usedWebSearch([], [tool({ tool: 'web_search' })])).toBe(true);
+  });
+
+  it('is false for a document-only answer', () => {
+    expect(usedWebSearch([cite()], [tool({ tool: 'search_text' })])).toBe(false);
+    expect(usedWebSearch([], [])).toBe(false);
+  });
+});
+
+describe('partitionCitations', () => {
+  it('splits web vs document citations, preserving order', () => {
+    const doc = cite({ id: 'd1' });
+    const web = cite({ id: 'w1', documentId: '', url: 'https://example.com/x' });
+    const { web: webs, documents } = partitionCitations([doc, web]);
+    expect(documents.map((c) => c.id)).toEqual(['d1']);
+    expect(webs.map((c) => c.id)).toEqual(['w1']);
   });
 });

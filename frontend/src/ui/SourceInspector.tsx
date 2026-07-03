@@ -33,6 +33,13 @@ export interface SourceInspectorProps {
   permission?: PermissionLevel;
   /** Deep-link target for "Open in source". */
   href?: string;
+  /**
+   * Web-source variant (#221): when set, the inspector is for a web citation —
+   * it renders a globe icon + the registrable host as a distinct trust signal,
+   * and the outbound link reads "Open page" instead of "Open in source". Corpus
+   * document citations leave this unset (the existing behavior).
+   */
+  web?: { host: string };
   /** Called when the panel is dismissed (renders a close button when set). */
   onClose?: () => void;
   loading?: boolean;
@@ -60,6 +67,7 @@ export function SourceInspector({
   stale = false,
   permission,
   href,
+  web,
   onClose,
   loading = false,
   error,
@@ -67,14 +75,15 @@ export function SourceInspector({
   className,
 }: SourceInspectorProps) {
   const hasSource = Boolean(title || passage);
+  const isWeb = web !== undefined;
 
   return (
     <section
-      className={cn('lc-inspector', className)}
+      className={cn('lc-inspector', isWeb && 'lc-inspector--web', className)}
       aria-label={title ? `Source: ${title}` : 'Source inspector'}
     >
       <header className="lc-inspector__head">
-        <Icon name="file-text" />
+        <Icon name={isWeb ? 'globe' : 'file-text'} />
         <span className="lc-inspector__title">{title ?? 'Source'}</span>
         {onClose ? (
           <button
@@ -115,6 +124,12 @@ export function SourceInspector({
           <>
             {passage ? <PassageBody passage={passage} /> : null}
             <div className="lc-inspector__meta">
+              {web ? (
+                <span className="lc-meta-item lc-meta-item--web">
+                  <Icon name="globe" />
+                  {web.host}
+                </span>
+              ) : null}
               {owner ? (
                 <span className="lc-meta-item">
                   <Icon name="user" />
@@ -125,9 +140,9 @@ export function SourceInspector({
               {permission ? <PermissionPill level={permission} /> : null}
             </div>
             {href ? (
-              <a className="lc-link" href={href} target="_blank" rel="noreferrer noopener">
-                Open in source
-                <Icon name="arrow-up-right" />
+              <a className="lc-link" href={href} target="_blank" rel="noopener noreferrer">
+                {isWeb ? 'Open page' : 'Open in source'}
+                <Icon name={isWeb ? 'link' : 'arrow-up-right'} />
               </a>
             ) : null}
           </>

@@ -43,7 +43,9 @@ export type IconName =
   | 'pause'
   | 'settings'
   | 'calendar'
-  | 'inbox';
+  | 'inbox'
+  | 'globe'
+  | 'link';
 
 const PATHS: Record<IconName, string> = {
   'shield-check': 'M12 3 4 6v6c0 4.5 3.3 7.5 8 9 4.7-1.5 8-4.5 8-9V6l-8-3ZM9 12l2 2 4-4',
@@ -88,6 +90,10 @@ const PATHS: Record<IconName, string> = {
   calendar: 'M7 3v4M17 3v4M4 8h16M5 6h14v14H5V6Z',
   inbox:
     'M4 13h4l2 3h4l2-3h4M4 13 6 5h12l2 8M4 13v6h16v-6',
+  // A web/internet globe — the trust glyph for a web-sourced citation (#221).
+  globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9S14.5 18.5 12 21c-2.5-2.5-3.5-5.5-3.5-9S9.5 5.5 12 3Z',
+  // A chain link — the external-link affordance on a web citation (#221).
+  link: 'M9 15l6-6M10.5 6.5 12 5a4 4 0 0 1 6 6l-1.5 1.5M13.5 17.5 12 19a4 4 0 0 1-6-6l1.5-1.5',
 };
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

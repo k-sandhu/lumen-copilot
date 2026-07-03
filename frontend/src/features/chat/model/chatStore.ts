@@ -5,6 +5,7 @@
  * id, the per-turn model override, and the citation viewer target.
  */
 import { create } from 'zustand';
+import type { KnowledgeMode } from '@/api';
 
 /**
  * What the citation viewer is currently showing (AC-2 click-through). It carries
@@ -20,6 +21,28 @@ export interface ViewerTarget {
   charStart: number;
   charEnd: number;
   snippet: string;
+  /**
+   * Present when the citation is a web page (#221): its URL. Absent ⇒ a corpus
+   * document. Drives the web variant of the inspector/viewer (globe + host +
+   * "Open page") vs the document viewer.
+   */
+  url?: string;
+}
+
+/**
+ * The knowledge-scope facts a session was started with (#221). The running
+ * `ChatSession` wire does NOT carry the assistant's `knowledgeScope.modes` (nor
+ * an `assistant_id`), so when a chat is launched FROM an assistant we stash its
+ * modes here at launch time. It seeds the composer's knowledge-mode control so
+ * the active modes are visible, and marks WEB available only when the assistant
+ * scope includes it (governed — ADR-0014). An ad-hoc chat (no assistant) has no
+ * scope and the composer falls back to its own defaults.
+ */
+export interface SessionScope {
+  /** The session id this scope belongs to (guards against a stale scope). */
+  sessionId: string;
+  /** The assistant's declared knowledge modes; [] / undefined ⇒ none declared. */
+  modes: KnowledgeMode[];
 }
 
 interface ChatUiState {
@@ -31,8 +54,15 @@ interface ChatUiState {
   pendingModel: string | null;
   /** The citation the viewer pane is opened on, or null when closed. */
   viewer: ViewerTarget | null;
+  /**
+   * The knowledge scope the active session was started with (#221), or null for
+   * an ad-hoc chat / a session opened without an assistant context. Cleared when
+   * a different session opens so it never leaks across sessions.
+   */
+  sessionScope: SessionScope | null;
 
-  openSession: (sessionId: string) => void;
+  /** Open a session, optionally seeding it with an assistant's knowledge modes. */
+  openSession: (sessionId: string, scope?: KnowledgeMode[]) => void;
   closeSession: () => void;
   startStream: (streamId: string) => void;
   endStream: () => void;
@@ -46,11 +76,20 @@ export const useChatStore = create<ChatUiState>((set) => ({
   activeStreamId: null,
   pendingModel: null,
   viewer: null,
+  sessionScope: null,
 
-  // Opening a session ends any in-flight stream and clears the viewer.
-  openSession: (sessionId) =>
-    set({ activeSessionId: sessionId, activeStreamId: null, viewer: null }),
-  closeSession: () => set({ activeSessionId: null, activeStreamId: null, viewer: null }),
+  // Opening a session ends any in-flight stream and clears the viewer. When a
+  // scope (the launching assistant's modes) is supplied, stash it against this
+  // session; otherwise clear any prior scope so it never leaks to an ad-hoc chat.
+  openSession: (sessionId, scope) =>
+    set({
+      activeSessionId: sessionId,
+      activeStreamId: null,
+      viewer: null,
+      sessionScope: scope ? { sessionId, modes: scope } : null,
+    }),
+  closeSession: () =>
+    set({ activeSessionId: null, activeStreamId: null, viewer: null, sessionScope: null }),
   startStream: (streamId) => set({ activeStreamId: streamId }),
   endStream: () => set({ activeStreamId: null }),
   setPendingModel: (model) => set({ pendingModel: model }),

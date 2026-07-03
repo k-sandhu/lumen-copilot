@@ -1018,8 +1018,15 @@ export interface ChatCitation {
   score?: number;
 }
 
-/** Retrieval tool the chat agent can invoke (surfaced for "searching…" UX). */
-export type ChatTool = 'search_text' | 'search_documents' | 'get_document';
+/**
+ * A governed tool the chat agent can invoke (surfaced for "searching…" UX). The
+ * wire tool set is open-ended (contract `ChatToolCall.tool` is a free string,
+ * CC-7 #207); this union names the tools the UI has a label for. `web_search`
+ * (#219, ADR-0014) is the governed public-web tool whose results become web
+ * citations (#221). An unknown/renamed tool still arrives as a string and the UI
+ * falls back to a generic label (see ToolActivity).
+ */
+export type ChatTool = 'search_text' | 'search_documents' | 'get_document' | 'web_search';
 
 /** `event.data` for name=tool_call — the agent invoked a retrieval tool. */
 export interface ChatToolCall {
