@@ -19,6 +19,7 @@ returned ``stream_id``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -35,13 +36,16 @@ from app.api.deps import (
     extract_request_id,
     get_llm_gateway,
 )
+from app.core.config import Settings
 from app.core.errors import NotFoundError
 from app.db.repositories import CitationView
 from app.db.session import get_sessionmaker
 from app.domain.entities import Message, MessageRole
 from app.domain.llm import ChatMessage, Role
 from app.realtime.backplane import Backplane
-from app.services.chat_runtime import ChatRuntime
+from app.sandbox.runner import HttpSandboxRunner
+from app.sandbox.tool_runner import ChatSandboxToolRunner
+from app.services.chat_runtime import ChatRuntime, SandboxContext
 from app.services.chat_service import (
     ChatService,
     MessagePage,
@@ -50,6 +54,8 @@ from app.services.chat_service import (
     SessionPage,
     SessionView,
 )
+from app.services.tools.types import SandboxToolRunner
+from app.storage import ObjectStore
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -446,7 +452,7 @@ async def send_message(
         session_id=session_id,
         result=result,
         collection_ids=body.collection_ids,
-        default_max_tool_turns=settings.chat_max_tool_turns,
+        settings=settings,
     )
     return SendMessageResponse(
         message=_bare_message_to_response(result.user_message),
@@ -462,7 +468,7 @@ def _schedule_answer(
     session_id: UUID,
     result: SendResult,
     collection_ids: list[UUID] | None,
-    default_max_tool_turns: int,
+    settings: Settings,
 ) -> None:
     """Launch the answer runtime as a tracked task detached from the response.
 
@@ -478,15 +484,31 @@ def _schedule_answer(
     registered in the app's process-wide ``answer_tasks`` set. The lifespan
     teardown cancels and drains that set under a bounded grace window; the
     ``add_done_callback`` discards a finished task so the set self-empties.
+
+    The #231 ``run_python`` sandbox seam is wired via a factory the runtime only
+    invokes when a run's allow-list actually offers ``run_python`` (an admin/
+    assistant-gated, off-by-default tool). The deny-by-default admin/quota gate lives
+    inside the sandbox service the seam composes (``SANDBOX_ENABLED`` / the #233
+    per-tenant enable), so a disabled tenant's run is refused there and surfaces as a
+    typed ``ok=False`` tool result — never an exception.
     """
+    request_id = extract_request_id(request) or "unknown"
+    source_ip = request.client.host if request.client else "unknown"
     runtime = ChatRuntime(
         sessionmaker=get_sessionmaker(),
         gateway=get_llm_gateway(),
         backplane=backplane,
         principal=principal,
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
-        default_max_tool_turns=default_max_tool_turns,
+        request_id=request_id,
+        source_ip=source_ip,
+        default_max_tool_turns=settings.chat_max_tool_turns,
+        sandbox_factory=_build_sandbox_factory(
+            principal=principal,
+            backplane=backplane,
+            settings=settings,
+            request_id=request_id,
+            source_ip=source_ip,
+        ),
     )
     history = _to_chat_messages(result.history)
 
@@ -505,3 +527,43 @@ def _schedule_answer(
     task = asyncio.create_task(_produce())
     tasks.add(task)
     task.add_done_callback(tasks.discard)
+
+
+def _build_sandbox_factory(
+    *,
+    principal: CurrentUser,
+    backplane: Backplane,
+    settings: Settings,
+    request_id: str,
+    source_ip: str,
+) -> Callable[[SandboxContext], SandboxToolRunner | None]:
+    """Build the live ``run_python`` seam factory (issue #231).
+
+    Returns a closure the runtime calls **only** when a run's allow-list offers
+    ``run_python``; it composes the live :class:`HttpSandboxRunner` (the worker's
+    only container-engine surface — an internal HTTP hop to the dedicated runner, no
+    Docker socket) and the object store into a :class:`ChatSandboxToolRunner` scoped
+    to the streaming principal (tenant + owner from the token, never model input).
+    The deny-by-default admin/quota gate is inside the sandbox service the seam
+    composes, so this factory does not gate — it wires; a disabled tenant's run is
+    refused downstream and surfaces as a typed ``ok=False`` result.
+    """
+
+    def _factory(ctx: SandboxContext) -> SandboxToolRunner | None:
+        return ChatSandboxToolRunner(
+            session=ctx.session,
+            tenant_id=principal.tenant_id,
+            owner_id=principal.user_id,
+            runner=HttpSandboxRunner(settings.sandbox_runner_url),
+            object_store=ObjectStore(settings),
+            settings=settings,
+            backplane=backplane,
+            stream_id=ctx.stream_id,
+            request_id=request_id,
+            source_ip=source_ip,
+            next_seq=ctx.next_seq,
+            session_id=ctx.session_id,
+            message_id=ctx.message_id,
+        )
+
+    return _factory

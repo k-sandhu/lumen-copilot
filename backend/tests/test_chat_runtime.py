@@ -37,7 +37,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import Role
+from app.domain.entities import CodeRunStatus, Role
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.realtime.backplane import InMemoryBackplane
@@ -631,3 +631,189 @@ async def test_retrieval_and_answer_audit_events_emitted(ctx: _Ctx) -> None:
     # the audit read-path can synthesise an allow-candidate and the "Answers
     # cited" KPI counts this grounded answer as cited.
     assert answer_ev.metadata["document_ids"] == [str(ctx.document_id)]
+
+
+# ---------------------------------------------------------------------------
+# run_python seam wiring (issue #231) — deny-by-default + the streamed events.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSandboxFactory:
+    """A sandbox factory that records whether it was invoked + returns a fake seam.
+
+    Lets the runtime wiring tests assert deny-by-default: the factory is called ONLY
+    when a run's allow-list offers ``run_python`` (below), never for an ad-hoc
+    session on the default allow-list.
+    """
+
+    def __init__(self, seam: object) -> None:
+        self._seam = seam
+        self.contexts: list[object] = []
+
+    def __call__(self, sandbox_ctx: object) -> object:
+        self.contexts.append(sandbox_ctx)
+        return self._seam
+
+
+class _FakeSeam:
+    """A ``SandboxToolRunner`` that records the submission and returns a scripted run.
+
+    The seam's own WS-event emission is exercised end-to-end by the real
+    ``ChatSandboxToolRunner`` in ``test_sandbox_tool_runner.py``; this fake only proves
+    the runtime *wiring* — that a ``run_python`` call reaches the seam when the tool
+    is allowed.
+    """
+
+    def __init__(self, sandbox_ctx: object) -> None:
+        self._ctx = sandbox_ctx
+        self.run_id = uuid.uuid4()
+        self.submissions: list[str] = []
+
+    async def submit(self, *, code: str, timeout_s: int | None = None) -> object:
+        from app.services.tools.types import SandboxRun
+
+        self.submissions.append(code)
+        return SandboxRun(
+            code_run_id=self.run_id,
+            status=CodeRunStatus.SUCCEEDED,
+            exit_code=0,
+            duration_ms=5,
+            stdout="hi\n",
+            stderr="",
+            artifact_ids=(),
+        )
+
+
+def _sandbox_runtime(
+    ctx: _Ctx,
+    *,
+    gateway: object,
+    retrieval: object,
+    backplane: InMemoryBackplane,
+    sandbox_factory: object,
+) -> ChatRuntime:
+    return ChatRuntime(
+        sessionmaker=ctx.sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        sandbox_factory=sandbox_factory,  # type: ignore[arg-type]
+    )
+
+
+async def test_run_python_seam_wired_when_allowed_but_gated_by_approval(ctx: _Ctx) -> None:
+    """The seam is wired when a run offers run_python — but INV-7 still gates it.
+
+    ``run_python`` is a T2 tool: the governed runner routes it through the approval
+    gate BEFORE the handler runs, and the chat runtime wires the fail-closed default
+    (``DenyAllApprovalGate`` — no in-session approval flow ships yet, F-ADMIN-TOOLS).
+    So the seam is BUILT (run_python is in the allow-list) yet the call is
+    **approval_denied** and the seam's ``submit`` is never reached — the consequential
+    action does not execute without a recorded approval (the negative AC).
+    """
+    from app.services.assistant_runtime import AssistantRunConfig
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+
+    seam_holder: dict[str, _FakeSeam] = {}
+
+    def _factory(sandbox_ctx: object) -> object:
+        seam = _FakeSeam(sandbox_ctx)
+        seam_holder["seam"] = seam
+        return seam
+
+    gateway = _ScriptedGateway(
+        [
+            # Turn 1: the model calls run_python.
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="run_python", arguments={"code": "print(1)"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            # Turn 2: the model answers (having read the denial).
+            [StreamEvent(text="I could not run the code."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+
+    import asyncio
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _sandbox_runtime(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane,
+        sandbox_factory=_factory,
+    )
+    # An assistant config whose allow-list grants run_python (admin/assistant-gated).
+    assistant_config = AssistantRunConfig(
+        system_prompt=GROUNDED_SYSTEM_PROMPT,
+        allowed=frozenset({"run_python"}),
+        collection_ids=None,
+        model=None,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="compute 1",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        assistant_config=assistant_config,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # The seam was BUILT (run_python was in the allow-list) — the wiring is present.
+    assert "seam" in seam_holder
+    # ...but the approval gate blocked the call, so the seam's submit was NOT reached
+    # (INV-7: no unapproved consequential action executes).
+    assert seam_holder["seam"].submissions == []
+    # The tool_result event reports the governance denial the model reads.
+    tool_results = [
+        e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"
+    ]
+    assert any(
+        e["data"]["tool"] == "run_python" and e["data"]["ok"] is False  # type: ignore[index]
+        for e in tool_results
+    )
+
+
+async def test_ad_hoc_session_never_wires_run_python_seam(ctx: _Ctx) -> None:
+    """Deny-by-default: an ad-hoc session (default allow-list) never builds the seam."""
+    factory = _RecordingSandboxFactory(seam=object())
+    # The model tries to call run_python, but ad-hoc chat does not offer it, so the
+    # governed runner denies it (not_permitted) and the seam factory is never invoked.
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="run_python", arguments={"code": "print(1)"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="No code ran."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    runtime = _sandbox_runtime(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane,
+        sandbox_factory=factory,
+    )
+    await runtime.run(
+        stream_id=uuid.uuid4().hex,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    # The factory was NEVER invoked — no execution plumbing on a path that can't use it.
+    assert factory.contexts == []
