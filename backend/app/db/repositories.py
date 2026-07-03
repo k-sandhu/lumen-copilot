@@ -2513,6 +2513,28 @@ class McpServerRepository(_TenantScopedRepository):
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_enabled_for_owner(self, owner_id: UUID) -> list[McpServer]:
+        """Every **enabled** server an owner registered in this tenant (INV-1/INV-2).
+
+        The read the tool bridge (#227) uses to resolve a run's MCP tools: tenant-
+        *and* owner-scoped and filtered to ``enabled`` in the SQL, so a disabled
+        server — or a foreign-tenant / non-owned one — never even loads, and thus
+        can never be offered or invoked in a chat run (the deny-by-default cross-
+        tenant/disabled fence lives here + one more time in the bridge). Ordered by
+        ``(created_at, id)`` for a stable resolution order.
+        """
+        stmt = (
+            select(models.McpServer)
+            .where(
+                models.McpServer.tenant_id == self._tenant_id,
+                models.McpServer.owner_id == owner_id,
+                models.McpServer.enabled.is_(True),
+            )
+            .order_by(models.McpServer.created_at.asc(), models.McpServer.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_mcp_server(r) for r in rows]
+
     async def list_for_owner_page(
         self,
         owner_id: UUID,
