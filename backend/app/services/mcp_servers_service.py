@@ -68,6 +68,7 @@ from app.mcp import (
     McpClient,
     McpHealth,
     McpServerConfig,
+    McpToolResult,
     McpToolSpec,
     McpTransport,
 )
@@ -75,6 +76,8 @@ from app.mcp.client import RateLimitCheck
 from app.net.egress import EgressBlockedError, resolve_safe_ip
 from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
+from app.services.tools.mcp_bridge import tools_for_servers
+from app.services.tools.types import ToolDefinition
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 
 log = get_logger(__name__)
@@ -654,6 +657,32 @@ class McpServersService:
             },
         )
         return updated
+
+    async def resolve_run_tools(self) -> dict[str, ToolDefinition]:
+        """The caller's registered+enabled MCP tools as governed CC-A definitions (#227).
+
+        The per-run resolver the chat runtime uses (never a global registration —
+        MCP tools are tenant-scoped and dynamic, so resolving them here per run keeps
+        INV-1/INV-2: only *this* caller's own, enabled servers in *this* tenant
+        contribute, and a disabled / foreign server never loads). Each discovered
+        tool becomes a namespaced ``mcp:<slug>:<tool>`` :class:`ToolDefinition` whose
+        handler invokes the tool through this service's SSRF-guarded, rate-limited,
+        auth-resolving :class:`McpClient` (auth fetched from CC-C at call time). The
+        returned map is handed to the runner as its ``extra_tools`` for that answer;
+        the runner's allow-list is still the hard chokepoint on which of them are
+        actually offered/invokable.
+        """
+        servers = await self._servers.list_enabled_for_owner(self._owner_id)
+        if not servers:
+            return {}
+        client = self._build_client()
+
+        async def _invoke(
+            config: McpServerConfig, name: str, args: dict[str, object]
+        ) -> McpToolResult:
+            return await client.call_tool(config, name, args)
+
+        return tools_for_servers(servers, _invoke)
 
     async def list_tools(self, server_id: UUID) -> list[McpToolView] | None:
         """The tools discovered on the last successful probe (ADR-0012 §6), or None.

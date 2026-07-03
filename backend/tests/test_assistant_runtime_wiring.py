@@ -81,6 +81,15 @@ def test_resolve_allowlist_intersects_registry() -> None:
     assert "not_a_tool" not in resolved
 
 
+def test_resolve_allowlist_keeps_mcp_names() -> None:
+    # A namespaced MCP tool (#227) is NOT in the static registry (it is tenant-
+    # scoped + dynamic), so it must be kept as-is here — whether it is actually
+    # offered/invokable is decided per-run by the runtime resolver + the runner.
+    resolved = resolve_allowlist(["mcp:srv-abc123def456:echo", "not_a_tool"])
+    assert "mcp:srv-abc123def456:echo" in resolved
+    assert "not_a_tool" not in resolved
+
+
 def test_scope_collection_ids_parses_and_empty_is_none() -> None:
     cid = uuid.uuid4()
     assert scope_collection_ids({"collectionIds": [str(cid)]}) == [cid]

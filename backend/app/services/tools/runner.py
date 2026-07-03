@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from uuid import UUID
 
 from app.core.logging import get_logger
@@ -87,6 +88,16 @@ class ToolRunner:
     correlation (``request_id``/``source_ip``) the audit events carry. The
     approval ``gate`` defaults to :class:`DenyAllApprovalGate` (inert for T0/T1;
     fail-closed for any gated tool until a real approval flow is wired).
+
+    ``extra_tools`` is the per-run set of **dynamic** :class:`ToolDefinition`s that
+    are not in the static ``impls/`` registry — namely the tenant's registered MCP
+    tools (issue #227, namespaced ``mcp:<slug>:<tool>``). They are tenant-scoped and
+    resolved fresh each run from :mod:`app.services.tools.mcp_bridge`, so they are
+    passed in here rather than globally registered (a global static registration
+    could leak an MCP server across tenants — INV-1). Resolution consults
+    ``extra_tools`` first, then the static registry; the allow-list / approval /
+    audit path (below) is then **identical** for a dynamic MCP tool and a native one
+    — MCP adds no second pipeline (ADR-0012 §6).
     """
 
     def __init__(
@@ -100,6 +111,7 @@ class ToolRunner:
         source_ip: str,
         session_id: UUID | None = None,
         gate: ApprovalGate | None = None,
+        extra_tools: Mapping[str, ToolDefinition] | None = None,
     ) -> None:
         self._allowed = allowed
         self._invocations = invocations
@@ -109,6 +121,7 @@ class ToolRunner:
         self._source_ip = source_ip
         self._session_id = session_id
         self._gate: ApprovalGate = gate or DenyAllApprovalGate()
+        self._extra_tools: Mapping[str, ToolDefinition] = extra_tools or {}
 
     async def run(
         self, *, call: ToolCall, context: ToolContext, message_id: UUID | None = None
@@ -123,12 +136,10 @@ class ToolRunner:
         args_hash = hash_args(call.arguments)
         started = time.monotonic()
 
-        # (1) Resolve. An unknown tool is denied by default (deny-by-default), and
-        # never even reaches the allow-list/handler.
-        try:
-            definition: ToolDefinition | None = get_tool(call.name)
-        except UnknownToolError:
-            definition = None
+        # (1) Resolve. A dynamic per-run MCP tool (``extra_tools``, issue #227) is
+        # tried first, then the static ``impls/`` registry. An unknown tool is denied
+        # by default (deny-by-default) and never reaches the allow-list/handler.
+        definition = self._resolve(call.name)
 
         # (2) Allow-list — the one enforcement point (AC-2 / AC-N). A tool absent
         # from the registry OR absent from this run's allowed set is refused with a
@@ -210,6 +221,23 @@ class ToolRunner:
             result=result,
             outcome=outcome,
         )
+
+    def _resolve(self, name: str) -> ToolDefinition | None:
+        """Resolve ``name`` to a :class:`ToolDefinition`, or ``None`` (deny by default).
+
+        A per-run dynamic MCP tool (``extra_tools``, ADR-0012 §6) takes precedence
+        over the static ``impls/`` registry — the namespace ``mcp:*`` guarantees no
+        collision with a native tool, so precedence only matters as a fast path. An
+        unknown name (in neither) is ``None``, which the caller turns into a
+        ``tool_not_found`` result.
+        """
+        dynamic = self._extra_tools.get(name)
+        if dynamic is not None:
+            return dynamic
+        try:
+            return get_tool(name)
+        except UnknownToolError:
+            return None
 
     async def _execute(
         self,

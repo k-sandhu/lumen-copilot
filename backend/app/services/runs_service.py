@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -69,8 +70,10 @@ from app.llm import LLMGateway
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
+from app.services.mcp_servers_service import build_mcp_servers_service
 from app.services.models_service import is_allowed_model
 from app.services.run_sink import RunTranscriptSink
+from app.services.tools.types import ToolDefinition
 
 log = get_logger(__name__)
 
@@ -313,6 +316,12 @@ async def execute_run(
         request_id=request_id,
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
+        mcp_tools_factory=_build_run_mcp_tools_factory(
+            principal=principal,
+            settings=settings,
+            request_id=request_id,
+            source_ip=source_ip,
+        ),
     )
     try:
         await runtime.run(
@@ -428,6 +437,39 @@ async def _audit_run(
         source_ip=source_ip,
         metadata=metadata,
     )
+
+
+def _build_run_mcp_tools_factory(
+    *,
+    principal: Principal,
+    settings: Settings,
+    request_id: str,
+    source_ip: str,
+) -> Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]:
+    """The MCP-tools resolver a scheduled/manual assistant run uses (issue #227).
+
+    A headless run executes **as** the assistant's owner (``principal``), so its MCP
+    tools are resolved from exactly that owner's registered+enabled servers in the
+    tenant — the same owner-scoped, SSRF-guarded, CC-C-auth path an interactive chat
+    uses. The runtime calls this only when the pinned version's allow-list names an
+    ``mcp:*`` tool; a native-only assistant never touches the MCP servers table.
+    """
+
+    async def _factory(session: AsyncSession) -> dict[str, ToolDefinition]:
+        audit = AuditSink(AuditEventRepository(session, principal.tenant_id))
+        service = build_mcp_servers_service(
+            session,
+            settings=settings,
+            tenant_id=principal.tenant_id,
+            owner_id=principal.user_id,
+            roles=principal.roles,
+            audit=audit,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+        return await service.resolve_run_tools()
+
+    return _factory
 
 
 async def _load_owner_principal(

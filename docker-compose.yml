@@ -1,6 +1,11 @@
 # Lumen Copilot — one-command local stack (ADR-0005).
 #   cp .env.example .env  &&  docker compose up --build
-# Brings up: Postgres+pgvector, Redis, MinIO, backend (web), Celery worker, frontend.
+# Brings up: Postgres+pgvector, Redis, MinIO, OpenSearch, SearXNG, backend (web),
+# Celery worker, redbeat beat, frontend.
+# The sandbox-runner (ADR-0013) is OPT-IN via the `sandbox` compose profile —
+#   docker compose --profile sandbox up
+# — because its images are provisioned per-deploy (not published publicly); the
+# default stack runs fully without it (SANDBOX_ENABLED defaults to false).
 # Host ports come from .env (471xx block); container-to-container traffic uses service names.
 # Images are version-pinned (no :latest) per AGENTS.md.
 
@@ -181,8 +186,14 @@ services:
   # service image is provisioned per-deploy (its build/impl is a follow-up seam); this
   # is the topology the ADR specifies. gVisor (SANDBOX_RUNTIME=runsc) is a runner
   # config swap for production hardening — no app code change.
+  #
+  # Behind the `sandbox` compose profile: the runner/runtime images below are
+  # provisioned per-deploy and not published publicly, so the DEFAULT stack starts
+  # without this service (nothing depends_on it, and the worker refuses runs while
+  # SANDBOX_ENABLED=false). Enable with: docker compose --profile sandbox up
   sandbox-runner:
     image: ghcr.io/k-sandhu/lumen-sandbox-runner:0.1.0
+    profiles: ["sandbox"]
     restart: unless-stopped
     # The single Docker-socket holder. Read-only mount limits it to the container API
     # it needs (the app/worker NEVER mount this).

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, registered_names
 
 
@@ -73,16 +74,26 @@ def resolve_allowlist(tool_allowlist: object) -> frozenset[str]:
     """The effective allowed-tool set for a run given the assistant's allow-list.
 
     ``[]`` (or a missing list) ⇒ the ad-hoc default set (the read-only retrieval
-    tools). A non-empty list is **intersected** with the live registry so an entry
-    that has since been removed is dropped (deny-by-default, issue #207) rather than
-    handed to the runner as an unknown name. The runner still enforces this set as
-    the hard chokepoint — this only decides what to offer.
+    tools). A non-empty list keeps:
+
+    * a **native** name only if it is still in the live registry (an entry removed
+      since the draft was saved is dropped — deny-by-default, issue #207);
+    * an **``mcp:*``** name as-is (issue #227). MCP tools are tenant-scoped and
+      dynamic, so they are NOT in the static registry; whether a named MCP tool is
+      actually offered/invokable is decided per-run by the runtime resolver (a
+      disabled / unregistered / cross-tenant server contributes nothing) and the
+      runner's hard allow-list chokepoint — never here.
+
+    The runner still enforces this set as the hard chokepoint; this only decides
+    what to offer.
     """
     names = [str(t) for t in _as_list(tool_allowlist)]
     if not names:
         return default_allowlist()
     known = registered_names()
-    return frozenset(name for name in names if name in known)
+    return frozenset(
+        name for name in names if is_mcp_tool_name(name) or name in known
+    )
 
 
 def scope_collection_ids(knowledge_scope: object) -> list[UUID] | None:

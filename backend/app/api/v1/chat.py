@@ -19,13 +19,14 @@ returned ``stream_id``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     BackplaneDep,
@@ -38,13 +39,14 @@ from app.api.deps import (
 )
 from app.core.config import Settings
 from app.core.errors import NotFoundError
-from app.db.repositories import CitationView
+from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
 from app.domain.entities import Message, MessageRole
 from app.domain.llm import ChatMessage, Role
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.tool_runner import ChatSandboxToolRunner
+from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime, SandboxContext
 from app.services.chat_service import (
     ChatService,
@@ -54,7 +56,8 @@ from app.services.chat_service import (
     SessionPage,
     SessionView,
 )
-from app.services.tools.types import SandboxToolRunner
+from app.services.mcp_servers_service import build_mcp_servers_service
+from app.services.tools.types import SandboxToolRunner, ToolDefinition
 from app.storage import ObjectStore
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -509,6 +512,12 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
+        mcp_tools_factory=_build_mcp_tools_factory(
+            principal=principal,
+            settings=settings,
+            request_id=request_id,
+            source_ip=source_ip,
+        ),
     )
     history = _to_chat_messages(result.history)
 
@@ -565,5 +574,41 @@ def _build_sandbox_factory(
             session_id=ctx.session_id,
             message_id=ctx.message_id,
         )
+
+    return _factory
+
+
+def _build_mcp_tools_factory(
+    *,
+    principal: CurrentUser,
+    settings: Settings,
+    request_id: str,
+    source_ip: str,
+) -> Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]:
+    """Build the live MCP-tools resolver the runtime calls per answer (issue #227).
+
+    Returns a coroutine the runtime invokes **only** when a run's allow-list names
+    at least one ``mcp:*`` tool. It builds the per-tenant :class:`McpServersService`
+    over the runtime's own session (the request session is gone by then) — scoped to
+    the streaming principal (tenant + owner + roles from the token, never model
+    input) — and resolves its registered+enabled MCP tools into governed CC-A
+    :class:`ToolDefinition`s. The SSRF guard, per-tenant rate limit, and CC-C auth
+    resolution all live inside that service's client, so the resolved handlers invoke
+    upstream through the same governed egress the ``/mcp-servers`` surface uses.
+    """
+
+    async def _factory(session: AsyncSession) -> dict[str, ToolDefinition]:
+        audit = AuditSink(AuditEventRepository(session, principal.tenant_id))
+        service = build_mcp_servers_service(
+            session,
+            settings=settings,
+            tenant_id=principal.tenant_id,
+            owner_id=principal.user_id,
+            roles=principal.roles,
+            audit=audit,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+        return await service.resolve_run_tools()
 
     return _factory
