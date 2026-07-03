@@ -177,7 +177,7 @@ async def _create_published_assistant(
     published = await client.post(
         f"/api/v1/assistants/{aid}/publish", headers=_auth(owner_token), json={}
     )
-    assert published.status_code == 201, published.text
+    assert published.status_code == 200, published.text
     return aid
 
 
@@ -301,7 +301,7 @@ async def test_disabled_assistant_cannot_be_scheduled(
     sched = await client.post(
         "/api/v1/schedules",
         headers=_auth(owner_token),
-        json={"assistant_id": aid, "cadence": {"cron": "0 8 * * *"}},
+        json={"assistant_id": aid, "cadence": {"cron": "0 8 * * *"}, "timezone": "UTC"},
     )
     assert sched.status_code == 422, sched.text
     assert sched.json()["code"] == "assistant_not_runnable"

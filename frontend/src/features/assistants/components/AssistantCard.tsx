@@ -14,7 +14,13 @@ import { Card } from '@/components/Card';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Icon } from '@/ui';
 import type { Assistant, ChatModelInfo, Member } from '@/api';
-import { modelLabel, ownerLabel, STATUS_LABEL, statusTone } from '../model/presentation';
+import {
+  certificationBadge,
+  modelLabel,
+  ownerLabel,
+  STATUS_LABEL,
+  statusTone,
+} from '../model/presentation';
 
 /** Cap tool badges so a long allow-list never blows out the card. */
 const MAX_TOOL_BADGES = 4;
@@ -46,6 +52,7 @@ export function AssistantCard({
   const tools = assistant.toolAllowlist;
   const shownTools = tools.slice(0, MAX_TOOL_BADGES);
   const overflow = tools.length - shownTools.length;
+  const certification = certificationBadge(assistant.certificationState);
 
   return (
     <Card
@@ -65,9 +72,23 @@ export function AssistantCard({
             {assistant.name}
           </h3>
         </div>
-        <StatusBadge tone={statusTone(assistant.status)}>
-          {STATUS_LABEL[assistant.status]}
-        </StatusBadge>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          {assistant.featured ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+              title="Featured in the library by an admin"
+            >
+              <Icon name="sparkles" className="shrink-0" aria-hidden="true" />
+              Featured
+            </span>
+          ) : null}
+          {certification ? (
+            <StatusBadge tone={certification.tone}>{certification.label}</StatusBadge>
+          ) : null}
+          <StatusBadge tone={statusTone(assistant.status)}>
+            {STATUS_LABEL[assistant.status]}
+          </StatusBadge>
+        </div>
       </div>
 
       {assistant.description ? (

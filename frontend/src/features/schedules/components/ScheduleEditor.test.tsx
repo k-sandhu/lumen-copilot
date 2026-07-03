@@ -37,6 +37,8 @@ const ASSISTANTS: AssistantList = {
       autonomyLevel: 'suggest',
       owner: 'u1',
       status: 'published',
+      certificationState: 'none',
+      featured: false,
       created_at: 't',
       updated_at: 't',
     },

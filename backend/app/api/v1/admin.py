@@ -657,7 +657,6 @@ def _build_governance_service(
 @router.get(
     "/assistants",
     response_model=GovernedAssistantListResponse,
-    response_model_exclude_none=True,
 )
 async def list_governed_assistants(
     request: Request,
@@ -684,7 +683,6 @@ async def list_governed_assistants(
 @router.post(
     "/assistants/{assistant_id}/certify",
     response_model=GovernedAssistantResponse,
-    response_model_exclude_none=True,
 )
 async def certify_assistant(
     assistant_id: UUID,
@@ -710,7 +708,6 @@ async def certify_assistant(
 @router.post(
     "/assistants/{assistant_id}/feature",
     response_model=GovernedAssistantResponse,
-    response_model_exclude_none=True,
 )
 async def feature_assistant(
     assistant_id: UUID,
@@ -736,7 +733,6 @@ async def feature_assistant(
 @router.post(
     "/assistants/{assistant_id}/disable",
     response_model=GovernedAssistantResponse,
-    response_model_exclude_none=True,
 )
 async def disable_assistant(
     assistant_id: UUID,
@@ -765,7 +761,6 @@ async def disable_assistant(
 @router.post(
     "/assistants/{assistant_id}/transfer-ownership",
     response_model=GovernedAssistantResponse,
-    response_model_exclude_none=True,
 )
 async def transfer_assistant_ownership(
     assistant_id: UUID,

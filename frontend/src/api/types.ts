@@ -709,6 +709,13 @@ export type AutonomyLevel = 'suggest' | 'draft' | 'act_with_approval' | 'act_aut
 /** Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions. */
 export type AssistantStatus = 'draft' | 'published' | 'disabled';
 
+/**
+ * Admin library-governance certification (E6-6, #217) — an orthogonal axis to the
+ * lifecycle status. `none` = not reviewed; `certified` = an admin vouched for it;
+ * `deprecated` = an admin flagged it for retirement (still runnable, library warns).
+ */
+export type CertificationState = 'none' | 'certified' | 'deprecated';
+
 /** A retrieval source class the assistant's scope may draw from. */
 export type KnowledgeMode = 'company' | 'uploaded' | 'web' | 'model';
 
@@ -748,10 +755,49 @@ export interface Assistant {
   /** The backup owner's user id; required before publish (ADR-0011 §4). */
   backupOwner?: string | null;
   status: AssistantStatus;
+  /** Admin library-governance certification verdict (E6-6, #217; read-only here). */
+  certificationState: CertificationState;
+  /** Whether an admin has featured/pinned the assistant in the library (E6-6, #217). */
+  featured: boolean;
   /** The current published head version number (null while never published). */
   version?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The admin library view of an assistant (E6-6/E6-8, #217): identity + owner +
+ * lifecycle status plus the governance axis and the `ownerOrphaned` projection
+ * (owner no longer a tenant member — flag for reassignment). Admin-only; spans
+ * every owner in the tenant.
+ */
+export interface GovernedAssistant {
+  id: string;
+  name: string;
+  description?: string | null;
+  model?: string | null;
+  autonomyLevel: AutonomyLevel;
+  /** The accountable owner's user id. */
+  owner: string;
+  backupOwner?: string | null;
+  status: AssistantStatus;
+  certificationState: CertificationState;
+  featured: boolean;
+  /** A library grouping label (null ⇒ uncategorised). */
+  category?: string | null;
+  /** When an admin disabled the assistant (null ⇒ not disabled). */
+  disabledAt?: string | null;
+  /** The owner is no longer a member of the tenant (flag for reassignment, E6-8). */
+  ownerOrphaned: boolean;
+  version?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A cursor page of the admin library view (GET /admin/assistants). */
+export interface GovernedAssistantList {
+  items: GovernedAssistant[];
+  next_cursor?: string | null;
 }
 
 /**
