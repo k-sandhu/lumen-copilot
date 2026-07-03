@@ -32,6 +32,7 @@ from app.db.repositories import (
     AuditEventRepository,
     CollectionRepository,
     GrantRepository,
+    McpServerRepository,
     SourceRepository,
     TenantRepository,
     UserRepository,
@@ -42,10 +43,12 @@ from app.domain.entities import (
     GrantResourceType,
     GrantRole,
     KnowledgeScope,
+    McpServerStatus,
     Role,
 )
 from app.services.assistants_service import AssistantsService
 from app.services.audit import AuditSink
+from app.services.tools.mcp_bridge import namespaced_tool_name, slug_for_server
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -232,6 +235,87 @@ async def test_update_rejects_unknown_tool(session: AsyncSession, world: _World)
     assistant = await svc.create(name="Editable")
     with pytest.raises(ValidationError) as exc:
         await svc.update(assistant.id, tool_allowlist=["made_up"])
+    assert exc.value.code == "unknown_tool"
+
+
+# ---------------------------------------------------------------------------
+# #227: an assistant may allow-list its own registered MCP tools; a bogus /
+# cross-tenant ``mcp:*`` name is rejected (deny by default, INV-1/INV-2).
+# ---------------------------------------------------------------------------
+
+
+async def _register_mcp_server(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    tool_name: str = "echo",
+) -> str:
+    """Register an MCP server with one discovered tool; return its namespaced name."""
+    repo = McpServerRepository(session, tenant_id)
+    server = await repo.create(
+        owner_id=owner_id,
+        name="fixture",
+        transport="streamable_http",
+        endpoint_url="https://mcp.example.com/mcp",
+        auth_secret_ref=None,
+        secret_hint=None,
+    )
+    await repo.update_health(
+        server.id,
+        status=McpServerStatus.READY,
+        last_health_at=None,
+        last_error=None,
+        discovered_tools=[
+            {"name": tool_name, "description": "d", "input_schema": {}, "read_only": True}
+        ],
+    )
+    await session.commit()
+    return namespaced_tool_name(slug_for_server(server), tool_name)
+
+
+async def test_assistant_may_allowlist_its_own_mcp_tool(
+    session: AsyncSession, world: _World
+) -> None:
+    tool_name = await _register_mcp_server(
+        session, tenant_id=world.tenant_a, owner_id=world.alice
+    )
+    svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    assistant = await svc.create(name="MCP-enabled", tool_allowlist=(tool_name,))
+    assert assistant.tool_allowlist == (tool_name,)
+
+
+async def test_bogus_mcp_tool_name_is_rejected(session: AsyncSession, world: _World) -> None:
+    # A well-formed but non-existent ``mcp:*`` id (no such server/tool for the caller).
+    svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    with pytest.raises(ValidationError) as exc:
+        await svc.create(name="Bad mcp", tool_allowlist=("mcp:srv-deadbeef0000:ghost",))
+    assert exc.value.code == "unknown_tool"
+
+
+async def test_cross_owner_mcp_tool_name_is_rejected(
+    session: AsyncSession, world: _World
+) -> None:
+    # Bob (same tenant) registers a server; Alice cannot name Bob's tool (INV-2).
+    bobs_tool = await _register_mcp_server(
+        session, tenant_id=world.tenant_a, owner_id=world.bob
+    )
+    svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    with pytest.raises(ValidationError) as exc:
+        await svc.create(name="Steal Bob's tool", tool_allowlist=(bobs_tool,))
+    assert exc.value.code == "unknown_tool"
+
+
+async def test_cross_tenant_mcp_tool_name_is_rejected(
+    session: AsyncSession, world: _World
+) -> None:
+    # Carol (tenant B) registers a server; Alice (tenant A) cannot name it (INV-1).
+    carols_tool = await _register_mcp_server(
+        session, tenant_id=world.tenant_b, owner_id=world.carol
+    )
+    svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    with pytest.raises(ValidationError) as exc:
+        await svc.create(name="Cross-tenant mcp", tool_allowlist=(carols_tool,))
     assert exc.value.code == "unknown_tool"
 
 
