@@ -57,10 +57,21 @@ class RedisFixedWindowRateLimiter:
     Redis URL (the stack's existing store) and the window/limit from settings.
     """
 
-    def __init__(self, redis_url: str, *, max_per_window: int, window_seconds: int) -> None:
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        max_per_window: int,
+        window_seconds: int,
+        key_prefix: str = _KEY_PREFIX,
+    ) -> None:
         self._redis_url = redis_url
         self._max_per_window = max_per_window
         self._window_seconds = window_seconds
+        # The Redis keyspace this limiter counts in — defaults to the connector-sync
+        # namespace; other per-tenant limiters (run enqueue, web search) pass their
+        # own distinct prefix so their windows do not collide (ADR-0015 §5).
+        self._key_prefix = key_prefix
 
     def try_acquire(self, tenant_id: UUID) -> bool:
         """Admit (``True``) or throttle (``False``) one fetch for ``tenant_id``.
@@ -70,7 +81,7 @@ class RedisFixedWindowRateLimiter:
         Fail-open: a Redis error admits the sync (availability over strictness;
         the SSRF guard remains the authoritative control).
         """
-        key = f"{_KEY_PREFIX}:{tenant_id}"
+        key = f"{self._key_prefix}:{tenant_id}"
         try:
             client: redis.Redis = redis.Redis.from_url(self._redis_url)
             try:
