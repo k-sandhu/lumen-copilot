@@ -69,6 +69,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "assistant_versions",
     "runs",
     "run_steps",
+    "schedules",
 }
 
 
@@ -93,7 +94,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0017_runs"]
+    assert list(script.get_heads()) == ["0018_schedules"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -142,6 +143,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     runs = script.get_revision("0017_runs")
     assert runs is not None
     assert runs.down_revision == "0016_assistants"
+    schedules = script.get_revision("0018_schedules")
+    assert schedules is not None
+    assert schedules.down_revision == "0017_runs"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -685,6 +689,65 @@ def test_offline_runs_migration_round_trips(
     assert "drop policy if exists rls_run_steps on run_steps" in down
     assert "drop table run_steps" in down
     assert "drop table runs" in down
+
+
+def test_offline_schedules_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0018 creates schedules + the runs.schedule_id FK + RLS; down() reverses (#236).
+
+    AC (ADR-0015 §2): the upgrade renders the tenant/owner-scoped ``schedules`` table
+    (with its jsonb ``input_params``/``delivery``/``cadence_structured``, the
+    normalized ``cadence_cron``, the ``timezone``, the overlap-policy + last-status
+    CHECKs, the ``assistant_id`` CASCADE FK + the ``owner_id`` SET-NULL FK, and the
+    three tenant-leading indexes), the ``runs.schedule_id`` → ``schedules.id``
+    ``ON DELETE SET NULL`` FK (the #235 residual), and the same fail-closed RLS policy
+    the 0007 backstop uses. The downgrade drops the FK, the policy, disables RLS, and
+    drops the table. Offline DDL render (Postgres dialect) — structural reversibility
+    without a DB (#70 lesson); the behavioural proof is the service + scheduler tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0017_runs:0018_schedules", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped schedules table + its FKs.
+    assert "create table schedules" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK (the run's principal, SET NULL)
+    assert "references assistants" in up  # assistant_id FK (CASCADE)
+    # The cadence + jsonb columns.
+    assert "cadence_cron" in up
+    assert "input_params jsonb" in up
+    assert "delivery jsonb" in up
+    assert "timezone" in up
+    # The domain-pinning CHECKs.
+    assert "ck_schedules_overlap_policy" in up
+    assert "ck_schedules_last_status" in up
+    # The three tenant-leading indexes (owner list, by assistant, enabled sweep).
+    assert "create index ix_schedules_tenant_owner on schedules (tenant_id, owner_id)" in up
+    assert (
+        "create index ix_schedules_tenant_assistant on schedules "
+        "(tenant_id, assistant_id)" in up
+    )
+    assert "create index ix_schedules_tenant_enabled on schedules (tenant_id, enabled)" in up
+    # The #235 residual FK: runs.schedule_id → schedules.id, SET NULL.
+    assert "alter table runs add constraint fk_runs_schedule_id" in up
+    assert "foreign key(schedule_id) references schedules (id) on delete set null" in up
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table schedules enable row level security" in up
+    assert "alter table schedules force row level security" in up
+    assert "create policy rls_schedules on schedules" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0018_schedules:0017_runs", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_schedules on schedules" in down
+    assert "alter table schedules disable row level security" in down
+    # The residual FK is dropped before the table.
+    assert "alter table runs drop constraint fk_runs_schedule_id" in down
+    assert "drop index ix_schedules_tenant_enabled" in down
+    assert "drop table schedules" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

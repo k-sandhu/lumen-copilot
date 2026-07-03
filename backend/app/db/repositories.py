@@ -44,6 +44,7 @@ from app.domain.entities import (
     Chunk,
     Citation,
     Collection,
+    DigestCadence,
     Document,
     DocumentStatus,
     Grant,
@@ -54,6 +55,7 @@ from app.domain.entities import (
     KnowledgeScope,
     Message,
     MessageRole,
+    OverlapPolicy,
     RecentSearch,
     RefreshToken,
     Role,
@@ -64,6 +66,8 @@ from app.domain.entities import (
     RunStepKind,
     RunTrigger,
     SavedSearch,
+    Schedule,
+    ScheduleDelivery,
     Secret,
     SecretKind,
     Source,
@@ -74,6 +78,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
+from app.domain.scheduling import Cadence, StructuredCadence
 
 # ---------------------------------------------------------------------------
 # Row → domain mappers (the boundary: ORM rows never escape this module).
@@ -433,6 +438,92 @@ def _to_run_step(row: models.RunStep) -> RunStep:
         kind=RunStepKind(row.kind),
         payload=dict(row.payload or {}),
         created_at=row.created_at,
+    )
+
+
+def _structured_from_json(raw: object) -> StructuredCadence | None:
+    """Rebuild a :class:`StructuredCadence` from the stored jsonb blob, or ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    from app.domain.scheduling import CadenceUnit
+
+    every = raw.get("every")
+    at = raw.get("at")
+    if not isinstance(every, str) or not isinstance(at, str):
+        return None
+    try:
+        unit = CadenceUnit(every)
+    except ValueError:
+        return None
+    dow = raw.get("day_of_week")
+    dom = raw.get("day_of_month")
+    return StructuredCadence(
+        every=unit,
+        at=at,
+        day_of_week=dow if isinstance(dow, int) else None,
+        day_of_month=dom if isinstance(dom, int) else None,
+    )
+
+
+def _cadence_from_row(row: models.Schedule) -> Cadence:
+    """The row's canonical cadence: the stored cron + the original structured form."""
+    structured = _structured_from_json(row.cadence_structured)
+    return Cadence(cron=row.cadence_cron, structured=structured)
+
+
+def _structured_to_json(sc: StructuredCadence) -> dict[str, object]:
+    """Serialize a :class:`StructuredCadence` to a stored jsonb blob."""
+    out: dict[str, object] = {"every": sc.every.value, "at": sc.at}
+    if sc.day_of_week is not None:
+        out["day_of_week"] = sc.day_of_week
+    if sc.day_of_month is not None:
+        out["day_of_month"] = sc.day_of_month
+    return out
+
+
+def _delivery_from_json(raw: object) -> ScheduleDelivery:
+    """Rebuild a :class:`ScheduleDelivery` from the stored jsonb blob (fail-safe default)."""
+    if not isinstance(raw, dict):
+        return ScheduleDelivery.default()
+    inbox = raw.get("inbox")
+    digest_raw = raw.get("digest")
+    digest: DigestCadence | None = None
+    if isinstance(digest_raw, str):
+        try:
+            digest = DigestCadence(digest_raw)
+        except ValueError:
+            digest = None
+    return ScheduleDelivery(
+        inbox=bool(inbox) if isinstance(inbox, bool) else True,
+        digest=digest,
+    )
+
+
+def _delivery_to_json(delivery: ScheduleDelivery) -> dict[str, object]:
+    """Serialize a :class:`ScheduleDelivery` to a stored jsonb blob."""
+    return {
+        "inbox": delivery.inbox,
+        "digest": delivery.digest.value if delivery.digest is not None else None,
+    }
+
+
+def _to_schedule(row: models.Schedule) -> Schedule:
+    return Schedule(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        assistant_id=row.assistant_id,
+        cadence=_cadence_from_row(row),
+        timezone=row.timezone,
+        input_params=dict(row.input_params or {}),
+        delivery=_delivery_from_json(row.delivery),
+        overlap_policy=OverlapPolicy(row.overlap_policy),
+        enabled=row.enabled,
+        next_run_at=row.next_run_at,
+        last_run_at=row.last_run_at,
+        last_status=RunStatus(row.last_status) if row.last_status is not None else None,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -2890,6 +2981,244 @@ class RunStepRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_run_step(r) for r in rows]
+
+
+class ScheduleRepository(_TenantScopedRepository):
+    """Recurring-run definitions (``schedules``) within one tenant (ADR-0015 §2, #236).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``schedule_id``
+    resolves to ``None``, so the existence-non-disclosure 404 is enforced one layer
+    up in ``services.schedules_service``. Owner visibility (deny-by-default, spec
+    0004 §2.2) is layered in the service. Persists via the session but does not
+    commit — the caller owns the transaction boundary.
+
+    The cadence is stored as its normalized canonical cron (``cadence_cron``) plus
+    the optional original structured form (``cadence_structured``); the service is
+    the only thing that normalizes/validates a cadence (it owns the domain
+    ``scheduling`` helpers), so the repository takes the already-normalized
+    :class:`Cadence`.
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        assistant_id: UUID,
+        cadence: Cadence,
+        timezone: str,
+        input_params: dict[str, object] | None = None,
+        delivery: ScheduleDelivery | None = None,
+        overlap_policy: OverlapPolicy = OverlapPolicy.SKIP,
+        enabled: bool = True,
+        next_run_at: datetime | None = None,
+    ) -> Schedule:
+        """Create a schedule owned by ``owner_id`` (ADR-0015 §2)."""
+        row = models.Schedule(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            assistant_id=assistant_id,
+            cadence_cron=cadence.cron,
+            cadence_structured=(
+                _structured_to_json(cadence.structured) if cadence.structured is not None else None
+            ),
+            timezone=timezone,
+            input_params=dict(input_params or {}),
+            delivery=_delivery_to_json(delivery or ScheduleDelivery.default()),
+            overlap_policy=overlap_policy.value,
+            enabled=enabled,
+            next_run_at=next_run_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_schedule(row)
+
+    async def get(self, schedule_id: UUID) -> Schedule | None:
+        row = await self._get_row(schedule_id)
+        return _to_schedule(row) if row is not None else None
+
+    async def _get_row(self, schedule_id: UUID) -> models.Schedule | None:
+        stmt = select(models.Schedule).where(
+            models.Schedule.tenant_id == self._tenant_id,
+            models.Schedule.id == schedule_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def update(
+        self,
+        schedule_id: UUID,
+        *,
+        cadence: Cadence | None = None,
+        timezone: str | None = None,
+        input_params: dict[str, object] | None = None,
+        delivery: ScheduleDelivery | None = None,
+        overlap_policy: OverlapPolicy | None = None,
+        enabled: bool | None = None,
+        next_run_at: datetime | None = None,
+        clear_next_run_at: bool = False,
+    ) -> Schedule | None:
+        """Apply a partial update to a schedule, tenant-scoped.
+
+        Only non-``None`` arguments are written (the service already validated
+        them). ``next_run_at`` is set when supplied; ``clear_next_run_at`` explicitly
+        nulls it (pause), distinguishing "not touched" from "cleared". Returns the
+        updated entity, or ``None`` if no row matches in this tenant.
+        """
+        row = await self._get_row(schedule_id)
+        if row is None:
+            return None
+        if cadence is not None:
+            row.cadence_cron = cadence.cron
+            row.cadence_structured = (
+                _structured_to_json(cadence.structured) if cadence.structured is not None else None
+            )
+        if timezone is not None:
+            row.timezone = timezone
+        if input_params is not None:
+            row.input_params = dict(input_params)
+        if delivery is not None:
+            row.delivery = _delivery_to_json(delivery)
+        if overlap_policy is not None:
+            row.overlap_policy = overlap_policy.value
+        if enabled is not None:
+            row.enabled = enabled
+        if clear_next_run_at:
+            row.next_run_at = None
+        elif next_run_at is not None:
+            row.next_run_at = next_run_at
+        await self._session.flush()
+        # Refresh so the ``onupdate`` server-side ``updated_at`` is materialized before
+        # mapping (a mutating flush expires it; reading it in ``_to_schedule`` otherwise
+        # triggers a lazy DB load in a sync context).
+        await self._session.refresh(row)
+        return _to_schedule(row)
+
+    async def record_fire(
+        self,
+        schedule_id: UUID,
+        *,
+        last_run_at: datetime,
+        last_status: RunStatus,
+        next_run_at: datetime | None,
+    ) -> Schedule | None:
+        """Stamp a fire's summary (last_run_at/last_status) + the recomputed next fire.
+
+        Called by the dispatcher after a real fire enqueues a run (ADR-0015 §4):
+        records when the schedule last fired and with what run status, and advances
+        ``next_run_at`` to the next tz/DST-correct instant. Tenant-scoped.
+        """
+        row = await self._get_row(schedule_id)
+        if row is None:
+            return None
+        row.last_run_at = last_run_at
+        row.last_status = last_status.value
+        row.next_run_at = next_run_at
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_schedule(row)
+
+    async def advance_next_run(
+        self, schedule_id: UUID, *, next_run_at: datetime | None
+    ) -> Schedule | None:
+        """Advance ``next_run_at`` **without** touching last_run_at/last_status, tenant-scoped.
+
+        Used when a fire is *skipped* or *deferred* (overlap/concurrency/rate,
+        ADR-0015 §5): the schedule keeps ticking to its next fire, but a skipped fire
+        is not a run — the prior run's ``last_status`` stands, and no fake fire time
+        is recorded.
+        """
+        row = await self._get_row(schedule_id)
+        if row is None:
+            return None
+        row.next_run_at = next_run_at
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_schedule(row)
+
+    async def delete(self, schedule_id: UUID) -> bool:
+        """Delete a schedule, tenant-scoped. Returns whether a row was removed."""
+        row = await self._get_row(schedule_id)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        assistant_id: UUID | None = None,
+        enabled: bool | None = None,
+    ) -> list[Schedule]:
+        """A keyset page of an owner's schedules (newest first) — the ``/schedules`` list.
+
+        Owner- *and* tenant-scoped (spec 0004 §2.2 + INV-1). Optional
+        ``assistant_id`` / ``enabled`` filters compose (the frozen ``GET /schedules``
+        query params). Ordered by ``(created_at, id)`` descending; the id-only cursor
+        resolves the boundary ``created_at`` by a correlated scalar subquery (exact on
+        Postgres + the offline SQLite), mirroring the runs keyset.
+        """
+        conditions = [
+            models.Schedule.tenant_id == self._tenant_id,
+            models.Schedule.owner_id == owner_id,
+        ]
+        if assistant_id is not None:
+            conditions.append(models.Schedule.assistant_id == assistant_id)
+        if enabled is not None:
+            conditions.append(models.Schedule.enabled == enabled)
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Schedule.created_at)
+                .where(
+                    models.Schedule.tenant_id == self._tenant_id,
+                    models.Schedule.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Schedule.created_at < boundary_created_at,
+                    and_(
+                        models.Schedule.created_at == boundary_created_at,
+                        models.Schedule.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Schedule)
+            .where(*conditions)
+            .order_by(models.Schedule.created_at.desc(), models.Schedule.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_schedule(r) for r in rows]
+
+
+class ScheduleReconcileRepository:
+    """Cross-tenant read of enabled schedules — for the Beat reconcile sweep ONLY (ADR-0015 §1).
+
+    **Not** tenant-scoped (it is the one schedule read that spans tenants), mirroring
+    :class:`TenantRepository` / the search reindex sweep: the dynamic Beat rebuilds
+    its derived RedBeat entries from Postgres (the source of truth) on boot / on a
+    lost Redis entry, so it must enumerate every tenant's enabled schedules. It runs
+    under a **bypass**-scoped session (``bind_bypass``) — a deliberate, system-only
+    path, never a request path (requests are always tenant-scoped, INV-1). Read-only.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_enabled(self) -> list[Schedule]:
+        """Every enabled schedule across all tenants, oldest first (the reconcile set)."""
+        stmt = (
+            select(models.Schedule)
+            .where(models.Schedule.enabled.is_(True))
+            .order_by(models.Schedule.created_at.asc(), models.Schedule.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_schedule(r) for r in rows]
 
 
 def normalize_query(query: str) -> str:
