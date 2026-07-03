@@ -36,6 +36,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    LLMGatewayDep,
     extract_request_id,
 )
 from app.domain.entities import (
@@ -46,6 +47,7 @@ from app.domain.entities import (
     KnowledgeMode,
     KnowledgeScope,
 )
+from app.services.assistant_draft_service import AssistantDraftService, DraftResult
 from app.services.assistants_service import (
     UNSET,
     AssistantPage,
@@ -190,6 +192,51 @@ class AssistantRollbackRequest(BaseModel):
     notes: str | None = None
 
 
+class AssistantDraftRequest(BaseModel):
+    """``#/components/schemas/AssistantDraftRequest`` — the plain-language ask."""
+
+    model_config = {"extra": "forbid"}
+
+    description: str = Field(min_length=1, max_length=4000)
+
+
+class AssistantDraftConfigModel(BaseModel):
+    """``#/components/schemas/AssistantDraftConfig`` — the drafted, editable config.
+
+    The subset of ``AssistantVersionConfig`` the editor pre-fills (no owner/status/
+    version — nothing is created until the user saves). ``model`` ``null`` ⇒ the
+    smart server default; the scope + allow-list default empty (the safe draft).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str
+    description: str | None = None
+    instructions: str | None = None
+    model: str | None = None
+    knowledgeScope: KnowledgeScopeModel  # noqa: N815 — contract camelCase
+    toolAllowlist: list[str]  # noqa: N815 — contract camelCase
+    autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+
+
+class AssistantDraftResponse(BaseModel):
+    """``#/components/schemas/AssistantDraft`` — the draft + clarifications/notes.
+
+    ``draft`` is the config the FE loads into ``AssistantEditor`` for review;
+    ``clarifications`` are the questions the builder asks for missing scope / owner
+    / risk (E6-3); ``notes`` explain any field omitted because it referenced an
+    unknown tool or an unseeable collection/source; ``warnings`` flag any drafted
+    high-risk tool the user should acknowledge before publish.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    draft: AssistantDraftConfigModel
+    clarifications: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -236,6 +283,28 @@ def _to_version_list_response(page: VersionPage) -> AssistantVersionListResponse
     return AssistantVersionListResponse(
         items=[_to_version_response(v) for v in page.items],
         next_cursor=page.next_cursor,
+    )
+
+
+def _to_draft_response(result: DraftResult) -> AssistantDraftResponse:
+    draft = result.draft
+    return AssistantDraftResponse(
+        draft=AssistantDraftConfigModel(
+            name=draft.name,
+            description=draft.description,
+            instructions=draft.instructions,
+            model=draft.model,
+            knowledgeScope=KnowledgeScopeModel(
+                collectionIds=list(draft.collection_ids),
+                sourceIds=list(draft.source_ids),
+                modes=[],
+            ),
+            toolAllowlist=list(draft.tool_allowlist),
+            autonomyLevel=draft.autonomy_level,
+        ),
+        clarifications=list(result.clarifications),
+        notes=list(result.notes),
+        warnings=list(result.warnings),
     )
 
 
@@ -319,6 +388,42 @@ async def create_assistant(
     )
     await session.commit()
     return _to_response(assistant)
+
+
+@router.post(
+    "/draft",
+    response_model=AssistantDraftResponse,
+    response_model_exclude_none=True,
+)
+async def draft_assistant(
+    body: AssistantDraftRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+    llm: LLMGatewayDep,
+) -> AssistantDraftResponse:
+    """Draft an assistant config from a plain-language description (E6-1, #213).
+
+    Creates **nothing** — returns a draft config the FE loads into the editor for
+    review + save, plus clarifying questions (missing scope/owner/risk) and notes
+    for any tool/scope the description named that was omitted (unknown tool → not
+    in the draft; unseeable collection/source → not in the draft — deny-by-default).
+    Owner-scoped; audited ``assistant.drafted``. A blank/oversize body → 422.
+    """
+    service = AssistantDraftService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        llm=llm,
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    result = await service.draft(description=body.description)
+    await session.commit()
+    return _to_draft_response(result)
 
 
 @router.get(
