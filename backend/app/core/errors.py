@@ -109,6 +109,20 @@ class ValidationError(AppError):
     title = "Unprocessable Entity"
 
 
+class ConflictError(AppError):
+    """The request conflicts with the current resource state (illegal transition, INV-8).
+
+    Mapped to **409** (the contract's ``Conflict`` response): e.g. ``run-now`` on a
+    paused schedule, or acting on a resource in a state that forbids the action.
+    Distinct from :class:`ValidationError` (422, malformed input) — a 409 is a valid
+    request against a resource whose state rejects it.
+    """
+
+    status = 409
+    code = "conflict"
+    title = "Conflict"
+
+
 class UnauthorizedError(AppError):
     """The caller is not authenticated."""
 
