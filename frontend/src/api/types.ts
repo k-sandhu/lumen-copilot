@@ -631,6 +631,28 @@ export interface SandboxPolicyUpdate {
   max_concurrency: number;
 }
 
+/**
+ * The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+ * is the ceiling an assistant's EFFECTIVE autonomy is min'd to. `is_default` is true
+ * when no cap is stored — no ceiling, so `max_autonomy` is reported as `act_auto` and
+ * every assistant runs at its own configured level. `levels` lists the choice set in
+ * ascending order (suggest … act_auto).
+ */
+export interface AutonomyPolicy {
+  max_autonomy: AutonomyLevel;
+  is_default: boolean;
+  levels: AutonomyLevel[];
+}
+
+/**
+ * PATCH /admin/autonomy-policy body — set the per-tenant autonomy cap (issue #218).
+ * `max_autonomy` must be a valid AutonomyLevel (an unknown value → 422). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it.
+ */
+export interface AutonomyPolicyUpdate {
+  max_autonomy: AutonomyLevel;
+}
+
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
 
 /**
@@ -743,6 +765,12 @@ export interface Assistant {
   /** Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands). */
   toolAllowlist: string[];
   autonomyLevel: AutonomyLevel;
+  /**
+   * The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+   * (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no cap
+   * lowers it — visibility for the library/run detail.
+   */
+  effectiveAutonomy: AutonomyLevel;
   /** The accountable owner's user id. */
   owner: string;
   /** The backup owner's user id; required before publish (ADR-0011 §4). */

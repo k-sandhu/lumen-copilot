@@ -35,6 +35,7 @@ const ASSISTANTS: AssistantList = {
       knowledgeScope: {},
       toolAllowlist: [],
       autonomyLevel: 'suggest',
+      effectiveAutonomy: 'suggest',
       owner: 'u1',
       status: 'published',
       created_at: 't',

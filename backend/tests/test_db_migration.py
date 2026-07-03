@@ -975,7 +975,7 @@ def test_offline_tenant_sandbox_policy_migration_round_trips(
 def test_offline_tenant_autonomy_policy_migration_round_trips(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """0023 creates the tenant-scoped ``tenant_autonomy_policy`` table + RLS; down() reverses (#218).
+    """0023 creates the ``tenant_autonomy_policy`` table + RLS; down() reverses (#218).
 
     AC (issue #218, spec 0004 §2.1/§2.5): the upgrade renders the ``tenant_autonomy_policy``
     table with its ``max_autonomy`` column, the ``updated_by`` FK → ``users`` (SET NULL
