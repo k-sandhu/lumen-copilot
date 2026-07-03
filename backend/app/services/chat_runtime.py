@@ -66,11 +66,41 @@ from app.services.assistant_runtime import AssistantRunConfig
 from app.services.audit import AuditSink
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
 from app.services.tools.impls import retrieval as _retrieval_impl
+from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
 from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import ToolContext
+from app.services.tools.types import SandboxToolRunner, ToolContext
 
 log = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxContext:
+    """The per-answer inputs the sandbox seam factory needs (issue #231).
+
+    Threaded from the runtime into the injected :data:`SandboxFactory` so the seam
+    can create + link the ``code_run`` (the runtime's own ``session`` + the parent
+    chat ``session_id`` / assistant ``message_id``), stream over the answer's
+    ``stream_id`` with the shared monotonic ``next_seq`` (so ``code_output`` /
+    ``code_result`` interleave with the answer's envelopes), and carry the audit
+    correlation. Everything is the runtime's — never model/tool input.
+    """
+
+    session: AsyncSession
+    stream_id: str
+    session_id: UUID
+    message_id: UUID
+    next_seq: Callable[[], int]
+
+
+# The injected code-execution seam factory (issue #231): given the per-answer
+# :class:`SandboxContext`, build the :class:`SandboxToolRunner` the ``run_python``
+# tool submits through, or ``None`` when code execution is unavailable (no live
+# runner configured / disabled deploy). The runtime only calls it when the run's
+# allow-list offers ``run_python``, so the seam is never built for a session that
+# cannot use it.
+SandboxFactory = Callable[["SandboxContext"], SandboxToolRunner | None]
+
 
 # How many tool-calling turns the agent may take before the runtime forces a
 # final answer (bounds the loop — no unbounded multi-step planning, issue #24
@@ -135,6 +165,7 @@ class ChatRuntime:
         source_ip: str,
         default_max_tool_turns: int = _DEFAULT_MAX_TOOL_TURNS,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
+        sandbox_factory: SandboxFactory | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -151,6 +182,13 @@ class ChatRuntime:
         self._retrieval_factory = retrieval_factory or (
             lambda session: RetrievalService(session, gateway=self._gateway)
         )
+        # The #231 code-execution seam factory. It is wired into the tool context
+        # **only** when the run's allow-list offers ``run_python`` (below) — a
+        # session that cannot run code never carries execution plumbing (no untested
+        # seam on a path that does not use it). ``None`` (the default, and the offline
+        # / no-code case) ⇒ ``run_python`` invocations report a typed ``ok=False``
+        # rather than executing. The API wires the live factory (issue #231).
+        self._sandbox_factory = sandbox_factory
 
     async def run(
         self,
@@ -353,11 +391,26 @@ class ChatRuntime:
         # #207): it carries the asking principal (the ``retrieval/`` filter keys
         # off it, INV-2) and the run's retrieval service + collection scope. Built
         # once — the handlers reach nothing outside it.
+        #
+        # The #231 code-execution seam is wired in ONLY when this run's allow-list
+        # offers ``run_python`` AND a live factory is configured — a session that
+        # cannot run code carries no execution plumbing (deny-by-default; no untested
+        # seam on a path that does not use it). ``run_python`` is off the ad-hoc
+        # default allow-list and admin-gated, so ad-hoc chat never wires it.
+        sandbox = self._build_sandbox_seam(
+            session=session,
+            state=state,
+            allowed=allowed,
+            session_id=session_id,
+            assistant_message_id=assistant_message_id,
+        )
         tool_context = ToolContext(
             principal=self._principal,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
             default_k=_DEFAULT_K,
+            session_id=session_id,
+            sandbox=sandbox,
         )
 
         budget_exhausted = True
@@ -468,6 +521,37 @@ class ChatRuntime:
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens,
+        )
+
+    def _build_sandbox_seam(
+        self,
+        *,
+        session: AsyncSession,
+        state: _StreamState,
+        allowed: frozenset[str],
+        session_id: UUID,
+        assistant_message_id: UUID,
+    ) -> SandboxToolRunner | None:
+        """Build the ``run_python`` code-execution seam, or ``None`` (issue #231).
+
+        Deny-by-default + no-untested-plumbing: the seam is built **only** when this
+        run's allow-list actually offers ``run_python`` *and* a live sandbox factory
+        was injected. Ad-hoc chat (``run_python`` off the default allow-list) and any
+        session whose assistant did not grant it never carry the seam, so the
+        ``ToolContext.sandbox`` stays ``None`` and a stray ``run_python`` invocation
+        reports a typed ``ok=False`` instead of executing. The factory itself may
+        also return ``None`` (no runner configured / disabled deploy) — same result.
+        """
+        if self._sandbox_factory is None or RUN_PYTHON_TOOL_NAME not in allowed:
+            return None
+        return self._sandbox_factory(
+            SandboxContext(
+                session=session,
+                stream_id=state.stream_id,
+                session_id=session_id,
+                message_id=assistant_message_id,
+                next_seq=state.next_seq,
+            )
         )
 
     async def _resolve_max_tool_turns(self, session: AsyncSession, tenant_id: UUID) -> int:
@@ -798,4 +882,4 @@ _RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-__all__ = ["ChatRuntime"]
+__all__ = ["ChatRuntime", "SandboxContext", "SandboxFactory"]

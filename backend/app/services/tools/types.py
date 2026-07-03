@@ -20,7 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.auth.principal import Principal
-from app.domain.entities import Artifact, ArtifactProducedBy
+from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
 from app.domain.tools import RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
 from app.services.artifacts_service import ArtifactLinks
@@ -57,6 +57,63 @@ class ArtifactWriter(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxRun:
+    """The terminal outcome of a governed ``run_python`` submission (issue #231).
+
+    The narrow domain shape the sandbox seam hands back to the ``run_python`` tool
+    once a code run reaches a terminal :class:`~app.domain.entities.CodeRunStatus`:
+    the ``code_run_id`` (for ``GET /code-runs/{id}`` inspection and the WS
+    ``runId`` correlation), the terminal ``status``/``exit_code``/``duration_ms``,
+    the (output-size-capped, G7) ``stdout``/``stderr`` tails the tool summarises
+    back to the model, and the ids of any artifacts the run produced (collected via
+    CC-B #208). It carries **no** runner/Docker wire object — the sandbox boundary
+    exposes domain types only (ADR-0004).
+    """
+
+    code_run_id: UUID
+    status: CodeRunStatus
+    exit_code: int | None
+    duration_ms: int | None
+    stdout: str
+    stderr: str
+    artifact_ids: tuple[UUID, ...] = ()
+
+
+@runtime_checkable
+class SandboxToolRunner(Protocol):
+    """The narrow code-execution seam the ``run_python`` tool submits through (#231).
+
+    A tool never orchestrates a container, never talks to the ``sandbox-runner``,
+    and never enqueues a Celery task itself (ADR-0004: the ``sandbox/`` module owns
+    code execution, ``tasks/`` owns enqueue). This Protocol exposes one method:
+    submit the model-authored ``code`` to the merged sandbox engine (#230), await
+    the terminal :class:`~app.domain.entities.CodeRun`, and return a
+    :class:`SandboxRun` summary — streaming ``code_output`` chunks and a terminal
+    ``code_result`` over the chat stream as the run progresses (the frozen ADR-0013
+    contract). The real implementation is already scoped to the caller's tenant +
+    owner (from the principal, never tool args), so tenant isolation (INV-1/INV-2)
+    and the ``code_run.*`` audit (INV-6) hold by delegation; a test fake implements
+    only this one method.
+
+    The seam is **admin-gated at the deploy/tenant layer** (``SANDBOX_ENABLED`` /
+    the per-tenant enable #233): a disabled tenant's submission comes back as a
+    ``denied`` :class:`SandboxRun` (never a raised exception), which the tool folds
+    into an ``ok=False`` result. A submission that never even reaches a run (the
+    seam is not wired for this session) is the tool's ``sandbox is None`` guard.
+    """
+
+    async def submit(self, *, code: str, timeout_s: int | None = None) -> SandboxRun:
+        """Run ``code`` in the sandbox to a terminal status; return its outcome.
+
+        Streams ``code_output`` chunks and a terminal ``code_result`` over the chat
+        stream, correlated by the ``runId`` (the ``code_run`` id). ``timeout_s`` is
+        the model's optional per-run wall-clock hint, clamped by the seam to the
+        configured ceiling (a hostile large value can never widen the cap, G6).
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class ToolContext:
     """The permission-scoped context a tool handler runs against (issue #207).
 
@@ -73,6 +130,13 @@ class ToolContext:
     is the read-only test-mode flag (F-AB-5): when set, a write tool builds and
     validates the bytes but does **not** persist — the artifact-producing action is
     simulated, so the read-only harness never mutates state.
+
+    ``sandbox`` is the optional #231 code-execution seam the ``run_python`` tool
+    submits through. It defaults ``None`` — a session that does not offer
+    ``run_python`` (the deny-by-default case; ``run_python`` is off the ad-hoc
+    allow-list and admin-gated) is never wired with a runner, so no untested
+    execution plumbing hangs off a path that cannot use it, and the tool reports a
+    typed ``ok=False`` if ever invoked without the seam rather than crashing.
     """
 
     principal: Principal
@@ -82,6 +146,7 @@ class ToolContext:
     artifacts: ArtifactWriter | None = None
     session_id: UUID | None = None
     simulate_writes: bool = False
+    sandbox: SandboxToolRunner | None = None
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and
@@ -200,6 +265,8 @@ __all__ = [
     "ApprovalRequest",
     "ArtifactWriter",
     "DenyAllApprovalGate",
+    "SandboxRun",
+    "SandboxToolRunner",
     "ToolContext",
     "ToolDefinition",
     "ToolHandler",
