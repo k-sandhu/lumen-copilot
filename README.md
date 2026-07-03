@@ -55,7 +55,7 @@ Sandboxed code execution is off by default and gated behind a compose profile: `
 
 ## Evaluation & tests
 
-- **~1,980 automated tests**: 1,048 backend test functions (pytest, 94 files) and 936 frontend cases (Vitest, 138 files). The backend suite is offline by default — tests that open real network sockets are marked `live` and opt-in via `RUN_LIVE=1`.
+- **~2,000 automated tests**: 1,048 backend test functions (pytest, 94 files) and 930+ frontend cases (Vitest, 139 files). The backend suite is offline by default — tests that open real network sockets are marked `live` and opt-in via `RUN_LIVE=1`.
 - **Negative tests are mandatory**, keyed to the security invariants in [spec 0004](docs/specs/0004-security-and-domain-invariants.md): cross-tenant access → 404, unauthorized passage → excluded from retrieval, uncited answer → blocked, missing token → 401, wrong role → 403, missing audit event → test failure, unapproved consequential action → forbidden.
 - **Grounded-answer eval harness** ([`backend/tests/eval/`](backend/tests/eval/)): a golden Q/A-with-source set scored on retrieval recall, citation correctness, and groundedness — deterministic fakes in CI-safe mode, the same corpus against a real model in live mode.
 - **Decision record trail**: [15 ADRs](docs/architecture/) and [5 specs](docs/specs/) cover the stack, module boundaries, retrieval engine, assistant runtime, MCP integration, sandbox design, and scheduling — the repo is built agent-first, with [AGENTS.md](AGENTS.md) as the canonical working contract.
