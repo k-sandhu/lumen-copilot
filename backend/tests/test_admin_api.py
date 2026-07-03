@@ -45,6 +45,7 @@ _ADMIN_PATHS = (
     "/api/v1/admin/model-governance",
     "/api/v1/admin/risk-tiers",
     "/api/v1/admin/settings",
+    "/api/v1/admin/tool-policy",
 )
 
 
@@ -460,3 +461,163 @@ async def test_patch_tenant_settings_emits_audit_event(
     assert ev.metadata["max_tool_turns"] == 15
     assert ev.resource_type == "tenant"
     assert ev.resource_id == str(seeded.tenant_a)
+
+
+# --- GET/PATCH /admin/tool-policy (per-tenant tool governance, issue #223) ----
+
+
+def _entry(body: dict[str, object], tool_name: str) -> dict[str, object]:
+    """The tool-policy entry for ``tool_name`` from a GET/PATCH response body."""
+    items = body["items"]
+    assert isinstance(items, list)
+    matches = [e for e in items if e["tool_name"] == tool_name]
+    assert matches, f"{tool_name} not in policy: {[e['tool_name'] for e in items]}"
+    return matches[0]  # type: ignore[no-any-return]
+
+
+async def test_get_tool_policy_lists_every_registered_tool_with_defaults(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    from app.services.tools.registry import registered_names
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.get("/api/v1/admin/tool-policy", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == {"items"}
+
+    names = {e["tool_name"] for e in body["items"]}
+    # Every registered tool appears (the registry is the source of truth).
+    assert names == set(registered_names())
+    for entry in body["items"]:
+        assert set(entry) == {
+            "tool_name",
+            "risk_tier",
+            "read_only",
+            "enabled",
+            "requires_approval",
+            "is_default",
+        }
+        # A fresh tenant has NO overrides → every entry is the built-in default.
+        assert entry["is_default"] is True
+
+    # run_python (T2, requires_approval) is DENY-BY-DEFAULT: enabled but still
+    # requiring approval (no admin pre-approval yet) — the gate denies it.
+    run_python = _entry(body, "run_python")
+    assert run_python["risk_tier"] == "T2"
+    assert run_python["read_only"] is False
+    assert run_python["requires_approval"] is True
+
+    # A read-only retrieval tool is T0 and never gated.
+    search = _entry(body, "search_text")
+    assert search["risk_tier"] == "T0"
+    assert search["read_only"] is True
+    assert search["requires_approval"] is False
+
+
+async def test_patch_tool_policy_enables_and_preapproves_run_python(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    # The run_python unlock: an admin enables AND pre-approves it for the tenant.
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token),
+        json={"tool_name": "run_python", "enabled": True, "requires_approval": False},
+    )
+    assert resp.status_code == 200, resp.text
+    run_python = _entry(resp.json(), "run_python")
+    assert run_python["enabled"] is True
+    assert run_python["requires_approval"] is False
+    assert run_python["is_default"] is False  # an explicit override now exists
+
+    # The override reads back via GET (round-trip).
+    got = await client.get("/api/v1/admin/tool-policy", headers=_auth(token))
+    assert _entry(got.json(), "run_python")["requires_approval"] is False
+
+
+async def test_patch_tool_policy_unknown_tool_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token),
+        json={"tool_name": "not_a_real_tool", "enabled": True, "requires_approval": False},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_tool_policy_missing_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token),
+        json={"tool_name": "run_python"},  # missing enabled/requires_approval
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_patch_tool_policy_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    # The governance write is admin-only (INV-5) — member/security are 403.
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token),
+        json={"tool_name": "run_python", "enabled": True, "requires_approval": False},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_patch_tool_policy_unauthenticated_is_401(client: AsyncClient) -> None:
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        json={"tool_name": "run_python", "enabled": True, "requires_approval": False},
+    )
+    assert resp.status_code == 401
+
+
+async def test_tool_policy_is_tenant_scoped(client: AsyncClient, seeded: _Seeded) -> None:
+    # Admin A pre-approves run_python; admin B's tenant is untouched (INV-1).
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token_a),
+        json={"tool_name": "run_python", "enabled": True, "requires_approval": False},
+    )
+    token_b = await _login(client, seeded.admin_b_email)
+    got_b = await client.get("/api/v1/admin/tool-policy", headers=_auth(token_b))
+    run_python_b = _entry(got_b.json(), "run_python")
+    # Tenant B still sees the built-in default (deny-by-default), never A's override.
+    assert run_python_b["is_default"] is True
+    assert run_python_b["requires_approval"] is True
+
+
+async def test_patch_tool_policy_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/tool-policy",
+        headers=_auth(token),
+        json={"tool_name": "run_python", "enabled": True, "requires_approval": False},
+    )
+    assert resp.status_code == 200, resp.text
+    # The write emits exactly one audit event for this tenant (INV-6).
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    policy_events = [e for e in events if e.action == "tool_policy.updated"]
+    assert len(policy_events) == 1
+    ev = policy_events[0]
+    assert ev.metadata["tool_name"] == "run_python"
+    assert ev.metadata["enabled"] is True
+    assert ev.metadata["requires_approval"] is False
+    assert ev.resource_type == "tool"
+    assert ev.resource_id == "run_python"

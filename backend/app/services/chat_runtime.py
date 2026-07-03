@@ -65,6 +65,7 @@ from app.retrieval import RetrievalService
 from app.services.assistant_runtime import AssistantRunConfig
 from app.services.audit import AuditSink
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
+from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
 from app.services.tools.mcp_bridge import is_mcp_tool_name
@@ -382,6 +383,14 @@ class ChatRuntime:
             request_id=self._request_id,
             source_ip=self._source_ip,
             session_id=session_id,
+            # The policy-driven approval gate (issue #223) — replaces the inert
+            # DenyAllApprovalGate on the live path. A requires_approval tool (⇒ T2+)
+            # executes ONLY if the tenant's admin policy has enabled AND pre-approved
+            # it (enabled=true, requires_approval=false); otherwise denied. Fail-closed
+            # if the policy can't be read. This is what lets an admin turn on
+            # run_python for their tenant. Tenant-scoped: keyed off the running
+            # principal's tenant, never request input (INV-1).
+            gate=PolicyApprovalGate(session, tenant_id=tenant_id),
             extra_tools=mcp_tools,
         )
         # The tool schemas advertised to the model — exactly the allow-list (native

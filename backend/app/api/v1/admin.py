@@ -53,6 +53,7 @@ from app.services.admin_service import (
     RiskTierView,
     TenantSettingsView,
 )
+from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
 
 # The admin-only gate runs for every route on this router (INV-5). It depends on
 # ``current_user`` underneath, so an unauthenticated caller is a 401 (INV-4)
@@ -154,6 +155,41 @@ class TenantSettingsUpdateRequest(BaseModel):
     max_tool_turns: int | None = Field(ge=1, le=50)
 
 
+class ToolPolicyEntryResponse(BaseModel):
+    """``#/components/schemas/ToolPolicyEntry`` — one tool's effective governance."""
+
+    model_config = {"extra": "forbid"}
+
+    tool_name: str
+    risk_tier: str
+    read_only: bool
+    enabled: bool
+    requires_approval: bool
+    is_default: bool
+
+
+class ToolPolicyResponse(BaseModel):
+    """``#/components/schemas/ToolPolicy`` — the per-tenant tool-governance policy."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[ToolPolicyEntryResponse]
+
+
+class ToolPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/ToolPolicyUpdate`` — set one tool's per-tenant flags.
+
+    Both flags are required so the stored override is explicit; the tool name is
+    validated against the registry in the service (an unknown tool → 422, INV-8).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    tool_name: str = Field(min_length=1)
+    enabled: bool
+    requires_approval: bool
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -190,6 +226,22 @@ def _to_tenant_settings(view: TenantSettingsView) -> TenantSettingsResponse:
     return TenantSettingsResponse(
         max_tool_turns=view.max_tool_turns,
         max_tool_turns_is_default=view.max_tool_turns_is_default,
+    )
+
+
+def _to_tool_policy(entries: list[ToolPolicyEntryView]) -> ToolPolicyResponse:
+    return ToolPolicyResponse(
+        items=[
+            ToolPolicyEntryResponse(
+                tool_name=e.tool_name,
+                risk_tier=e.risk_tier,
+                read_only=e.read_only,
+                enabled=e.enabled,
+                requires_approval=e.requires_approval,
+                is_default=e.is_default,
+            )
+            for e in entries
+        ]
     )
 
 
@@ -286,3 +338,49 @@ async def update_tenant_settings(
     )
     await session.commit()
     return _to_tenant_settings(view)
+
+
+@router.get("/tool-policy", response_model=ToolPolicyResponse)
+async def get_tool_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+) -> ToolPolicyResponse:
+    """The caller's tenant's tool-governance policy (admin only; tenant-scoped).
+
+    For every registered tool: its static risk tier plus the effective per-tenant
+    ``enabled`` / ``requires_approval`` flags (an admin override, else the tool's
+    built-in default — deny-by-default for a ``requires_approval`` tool). Admin-only
+    via the router gate (INV-5); tenant-scoped via ``current_tenant`` (INV-1).
+    """
+    service = ToolPolicyService(session, tenant_id=tenant_id)
+    return _to_tool_policy(await service.list_policy())
+
+
+@router.patch("/tool-policy", response_model=ToolPolicyResponse)
+async def update_tool_policy(
+    body: ToolPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> ToolPolicyResponse:
+    """Set the per-tenant ``enabled`` / ``requires_approval`` flags for one tool.
+
+    A reversible, tenant-scoped **T1** governance write (issue #223): admin-only via
+    the router gate (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the
+    service audits ``tool_policy.updated`` (INV-6) and rejects an unknown tool name
+    as **422** (INV-8). Setting a gated tool's ``requires_approval`` to ``false``
+    (with ``enabled`` true) is the admin pre-approval that lets the policy-driven
+    approval gate execute it (the ``run_python`` unlock). Returns the full policy.
+    """
+    service = ToolPolicyService(session, tenant_id=tenant_id)
+    entries = await service.set_policy(
+        tool_name=body.tool_name,
+        enabled=body.enabled,
+        requires_approval=body.requires_approval,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_tool_policy(entries)

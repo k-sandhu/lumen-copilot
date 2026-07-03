@@ -72,6 +72,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "schedules",
     "code_runs",
     "mcp_servers",
+    "tenant_tool_policy",
 }
 
 
@@ -96,7 +97,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0020_mcp_servers"]
+    assert list(script.get_heads()) == ["0021_tenant_tool_policy"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -154,6 +155,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     mcp_servers = script.get_revision("0020_mcp_servers")
     assert mcp_servers is not None
     assert mcp_servers.down_revision == "0019_code_runs"
+    tool_policy = script.get_revision("0021_tenant_tool_policy")
+    assert tool_policy is not None
+    assert tool_policy.down_revision == "0020_mcp_servers"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -862,6 +866,52 @@ def test_offline_mcp_servers_migration_round_trips(
     assert "alter table mcp_servers disable row level security" in down
     assert "drop index ix_mcp_servers_tenant_owner" in down
     assert "drop table mcp_servers" in down
+
+
+def test_offline_tenant_tool_policy_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0021 creates the tenant-scoped ``tenant_tool_policy`` table + RLS; down() reverses (#223).
+
+    AC (issue #223, spec 0004 §2.1/§2.5): the upgrade renders the ``tenant_tool_policy``
+    table with its ``tool_name`` + ``enabled`` / ``requires_approval`` columns, the
+    ``updated_by`` FK → ``users`` (SET NULL — a deprovisioned admin does not
+    cascade-delete the tenant's live policy), the per-tenant-per-tool UNIQUE (a
+    per-tenant upsert), the tenant-leading index, and the same fail-closed RLS policy
+    the 0007 backstop uses (``tenant_tool_policy`` is tenant-scoped, INV-1). The
+    downgrade drops the policy, disables RLS, drops the index, and drops the table.
+    Offline DDL render (Postgres dialect) — structural reversibility without a DB
+    (#70 lesson); the behavioural proof is the tool-policy service + gate tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0020_mcp_servers:0021_tenant_tool_policy", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant-scoped policy table + its FKs.
+    assert "create table tenant_tool_policy" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # updated_by FK (the admin, SET NULL)
+    assert "tool_name" in up
+    assert "requires_approval" in up
+    # The per-tenant-per-tool upsert UNIQUE.
+    assert "uq_tenant_tool_policy_tenant_tool" in up
+    # Tenant-leading index (the INV-1 predicate column).
+    assert (
+        "create index ix_tenant_tool_policy_tenant_id on tenant_tool_policy (tenant_id)" in up
+    )
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table tenant_tool_policy enable row level security" in up
+    assert "alter table tenant_tool_policy force row level security" in up
+    assert "create policy rls_tenant_tool_policy on tenant_tool_policy" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0021_tenant_tool_policy:0020_mcp_servers", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_tenant_tool_policy on tenant_tool_policy" in down
+    assert "alter table tenant_tool_policy disable row level security" in down
+    assert "drop index ix_tenant_tool_policy_tenant_id" in down
+    assert "drop table tenant_tool_policy" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

@@ -41,7 +41,13 @@ export {
 } from './savedSearches';
 export { suggestSearch, listRecentSearches, clearRecentSearches } from './suggest';
 export { listAuditEvents } from './audit';
-export { listMembers, getModelGovernance, getRiskTiers } from './admin';
+export {
+  listMembers,
+  getModelGovernance,
+  getRiskTiers,
+  getToolPolicy,
+  updateToolPolicy,
+} from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
 // public one is already re-exported above, so we expose only the functions here.
 export { listSources, createSource, syncSource, deleteSource } from './sources';

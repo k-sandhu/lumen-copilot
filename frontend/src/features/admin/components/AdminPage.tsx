@@ -26,16 +26,18 @@ import { adminTabIds } from './tabIds';
 import { MembersPanel } from './MembersPanel';
 import { ModelGovernancePanel } from './ModelGovernancePanel';
 import { RiskTierPanel } from './RiskTierPanel';
+import { ToolGovernancePanel } from './ToolGovernancePanel';
 import { DataMinimizationPanel } from './DataMinimizationPanel';
 
 const TAB_PREFIX = 'admin';
 
-type TabId = 'members' | 'models' | 'approvals' | 'data';
+type TabId = 'members' | 'models' | 'approvals' | 'tools' | 'data';
 
 const TABS: AdminTab[] = [
   { id: 'members', label: 'Members & roles', icon: 'user' },
   { id: 'models', label: 'Model governance', icon: 'database' },
   { id: 'approvals', label: 'Approvals & risk', icon: 'shield-check' },
+  { id: 'tools', label: 'Tool governance', icon: 'sliders' },
   { id: 'data', label: 'Data minimization', icon: 'lock' },
 ];
 
@@ -43,6 +45,7 @@ const PANELS: Record<TabId, { label: string; render: () => ReactNode }> = {
   members: { label: 'Members', render: () => <MembersPanel /> },
   models: { label: 'Model governance', render: () => <ModelGovernancePanel /> },
   approvals: { label: 'Risk tiers', render: () => <RiskTierPanel /> },
+  tools: { label: 'Tool governance', render: () => <ToolGovernancePanel /> },
   data: { label: 'Data minimization', render: () => <DataMinimizationPanel /> },
 };
 
