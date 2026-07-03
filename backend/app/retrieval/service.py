@@ -56,7 +56,11 @@ from app.retrieval.permissions import AllowSet
 from app.search import OpenSearchStore, SearchAllowFilter, get_search_store
 
 # Hard ceilings so a hostile/large ``k`` cannot turn into an unbounded scan.
-_MAX_K = 100
+# ``MAX_K`` is public so callers that paginate over ``search`` (e.g. the search
+# service) know the maximum reachable rank and never advertise a page beyond it
+# (#270). ``_MAX_K`` stays as the in-module alias the clamps use.
+MAX_K = 100
+_MAX_K = MAX_K
 _MAX_DOCUMENT_HITS = 50
 
 

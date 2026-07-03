@@ -25,9 +25,10 @@ The SQL builders (:mod:`app.retrieval.queries`), the pure fusion/ranking
 from __future__ import annotations
 
 from app.retrieval.permissions import AllowSet
-from app.retrieval.service import RetrievalService
+from app.retrieval.service import MAX_K, RetrievalService
 
 __all__ = [
+    "MAX_K",
     "AllowSet",
     "RetrievalService",
 ]
