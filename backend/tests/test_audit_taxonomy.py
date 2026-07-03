@@ -94,6 +94,12 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "schedule.paused",
         "schedule.resumed",
         "schedule.run_now",
+        # Sandbox code execution (ADR-0013 §4 / issue #230) — additive; every run is
+        # bracketed by code_run.started/code_run.finished (INV-6) and a run refused
+        # before execution is audited code_run.denied (never a silent drop).
+        "code_run.started",
+        "code_run.finished",
+        "code_run.denied",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
