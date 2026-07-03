@@ -410,6 +410,30 @@ async def test_provenance_synthesizes_allow_candidates_from_document_ids(
     assert all(c.disposition == "allow" for c in candidates)
 
 
+async def test_answer_event_with_document_ids_yields_allow_candidates(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    two_tenants: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """An answer.generated event recording cited document_ids yields allow
+    candidates — the projection the frontend "Answers cited" KPI reads to count
+    a grounded answer as cited (#249)."""
+    tenant_a, _ = two_tenants
+    docs = [str(uuid.uuid4())]
+    await _emit(
+        sessionmaker,
+        tenant_id=tenant_a,
+        action=AuditAction.ANSWER_GENERATED,
+        actor=AuditActor.user(uuid.uuid4()),
+        resource_type="message",
+        metadata={"document_ids": docs, "citation_count": 1},
+    )
+    async with sessionmaker() as session:
+        page = await _service(session, tenant_a).query()
+    candidates = page.items[0].provenance.candidates
+    assert [c.resource_id for c in candidates] == docs
+    assert candidates[0].disposition == "allow"
+
+
 # ---------------------------------------------------------------------------
 # Event → contract mapping — actor label + resource_id passthrough.
 # ---------------------------------------------------------------------------
