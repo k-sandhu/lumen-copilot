@@ -277,6 +277,11 @@ class Settings(BaseSettings):
     # where a redirect is undesirable (e.g. same-origin embedding). Both are
     # contract-valid (the 200 and 302 responses are both defined).
     document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
+    # Cap on the extracted text served by GET /documents/{id}/text (#244), in
+    # UTF-8 bytes. The viewer needs readable text, not an unbounded payload —
+    # an over-cap document is cut at a character boundary and flagged
+    # ``truncated`` so the UI says so honestly. Default 2 MiB.
+    document_text_max_bytes: int = Field(default=2 * 1024 * 1024, alias="DOCUMENT_TEXT_MAX_BYTES")
 
     # --- OpenSearch — the single retrieval store (ADR-0010) ---
     # BM25 lexical + kNN vectors in one engine behind ``app/search/``. Inside

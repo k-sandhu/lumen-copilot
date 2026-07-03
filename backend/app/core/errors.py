@@ -125,6 +125,21 @@ class ForbiddenError(AppError):
     title = "Forbidden"
 
 
+class ConflictError(AppError):
+    """The resource exists but its state does not allow this request (→ 409).
+
+    INV-8's "illegal transition" arm: distinct from 404 (existence
+    non-disclosure) and 422 (malformed input) — the caller may see the
+    resource, but it is not in a state that can serve the request (e.g. a
+    document that has not finished ingestion has no text yet). The ``code``
+    names the specific conflict (contract ``Conflict`` response).
+    """
+
+    status = 409
+    code = "conflict"
+    title = "Conflict"
+
+
 class PayloadTooLargeError(AppError):
     """An upload exceeds the configured size cap (contract 413)."""
 
