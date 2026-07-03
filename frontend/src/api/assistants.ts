@@ -28,6 +28,8 @@ import { request } from './client';
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraft,
+  AssistantDraftRequest,
   AssistantList,
   AssistantPublishRequest,
   AssistantRollbackRequest,
@@ -73,6 +75,17 @@ export function listAssistants(
  */
 export function createAssistant(body: AssistantCreate): Promise<Assistant> {
   return request<Assistant>('/assistants', { method: 'POST', json: body });
+}
+
+/**
+ * Draft an assistant config from a plain-language description (E6-1, #213). Creates
+ * NOTHING — returns a draft config the editor pre-fills for review + save, plus
+ * clarifying questions (missing scope/owner/risk), notes for any omitted tool/scope
+ * (deny-by-default, INV-2), and warnings for any drafted high-risk tool. A blank /
+ * oversize `description` → 422 (INV-8), surfaced inline.
+ */
+export function draftAssistant(body: AssistantDraftRequest): Promise<AssistantDraft> {
+  return request<AssistantDraft>('/assistants/draft', { method: 'POST', json: body });
 }
 
 /** Get an assistant by id (404 if not yours / cross-tenant — INV-1/INV-2). */

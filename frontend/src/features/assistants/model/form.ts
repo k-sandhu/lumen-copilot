@@ -11,6 +11,7 @@
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraftConfig,
   AssistantUpdate,
   AutonomyLevel,
   KnowledgeScope,
@@ -42,6 +43,31 @@ export function emptyForm(): AssistantFormState {
     knowledgeScope: { collectionIds: [], sourceIds: [], modes: [] },
     toolAllowlist: [],
     autonomyLevel: 'suggest',
+    owner: '',
+    backupOwner: '',
+  };
+}
+
+/**
+ * Hydrate a NEW-mode form from a builder draft (E6-1, #213). The draft is a
+ * suggestion, not a saved assistant — owner/backup are still server-assigned on
+ * save, so they stay empty here (the draft never carries them). Everything else the
+ * builder proposed pre-fills the editor for review, exactly like `emptyForm` but
+ * with the drafted values. The user edits and saves; nothing is created until then.
+ */
+export function formFromDraft(draft: AssistantDraftConfig): AssistantFormState {
+  return {
+    name: draft.name,
+    description: draft.description ?? '',
+    instructions: draft.instructions ?? '',
+    model: draft.model ?? '',
+    knowledgeScope: {
+      collectionIds: draft.knowledgeScope.collectionIds ?? [],
+      sourceIds: draft.knowledgeScope.sourceIds ?? [],
+      modes: draft.knowledgeScope.modes ?? [],
+    },
+    toolAllowlist: draft.toolAllowlist,
+    autonomyLevel: draft.autonomyLevel,
     owner: '',
     backupOwner: '',
   };
