@@ -100,6 +100,14 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "code_run.started",
         "code_run.finished",
         "code_run.denied",
+        # Per-tenant MCP server registration (ADR-0012 §5 / issue #226) — additive;
+        # register/update/delete of a remote MCP server (a T1 config write) and the
+        # on-demand health/discovery probe are each audited (INV-6). The stored
+        # credential (CC-C #209) is never in the metadata — only its masked hint.
+        "mcp_server.registered",
+        "mcp_server.updated",
+        "mcp_server.deleted",
+        "mcp_server.tested",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",

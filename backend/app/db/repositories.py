@@ -55,6 +55,8 @@ from app.domain.entities import (
     GrantRole,
     KnowledgeMode,
     KnowledgeScope,
+    McpServer,
+    McpServerStatus,
     Message,
     MessageRole,
     OverlapPolicy,
@@ -295,6 +297,26 @@ def _to_secret(row: models.Secret) -> Secret:
         key_version=row.key_version,
         hint=row.hint,
         created_by=row.created_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_mcp_server(row: models.McpServer) -> McpServer:
+    return McpServer(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        name=row.name,
+        transport=row.transport,
+        endpoint_url=row.endpoint_url,
+        auth_secret_ref=str(row.auth_secret_ref) if row.auth_secret_ref is not None else None,
+        enabled=row.enabled,
+        status=McpServerStatus(row.status),
+        last_health_at=row.last_health_at,
+        last_error=row.last_error,
+        discovered_tools=list(row.discovered_tools or []),
+        secret_hint=row.secret_hint,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -2433,6 +2455,179 @@ class SecretRepository(_TenantScopedRepository):
             models.Secret.id == secret_id,
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+
+class McpServerRepository(_TenantScopedRepository):
+    """Registered remote MCP servers within one tenant (ADR-0012 §5, issue #226).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``server_id``
+    resolves to ``None``/no rows, so the existence-non-disclosure 404 is enforced
+    one layer up off the ``None`` return. Ownership (owner-or-admin) is layered in
+    :class:`~app.services.mcp_servers_service.McpServersService`. Rows never hold
+    the credential — only the CC-C ``auth_secret_ref`` + a masked ``secret_hint``.
+    Writes are flushed not committed; the caller owns the transaction boundary
+    (audits atomically with the write).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        transport: str,
+        endpoint_url: str,
+        auth_secret_ref: UUID | None,
+        secret_hint: str | None,
+        status: McpServerStatus = McpServerStatus.PENDING,
+    ) -> McpServer:
+        row = models.McpServer(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            name=name,
+            transport=transport,
+            endpoint_url=endpoint_url,
+            auth_secret_ref=auth_secret_ref,
+            secret_hint=secret_hint,
+            enabled=True,
+            status=status.value,
+            discovered_tools=[],
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_mcp_server(row)
+
+    async def get(self, server_id: UUID) -> McpServer | None:
+        row = await self._get_row(server_id)
+        return _to_mcp_server(row) if row is not None else None
+
+    async def _get_row(self, server_id: UUID) -> models.McpServer | None:
+        stmt = select(models.McpServer).where(
+            models.McpServer.tenant_id == self._tenant_id,
+            models.McpServer.id == server_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[McpServer]:
+        """A keyset page of an owner's MCP servers (newest first).
+
+        Owner- *and* tenant-scoped (deny-by-default ownership, spec 0004 §2.2 +
+        INV-1). Ordered by ``(created_at, id)`` descending with ``id`` the stable
+        tiebreaker (mirrors the sources/documents keyset).
+        """
+        conditions = [
+            models.McpServer.tenant_id == self._tenant_id,
+            models.McpServer.owner_id == owner_id,
+        ]
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.McpServer.created_at)
+                .where(
+                    models.McpServer.tenant_id == self._tenant_id,
+                    models.McpServer.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.McpServer.created_at < boundary_created_at,
+                    and_(
+                        models.McpServer.created_at == boundary_created_at,
+                        models.McpServer.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.McpServer)
+            .where(*conditions)
+            .order_by(models.McpServer.created_at.desc(), models.McpServer.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_mcp_server(r) for r in rows]
+
+    async def update(
+        self,
+        server_id: UUID,
+        *,
+        name: str | None = None,
+        endpoint_url: str | None = None,
+        enabled: bool | None = None,
+        auth_secret_ref: UUID | None = None,
+        secret_hint: str | None = None,
+        clear_auth: bool = False,
+    ) -> McpServer | None:
+        """Apply a partial update to one server (tenant-scoped), or ``None``.
+
+        Only the passed fields change. ``auth_secret_ref``/``secret_hint`` are
+        applied together on a credential rotation; ``clear_auth=True`` nulls both
+        (the caller having already deleted the vault secret). Ownership is enforced
+        one layer up; a foreign-tenant id matches nothing here (INV-1).
+        """
+        row = await self._get_row(server_id)
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if endpoint_url is not None:
+            row.endpoint_url = endpoint_url
+        if enabled is not None:
+            row.enabled = enabled
+        if clear_auth:
+            row.auth_secret_ref = None
+            row.secret_hint = None
+        elif auth_secret_ref is not None:
+            row.auth_secret_ref = auth_secret_ref
+            row.secret_hint = secret_hint
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_mcp_server(row)
+
+    async def update_health(
+        self,
+        server_id: UUID,
+        *,
+        status: McpServerStatus,
+        last_health_at: datetime | None,
+        last_error: str | None,
+        discovered_tools: list[dict[str, object]],
+    ) -> McpServer | None:
+        """Persist a probe outcome: status + health timestamp + tool snapshot.
+
+        On a healthy probe the caller passes ``status=ready`` with the fresh
+        ``last_health_at`` + discovered tools; on a failure ``status=error`` with a
+        safe ``last_error`` (the previous tool snapshot is left in place by passing
+        it back). Tenant-scoped; ``None`` for a foreign id.
+        """
+        row = await self._get_row(server_id)
+        if row is None:
+            return None
+        row.status = status.value
+        row.last_health_at = last_health_at
+        row.last_error = last_error
+        row.discovered_tools = discovered_tools
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_mcp_server(row)
+
+    async def delete(self, server_id: UUID) -> bool:
+        """Delete a server by id (tenant-scoped); ``True`` if one was removed.
+
+        Idempotent — ``False`` if no such server exists in this tenant. Ownership
+        is enforced one layer up; a foreign-tenant id matches nothing (INV-1).
+        """
+        row = await self._get_row(server_id)
         if row is None:
             return False
         await self._session.delete(row)

@@ -131,6 +131,17 @@ class AuditAction(str, enum.Enum):
     CODE_RUN_STARTED = "code_run.started"
     CODE_RUN_FINISHED = "code_run.finished"
     CODE_RUN_DENIED = "code_run.denied"
+    # Per-tenant MCP server registration (ADR-0012 §5, issue #226). Additive to the
+    # §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Registering a remote MCP server is an owner-gated T1 config write
+    # (spec 0004 §2.5 — reversible internal write, audited); every lifecycle mutation
+    # (register/update/delete) and the on-demand health/discovery probe (tested) is
+    # audited (INV-6). The stored credential (CC-C #209) is never in the metadata —
+    # only its masked hint, mirroring the secrets vault's own events.
+    MCP_SERVER_REGISTERED = "mcp_server.registered"
+    MCP_SERVER_UPDATED = "mcp_server.updated"
+    MCP_SERVER_DELETED = "mcp_server.deleted"
+    MCP_SERVER_TESTED = "mcp_server.tested"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"
