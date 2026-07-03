@@ -61,7 +61,7 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     expect(screen.getByText(/loading document/i)).toBeInTheDocument();
 
     await waitFor(() => {
-      const iframe = screen.getByTitle('Document: Q4 strategy.pdf');
+      const iframe = screen.getByTitle('Preview of Q4 strategy.pdf');
       expect(iframe).toBeInTheDocument();
     });
 
@@ -74,16 +74,15 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     const headers = new Headers(init?.headers);
     expect(headers.get('Authorization')).toBe('Bearer jwt-abc');
 
-    // The iframe/anchor render the blob: URL, never the bearer-authed endpoint.
-    const iframe = screen.getByTitle('Document: Q4 strategy.pdf') as HTMLIFrameElement;
+    // The iframe renders the blob: URL, never the bearer-authed endpoint, and a
+    // download affordance is offered (bytes are always reachable).
+    const iframe = screen.getByTitle('Preview of Q4 strategy.pdf') as HTMLIFrameElement;
     expect(iframe.getAttribute('src')).toMatch(/^blob:/);
     expect(iframe.getAttribute('src')).not.toContain(CONTENT_PATH);
-    const anchor = screen.getByRole('link', { name: /open original/i });
-    expect(anchor.getAttribute('href')).toMatch(/^blob:/);
-    expect(anchor.getAttribute('href')).not.toContain(CONTENT_PATH);
+    expect(screen.getByRole('button', { name: /download original/i })).toBeInTheDocument();
   });
 
-  it('surfaces a 404 (not-permitted / cross-tenant, INV-2) as an actionable error', async () => {
+  it('renders "no longer available" with no retry on 404 (not-permitted / cross-tenant, INV-2)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       problemResponse(404, 'Not Found'),
     );
@@ -91,11 +90,11 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(/could not open this document/i);
+    expect(alert).toHaveTextContent(/no longer available/i);
     // No iframe pointed at anything when the load fails.
-    expect(screen.queryByTitle('Document: Q4 strategy.pdf')).not.toBeInTheDocument();
-    // The error is recoverable, not a dead end.
-    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByTitle('Preview of Q4 strategy.pdf')).not.toBeInTheDocument();
+    // INV-2: the UI never suggests access might appear — no retry on a 404.
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
   });
 
   it('revokes the blob: object URL on unmount (no leak)', async () => {
@@ -103,7 +102,7 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
 
     const { unmount } = render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
-    await screen.findByTitle('Document: Q4 strategy.pdf');
+    await screen.findByTitle('Preview of Q4 strategy.pdf');
 
     unmount();
     expect(revokeSpy).toHaveBeenCalled();

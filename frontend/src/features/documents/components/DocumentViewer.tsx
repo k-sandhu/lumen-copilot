@@ -3,9 +3,10 @@
  * surfaces the document's trust signals before its bytes: a metadata grid, the
  * parse → chunk → embed → ready INGESTION TRACE (so a user can see exactly how a
  * file became answerable), and — when opened on a cited passage — the cited
- * SourceInspector passage. It then resolves the original file via
- * `GET /documents/{id}/content` (following a 302 to a short-TTL presigned URL)
- * and renders it in an isolated sandboxed iframe.
+ * SourceInspector passage. The preview itself is the shared
+ * `DocumentPreviewBody` (#242/#245): authenticated blob fetch for
+ * browser-renderable types, server-extracted text for office types, and a
+ * download-original affordance everywhere.
  *
  * A11y: role="dialog" aria-modal, focus moves into the drawer on open and is
  * restored on close, Escape and a backdrop click dismiss. Loading / error /
@@ -13,9 +14,8 @@
  * clear message.
  */
 import { useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { ApiError, resolveDocumentContentUrl } from '@/api';
 import type { Document } from '@/api';
+import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 import { SourceInspector, StatusDot, type SourcePassage } from '@/ui';
 import { useFocusTrap } from '@/lib/useFocusTrap';
 import { formatBytes, fileKind, ingestSteps, type IngestStep } from '../model/presentation';
@@ -37,17 +37,6 @@ const INGEST_TONE: Record<IngestStep['state'], 'ok' | 'sync' | 'muted' | 'danger
 export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-
-  const query = useQuery<string>({
-    queryKey: ['document-content', doc.id],
-    queryFn: ({ signal }) => resolveDocumentContentUrl(doc.id, signal),
-    // Presigned URLs are short-TTL; never cache the resolved URL.
-    staleTime: 0,
-    gcTime: 0,
-    retry: false,
-    // Only the iframe preview needs the bytes; a failed-ingest doc has none.
-    enabled: doc.status === 'ready',
-  });
 
   // Move focus to the Close button on open, trap Tab inside the drawer, restore
   // focus on close; Escape dismisses. The component is mounted only while open,
@@ -141,13 +130,25 @@ export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerPro
             </section>
           )}
 
-          {/* Preview (bytes in a sandboxed iframe) */}
+          {/* Preview (shared body: blob iframe / extracted text / download) */}
           <section aria-label="Preview" className="p-4">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
               Preview
             </p>
             <div className="h-[28rem] overflow-hidden rounded-md border border-border bg-surface-muted/40">
-              <ViewerBody doc={doc} query={query} />
+              {doc.status === 'ready' ? (
+                <DocumentPreviewBody
+                  documentId={doc.id}
+                  filename={doc.filename}
+                  mimeType={doc.mime_type}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center p-6 text-center">
+                  <span className="text-sm text-foreground-muted">
+                    Preview is available once ingestion completes.
+                  </span>
+                </div>
+              )}
             </div>
           </section>
         </div>
@@ -185,60 +186,3 @@ function StatusLine({ doc }: { doc: Document }) {
   return <StatusDot tone={tone} label={label} />;
 }
 
-type ContentQuery = ReturnType<typeof useQuery<string>>;
-
-function ViewerBody({ doc, query }: { doc: Document; query: ContentQuery }) {
-  if (doc.status !== 'ready') {
-    return (
-      <div className="flex h-full items-center justify-center p-6 text-center">
-        <span className="text-sm text-foreground-muted">
-          Preview is available once ingestion completes.
-        </span>
-      </div>
-    );
-  }
-
-  if (query.isPending) {
-    return (
-      <div role="status" aria-live="polite" className="flex h-full items-center justify-center">
-        <span className="text-sm text-foreground-muted">Loading document…</span>
-      </div>
-    );
-  }
-
-  if (query.isError) {
-    const notFound = query.error instanceof ApiError && query.error.status === 404;
-    const message = notFound
-      ? 'This document is no longer available.'
-      : query.error instanceof ApiError
-        ? query.error.displayMessage
-        : 'Could not load the document.';
-    return (
-      <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-sm font-medium text-danger">Couldn’t open “{doc.filename}”</p>
-        <p className="text-sm text-foreground-muted">{message}</p>
-        {!notFound && (
-          <button
-            type="button"
-            onClick={() => void query.refetch()}
-            className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-muted"
-          >
-            Retry
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  // Success — render the bytes in a sandboxed iframe (browser picks the right
-  // viewer for PDFs / images / text). `sandbox` (no allow-scripts) isolates
-  // untrusted document content from the app.
-  return (
-    <iframe
-      title={`Preview of ${doc.filename}`}
-      src={query.data}
-      className="h-full w-full border-0 bg-white"
-      sandbox=""
-    />
-  );
-}

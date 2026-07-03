@@ -16,10 +16,13 @@ Transport (the `api/` boundary — the only backend caller):
 - [`api/documents.ts`](../../api/documents.ts) — typed `listCollections` /
   `createCollection` / `updateCollection` / `deleteCollection`, `listDocuments` /
   `getDocument` / `deleteDocument`, `uploadDocument` (multipart, **XHR**-based so it
-  can report upload progress — `fetch` exposes none), and `resolveDocumentContentUrl`
-  (issues a `redirect: 'manual'` GET so it can READ a 302 `Location` presigned URL
-  instead of letting the browser opaquely follow it). Types added to
-  [`api/types.ts`](../../api/types.ts).
+  can report upload progress — `fetch` exposes none), `fetchDocumentContent` (the
+  single content loader: an authenticated fetch that follows the contract's optional
+  302→presigned redirect and returns a `blob:` object URL + its content-type), and
+  `fetchDocumentText` (`GET /documents/{id}/text` — extracted text for formats a
+  browser can't render). Types added to [`api/types.ts`](../../api/types.ts).
+  (The old `resolveDocumentContentUrl` was removed in #242: its `redirect:'manual'`
+  read failed on the browser's opaqueredirect — status 0 — for every document.)
 
 Feature (`features/documents`):
 

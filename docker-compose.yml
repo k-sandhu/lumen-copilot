@@ -132,6 +132,14 @@ services:
       # network (#241): sign them against MinIO's published host port. Deployments
       # with a real public object-store URL override this via .env / host env.
       S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:47184}
+      # Serve document /content by STREAMING it inline through the API (same
+      # origin) rather than 302-ing to a presigned MinIO URL (#242). The viewer
+      # fetches the bytes and renders them; an inline same-origin response needs
+      # no CORS, whereas a browser fetch that follows the 302 to MinIO would be a
+      # cross-origin read MinIO does not expose by default → the preview fails.
+      # Deployments that put object storage behind a CORS-enabled endpoint or a
+      # CDN can flip this to "true" to serve bytes straight from storage.
+      DOCUMENT_CONTENT_REDIRECT: ${DOCUMENT_CONTENT_REDIRECT:-false}
     env_file:
       - .env
     ports:
