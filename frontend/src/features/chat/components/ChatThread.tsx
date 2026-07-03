@@ -26,7 +26,7 @@ import {
   relativeTime,
   usedWebSearch,
 } from '../model/presentation';
-import type { StreamPhase, ToolActivity } from '../model/streamReducer';
+import type { StreamPhase, ToolActivity, CodeRunActivity } from '../model/streamReducer';
 import type { ChatCitation } from '@/api';
 
 export interface LiveAnswer {
@@ -34,6 +34,8 @@ export interface LiveAnswer {
   text: string;
   citations: ChatCitation[];
   tools: ToolActivity[];
+  /** Sandbox code runs on the in-flight turn (#232), with live stdout/stderr. */
+  codeRuns: CodeRunActivity[];
   problem: WsProblem | null;
   model?: string | undefined;
 }
@@ -109,13 +111,27 @@ export function ChatThread({
     return () => viewport.removeEventListener('scroll', onScroll);
   }, []);
 
+  // Total streamed code-run output length — a scalar that grows as stdout/stderr
+  // chunks arrive, so autoscroll follows live code output too (#232 AC-3), not
+  // just answer tokens.
+  const codeOutputLen =
+    live?.codeRuns.reduce((sum, r) => sum + r.stdout.length + r.stderr.length, 0) ?? 0;
+
   // Follow new content only while stuck to the bottom. Guard scrollIntoView —
   // it is not implemented in jsdom (tests) and may be absent in older runtimes.
   useLayoutEffect(() => {
     if (stickRef.current && typeof endRef.current?.scrollIntoView === 'function') {
       endRef.current.scrollIntoView({ block: 'end' });
     }
-  }, [messages.length, live?.text, live?.tools.length, live?.citations.length, live?.phase]);
+  }, [
+    messages.length,
+    live?.text,
+    live?.tools.length,
+    live?.citations.length,
+    live?.codeRuns.length,
+    codeOutputLen,
+    live?.phase,
+  ]);
 
   // Reset stickiness whenever a fresh stream starts.
   useEffect(() => {
@@ -198,6 +214,7 @@ export function ChatThread({
                   traceSummary={trace.hasContent ? trace.summary : undefined}
                   traceSteps={trace.steps}
                   tools={live.tools}
+                  codeRuns={live.codeRuns}
                   streaming={live.phase === 'streaming'}
                   // A just-settled live answer was produced now → "answered Just now".
                   answeredAt={live.phase === 'done' ? 'Just now' : undefined}
