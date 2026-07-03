@@ -53,6 +53,7 @@ from app.services.admin_service import (
     RiskTierView,
     TenantSettingsView,
 )
+from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
 from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
 
 # The admin-only gate runs for every route on this router (INV-5). It depends on
@@ -190,6 +191,49 @@ class ToolPolicyUpdateRequest(BaseModel):
     requires_approval: bool
 
 
+class SandboxPolicyResponse(BaseModel):
+    """``#/components/schemas/SandboxPolicy`` — the effective per-tenant sandbox policy."""
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool
+    allowed_packages: list[str]
+    denied_packages: list[str]
+    egress_allowed: bool
+    egress_allowlist: list[str]
+    max_runtime_s: int
+    max_memory_mb: int
+    daily_runtime_cap_s: int
+    max_concurrency: int
+    is_default: bool
+    max_runtime_s_ceiling: int
+    max_memory_mb_ceiling: int
+    daily_runtime_cap_s_ceiling: int
+    max_concurrency_ceiling: int
+
+
+class SandboxPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/SandboxPolicyUpdate`` — set the per-tenant sandbox policy.
+
+    All fields required so the stored policy is explicit; the caps are positive at the
+    wire (a non-positive value → 422, INV-8). The service clamps each cap DOWN to the
+    deploy-wide config ceiling and strips the metadata IP from the egress allowlist (a
+    per-tenant value can only narrow, never widen).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool
+    allowed_packages: list[str]
+    denied_packages: list[str]
+    egress_allowed: bool
+    egress_allowlist: list[str]
+    max_runtime_s: int = Field(ge=1)
+    max_memory_mb: int = Field(ge=1)
+    daily_runtime_cap_s: int = Field(ge=1)
+    max_concurrency: int = Field(ge=1)
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -242,6 +286,25 @@ def _to_tool_policy(entries: list[ToolPolicyEntryView]) -> ToolPolicyResponse:
             )
             for e in entries
         ]
+    )
+
+
+def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
+    return SandboxPolicyResponse(
+        enabled=view.enabled,
+        allowed_packages=list(view.allowed_packages),
+        denied_packages=list(view.denied_packages),
+        egress_allowed=view.egress_allowed,
+        egress_allowlist=list(view.egress_allowlist),
+        max_runtime_s=view.max_runtime_s,
+        max_memory_mb=view.max_memory_mb,
+        daily_runtime_cap_s=view.daily_runtime_cap_s,
+        max_concurrency=view.max_concurrency,
+        is_default=view.is_default,
+        max_runtime_s_ceiling=view.max_runtime_s_ceiling,
+        max_memory_mb_ceiling=view.max_memory_mb_ceiling,
+        daily_runtime_cap_s_ceiling=view.daily_runtime_cap_s_ceiling,
+        max_concurrency_ceiling=view.max_concurrency_ceiling,
     )
 
 
@@ -384,3 +447,60 @@ async def update_tool_policy(
     )
     await session.commit()
     return _to_tool_policy(entries)
+
+
+@router.get("/sandbox-policy", response_model=SandboxPolicyResponse)
+async def get_sandbox_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxPolicyResponse:
+    """The caller's tenant's effective code-execution sandbox policy (admin only; #233).
+
+    Whether code execution is enabled for the tenant, the package allow/deny lists, the
+    egress posture, and the runtime / memory / quota caps — every value already clamped
+    to the deploy-wide ``SANDBOX_*`` ceiling (a per-tenant policy can only narrow). No
+    stored policy ⇒ deny-by-default (code exec off, caps = config ceiling,
+    ``is_default=true``). Admin-only via the router gate (INV-5); tenant-scoped via
+    ``current_tenant`` (INV-1).
+    """
+    service = SandboxPolicyService(session, tenant_id=tenant_id, settings=settings)
+    return _to_sandbox_policy(await service.get_policy())
+
+
+@router.patch("/sandbox-policy", response_model=SandboxPolicyResponse)
+async def update_sandbox_policy(
+    body: SandboxPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxPolicyResponse:
+    """Set the per-tenant code-execution sandbox policy (admin only; T1, audited; #233).
+
+    Enable/disable code execution, the package allow/deny lists, the egress posture, and
+    the runtime / memory / quota caps. A reversible, tenant-scoped **T1** governance
+    write: admin-only via the router gate (INV-5); tenant-scoped via ``current_tenant``
+    (INV-1); the service audits ``sandbox_policy.updated`` (INV-6). The write can only
+    NARROW the config ceiling — a cap above the ceiling is clamped down, and the
+    metadata IP is stripped from the egress allowlist (never reachable, G4). A
+    non-positive cap is **422** at the wire model (INV-8). Returns the effective policy.
+    """
+    service = SandboxPolicyService(session, tenant_id=tenant_id, settings=settings)
+    view = await service.set_policy(
+        enabled=body.enabled,
+        allowed_packages=tuple(body.allowed_packages),
+        denied_packages=tuple(body.denied_packages),
+        egress_allowed=body.egress_allowed,
+        egress_allowlist=tuple(body.egress_allowlist),
+        max_runtime_s=body.max_runtime_s,
+        max_memory_mb=body.max_memory_mb,
+        daily_runtime_cap_s=body.daily_runtime_cap_s,
+        max_concurrency=body.max_concurrency,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_sandbox_policy(view)

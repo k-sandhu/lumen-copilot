@@ -47,6 +47,8 @@ export {
   getRiskTiers,
   getToolPolicy,
   updateToolPolicy,
+  getSandboxPolicy,
+  updateSandboxPolicy,
 } from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
 // public one is already re-exported above, so we expose only the functions here.

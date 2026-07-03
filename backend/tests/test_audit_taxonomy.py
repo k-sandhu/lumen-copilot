@@ -104,6 +104,11 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "code_run.started",
         "code_run.finished",
         "code_run.denied",
+        # Admin per-tenant sandbox governance (issue #233) — additive; setting a
+        # tenant's sandbox policy (enable code exec + package/egress/runtime/quota caps)
+        # is a T1 governance write audited (INV-6). This is the policy the sandbox
+        # admission path consults per run.
+        "sandbox_policy.updated",
         # Per-tenant MCP server registration (ADR-0012 §5 / issue #226) — additive;
         # register/update/delete of a remote MCP server (a T1 config write) and the
         # on-demand health/discovery probe are each audited (INV-6). The stored

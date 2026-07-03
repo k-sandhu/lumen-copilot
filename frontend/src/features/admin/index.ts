@@ -14,6 +14,7 @@ export { MembersPanel } from './components/MembersPanel';
 export { ModelGovernancePanel } from './components/ModelGovernancePanel';
 export { RiskTierPanel } from './components/RiskTierPanel';
 export { ToolGovernancePanel } from './components/ToolGovernancePanel';
+export { SandboxGovernancePanel } from './components/SandboxGovernancePanel';
 export { DataMinimizationPanel } from './components/DataMinimizationPanel';
 export {
   useMembers,
@@ -21,8 +22,11 @@ export {
   useRiskTiers,
   useToolPolicy,
   useUpdateToolPolicy,
+  useSandboxPolicy,
+  useUpdateSandboxPolicy,
   membersQueryKey,
   modelGovernanceQueryKey,
   riskTiersQueryKey,
   toolPolicyQueryKey,
+  sandboxPolicyQueryKey,
 } from './model/queries';

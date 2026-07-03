@@ -139,6 +139,14 @@ class AuditAction(str, enum.Enum):
     CODE_RUN_STARTED = "code_run.started"
     CODE_RUN_FINISHED = "code_run.finished"
     CODE_RUN_DENIED = "code_run.denied"
+    # Admin per-tenant sandbox governance (issue #233). Additive to the §2.4 taxonomy
+    # — deny-by-default is preserved (the set only grows; no action is relaxed).
+    # Setting a tenant's sandbox policy (enable code exec + package/egress/runtime/quota
+    # caps) is a reversible, tenant-scoped **T1** governance write (spec 0004 §2.5 —
+    # "authorized owner; audited; no extra approval"): admin-gated (INV-5) and audited
+    # here (INV-6). This is the policy the sandbox admission path consults per run, so
+    # its provenance (who enabled/narrowed what) is provable after the fact.
+    SANDBOX_POLICY_UPDATED = "sandbox_policy.updated"
     # Per-tenant MCP server registration (ADR-0012 §5, issue #226). Additive to the
     # §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Registering a remote MCP server is an owner-gated T1 config write

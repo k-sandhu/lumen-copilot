@@ -24,14 +24,18 @@ import {
 import {
   getModelGovernance,
   getRiskTiers,
+  getSandboxPolicy,
   getToolPolicy,
   listMembers,
+  updateSandboxPolicy,
   updateToolPolicy,
 } from '@/api';
 import type {
   MemberList,
   ModelGovernance,
   RiskTierList,
+  SandboxPolicy,
+  SandboxPolicyUpdate,
   ToolPolicy,
   ToolPolicyUpdate,
 } from '@/api';
@@ -40,6 +44,7 @@ export const membersQueryKey = ['admin', 'members'] as const;
 export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
+export const sandboxPolicyQueryKey = ['admin', 'sandbox-policy'] as const;
 
 /** The tenant's members and their roles (admin only). */
 export function useMembers(): UseQueryResult<MemberList> {
@@ -91,6 +96,36 @@ export function useUpdateToolPolicy(): UseMutationResult<ToolPolicy, unknown, To
     onSuccess: (policy) => {
       qc.setQueryData(toolPolicyQueryKey, policy);
       void qc.invalidateQueries({ queryKey: toolPolicyQueryKey });
+    },
+  });
+}
+
+/** The per-tenant code-execution sandbox policy — effective/clamped (admin only, #233). */
+export function useSandboxPolicy(): UseQueryResult<SandboxPolicy> {
+  return useQuery<SandboxPolicy>({
+    queryKey: sandboxPolicyQueryKey,
+    queryFn: ({ signal }) => getSandboxPolicy(signal),
+    staleTime: 15_000,
+  });
+}
+
+/**
+ * Set the per-tenant sandbox policy (issue #233). On success we seed the cache with the
+ * returned effective (clamped) policy and invalidate so the panel re-reads. A 422
+ * (non-positive cap) / 403 propagates as an `ApiError` the panel surfaces — it is NOT
+ * swallowed here.
+ */
+export function useUpdateSandboxPolicy(): UseMutationResult<
+  SandboxPolicy,
+  unknown,
+  SandboxPolicyUpdate
+> {
+  const qc = useQueryClient();
+  return useMutation<SandboxPolicy, unknown, SandboxPolicyUpdate>({
+    mutationFn: (body) => updateSandboxPolicy(body),
+    onSuccess: (policy) => {
+      qc.setQueryData(sandboxPolicyQueryKey, policy);
+      void qc.invalidateQueries({ queryKey: sandboxPolicyQueryKey });
     },
   });
 }

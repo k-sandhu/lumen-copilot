@@ -73,6 +73,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "code_runs",
     "mcp_servers",
     "tenant_tool_policy",
+    "tenant_sandbox_policy",
 }
 
 
@@ -97,7 +98,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0021_tenant_tool_policy"]
+    assert list(script.get_heads()) == ["0022_sandbox_policy"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -158,6 +159,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     tool_policy = script.get_revision("0021_tenant_tool_policy")
     assert tool_policy is not None
     assert tool_policy.down_revision == "0020_mcp_servers"
+    sandbox_policy = script.get_revision("0022_sandbox_policy")
+    assert sandbox_policy is not None
+    assert sandbox_policy.down_revision == "0021_tenant_tool_policy"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -912,6 +916,56 @@ def test_offline_tenant_tool_policy_migration_round_trips(
     assert "alter table tenant_tool_policy disable row level security" in down
     assert "drop index ix_tenant_tool_policy_tenant_id" in down
     assert "drop table tenant_tool_policy" in down
+
+
+def test_offline_tenant_sandbox_policy_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0022 creates the tenant-scoped ``tenant_sandbox_policy`` table + RLS; down() reverses (#233).
+
+    AC (issue #233, spec 0004 §2.1/§2.5): the upgrade renders the ``tenant_sandbox_policy``
+    table with its ``enabled`` + package/egress + runtime/memory/quota columns, the
+    ``updated_by`` FK → ``users`` (SET NULL — a deprovisioned admin does not
+    cascade-delete the tenant's live policy), the per-tenant UNIQUE (a per-tenant
+    singleton), the positive-cap CHECKs, the tenant-leading index, and the same
+    fail-closed RLS policy the 0007 backstop uses (``tenant_sandbox_policy`` is
+    tenant-scoped, INV-1). The downgrade drops the policy, disables RLS, drops the index,
+    and drops the table. Offline DDL render (Postgres dialect) — structural reversibility
+    without a DB (#70 lesson); the behavioural proof is the sandbox policy service +
+    admission tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0021_tenant_tool_policy:0022_sandbox_policy", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant-scoped policy table + its FKs.
+    assert "create table tenant_sandbox_policy" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # updated_by FK (the admin, SET NULL)
+    assert "enabled" in up
+    assert "egress_allowed" in up
+    assert "max_runtime_s" in up
+    # The per-tenant singleton UNIQUE + the positive-cap CHECKs.
+    assert "uq_tenant_sandbox_policy_tenant" in up
+    assert "ck_tenant_sandbox_policy_runtime_pos" in up
+    # Tenant-leading index (the INV-1 predicate column).
+    assert (
+        "create index ix_tenant_sandbox_policy_tenant_id on tenant_sandbox_policy (tenant_id)"
+        in up
+    )
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table tenant_sandbox_policy enable row level security" in up
+    assert "alter table tenant_sandbox_policy force row level security" in up
+    assert "create policy rls_tenant_sandbox_policy on tenant_sandbox_policy" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0022_sandbox_policy:0021_tenant_tool_policy", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_tenant_sandbox_policy on tenant_sandbox_policy" in down
+    assert "alter table tenant_sandbox_policy disable row level security" in down
+    assert "drop index ix_tenant_sandbox_policy_tenant_id" in down
+    assert "drop table tenant_sandbox_policy" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

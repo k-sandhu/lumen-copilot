@@ -873,6 +873,60 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/sandbox-policy:
+    get:
+      operationId: getSandboxPolicy
+      summary: The per-tenant code-execution sandbox policy (admin only).
+      description: >
+        The caller's tenant's sandbox policy (issue #233): whether code execution is
+        `enabled` for the tenant, the package allow/deny lists, the outbound egress
+        posture (`egress_allowed` + `egress_allowlist`), and the runtime / memory /
+        quota caps. Every value is the EFFECTIVE policy — the per-tenant setting
+        already clamped to the deploy-wide `SANDBOX_*` ceiling (a per-tenant policy can
+        only NARROW, never widen: the cloud-metadata IP is never egress-allowlistable,
+        and a runtime/memory/quota above the config cap is clamped down). Absence of a
+        stored policy is deny-by-default — code execution stays DISABLED for the tenant
+        (matching the deploy-wide kill-switch). Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1).
+      tags: [admin]
+      responses:
+        "200":
+          description: The per-tenant sandbox policy (effective, clamped to the config ceiling).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateSandboxPolicy
+      summary: Set the per-tenant sandbox policy (admin only).
+      description: >
+        Set the caller's tenant's sandbox policy (issue #233): enable/disable code
+        execution, the package allow/deny lists, the egress posture, and the runtime /
+        memory / quota caps. A tenant-scoped **T1** governance write (spec 0004 §2.5 —
+        "authorized owner; audited; no extra approval"): `admin`-only (**403**
+        otherwise, INV-5), audited as `sandbox_policy.updated` (INV-6). The write can
+        only NARROW the deploy-wide `SANDBOX_*` ceiling — a per-tenant runtime / memory
+        / quota above the config cap is clamped down, and the cloud-metadata IP is
+        stripped from any egress allowlist (never reachable). Changes take effect on
+        subsequent runs. An out-of-range value or unknown field is **422** (INV-8).
+        Returns the resulting effective policy (clamped).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SandboxPolicyUpdate" }
+      responses:
+        "200":
+          description: The updated effective sandbox policy (clamped to the config ceiling).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
     get:
@@ -2701,6 +2755,158 @@ components:
           description: >
             Whether an invocation still needs approval. Set `false` (with `enabled`
             true) to pre-approve a write-tier tool so the approval gate executes it.
+
+    # --- Sandbox governance policy (per-tenant packages/egress/quotas, #233) --
+    SandboxPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The EFFECTIVE per-tenant code-execution sandbox policy (issue #233): the
+        tenant's stored settings already clamped to the deploy-wide `SANDBOX_*` ceiling
+        (a per-tenant policy can only NARROW, never widen). `enabled` is deny-by-default
+        — a tenant with no stored policy has code execution DISABLED (and every value
+        is the config ceiling). The `*_ceiling` fields report the deploy-wide caps so
+        the admin console can show how far a setting may go.
+      required:
+        [
+          enabled,
+          allowed_packages,
+          denied_packages,
+          egress_allowed,
+          egress_allowlist,
+          max_runtime_s,
+          max_memory_mb,
+          daily_runtime_cap_s,
+          max_concurrency,
+          is_default,
+          max_runtime_s_ceiling,
+          max_memory_mb_ceiling,
+          daily_runtime_cap_s_ceiling,
+          max_concurrency_ceiling,
+        ]
+      properties:
+        enabled:
+          type: boolean
+          description: >
+            Whether code execution is enabled for this tenant. Deny-by-default: false
+            until an admin enables it AND the deploy-wide kill-switch is on.
+        allowed_packages:
+          type: array
+          items: { type: string }
+          description: >
+            Packages the sandbox may import/install for this tenant (an allowlist). An
+            empty list means the curated base image only (no extra packages).
+        denied_packages:
+          type: array
+          items: { type: string }
+          description: Packages explicitly denied for this tenant (takes precedence over the allowlist).
+        egress_allowed:
+          type: boolean
+          description: >
+            Whether outbound network egress is permitted at all. Deny-by-default:
+            false ⇒ the run gets no network (fully isolated).
+        egress_allowlist:
+          type: array
+          items: { type: string }
+          description: >
+            The host:port egress targets a run may reach when `egress_allowed` is true.
+            The cloud-metadata IP is NEVER allowlistable (stripped server-side, G4).
+        max_runtime_s:
+          type: integer
+          minimum: 1
+          description: Per-run wall-clock cap (seconds), clamped to the config ceiling.
+        max_memory_mb:
+          type: integer
+          minimum: 1
+          description: Per-run memory cap (MiB), clamped to the config ceiling.
+        daily_runtime_cap_s:
+          type: integer
+          minimum: 1
+          description: Aggregate wall-clock the tenant's runs may consume per day (seconds), clamped.
+        max_concurrency:
+          type: integer
+          minimum: 1
+          description: Max simultaneous runs for the tenant, clamped to the config ceiling.
+        is_default:
+          type: boolean
+          description: >
+            True when no per-tenant policy is stored — code execution is off and every
+            cap is the deploy-wide config default (deny-by-default).
+        max_runtime_s_ceiling:
+          type: integer
+          minimum: 1
+          description: The deploy-wide per-run wall-clock cap a per-tenant value cannot exceed.
+        max_memory_mb_ceiling:
+          type: integer
+          minimum: 1
+          description: The deploy-wide per-run memory cap a per-tenant value cannot exceed.
+        daily_runtime_cap_s_ceiling:
+          type: integer
+          minimum: 1
+          description: The deploy-wide daily-runtime cap a per-tenant value cannot exceed.
+        max_concurrency_ceiling:
+          type: integer
+          minimum: 1
+          description: The deploy-wide concurrency cap a per-tenant value cannot exceed.
+
+    SandboxPolicyUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set the per-tenant sandbox policy (issue #233). All fields are required so the
+        stored policy is explicit. The write can only NARROW the deploy-wide `SANDBOX_*`
+        ceiling: a runtime / memory / quota above the config cap is clamped down, and
+        the cloud-metadata IP is stripped from `egress_allowlist` (never reachable). An
+        out-of-range value (a non-positive cap) is **422** (INV-8).
+      required:
+        [
+          enabled,
+          allowed_packages,
+          denied_packages,
+          egress_allowed,
+          egress_allowlist,
+          max_runtime_s,
+          max_memory_mb,
+          daily_runtime_cap_s,
+          max_concurrency,
+        ]
+      properties:
+        enabled:
+          type: boolean
+          description: Enable or disable code execution for this tenant.
+        allowed_packages:
+          type: array
+          items: { type: string, minLength: 1 }
+          description: Packages the sandbox may import/install (an allowlist; empty ⇒ base image only).
+        denied_packages:
+          type: array
+          items: { type: string, minLength: 1 }
+          description: Packages explicitly denied (takes precedence over the allowlist).
+        egress_allowed:
+          type: boolean
+          description: Whether outbound network egress is permitted at all.
+        egress_allowlist:
+          type: array
+          items: { type: string, minLength: 1 }
+          description: >
+            The host:port egress targets a run may reach when `egress_allowed` is true.
+            The cloud-metadata IP is stripped server-side (never reachable, G4).
+        max_runtime_s:
+          type: integer
+          minimum: 1
+          description: Per-run wall-clock cap (seconds). Clamped to the config ceiling.
+        max_memory_mb:
+          type: integer
+          minimum: 1
+          description: Per-run memory cap (MiB). Clamped to the config ceiling.
+        daily_runtime_cap_s:
+          type: integer
+          minimum: 1
+          description: Aggregate wall-clock per day (seconds). Clamped to the config ceiling.
+        max_concurrency:
+          type: integer
+          minimum: 1
+          description: Max simultaneous runs for the tenant. Clamped to the config ceiling.
 
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:

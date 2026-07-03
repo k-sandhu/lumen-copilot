@@ -619,6 +619,37 @@ class TenantToolPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class TenantSandboxPolicy:
+    """An admin's per-tenant policy for the code-execution sandbox (issue #233).
+
+    One row of the ``tenant_sandbox_policy`` table: is code execution ``enabled`` for
+    the tenant, the package allow/deny lists, the outbound egress posture
+    (``egress_allowed`` + ``egress_allowlist``), and the runtime / memory / quota caps.
+    Tenant-scoped (INV-1); ``updated_by`` is the admin who last set it (may be ``None``
+    if that user was later deprovisioned — the policy outlives them). Absence of a row
+    (not represented here) means code execution stays DISABLED for the tenant — the
+    deny-by-default rule the enforcement path enforces. The stored caps are CEILINGS
+    the enforcement path clamps to the deploy-wide ``SANDBOX_*`` config (a per-tenant
+    value only ever narrows, never widens).
+    """
+
+    id: UUID
+    tenant_id: UUID
+    enabled: bool
+    allowed_packages: tuple[str, ...]
+    denied_packages: tuple[str, ...]
+    egress_allowed: bool
+    egress_allowlist: tuple[str, ...]
+    max_runtime_s: int
+    max_memory_mb: int
+    daily_runtime_cap_s: int
+    max_concurrency: int
+    updated_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Chunk:
     """A retrievable passage of a document, with its embedding in-row.
 

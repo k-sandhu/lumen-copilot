@@ -15,7 +15,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import type { MemberList, ModelGovernance, RiskTierList, ToolPolicy } from '@/api';
+import type {
+  MemberList,
+  ModelGovernance,
+  RiskTierList,
+  SandboxPolicy,
+  ToolPolicy,
+} from '@/api';
 import { AdminPage } from './AdminPage';
 
 const listMembers = vi.hoisted(() => vi.fn());
@@ -23,9 +29,20 @@ const getModelGovernance = vi.hoisted(() => vi.fn());
 const getRiskTiers = vi.hoisted(() => vi.fn());
 const getToolPolicy = vi.hoisted(() => vi.fn());
 const updateToolPolicy = vi.hoisted(() => vi.fn());
+const getSandboxPolicy = vi.hoisted(() => vi.fn());
+const updateSandboxPolicy = vi.hoisted(() => vi.fn());
 vi.mock('@/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api')>();
-  return { ...actual, listMembers, getModelGovernance, getRiskTiers, getToolPolicy, updateToolPolicy };
+  return {
+    ...actual,
+    listMembers,
+    getModelGovernance,
+    getRiskTiers,
+    getToolPolicy,
+    updateToolPolicy,
+    getSandboxPolicy,
+    updateSandboxPolicy,
+  };
 });
 
 const MEMBERS: MemberList = {
@@ -51,6 +68,22 @@ const TOOL_POLICY: ToolPolicy = {
     },
   ],
 };
+const SANDBOX_POLICY: SandboxPolicy = {
+  enabled: false,
+  allowed_packages: [],
+  denied_packages: [],
+  egress_allowed: false,
+  egress_allowlist: [],
+  max_runtime_s: 30,
+  max_memory_mb: 512,
+  daily_runtime_cap_s: 3600,
+  max_concurrency: 2,
+  is_default: true,
+  max_runtime_s_ceiling: 30,
+  max_memory_mb_ceiling: 512,
+  daily_runtime_cap_s_ceiling: 3600,
+  max_concurrency_ceiling: 2,
+};
 
 function renderAdmin() {
   const queryClient = new QueryClient({
@@ -71,6 +104,8 @@ beforeEach(() => {
   getRiskTiers.mockResolvedValue(TIERS);
   getToolPolicy.mockResolvedValue(TOOL_POLICY);
   updateToolPolicy.mockResolvedValue(TOOL_POLICY);
+  getSandboxPolicy.mockResolvedValue(SANDBOX_POLICY);
+  updateSandboxPolicy.mockResolvedValue(SANDBOX_POLICY);
 });
 
 describe('AdminPage', () => {
@@ -92,6 +127,7 @@ describe('AdminPage', () => {
     expect(screen.getByRole('tab', { name: /model governance/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /approvals & risk/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /tool governance/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /sandbox governance/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /data minimization/i })).toBeInTheDocument();
   });
 
@@ -124,10 +160,10 @@ describe('AdminPage', () => {
     renderAdmin();
     await screen.findByText('admin@acme.test');
     expect(screen.getByText(/not available here/i)).toBeInTheDocument();
-    // The Members panel (the default) carries no mutation control — the ONE write
-    // surface is the Tool governance tab, which is not mounted here.
+    // The Members panel (the default) carries no mutation control — the write
+    // surfaces are the Tool governance + Sandbox governance tabs, not mounted here.
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(6);
     expect(screen.queryAllByRole('switch')).toHaveLength(0);
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
@@ -139,5 +175,16 @@ describe('AdminPage', () => {
     // The registered tool renders with an enable/approval switch (the write surface).
     expect(await screen.findByText('run_python')).toBeInTheDocument();
     expect(screen.getAllByRole('switch').length).toBeGreaterThan(0);
+  });
+
+  it('surfaces the Sandbox governance write controls when that tab is active (#233)', async () => {
+    renderAdmin();
+    await screen.findByText('admin@acme.test');
+    await userEvent.click(screen.getByRole('tab', { name: /sandbox governance/i }));
+    // The sandbox policy form renders with its enable toggle + Save control.
+    expect(
+      await screen.findByRole('switch', { name: /enable code execution/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /save policy/i })).toBeInTheDocument();
   });
 });

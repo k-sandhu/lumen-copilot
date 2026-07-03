@@ -20,6 +20,8 @@ import type {
   MemberList,
   ModelGovernance,
   RiskTierList,
+  SandboxPolicy,
+  SandboxPolicyUpdate,
   ToolPolicy,
   ToolPolicyUpdate,
 } from './types';
@@ -66,4 +68,19 @@ export function getToolPolicy(signal?: AbortSignal): Promise<ToolPolicy> {
  */
 export function updateToolPolicy(body: ToolPolicyUpdate): Promise<ToolPolicy> {
   return request<ToolPolicy>('/admin/tool-policy', { method: 'PATCH', json: body });
+}
+
+/** The per-tenant code-execution sandbox policy (admin only, effective/clamped, #233). */
+export function getSandboxPolicy(signal?: AbortSignal): Promise<SandboxPolicy> {
+  return request<SandboxPolicy>('/admin/sandbox-policy', { signal });
+}
+
+/**
+ * Set the per-tenant sandbox policy (admin only, audited, #233). The server clamps each
+ * cap DOWN to the deploy-wide config ceiling and strips the cloud-metadata IP from the
+ * egress allowlist (a per-tenant value can only narrow). A non-positive cap → 422
+ * (INV-8). Returns the resulting effective policy.
+ */
+export function updateSandboxPolicy(body: SandboxPolicyUpdate): Promise<SandboxPolicy> {
+  return request<SandboxPolicy>('/admin/sandbox-policy', { method: 'PATCH', json: body });
 }
