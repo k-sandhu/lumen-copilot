@@ -7,7 +7,7 @@
  * permitted document's bytes so it can open at the cited passage (spec 0004
  * INV-2/INV-3 — the backend returns 404 for a document the caller may not see).
  *
- * Conforms to the FROZEN contract (contracts/openapi.yaml 0.1.0):
+ * Conforms to the FROZEN contract (contracts/openapi.yaml 0.6.0):
  *   GET    /collections                 → CollectionList
  *   POST   /collections                 → Collection (201)
  *   PATCH  /collections/{id}            → Collection
@@ -17,6 +17,7 @@
  *   GET    /documents/{id}               → Document
  *   DELETE /documents/{id}               → 204
  *   GET    /documents/{id}/content       → 200 bytes | 302 presigned URL
+ *   GET    /documents/{id}/text          → DocumentText | 404 | 409
  *
  * Negative paths honored (spec 0004): cross-tenant / not-permitted reads return
  * 404 (INV-1/INV-2), never 403; the client surfaces the typed Problem body so
@@ -33,6 +34,7 @@ import type {
   Document,
   DocumentList,
   DocumentListQuery,
+  DocumentText,
   Problem,
 } from './types';
 
@@ -206,74 +208,26 @@ export function uploadDocument({
   });
 }
 
-// --- Document content (documents viewer): follow a 302 → presigned URL ------
+// --- Document content (both viewers, #242) ----------------------------------
+//
+// There is exactly ONE way to load a document's bytes: an authenticated fetch
+// that follows the contract's optional 302→presigned redirect and hands back a
+// `blob:` object URL. The older `resolveDocumentContentUrl` (read the Location
+// from a `redirect:'manual'` response) was removed (#242): in a real browser a
+// manual cross-origin redirect is an *opaqueredirect* — status 0, headers
+// unreadable — so it failed for every document while passing in test fetches.
 
-/**
- * Resolve a viewable URL for a document's original bytes (AC-3, #49 viewer).
- *
- * `GET /documents/{id}/content` may either stream the bytes (200) or 302 to a
- * short-TTL presigned URL (CC-12). We issue a `redirect: 'manual'` request so we
- * can READ the `Location` header rather than have the browser transparently
- * follow it (a cross-origin presigned URL would otherwise be opaque). On 200 we
- * use the endpoint URL itself as the viewer `src` (the bearer rides via the
- * normal client on a subsequent fetch by the <img>/<iframe> — same-origin proxy).
- *
- * A 404 (cross-tenant / not permitted, INV-2) surfaces as a typed ApiError.
- */
-export async function resolveDocumentContentUrl(id: string, signal?: AbortSignal): Promise<string> {
-  const url = joinApi(`/documents/${id}/content`);
-  return withRefreshRetry(async () => {
-    const token = getAccessToken();
-    const headers = new Headers({ Accept: 'application/octet-stream, application/problem+json' });
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'GET',
-        credentials: 'include',
-        redirect: 'manual',
-        headers,
-        signal,
-      });
-    } catch (cause) {
-      throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
-    }
-
-    // `redirect: 'manual'` surfaces a redirect as an opaqueredirect response
-    // (status 0, type 'opaqueredirect') OR, in non-browser/test fetches, as a real
-    // 3xx with a readable Location. Handle both.
-    if (response.status === 302 || response.status === 301 || response.status === 307) {
-      const location = response.headers.get('Location');
-      if (location) return location;
-    }
-
-    if (response.status >= 200 && response.status < 400) {
-      // Bytes are streamed same-origin; the endpoint URL is itself the viewer src.
-      return url;
-    }
-
-    let problem: Problem | undefined;
-    try {
-      problem = problemFrom(await response.json());
-    } catch {
-      /* non-JSON body */
-    }
-    throw new ApiError(
-      `Content request for ${id} failed with ${response.status}`,
-      response.status,
-      problem,
-    );
-  });
-}
-
-// --- Document content (chat citation viewer, #50) --------------------------
-
-/** A loadable document content source, plus a revoke for any object URL we minted. */
+/** A loadable document content source, plus a revoke for the object URL we minted. */
 export interface DocumentContent {
-  /** URL to point the viewer's <iframe>/<a> at. */
+  /** `blob:` URL to point the viewer's <iframe>/<a> at. */
   url: string;
-  /** Release the underlying object URL (no-op for a passthrough presigned URL). */
+  /**
+   * The blob's content type (the stored upload content-type, carried through
+   * the presigned response). Lets a viewer branch on type when the caller
+   * doesn't know it (chat citations carry no mime type on the wire).
+   */
+  type: string;
+  /** Release the underlying object URL. */
   revoke: () => void;
 }
 
@@ -337,6 +291,19 @@ export async function fetchDocumentContent(
 
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
-    return { url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+    return { url: objectUrl, type: blob.type, revoke: () => URL.revokeObjectURL(objectUrl) };
   });
+}
+
+// --- Extracted text (contract 0.6.0, #245) ----------------------------------
+
+/**
+ * Fetch the extracted plain text of a ready document (`GET /documents/{id}/text`).
+ *
+ * The viewer's text surface for formats a browser cannot render natively
+ * (DOCX/PPTX/XLSX). 404 = not visible (INV-2); 409 = not ready yet
+ * (`document_not_ready`); both surface as typed ApiErrors via the client.
+ */
+export function fetchDocumentText(id: string, signal?: AbortSignal): Promise<DocumentText> {
+  return request<DocumentText>(`/documents/${id}/text`, { signal });
 }

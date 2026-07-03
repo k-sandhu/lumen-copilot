@@ -621,7 +621,12 @@ async def test_content_streams_inline_when_redirect_disabled(
             token = await _login(ac, seeded.alice_email)
             resp = await ac.get(f"/api/v1/documents/{doc_id}/content", headers=_auth(token))
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "application/octet-stream"
+        # The inline stream carries the document's OWN (allowlisted) content-type
+        # so the browser can render it inline — not a generic octet-stream that
+        # would force a download and defeat the viewer preview (#242).
+        assert resp.headers["content-type"].startswith(_TXT)  # the seeded doc's mime
+        assert resp.headers["content-type"] != "application/octet-stream"
+        assert resp.headers["content-disposition"].startswith("inline")
         assert resp.content == b"inline bytes here"
     finally:
         monkeypatch.delenv("DOCUMENT_CONTENT_REDIRECT", raising=False)
