@@ -92,7 +92,15 @@ export function buildRetrievalSummary(
   const sourceCount = new Set(citations.map((c) => c.documentId)).size;
   const passageCount = tools.reduce((sum, t) => sum + (t.hitCount ?? 0), 0);
 
-  const parts: string[] = [`${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}`];
+  // Only lead with the source count when there ARE cited sources. During
+  // retrieval, passages arrive (hitCount > 0) BEFORE citation events populate,
+  // and an answer can search passages yet cite nothing — in both cases leading
+  // with "0 sources" reads as a contradiction next to "N passages" (#248). Omit
+  // it instead; the empty-turn fallback below still reads "Looked at 0 sources".
+  const parts: string[] = [];
+  if (sourceCount > 0) {
+    parts.push(`${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}`);
+  }
   if (passageCount > 0) {
     parts.push(`${groupThousands(passageCount)} ${passageCount === 1 ? 'passage' : 'passages'}`);
   }
@@ -118,10 +126,49 @@ export function buildRetrievalSummary(
   }
 
   return {
-    summary: `Looked at ${parts.join(' · ')}`,
+    // With no sources, passages, or exclusions the parts are empty — fall back
+    // to the honest empty-turn label rather than a bare "Looked at ".
+    summary: parts.length ? `Looked at ${parts.join(' · ')}` : 'Looked at 0 sources',
     steps,
     hasContent: sourceCount > 0 || passageCount > 0 || excludedCount > 0,
   };
+}
+
+/** One document's cited passages, grouped for the "Sources used" strip (#248). */
+export interface CitationGroup {
+  documentId: string;
+  documentName: string;
+  /** The passages cited from this document, each with its FLAT 1-based number. */
+  passages: { citation: UiCitation; number: number }[];
+}
+
+/**
+ * Group citations by document for the "Sources used" strip, preserving
+ * first-appearance order (#248). A grounded answer often cites several passages
+ * of the SAME document; rendering one card per passage repeats the document N
+ * times. Grouping shows one card per document with its passage numbers.
+ *
+ * The `number` is the citation's FLAT 1-based index across ALL citations (not a
+ * per-group index), so it still matches any inline `[n]` marker the model wrote
+ * in the answer — grouping is visual only; it never renumbers.
+ */
+export function groupCitationsByDocument(citations: UiCitation[]): CitationGroup[] {
+  const order: string[] = [];
+  const byDoc = new Map<string, CitationGroup>();
+  citations.forEach((citation, i) => {
+    let group = byDoc.get(citation.documentId);
+    if (!group) {
+      group = {
+        documentId: citation.documentId,
+        documentName: citation.documentName,
+        passages: [],
+      };
+      byDoc.set(citation.documentId, group);
+      order.push(citation.documentId);
+    }
+    group.passages.push({ citation, number: i + 1 });
+  });
+  return order.map((id) => byDoc.get(id) as CitationGroup);
 }
 
 /**
