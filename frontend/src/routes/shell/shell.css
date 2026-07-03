@@ -11,7 +11,13 @@
   --lc-rail-w-collapsed: 64px;
   --lc-topbar-h: 56px;
   display: grid;
-  grid-template-columns: var(--lc-rail-w) 1fr;
+  /* The content track is minmax(0, 1fr), NOT 1fr: a bare `1fr` track is
+     `minmax(auto, 1fr)`, whose `auto` minimum is the content's min-content
+     width — so a wide child (a data table, a nowrap pill) forces the track
+     past the viewport and, with overflow:hidden below, clips it unreachably
+     (#246). minmax(0, …) lets the track shrink so children with their own
+     min-width:0 + overflow scroll/ellipsis internally instead. */
+  grid-template-columns: var(--lc-rail-w) minmax(0, 1fr);
   grid-template-rows: var(--lc-topbar-h) 1fr;
   grid-template-areas:
     'brand topbar'
@@ -22,7 +28,7 @@
   color: var(--text);
 }
 .lc-shell[data-rail='collapsed'] {
-  grid-template-columns: var(--lc-rail-w-collapsed) 1fr;
+  grid-template-columns: var(--lc-rail-w-collapsed) minmax(0, 1fr);
 }
 
 /* ---- skip-to-content link --------------------------------------------- */
@@ -120,6 +126,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Let the actions cluster shrink so its pills can ellipsize rather than push
+     the topbar past the viewport (#246). */
+  min-width: 0;
 }
 
 /* generic icon button used across the chrome */
@@ -192,6 +201,9 @@
   font-weight: 550;
   cursor: pointer;
   white-space: nowrap;
+  /* Shrinkable so a long tenant label ellipsizes instead of widening the topbar
+     past the viewport (#246). The dot stays fixed; the name truncates. */
+  min-width: 0;
   transition:
     background var(--dur-1),
     border-color var(--dur-1);
@@ -208,6 +220,14 @@
   border-radius: 50%;
   background: var(--ok);
   flex: none;
+}
+/* Bound the label so a long tenant name (or, until #247, the raw id) truncates
+   with an ellipsis instead of pushing the topbar past the viewport (#246). */
+.lc-tenant__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 168px;
 }
 
 /* account avatar */
