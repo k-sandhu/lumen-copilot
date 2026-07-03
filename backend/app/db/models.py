@@ -932,11 +932,13 @@ class Run(TenantScopedMixin, Base):
         ForeignKey("assistant_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Null ⇒ a manual/run-now run. The FK lands with the scheduler (#236 owns the
-    # ``schedules`` table); until then it is a plain nullable uuid column so #235
-    # ships independently (ADR-0015 §4 — run-now takes the identical task path).
+    # Null ⇒ a manual/run-now run. The FK → ``schedules`` lands with the scheduler
+    # (#236, the ``0018`` migration): SET NULL so deleting a schedule leaves its
+    # already-recorded runs (a run's history outlives the schedule that fired it).
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
+        Uuid(as_uuid=True),
+        ForeignKey("schedules.id", ondelete="SET NULL"),
+        nullable=True,
     )
     # The internal chat session the headless runtime persists its message/citations
     # against (ADR-0015 §2 — "citations reuse the existing chain"). SET NULL so the
@@ -1010,3 +1012,71 @@ class RunStep(TenantScopedMixin, Base):
     )
 
     run: Mapped[Run] = relationship(back_populates="steps")
+
+
+class Schedule(TenantScopedMixin, TimestampMixin, Base):
+    """A user-defined recurring run of a saved assistant — a ``schedules`` row (ADR-0015 §2, #236).
+
+    The dynamic scheduler's source of truth (Postgres authoritative; the derived
+    RedBeat entry lives in Redis, ADR-0015 §1). Tenant- and owner-scoped
+    (INV-1/INV-2): ``owner_id`` is the run's **principal** — a fired run retrieves
+    only what the owner could retrieve interactively. ``assistant_id`` (CASCADE — a
+    schedule is meaningless without its assistant) is the saved assistant to run;
+    ``cadence`` is the normalized canonical 5-field cron string (a structured cadence
+    is normalized to cron + the original preserved in ``cadence_structured`` for the
+    UI); ``timezone`` (IANA) drives the DST-correct ``next_run_at``. ``enabled`` =
+    firing; pausing sets it false (the derived RedBeat entry is removed).
+    ``overlap_policy`` gates a fire while a prior run is still active (ADR-0015 §5).
+    ``input_params``/``delivery`` are jsonb. ``last_run_at``/``last_status`` summarize
+    the last fire for the list view. Tenant-scoped (INV-1); the ``0018`` migration
+    puts it under the RLS backstop and adds the ``runs.schedule_id`` FK.
+    """
+
+    __tablename__ = "schedules"
+    __table_args__ = (
+        Index("ix_schedules_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_schedules_tenant_assistant", "tenant_id", "assistant_id"),
+        # The Beat reconcile sweep reads enabled schedules across the fleet; a
+        # tenant-leading (enabled) index serves it and the owner list-view filter.
+        Index("ix_schedules_tenant_enabled", "tenant_id", "enabled"),
+        CheckConstraint(
+            "overlap_policy in ('skip', 'queue', 'allow')",
+            name="ck_schedules_overlap_policy",
+        ),
+        CheckConstraint(
+            "last_status is null or "
+            "last_status in ('queued', 'running', 'succeeded', 'failed', 'escalated')",
+            name="ck_schedules_last_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The run's principal — retrieval runs *as* this user (INV-2). SET NULL on user
+    # delete so a schedule survives deprovisioning for admin reassignment (like the
+    # assistant owner), never cascade-deleted.
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    assistant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("assistants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The normalized canonical 5-field cron string (the stored recurrence form). A
+    # structured cadence is normalized to this + preserved in ``cadence_structured``.
+    cadence_cron: Mapped[str] = mapped_column(String(100), nullable=False)
+    # The original structured cadence blob when the schedule was created that way
+    # (null for a raw-cron schedule) — lets the UI round-trip the human form.
+    cadence_structured: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_params: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    delivery: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    overlap_policy: Mapped[str] = mapped_column(String(20), nullable=False, default="skip")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Computed tz/DST-correct; null while paused (no upcoming fire).
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)

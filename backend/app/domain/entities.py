@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.scheduling import Cadence
+
 
 class Role(str, enum.Enum):
     """RBAC roles (spec 0004 §2.3). A user may hold several."""
@@ -218,6 +220,51 @@ class RunStatus(str, enum.Enum):
 _TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset(
     {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.ESCALATED}
 )
+
+
+class OverlapPolicy(str, enum.Enum):
+    """What happens when a schedule fires while its prior run is still active (ADR-0015 §5).
+
+    ``SKIP`` (the default) records a skipped fire and enqueues nothing — so a slow
+    daily run never stacks up; ``QUEUE`` enqueues behind the active run; ``ALLOW``
+    runs concurrently. The dispatcher checks the schedule's active-run count against
+    this before enqueuing (INV-8: the overlap gate is a policy, not an accident).
+    """
+
+    SKIP = "skip"
+    QUEUE = "queue"
+    ALLOW = "allow"
+
+
+class DigestCadence(str, enum.Enum):
+    """How often completed runs roll into an in-app digest (ADR-0015 §6, contract).
+
+    v1 delivery is in-app only (no external egress, INV-7): ``NONE`` = no digest,
+    ``DAILY``/``WEEKLY`` = periodic in-app roll-up. The delivery detail is #238; this
+    fixes only the shape the schedule stores.
+    """
+
+    NONE = "none"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleDelivery:
+    """Where a completed run's result lands (ADR-0015 §6, contract ``ScheduleDelivery``).
+
+    v1 in-app only: ``inbox`` lands the run in the owner's in-app run inbox;
+    ``digest`` optionally rolls recent runs into a periodic in-app notification.
+    External channels (email/Slack) are deferred (T2-ish egress, INV-7 — #238).
+    """
+
+    inbox: bool = True
+    digest: DigestCadence | None = None
+
+    @classmethod
+    def default(cls) -> ScheduleDelivery:
+        """The v1 default delivery: land in the inbox, no digest."""
+        return cls(inbox=True, digest=None)
 
 
 class RunStepKind(str, enum.Enum):
@@ -783,3 +830,37 @@ class RunStep:
     kind: RunStepKind
     payload: dict[str, object]
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """A user-defined recurring run of a saved assistant — the ``schedules`` row (ADR-0015 §2).
+
+    Tenant- and owner-scoped (INV-1/INV-2): a schedule in another tenant or owned by
+    another user is a 404 (existence non-disclosure). ``owner_id`` is the run's
+    **principal** — a fired run retrieves only what the owner could retrieve
+    interactively (INV-2), the load-bearing security property of the epic.
+    ``cadence`` (normalized to a canonical cron) + ``timezone`` (IANA) drive the
+    DST-correct ``next_run_at`` (null while paused). ``enabled`` = firing; pausing
+    sets it false and removes the derived RedBeat entry. ``last_run_at`` /
+    ``last_status`` summarize the last fire for the list view.
+
+    ``Cadence``/``ScheduleDelivery`` are imported from ``app.domain.scheduling`` /
+    this module; the repository maps the stored jsonb ⇄ these.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    assistant_id: UUID
+    cadence: Cadence
+    timezone: str
+    input_params: dict[str, object]
+    delivery: ScheduleDelivery
+    overlap_policy: OverlapPolicy
+    enabled: bool
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    last_status: RunStatus | None
+    created_at: datetime
+    updated_at: datetime

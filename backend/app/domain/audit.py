@@ -106,6 +106,20 @@ class AuditAction(str, enum.Enum):
     # events the shared runtime already emits still fire inside a run.
     RUN_STARTED = "run.started"
     RUN_FINISHED = "run.finished"
+    # Dynamic per-tenant scheduler (ADR-0015 §6, issue #236). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). A schedule is an owner-gated T1 config (spec 0004 §2.5 — reversible
+    # internal write, audited); every lifecycle mutation and control is audited
+    # (INV-6): create/update/delete the schedule, pause/resume (toggle firing), and
+    # run-now (enqueue an out-of-band manual run immediately). A *scheduled* fire's
+    # run is still bracketed by ``run.started``/``run.finished`` — the schedule
+    # actions record the owner's control over the schedule itself.
+    SCHEDULE_CREATED = "schedule.created"
+    SCHEDULE_UPDATED = "schedule.updated"
+    SCHEDULE_DELETED = "schedule.deleted"
+    SCHEDULE_PAUSED = "schedule.paused"
+    SCHEDULE_RESUMED = "schedule.resumed"
+    SCHEDULE_RUN_NOW = "schedule.run_now"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"

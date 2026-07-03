@@ -154,15 +154,20 @@ async def enqueue_manual_run(
     owner_id: UUID,
     assistant_id: UUID,
     inputs: dict[str, object] | None = None,
+    trigger: RunTrigger = RunTrigger.MANUAL,
+    schedule_id: UUID | None = None,
 ) -> Run:
-    """Create a ``queued`` manual run for an assistant, then enqueue its task (ADR-0015 §4).
+    """Create a ``queued`` run for an assistant, then enqueue its task (ADR-0015 §4).
 
-    The ``run-now`` entry point (reused by the scheduler #236 + the test harness
-    #215). Resolves the assistant owner-scoped (cross-tenant / non-owned → 404,
-    INV-1/INV-2); requires it **published** with a pinned head version (else 422,
-    INV-8 — a run must be reproducible against a frozen version). Snapshots the
-    ``inputs`` and pins ``assistant_version_id``. The Celery enqueue is
-    **after-commit** by the caller (the router commits, then enqueues) so the
+    The ``run-now`` entry point (reused by the scheduler #236 run-now + a fire, and
+    the test harness #215). Resolves the assistant owner-scoped (cross-tenant /
+    non-owned → 404, INV-1/INV-2); requires it **published** with a pinned head
+    version (else 422, INV-8 — a run must be reproducible against a frozen version;
+    a **disabled** assistant is not ``PUBLISHED`` so it is rejected here too — the
+    "a disabled/unauthorized assistant cannot be run" negative). Snapshots the
+    ``inputs`` and pins ``assistant_version_id``. ``trigger`` distinguishes a
+    ``manual`` run-now from a ``schedule`` fire; ``schedule_id`` links a fired run to
+    its schedule. The Celery enqueue is **after-commit** by the caller so the
     request returns immediately and a broker outage never rolls back the queued run.
 
     Returns the created run; the caller enqueues ``run_assistant(run.id)`` once the
@@ -185,8 +190,9 @@ async def enqueue_manual_run(
         owner_id=owner_id,
         assistant_id=assistant.id,
         assistant_version_id=head.id,
-        trigger=RunTrigger.MANUAL,
+        trigger=trigger,
         inputs=inputs,
+        schedule_id=schedule_id,
     )
 
 
