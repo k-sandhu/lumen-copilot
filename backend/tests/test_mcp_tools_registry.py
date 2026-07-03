@@ -58,8 +58,8 @@ from app.domain.tools import (
 )
 from app.mcp import MCP_ERROR_UNAVAILABLE, McpServerConfig, McpToolResult
 from app.services.audit import AuditSink
-from app.services.mcp_servers_service import build_mcp_servers_service
 from app.services.mcp_servers_service import (
+    build_mcp_servers_service,
     build_transport_client_factory,
 )
 from app.services.tools import mcp_bridge
