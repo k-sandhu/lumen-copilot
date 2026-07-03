@@ -31,6 +31,7 @@ out-of-range value is a **422** (INV-8). No T2+ governance mutation exists.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -45,13 +46,18 @@ from app.api.deps import (
     extract_request_id,
     require_roles,
 )
-from app.domain.entities import Role
+from app.domain.entities import Assistant, AssistantStatus, AutonomyLevel, CertificationState, Role
 from app.services.admin_service import (
     AdminService,
     MemberPage,
     ModelGovernanceView,
     RiskTierView,
     TenantSettingsView,
+)
+from app.services.assistant_governance_service import (
+    AssistantGovernanceService,
+    BulkOrphanResult,
+    GovernedAssistantPage,
 )
 from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
 from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
@@ -234,6 +240,96 @@ class SandboxPolicyUpdateRequest(BaseModel):
     max_concurrency: int = Field(ge=1)
 
 
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
+
+
+class GovernedAssistantResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistant`` — one library assistant + governance.
+
+    The admin library view of an assistant: identity + owner + lifecycle status plus
+    the governance axis (certification / featured / category / disabled) and the
+    ``owner_orphaned`` projection (owner no longer a tenant member — flag for
+    reassignment, E6-8).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    name: str
+    description: str | None = None
+    model: str | None = None
+    autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+    owner: UUID
+    backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
+    status: AssistantStatus
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+    featured: bool
+    category: str | None = None
+    disabledAt: datetime | None = None  # noqa: N815 — contract camelCase
+    ownerOrphaned: bool  # noqa: N815 — contract camelCase
+    version: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GovernedAssistantListResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistantList`` — a cursor page of library assistants."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[GovernedAssistantResponse]
+    next_cursor: str | None = None
+
+
+class AssistantCertifyRequest(BaseModel):
+    """``#/components/schemas/AssistantCertifyRequest`` — set the certification verdict."""
+
+    model_config = {"extra": "forbid"}
+
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+
+
+class AssistantFeatureRequest(BaseModel):
+    """``#/components/schemas/AssistantFeatureRequest`` — feature/unfeature in the library."""
+
+    model_config = {"extra": "forbid"}
+
+    featured: bool
+
+
+class AssistantDisableRequest(BaseModel):
+    """``#/components/schemas/AssistantDisableRequest`` — disable/re-enable the assistant.
+
+    Disabling blocks it from starting a chat / schedule / run; re-enabling returns
+    the head to ``draft`` (the owner must re-publish before it can run again).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    disabled: bool
+
+
+class AssistantOwnershipTransferRequest(BaseModel):
+    """``#/components/schemas/AssistantOwnershipTransferRequest`` — reassign the owner.
+
+    The new owner must be a distinct member of the tenant (else 422). Used to rescue
+    an orphaned assistant (owner deprovisioned) by handing it to a live owner.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    newOwner: UUID  # noqa: N815 — contract camelCase
+
+
+class BulkOrphanResponse(BaseModel):
+    """``#/components/schemas/BulkOrphanResult`` — the outcome of a bulk orphan sweep."""
+
+    model_config = {"extra": "forbid"}
+
+    affected: list[UUID]
+    action: str
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -306,6 +402,38 @@ def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
         daily_runtime_cap_s_ceiling=view.daily_runtime_cap_s_ceiling,
         max_concurrency_ceiling=view.max_concurrency_ceiling,
     )
+
+
+def _to_governed_assistant(assistant: Assistant) -> GovernedAssistantResponse:
+    return GovernedAssistantResponse(
+        id=assistant.id,
+        name=assistant.name,
+        description=assistant.description,
+        model=assistant.model,
+        autonomyLevel=assistant.autonomy_level,
+        owner=assistant.owner_id,
+        backupOwner=assistant.backup_owner_id,
+        status=assistant.status,
+        certificationState=assistant.certification_state,
+        featured=assistant.featured,
+        category=assistant.category,
+        disabledAt=assistant.disabled_at,
+        ownerOrphaned=assistant.owner_orphaned,
+        version=assistant.current_version,
+        created_at=assistant.created_at,
+        updated_at=assistant.updated_at,
+    )
+
+
+def _to_governed_list(page: GovernedAssistantPage) -> GovernedAssistantListResponse:
+    return GovernedAssistantListResponse(
+        items=[_to_governed_assistant(a) for a in page.items],
+        next_cursor=page.next_cursor,
+    )
+
+
+def _to_bulk_orphan(result: BulkOrphanResult) -> BulkOrphanResponse:
+    return BulkOrphanResponse(affected=list(result.affected), action=result.action)
 
 
 # --- Routes -----------------------------------------------------------------
@@ -504,3 +632,180 @@ async def update_sandbox_policy(
     )
     await session.commit()
     return _to_sandbox_policy(view)
+
+
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
+
+
+def _build_governance_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    request: Request,
+) -> AssistantGovernanceService:
+    """Assemble the per-request governance service from the identity + correlation seams."""
+    return AssistantGovernanceService(
+        session,
+        tenant_id=tenant_id,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+@router.get(
+    "/assistants",
+    response_model=GovernedAssistantListResponse,
+    response_model_exclude_none=True,
+)
+async def list_governed_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GovernedAssistantListResponse:
+    """Every assistant in the tenant with its governance state (admin only; #217).
+
+    The admin library view (E6-6): all owners in the tenant, each item carrying its
+    certification / featured / disabled state and the ``owner_orphaned`` flag (owner
+    no longer a member) for reassignment (E6-8). Admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); a malformed cursor → 422.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    page = await service.list_all(cursor=cursor, limit=limit)
+    return _to_governed_list(page)
+
+
+@router.post(
+    "/assistants/{assistant_id}/certify",
+    response_model=GovernedAssistantResponse,
+    response_model_exclude_none=True,
+)
+async def certify_assistant(
+    assistant_id: UUID,
+    body: AssistantCertifyRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Set an assistant's certification verdict (certify / deprecate / clear; admin only).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.certified`` /
+    ``assistant.deprecated`` (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.certify(assistant_id, state=body.certificationState)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/feature",
+    response_model=GovernedAssistantResponse,
+    response_model_exclude_none=True,
+)
+async def feature_assistant(
+    assistant_id: UUID,
+    body: AssistantFeatureRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Feature / unfeature an assistant in the library (admin only; #217).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.featured``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_featured(assistant_id, featured=body.featured)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/disable",
+    response_model=GovernedAssistantResponse,
+    response_model_exclude_none=True,
+)
+async def disable_assistant(
+    assistant_id: UUID,
+    body: AssistantDisableRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Disable / re-enable an assistant (admin only; #217, INV-8 enforcement).
+
+    Disabling flips ``status`` to ``disabled`` (and stamps ``disabled_at``) so the
+    existing run/chat/schedule gate refuses it — a disabled assistant cannot start.
+    Re-enabling returns the head to ``draft`` (the owner re-publishes to run again).
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.disabled``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_disabled(assistant_id, disabled=body.disabled)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/transfer-ownership",
+    response_model=GovernedAssistantResponse,
+    response_model_exclude_none=True,
+)
+async def transfer_assistant_ownership(
+    assistant_id: UUID,
+    body: AssistantOwnershipTransferRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Reassign an assistant's accountable owner to another tenant member (admin only; #217).
+
+    The new owner must be a distinct member of the tenant (else 422, INV-8) — the
+    admin rescue for an orphaned assistant. Admin-only (INV-5); tenant-scoped
+    (INV-1); audited ``assistant.ownership_transferred`` (INV-6). Cross-tenant/
+    missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.transfer_ownership(assistant_id, new_owner_id=body.newOwner)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post("/assistants/disable-orphans", response_model=BulkOrphanResponse)
+async def disable_orphaned_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> BulkOrphanResponse:
+    """Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only; #217).
+
+    E6-8 bulk control: an abandoned assistant should not keep running unattended.
+    Admin-only (INV-5); tenant-scoped (INV-1); audits each ``assistant.disabled``
+    (INV-6). Idempotent — an already-disabled orphan is skipped.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    result = await service.bulk_disable_orphans()
+    await session.commit()
+    return _to_bulk_orphan(result)

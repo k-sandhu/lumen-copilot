@@ -41,6 +41,7 @@ from app.domain.entities import (
     AuditEvent,
     AuditOutcome,
     AutonomyLevel,
+    CertificationState,
     Chunk,
     Citation,
     CodeRun,
@@ -448,6 +449,10 @@ def _to_assistant(row: models.Assistant) -> Assistant:
         tool_allowlist=tuple(str(t) for t in (row.tool_allowlist or [])),
         autonomy_level=AutonomyLevel(row.autonomy_level),
         status=AssistantStatus(row.status),
+        certification_state=CertificationState(row.certification_state),
+        featured=bool(row.featured),
+        category=row.category,
+        disabled_at=row.disabled_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -3079,11 +3084,56 @@ class AssistantRepository(_TenantScopedRepository):
                 row.autonomy_level = value.value
             elif key == "status" and isinstance(value, AssistantStatus):
                 row.status = value.value
+            elif key == "certification_state" and isinstance(value, CertificationState):
+                row.certification_state = value.value
             else:
                 setattr(row, key, value)
         await self._session.flush()
         await self._session.refresh(row)
         return _to_assistant(row)
+
+    async def list_for_tenant_page(
+        self,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[Assistant]:
+        """A keyset page of ALL the tenant's assistants (newest first) — admin governance.
+
+        Tenant-scoped only (INV-1): unlike ``list_for_owner_page`` this is the
+        admin library view (#217), so it spans every owner in the tenant (the caller
+        is role-gated to ``admin`` one layer up). Ordered by ``(created_at, id)``
+        **descending** with ``id`` the stable tiebreaker; the id-only cursor resolves
+        the boundary ``created_at`` by a correlated scalar subquery (exact on Postgres
+        + the offline SQLite), mirroring ``list_for_owner_page``.
+        """
+        conditions = [models.Assistant.tenant_id == self._tenant_id]
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Assistant.created_at)
+                .where(
+                    models.Assistant.tenant_id == self._tenant_id,
+                    models.Assistant.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Assistant.created_at < boundary_created_at,
+                    and_(
+                        models.Assistant.created_at == boundary_created_at,
+                        models.Assistant.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Assistant)
+            .where(*conditions)
+            .order_by(models.Assistant.created_at.desc(), models.Assistant.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assistant(r) for r in rows]
 
     async def delete(self, assistant_id: UUID) -> bool:
         """Delete an assistant head (cascades to its version history), tenant-scoped."""

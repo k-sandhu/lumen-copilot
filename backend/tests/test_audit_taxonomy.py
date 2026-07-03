@@ -84,6 +84,14 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Admin library governance (E6-6/E6-8 / issue #217) — additive; certifying/
+        # featuring/deprecating/disabling an assistant + transferring its ownership are
+        # admin-only governance actions, each audited (INV-5/INV-6).
+        "assistant.certified",
+        "assistant.featured",
+        "assistant.deprecated",
+        "assistant.disabled",
+        "assistant.ownership_transferred",
         # Headless agent runs (ADR-0015 / issue #235) — additive; every run is
         # bracketed by run.started/run.finished (INV-6), actor = the run owner.
         "run.started",

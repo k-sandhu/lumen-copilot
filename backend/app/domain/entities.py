@@ -190,6 +190,22 @@ class AssistantStatus(str, enum.Enum):
     DISABLED = "disabled"
 
 
+class CertificationState(str, enum.Enum):
+    """Admin library-governance certification (E6-6, issue #217, contract ``CertificationState``).
+
+    An **orthogonal** governance axis to the lifecycle ``status`` (a certified
+    assistant is still ``published``/``disabled`` on its own axis). ``NONE`` = not
+    reviewed; ``CERTIFIED`` = an admin vouched for it (trusted in the library);
+    ``DEPRECATED`` = an admin flagged it for retirement (still runnable, but the
+    library warns). Only an admin transitions this (deny-by-default, INV-5); the
+    default for a fresh assistant is ``NONE``.
+    """
+
+    NONE = "none"
+    CERTIFIED = "certified"
+    DEPRECATED = "deprecated"
+
+
 class KnowledgeMode(str, enum.Enum):
     """A retrieval source class an assistant's scope may draw from (contract ``KnowledgeMode``)."""
 
@@ -366,6 +382,15 @@ class Assistant:
     only their own (or granted) assistants; a cross-tenant/non-owned id is 404.
     ``current_version`` is the published head version number (``None`` while never
     published) — a projection the service fills, not a stored column.
+
+    **Library governance (E6-6/E6-8, issue #217 — an orthogonal admin axis).**
+    ``certification_state`` (an admin's certify/deprecate verdict),
+    ``featured`` (an admin's library pin), ``category`` (a library grouping label),
+    and ``disabled_at`` (when an admin disabled it — set in lockstep with
+    ``status=disabled`` so the existing run/chat/schedule "only a published
+    assistant may start" gate blocks a disabled assistant, INV-8). ``owner_orphaned``
+    is a **projection** (not stored): whether the owner is no longer a member of the
+    tenant, so the library can flag an abandoned assistant for admin reassignment.
     """
 
     id: UUID
@@ -380,9 +405,14 @@ class Assistant:
     tool_allowlist: tuple[str, ...]
     autonomy_level: AutonomyLevel
     status: AssistantStatus
+    certification_state: CertificationState
+    featured: bool
+    category: str | None
+    disabled_at: datetime | None
     created_at: datetime
     updated_at: datetime
     current_version: int | None = None
+    owner_orphaned: bool = False
 
 
 @dataclass(frozen=True, slots=True)

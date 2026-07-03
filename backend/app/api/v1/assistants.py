@@ -43,6 +43,7 @@ from app.domain.entities import (
     AssistantStatus,
     AssistantVersion,
     AutonomyLevel,
+    CertificationState,
     KnowledgeMode,
     KnowledgeScope,
 )
@@ -100,6 +101,12 @@ class AssistantResponse(BaseModel):
     owner: UUID
     backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
     status: AssistantStatus
+    # Library governance (E6-6, #217) — an admin-managed axis, read-only here (the
+    # owner sees the certification/featured state; only an admin can mutate it via
+    # /admin/assistants*). Present on list responses so a certified/deprecated/
+    # disabled state is visible in the owner's library too.
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+    featured: bool
     version: int | None = None
     created_at: datetime
     updated_at: datetime
@@ -206,6 +213,8 @@ def _to_response(assistant: Assistant) -> AssistantResponse:
         owner=assistant.owner_id,
         backupOwner=assistant.backup_owner_id,
         status=assistant.status,
+        certificationState=assistant.certification_state,
+        featured=assistant.featured,
         version=assistant.current_version,
         created_at=assistant.created_at,
         updated_at=assistant.updated_at,

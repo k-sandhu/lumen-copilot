@@ -927,6 +927,167 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  # --- Admin assistant library governance : E6-6/E6-8 / #217 ------------------
+  /admin/assistants:
+    get:
+      operationId: listGovernedAssistants
+      summary: Every assistant in the tenant with its governance state (admin only).
+      description: >
+        The admin library view (E6-6, #217): all assistants across every owner in the
+        tenant, each carrying its certification / featured / disabled state, category,
+        and the `ownerOrphaned` flag (owner no longer a tenant member — flag for
+        reassignment, E6-8). Restricted to the `admin` role; any other role receives
+        **403** (INV-5). Tenant-scoped (INV-1). Cursor-paginated; a malformed cursor is
+        **422** (INV-8).
+      tags: [admin]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A cursor page of the tenant's assistants with governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistantList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/disable-orphans:
+    post:
+      operationId: disableOrphanedAssistants
+      summary: Disable every orphaned assistant in the tenant (admin only).
+      description: >
+        Bulk E6-8 control (#217): disable every orphaned assistant (owner
+        deprovisioned) so an abandoned assistant does not keep running unattended.
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audits each
+        `assistant.disabled` (INV-6). Idempotent — an already-disabled orphan is
+        skipped. Returns the affected ids.
+      tags: [admin]
+      responses:
+        "200":
+          description: The bulk-sweep outcome (affected ids + the applied action).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkOrphanResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/assistants/{assistantId}/certify:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: certifyAssistant
+      summary: Set an assistant's certification verdict (admin only).
+      description: >
+        Certify / deprecate / clear an assistant's library certification (E6-6, #217) —
+        an orthogonal governance axis. `admin`-only (**403** otherwise, INV-5);
+        tenant-scoped (INV-1); audited `assistant.certified` / `assistant.deprecated`
+        (INV-6). A cross-tenant / missing id is **404** (existence non-disclosure).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantCertifyRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/feature:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: featureAssistant
+      summary: Feature / unfeature an assistant in the library (admin only).
+      description: >
+        Feature / unfeature an assistant (E6-6, #217). `admin`-only (**403** otherwise,
+        INV-5); tenant-scoped (INV-1); audited `assistant.featured` (INV-6). A
+        cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantFeatureRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/disable:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: disableAssistant
+      summary: Disable / re-enable an assistant (admin only).
+      description: >
+        Disable / re-enable an assistant (E6-6, #217). Disabling flips the lifecycle
+        status to `disabled` (and stamps `disabledAt`) so the existing run / chat /
+        schedule gate refuses it — a disabled assistant cannot start (INV-8).
+        Re-enabling returns the head to `draft` (the owner re-publishes to run again).
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.disabled` (INV-6). A cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantDisableRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/transfer-ownership:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: transferAssistantOwnership
+      summary: Reassign an assistant's accountable owner (admin only).
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8,
+        #217) — the admin rescue for an orphaned assistant. The new owner must be a
+        distinct member of the tenant (else **422**, INV-8). `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.ownership_transferred` (INV-6). A cross-tenant / missing id is
+        **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantOwnershipTransferRequest" }
+      responses:
+        "200":
+          description: The assistant with its new owner + governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
     get:
@@ -3402,6 +3563,15 @@ components:
       description: Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions.
       enum: [draft, published, disabled]
 
+    CertificationState:
+      type: string
+      description: >
+        Admin library-governance certification (E6-6, #217) — an orthogonal axis to
+        the lifecycle status. `none` = not reviewed; `certified` = an admin vouched
+        for it (trusted in the library); `deprecated` = an admin flagged it for
+        retirement (still runnable, the library warns). Admin-only mutation (INV-5).
+      enum: [none, certified, deprecated]
+
     KnowledgeMode:
       type: string
       description: A retrieval source class the assistant's scope may draw from.
@@ -3435,7 +3605,7 @@ components:
         A saved, named, governed chat configuration (ADR-0011 §1) — the mutable
         head. Tenant- and owner-scoped (INV-1/INV-2).
       required:
-        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, created_at, updated_at]
+        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, certificationState, featured, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, maxLength: 200 }
@@ -3463,6 +3633,10 @@ components:
           format: uuid
           description: The backup owner's user id; required before publish (ADR-0011 §4).
         status: { $ref: "#/components/schemas/AssistantStatus" }
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+        featured:
+          type: boolean
+          description: Whether an admin has featured/pinned the assistant in the library (E6-6, #217).
         version:
           type: [integer, "null"]
           description: The current published head version number (null while never published).
@@ -3611,6 +3785,117 @@ components:
         next_cursor:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
+
+    GovernedAssistant:
+      type: object
+      additionalProperties: false
+      description: >
+        One assistant in the admin library view (E6-6/E6-8, #217): identity + owner +
+        lifecycle status plus the governance axis (certification / featured / category /
+        disabled) and the `ownerOrphaned` projection (owner no longer a tenant member —
+        flag for reassignment). Admin-only; spans every owner in the tenant.
+      required:
+        [id, name, autonomyLevel, owner, status, certificationState, featured, ownerOrphaned, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        owner:
+          type: string
+          format: uuid
+          description: The accountable owner's user id.
+        backupOwner:
+          type: [string, "null"]
+          format: uuid
+        status: { $ref: "#/components/schemas/AssistantStatus" }
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+        featured:
+          type: boolean
+          description: Whether an admin has featured/pinned the assistant.
+        category:
+          type: [string, "null"]
+          description: A library grouping label (null ⇒ uncategorised).
+        disabledAt:
+          type: [string, "null"]
+          format: date-time
+          description: When an admin disabled the assistant (null ⇒ not disabled).
+        ownerOrphaned:
+          type: boolean
+          description: The owner is no longer a member of the tenant (flag for reassignment, E6-8).
+        version:
+          type: [integer, "null"]
+          description: The current published head version number (null while never published).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    GovernedAssistantList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/GovernedAssistant" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    AssistantCertifyRequest:
+      type: object
+      additionalProperties: false
+      required: [certificationState]
+      description: Set an assistant's certification verdict (certify / deprecate / clear).
+      properties:
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+
+    AssistantFeatureRequest:
+      type: object
+      additionalProperties: false
+      required: [featured]
+      description: Feature / unfeature an assistant in the library.
+      properties:
+        featured: { type: boolean }
+
+    AssistantDisableRequest:
+      type: object
+      additionalProperties: false
+      required: [disabled]
+      description: >
+        Disable / re-enable an assistant. Disabling blocks it from starting a chat /
+        schedule / run (INV-8); re-enabling returns the head to `draft` (the owner
+        must re-publish before it can run again).
+      properties:
+        disabled: { type: boolean }
+
+    AssistantOwnershipTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [newOwner]
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8). The
+        new owner must be a distinct member of the tenant (else 422). Rescues an
+        orphaned assistant (owner deprovisioned).
+      properties:
+        newOwner:
+          type: string
+          format: uuid
+          description: The new owner's user id (a distinct member of the tenant).
+
+    BulkOrphanResult:
+      type: object
+      additionalProperties: false
+      required: [affected, action]
+      description: The outcome of a bulk reassign/disable of orphaned assistants (E6-8).
+      properties:
+        affected:
+          type: array
+          items: { type: string, format: uuid }
+          description: The assistant ids affected by the sweep.
+        action:
+          type: string
+          description: The action applied to each affected assistant (e.g. "disabled").
 
     # --- merged schemas: CodeRunStatus, ResourceUsage, CodeRun ---
     CodeRunStatus:
