@@ -46,6 +46,7 @@ _ADMIN_PATHS = (
     "/api/v1/admin/risk-tiers",
     "/api/v1/admin/settings",
     "/api/v1/admin/tool-policy",
+    "/api/v1/admin/sandbox-policy",
 )
 
 
@@ -621,3 +622,228 @@ async def test_patch_tool_policy_emits_audit_event(
     assert ev.metadata["requires_approval"] is False
     assert ev.resource_type == "tool"
     assert ev.resource_id == "run_python"
+
+
+# --- GET/PATCH /admin/sandbox-policy (per-tenant sandbox governance, #233) -----
+
+_SANDBOX_KEYS = {
+    "enabled",
+    "allowed_packages",
+    "denied_packages",
+    "egress_allowed",
+    "egress_allowlist",
+    "max_runtime_s",
+    "max_memory_mb",
+    "daily_runtime_cap_s",
+    "max_concurrency",
+    "is_default",
+    "max_runtime_s_ceiling",
+    "max_memory_mb_ceiling",
+    "daily_runtime_cap_s_ceiling",
+    "max_concurrency_ceiling",
+}
+
+
+def _sandbox_body(**overrides: object) -> dict[str, object]:
+    """A complete, valid SandboxPolicyUpdate body; override any field."""
+    body: dict[str, object] = {
+        "enabled": True,
+        "allowed_packages": [],
+        "denied_packages": [],
+        "egress_allowed": False,
+        "egress_allowlist": [],
+        "max_runtime_s": 20,
+        "max_memory_mb": 256,
+        "daily_runtime_cap_s": 600,
+        "max_concurrency": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+async def test_get_sandbox_policy_default_is_disabled_deny_by_default(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-3 (#233): a fresh tenant has NO policy → code exec off, caps = config ceiling."""
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.get("/api/v1/admin/sandbox-policy", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == _SANDBOX_KEYS
+    # Deny-by-default: disabled, no packages/egress, is_default true.
+    assert body["enabled"] is False
+    assert body["is_default"] is True
+    assert body["egress_allowed"] is False
+    assert body["allowed_packages"] == []
+    # The reported caps ARE the deploy-wide config ceiling.
+    settings = get_settings()
+    assert body["max_runtime_s"] == settings.sandbox_wall_clock_seconds
+    assert body["max_runtime_s_ceiling"] == settings.sandbox_wall_clock_seconds
+    assert body["max_concurrency_ceiling"] == settings.sandbox_max_concurrent_per_tenant
+
+
+async def test_patch_sandbox_policy_sets_and_reads_back(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-1 (#233): an admin enables code exec + sets limits; the policy reads back."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json=_sandbox_body(
+            enabled=True, allowed_packages=["numpy"], max_runtime_s=20, max_concurrency=1
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["is_default"] is False
+    assert body["allowed_packages"] == ["numpy"]
+    assert body["max_runtime_s"] == 20
+    # The policy persists and reads back via GET (round-trip).
+    got = await client.get("/api/v1/admin/sandbox-policy", headers=_auth(token))
+    assert got.json()["enabled"] is True
+    assert got.json()["allowed_packages"] == ["numpy"]
+
+
+async def test_patch_sandbox_policy_clamps_runtime_to_the_config_ceiling(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-2 (#233): a per-tenant cap ABOVE the config ceiling is clamped down — never widened."""
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    ceiling = get_settings().sandbox_wall_clock_seconds
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json=_sandbox_body(max_runtime_s=ceiling + 10_000, max_memory_mb=99_999),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The stored/effective runtime is the ceiling, NOT the widened value.
+    assert body["max_runtime_s"] == ceiling
+    assert body["max_runtime_s"] <= body["max_runtime_s_ceiling"]
+    assert body["max_memory_mb"] <= body["max_memory_mb_ceiling"]
+
+
+async def test_patch_sandbox_policy_strips_metadata_ip_from_egress(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-2 (#233, G4): the cloud-metadata IP is stripped from the egress allowlist."""
+    from app.sandbox.spec import METADATA_IP
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json=_sandbox_body(
+            egress_allowed=True,
+            egress_allowlist=[f"{METADATA_IP}:80", "api.example.com:443"],
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    allowlist = resp.json()["egress_allowlist"]
+    # The metadata IP is never allowlistable — only the legitimate target remains.
+    assert all(METADATA_IP not in t for t in allowlist)
+    assert "api.example.com:443" in allowlist
+
+
+@pytest.mark.parametrize(
+    "field", ["max_runtime_s", "max_memory_mb", "daily_runtime_cap_s", "max_concurrency"]
+)
+async def test_patch_sandbox_policy_non_positive_cap_is_422(
+    client: AsyncClient, seeded: _Seeded, field: str
+) -> None:
+    """AC (#233, INV-8): a non-positive cap is rejected 422 — no unbounded value stored."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json=_sandbox_body(**{field: 0}),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_sandbox_policy_unknown_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#233, INV-8): an unknown/extra field is rejected 422 (extra=forbid)."""
+    token = await _login(client, seeded.admin_a_email)
+    body = _sandbox_body()
+    body["not_a_real_field"] = True
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy", headers=_auth(token), json=body
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_sandbox_policy_missing_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#233, INV-8): a missing required field is rejected 422."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json={"enabled": True},  # missing everything else
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_patch_sandbox_policy_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    """AC-1 (#233, INV-5): the governance write is admin-only — member/security are 403."""
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy", headers=_auth(token), json=_sandbox_body()
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_patch_sandbox_policy_unauthenticated_is_401(client: AsyncClient) -> None:
+    resp = await client.patch("/api/v1/admin/sandbox-policy", json=_sandbox_body())
+    assert resp.status_code == 401
+
+
+async def test_sandbox_policy_is_tenant_scoped(client: AsyncClient, seeded: _Seeded) -> None:
+    """INV-1 (#233): admin A enables the sandbox; admin B's tenant stays deny-by-default."""
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token_a),
+        json=_sandbox_body(enabled=True),
+    )
+    token_b = await _login(client, seeded.admin_b_email)
+    got_b = await client.get("/api/v1/admin/sandbox-policy", headers=_auth(token_b))
+    # Tenant B still sees the deny-by-default default, never A's enabled policy.
+    assert got_b.json()["enabled"] is False
+    assert got_b.json()["is_default"] is True
+
+
+async def test_patch_sandbox_policy_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """AC-N (#233, INV-6): the write emits exactly one audit event for this tenant."""
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/sandbox-policy",
+        headers=_auth(token),
+        json=_sandbox_body(enabled=True, egress_allowed=True, egress_allowlist=["h:1"]),
+    )
+    assert resp.status_code == 200, resp.text
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    policy_events = [e for e in events if e.action == "sandbox_policy.updated"]
+    assert len(policy_events) == 1
+    ev = policy_events[0]
+    assert ev.metadata["enabled"] is True
+    assert ev.metadata["egress_allowed"] is True
+    assert ev.resource_type == "tenant"
+    assert ev.resource_id == str(seeded.tenant_a)

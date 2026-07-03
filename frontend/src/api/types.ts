@@ -585,6 +585,52 @@ export interface ToolPolicyUpdate {
   requires_approval: boolean;
 }
 
+// --- Admin sandbox-governance policy (contracts §admin, #233) ---
+
+/**
+ * 200 from GET/PATCH /admin/sandbox-policy — the EFFECTIVE per-tenant code-execution
+ * sandbox policy (issue #233). Every cap is already clamped to the deploy-wide
+ * `SANDBOX_*` ceiling (a per-tenant value can only narrow). `enabled` is
+ * deny-by-default — false with no stored policy (`is_default` true), and every cap is
+ * then the config ceiling. The `*_ceiling` fields report the deploy-wide caps so the
+ * console can show how far a setting may go. The cloud-metadata IP is never
+ * allowlistable (stripped server-side, G4).
+ */
+export interface SandboxPolicy {
+  enabled: boolean;
+  allowed_packages: string[];
+  denied_packages: string[];
+  egress_allowed: boolean;
+  egress_allowlist: string[];
+  max_runtime_s: number;
+  max_memory_mb: number;
+  daily_runtime_cap_s: number;
+  max_concurrency: number;
+  is_default: boolean;
+  max_runtime_s_ceiling: number;
+  max_memory_mb_ceiling: number;
+  daily_runtime_cap_s_ceiling: number;
+  max_concurrency_ceiling: number;
+}
+
+/**
+ * PATCH /admin/sandbox-policy body — set the per-tenant sandbox policy (issue #233).
+ * All fields required; the caps must be positive (a non-positive value → 422). The
+ * server clamps each cap DOWN to the config ceiling and strips the metadata IP from
+ * `egress_allowlist` (a per-tenant value can only narrow, never widen).
+ */
+export interface SandboxPolicyUpdate {
+  enabled: boolean;
+  allowed_packages: string[];
+  denied_packages: string[];
+  egress_allowed: boolean;
+  egress_allowlist: string[];
+  max_runtime_s: number;
+  max_memory_mb: number;
+  daily_runtime_cap_s: number;
+  max_concurrency: number;
+}
+
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
 
 /**

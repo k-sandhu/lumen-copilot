@@ -78,6 +78,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    TenantSandboxPolicy,
     TenantToolPolicy,
     ToolInvocation,
     User,
@@ -330,6 +331,25 @@ def _to_tenant_tool_policy(row: models.TenantToolPolicy) -> TenantToolPolicy:
         tool_name=row.tool_name,
         enabled=row.enabled,
         requires_approval=row.requires_approval,
+        updated_by=row.updated_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_tenant_sandbox_policy(row: models.TenantSandboxPolicy) -> TenantSandboxPolicy:
+    return TenantSandboxPolicy(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        enabled=row.enabled,
+        allowed_packages=tuple(row.allowed_packages or ()),
+        denied_packages=tuple(row.denied_packages or ()),
+        egress_allowed=row.egress_allowed,
+        egress_allowlist=tuple(row.egress_allowlist or ()),
+        max_runtime_s=row.max_runtime_s,
+        max_memory_mb=row.max_memory_mb,
+        daily_runtime_cap_s=row.daily_runtime_cap_s,
+        max_concurrency=row.max_concurrency,
         updated_by=row.updated_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -2741,6 +2761,87 @@ class TenantToolPolicyRepository(_TenantScopedRepository):
         await self._session.flush()
         await self._session.refresh(row)
         return _to_tenant_tool_policy(row)
+
+
+class TenantSandboxPolicyRepository(_TenantScopedRepository):
+    """The per-tenant code-execution sandbox policy within one tenant (issue #233).
+
+    Tenant-scoped like every repository (INV-1): every query filters on ``tenant_id``,
+    so one tenant can never read or write another's policy. A row's absence is
+    meaningful — it means "code execution is DISABLED for the tenant" (the
+    deny-by-default rule the service and the enforcement path enforce), so this exposes
+    a plain ``get`` returning ``None`` rather than fabricating a default. Writes are
+    flushed not committed; the caller owns the transaction boundary (so the audit event
+    commits atomically with the write).
+    """
+
+    async def get(self) -> TenantSandboxPolicy | None:
+        """The tenant's sandbox policy, or ``None`` if none is stored (deny-by-default).
+
+        ``None`` is not an error — it means code execution is disabled for the tenant
+        (the deny-by-default rule). Tenant-scoped (INV-1).
+        """
+        row = await self._get_row()
+        return _to_tenant_sandbox_policy(row) if row is not None else None
+
+    async def _get_row(self) -> models.TenantSandboxPolicy | None:
+        stmt = select(models.TenantSandboxPolicy).where(
+            models.TenantSandboxPolicy.tenant_id == self._tenant_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def upsert(
+        self,
+        *,
+        enabled: bool,
+        allowed_packages: tuple[str, ...],
+        denied_packages: tuple[str, ...],
+        egress_allowed: bool,
+        egress_allowlist: tuple[str, ...],
+        max_runtime_s: int,
+        max_memory_mb: int,
+        daily_runtime_cap_s: int,
+        max_concurrency: int,
+        updated_by: UUID | None,
+    ) -> TenantSandboxPolicy:
+        """Create or update the tenant's sandbox policy (a per-tenant singleton upsert).
+
+        The ``(tenant_id)`` unique constraint makes this a singleton per tenant: an
+        existing row is updated in place, otherwise a new one is inserted. Tenant-scoped
+        (INV-1) — the write is always keyed to this repository's tenant, never request
+        input. Flushed, not committed. The caller (service) is responsible for having
+        already clamped the caps + stripped the metadata IP to the config ceiling.
+        """
+        row = await self._get_row()
+        if row is None:
+            row = models.TenantSandboxPolicy(
+                tenant_id=self._tenant_id,
+                enabled=enabled,
+                allowed_packages=list(allowed_packages),
+                denied_packages=list(denied_packages),
+                egress_allowed=egress_allowed,
+                egress_allowlist=list(egress_allowlist),
+                max_runtime_s=max_runtime_s,
+                max_memory_mb=max_memory_mb,
+                daily_runtime_cap_s=daily_runtime_cap_s,
+                max_concurrency=max_concurrency,
+                updated_by=updated_by,
+            )
+            self._session.add(row)
+        else:
+            row.enabled = enabled
+            row.allowed_packages = list(allowed_packages)
+            row.denied_packages = list(denied_packages)
+            row.egress_allowed = egress_allowed
+            row.egress_allowlist = list(egress_allowlist)
+            row.max_runtime_s = max_runtime_s
+            row.max_memory_mb = max_memory_mb
+            row.daily_runtime_cap_s = daily_runtime_cap_s
+            row.max_concurrency = max_concurrency
+            row.updated_by = updated_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant_sandbox_policy(row)
 
 
 class AuditEventRepository(_TenantScopedRepository):

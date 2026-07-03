@@ -13,6 +13,7 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.sandbox.service import SandboxService
 from app.sandbox.spec import RunSpec, StagedInput
+from app.services.sandbox_policy_service import EffectiveSandboxPolicy
 
 
 def sandbox_settings(**overrides: object) -> Settings:
@@ -38,13 +39,48 @@ def sandbox_settings(**overrides: object) -> Settings:
     return Settings(**base)  # type: ignore[arg-type]
 
 
+def effective_policy(
+    *,
+    enabled: bool = True,
+    allowed_packages: tuple[str, ...] = (),
+    denied_packages: tuple[str, ...] = (),
+    egress_allowed: bool = False,
+    egress_allowlist: tuple[str, ...] = (),
+    max_runtime_s: int = 30,
+    max_memory_mb: int = 512,
+    daily_runtime_cap_s: int = 3600,
+    max_concurrency: int = 2,
+) -> EffectiveSandboxPolicy:
+    """A minimal :class:`EffectiveSandboxPolicy` for the sandbox service/spec tests.
+
+    Defaults mirror the config ceiling used by :func:`sandbox_settings`; override any
+    field to prove a per-tenant setting flows into the run spec (egress/packages) or the
+    gate (quotas). ``enabled=True`` by default so the happy-path spec tests build a spec.
+    """
+    return EffectiveSandboxPolicy(
+        enabled=enabled,
+        allowed_packages=allowed_packages,
+        denied_packages=denied_packages,
+        egress_allowed=egress_allowed,
+        egress_allowlist=egress_allowlist,
+        max_runtime_s=max_runtime_s,
+        max_memory_mb=max_memory_mb,
+        daily_runtime_cap_s=daily_runtime_cap_s,
+        max_concurrency=max_concurrency,
+    )
+
+
 def build_service_spec(
-    *, code: str, inputs: tuple[StagedInput, ...] = ()
+    *,
+    code: str,
+    inputs: tuple[StagedInput, ...] = (),
+    policy: EffectiveSandboxPolicy | None = None,
 ) -> RunSpec:
     """The run spec the service builds for ``code`` — used by the G5 leakage test.
 
     Constructs a service (its ``_build_spec`` needs no I/O) and returns the spec it
-    would hand the runner, so the assertion is against the production curated env.
+    would hand the runner, so the assertion is against the production curated env. The
+    effective policy defaults to the deny-by-default egress/packages posture (#233).
     """
     service = SandboxService(
         tenant_id=uuid4(),
@@ -53,7 +89,9 @@ def build_service_spec(
         object_store=object(),  # type: ignore[arg-type]  # unused by _build_spec
         settings=sandbox_settings(),
     )
-    return service._build_spec(code, inputs)  # noqa: SLF001 — the seam under test
+    return service._build_spec(  # noqa: SLF001 — the seam under test
+        code, inputs, policy or effective_policy()
+    )
 
 
 class _NullRunner:

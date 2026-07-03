@@ -61,6 +61,10 @@ from app.sandbox.spec import (
 )
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
 from app.services.audit import AuditSink
+from app.services.sandbox_policy_service import (
+    EffectiveSandboxPolicy,
+    SandboxPolicyReader,
+)
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -74,13 +78,19 @@ class _Denial:
     message: str
 
 
-def _limits_from_settings(settings: Settings) -> RunLimits:
-    """The per-run resource caps from config (G6/G7) — never a literal at the call site."""
+def _limits_for_run(settings: Settings, policy: EffectiveSandboxPolicy) -> RunLimits:
+    """The per-run resource caps for a run: the config caps NARROWED by the tenant policy.
+
+    The per-run wall-clock + memory are the tenant policy's caps (already clamped to the
+    config ceiling in the policy service — a per-tenant value can only narrow, never
+    widen, #233). CPU / pids / output caps stay the deploy-wide config values (not
+    per-tenant governable). Never a literal at the call site (G6/G7).
+    """
     return RunLimits(
         cpus=settings.sandbox_cpus,
-        memory_bytes=settings.sandbox_memory_bytes,
+        memory_bytes=policy.max_memory_mb * 1024 * 1024,
         pids=settings.sandbox_pids_limit,
-        wall_clock_seconds=settings.sandbox_wall_clock_seconds,
+        wall_clock_seconds=policy.max_runtime_s,
         output_bytes_cap=settings.sandbox_output_bytes_cap,
     )
 
@@ -115,36 +125,43 @@ class SandboxService:
         self._request_id = request_id
         self._source_ip = source_ip
 
-    # --- Policy / quota gate (deny-by-default, ADR-0013 §6) ------------------
+    # --- Policy / quota gate (deny-by-default, ADR-0013 §6, #233) ------------
 
-    async def _evaluate_gate(self, code_runs: CodeRunRepository) -> _Denial | None:
-        """Refuse a run before execution when disabled or over quota (ADR-0013 §6).
+    async def _evaluate_gate(
+        self,
+        policy: EffectiveSandboxPolicy,
+        code_runs: CodeRunRepository,
+    ) -> _Denial | None:
+        """Refuse a run before execution when disabled or over quota (ADR-0013 §6, #233).
 
-        Returns a :class:`_Denial` (→ ``status=denied``, audited) when:
+        Given the resolved **effective per-tenant sandbox policy** (#233 — the deploy-wide
+        kill-switch AND-ed with the tenant's admin-set enable, its quotas clamped to the
+        config ceiling), returns a :class:`_Denial` (→ ``status=denied``, audited) when:
 
-        * the system kill-switch (``SANDBOX_ENABLED``) is off — the sandbox never
-          launches for any tenant (the per-tenant admin enable #233 layers on top);
-        * the per-tenant **concurrency** cap is already met (too many active runs);
-        * the per-tenant **daily-runtime** cap is already exhausted for the window.
+        * code execution is not enabled for the tenant — the kill-switch is off, or the
+          tenant has no policy (deny-by-default), or an admin left it disabled; the
+          sandbox never launches (fail-closed: an unreadable policy resolves disabled);
+        * the per-tenant **concurrency** cap (policy ∩ config) is already met;
+        * the per-tenant **daily-runtime** cap (policy ∩ config) is already exhausted.
 
         ``None`` ⇒ the run may proceed. Fail-closed: any doubt refuses.
         """
-        if not self._settings.sandbox_enabled:
+        if not policy.enabled:
             return _Denial(
                 "code_execution_disabled",
                 "Code execution is disabled for this tenant.",
             )
         active = await code_runs.count_active()
         # The just-created queued row is included in the count, so the cap is met when
-        # the active count exceeds the configured maximum.
-        if active > self._settings.sandbox_max_concurrent_per_tenant:
+        # the active count exceeds the (clamped) per-tenant maximum.
+        if active > policy.max_concurrency:
             return _Denial(
                 "concurrency_quota_exceeded",
                 "The tenant's concurrent code-run limit is reached.",
             )
         window_start = datetime.now(UTC) - timedelta(days=1)
         used_ms = await code_runs.runtime_ms_since(window_start)
-        cap_ms = self._settings.sandbox_daily_runtime_seconds_per_tenant * 1000
+        cap_ms = policy.daily_runtime_cap_s * 1000
         if used_ms >= cap_ms:
             return _Denial(
                 "daily_runtime_quota_exceeded",
@@ -152,17 +169,48 @@ class SandboxService:
             )
         return None
 
-    def _build_spec(self, code: str, inputs: tuple[StagedInput, ...]) -> RunSpec:
-        """Build the deny-by-default run spec (ADR-0013 §2/§3/§5).
+    async def _effective_policy(self, session: AsyncSession) -> EffectiveSandboxPolicy:
+        """The tenant's effective sandbox policy (#233) — deny-by-default, fail-closed.
 
-        Egress is denied (G2–G4), package install is off (ADR-0013 §3), the runtime is
-        the configured OCI runtime, and the env is a **minimal curated set** — never
-        app secrets, the DB URL, or object-store creds (G5). Inputs are staged
-        read-only.
+        Resolved once per run via :class:`SandboxPolicyReader`: the deploy-wide
+        kill-switch AND the per-tenant admin enable, quotas/limits clamped to the config
+        ceiling, the metadata IP stripped from egress (G4). A read error resolves to a
+        DISABLED policy (INV-7) — a run is refused, never admitted on an unreadable
+        policy.
         """
-        policy = SandboxPolicy(
-            egress=EgressPolicy(allowed=False),  # deny-by-default (G2–G4)
-            allow_package_install=False,  # curated pinned image only (ADR-0013 §3)
+        reader = SandboxPolicyReader(
+            session, tenant_id=self._tenant_id, settings=self._settings
+        )
+        return await reader.resolve()
+
+    def _build_spec(
+        self,
+        code: str,
+        inputs: tuple[StagedInput, ...],
+        policy: EffectiveSandboxPolicy,
+    ) -> RunSpec:
+        """Build the run spec from the effective tenant policy (ADR-0013 §2/§3/§5, #233).
+
+        Egress + packages come from the **effective per-tenant policy** (already the
+        tenant's admin settings ∩ the config ceiling, with the metadata IP stripped, G4):
+        egress is opened only if the admin allowed it AND listed targets; package install
+        is enabled only if the admin allowed any packages. The runtime is the configured
+        OCI runtime, and the env is a **minimal curated set** — never app secrets, the DB
+        URL, or object-store creds (G5). Inputs are staged read-only. With no per-tenant
+        policy the effective policy is deny-by-default (this path is only reached once
+        the gate admitted the run, so ``enabled`` is already True).
+        """
+        # G2–G4: egress is opened only when the admin allowed it AND listed targets;
+        # the metadata IP was already stripped by the policy service (never reachable).
+        egress = EgressPolicy(
+            allowed=policy.egress_allowed and bool(policy.egress_allowlist),
+            allowlist=policy.egress_allowlist,
+        )
+        run_policy = SandboxPolicy(
+            egress=egress,
+            # Package install is enabled only when the admin allowlisted any packages
+            # (ADR-0013 §3 — otherwise the curated pinned image only).
+            allow_package_install=bool(policy.allowed_packages),
             runtime=self._settings.sandbox_runtime,
         )
         # G5: the ONLY env the run sees. Deliberately no secret/DB/host env — a
@@ -175,8 +223,8 @@ class SandboxService:
         )
         return RunSpec(
             code=code,
-            limits=_limits_from_settings(self._settings),
-            policy=policy,
+            limits=_limits_for_run(self._settings, policy),
+            policy=run_policy,
             inputs=inputs,
             env=curated_env,
         )
@@ -219,8 +267,11 @@ class SandboxService:
             # Already claimed (a duplicate delivery) — report its state, do not re-run.
             return run.status
 
-        # --- Gate: refuse before execution (deny-by-default). ----------------
-        denial = await self._evaluate_gate(code_runs)
+        # --- Gate: refuse before execution (deny-by-default, per-tenant policy #233).
+        # Resolve the effective policy ONCE so the gate decision and the run spec are
+        # built from the same clamped view (no read skew mid-run).
+        policy = await self._effective_policy(session)
+        denial = await self._evaluate_gate(policy, code_runs)
         if denial is not None:
             now = datetime.now(UTC)
             await code_runs.mark_terminal(
@@ -252,7 +303,7 @@ class SandboxService:
             metadata={"image_digest": self._settings.sandbox_image},
         )
 
-        spec = self._build_spec(run.code, inputs)
+        spec = self._build_spec(run.code, inputs, policy)
         try:
             result = await self._runner.run(
                 spec, tmpfs_scratch_bytes=self._settings.sandbox_scratch_bytes

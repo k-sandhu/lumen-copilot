@@ -814,6 +814,63 @@ class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class TenantSandboxPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """A per-tenant admin policy for the code-execution sandbox (issue #233).
+
+    The persistence half of admin sandbox governance: one row is an admin's policy for
+    the code-execution sandbox (#230/#231) within one tenant — whether code execution
+    is ``enabled`` for the tenant, the package allow/deny lists, the outbound egress
+    posture (``egress_allowed`` + ``egress_allowlist``), and the runtime / memory /
+    quota caps. **Absence of a row means code execution stays DISABLED for the tenant**
+    (deny-by-default / fail-closed, matching #230's deploy-wide kill-switch default
+    OFF).
+
+    The stored caps are CEILINGS the enforcement path clamps to the deploy-wide
+    ``SANDBOX_*`` config — a per-tenant policy can only NARROW, never widen (a runtime
+    above the config cap is clamped; the metadata IP is never egress-allowlistable).
+    The unique ``(tenant_id)`` constraint makes the policy a per-tenant singleton;
+    ``updated_by`` records the admin who last set it (audit corroboration). Tenant-
+    scoped like every table (INV-1); the ``0022`` migration puts it under the same
+    fail-closed RLS backstop as every other tenant-scoped table.
+    """
+
+    __tablename__ = "tenant_sandbox_policy"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_tenant_sandbox_policy_tenant"),
+        CheckConstraint("max_runtime_s > 0", name="ck_tenant_sandbox_policy_runtime_pos"),
+        CheckConstraint("max_memory_mb > 0", name="ck_tenant_sandbox_policy_memory_pos"),
+        CheckConstraint("daily_runtime_cap_s > 0", name="ck_tenant_sandbox_policy_daily_pos"),
+        CheckConstraint(
+            "max_concurrency > 0", name="ck_tenant_sandbox_policy_concurrency_pos"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # Deny-by-default: a stored row does NOT imply enabled — an admin must turn it on.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Package governance: an allowlist (empty ⇒ curated base image only) + a denylist
+    # (takes precedence over the allowlist). JSON string arrays.
+    allowed_packages: Mapped[list[str]] = mapped_column(_JSON, nullable=False, default=list)
+    denied_packages: Mapped[list[str]] = mapped_column(_JSON, nullable=False, default=list)
+    # Egress governance: deny-by-default network posture + the host:port allowlist (the
+    # metadata IP is stripped in the service — never reachable, G4).
+    egress_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    egress_allowlist: Mapped[list[str]] = mapped_column(_JSON, nullable=False, default=list)
+    # Runtime / memory / quota caps — CEILINGS clamped to the deploy-wide SANDBOX_*
+    # config in the enforcement path (a per-tenant value only ever narrows).
+    max_runtime_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_memory_mb: Mapped[int] = mapped_column(Integer, nullable=False)
+    daily_runtime_cap_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The admin who last set this policy (INV-6 corroboration); SET NULL so a
+    # deprovisioned admin does not cascade-delete the tenant's live policy.
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 
