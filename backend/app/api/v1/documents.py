@@ -321,9 +321,16 @@ async def get_document_content(
     if content is None:
         raise NotFoundError("Document not found.")
     await session.commit()
+    # Stream with the document's own (allowlisted) content-type — NOT a generic
+    # octet-stream — so the browser can render it inline (a PDF/image/text preview
+    # in the viewer's sandboxed iframe). Safe: the upload allowlist admits only
+    # PDF / OOXML office / text-plain / markdown (never HTML/SVG), so an inline
+    # response cannot carry active content, and the viewer iframe is sandboxed
+    # regardless. This same-origin inline stream is what makes previews work with
+    # no cross-origin CORS dependency when DOCUMENT_CONTENT_REDIRECT is off (#242).
     return StreamingResponse(
         iter((content.data,)),
-        media_type="application/octet-stream",
+        media_type=content.mime_type,
         headers={
             "Content-Disposition": f'inline; filename="{content.filename}"',
             "Content-Length": str(len(content.data)),
