@@ -839,6 +839,40 @@ export interface AssistantVersionList {
   next_cursor?: string | null;
 }
 
+/** A sample input for a read-only assistant test run (E6-5, #215). Optional. */
+export interface AssistantTestRequest {
+  input?: string;
+}
+
+/**
+ * One tool call captured in a test run's debug trace (E6-5). `args` are the
+ * model-supplied arguments; `result` is the governed runner's outcome. A write-tier
+ * tool's `result` reflects the simulate/deny outcome — no real write occurred.
+ */
+export interface AssistantTestToolCall {
+  callId: string;
+  tool?: string | null;
+  args?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+}
+
+/**
+ * The debug trace of a read-only assistant test run (E6-5, #215) — what the builder
+ * debug view renders. NO real side effect was produced (write-tier tools
+ * simulate/deny). Reuses the runtime's own trace vocabulary.
+ */
+export interface AssistantTestTrace {
+  prompt: string;
+  input: string;
+  model: string;
+  retrieval: Array<Record<string, unknown>>;
+  toolCalls: AssistantTestToolCall[];
+  outputs: string;
+  errors: Array<Record<string, unknown>>;
+  succeeded: boolean;
+  durationMs: number;
+}
+
 // --- Schedules & runs (contracts/openapi.yaml §schedules, §runs; ADR-0015) ---
 // Hand-authored mirror of the FROZEN contract (frontend/AGENTS.md: `api/types.ts`
 // is the documented stopgap; the generated `schema.ts` is gitignored). Kept in

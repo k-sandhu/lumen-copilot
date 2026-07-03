@@ -47,6 +47,7 @@ import { KnowledgeScopePicker } from './KnowledgeScopePicker';
 import { ToolAllowlist } from './ToolAllowlist';
 import { OwnerPickers } from './OwnerPickers';
 import { VersionHistory } from './VersionHistory';
+import { TestPanel } from './TestPanel';
 
 interface AssistantEditorProps {
   /** The assistant id in edit mode; null for `/assistants/new`. */
@@ -366,6 +367,15 @@ function EditorForm({
         </p>
       ) : null}
     </form>
+
+    {/* Test/preview/debug (#215) — edit mode only; a draft with no id cannot be
+        tested. Runs the working config with write-tier tools simulated/denied —
+        no real side effect — and shows the debug trace. */}
+    {!isNew && assistantId ? (
+      <div className="border-t border-border pt-6">
+        <TestPanel assistantId={assistantId} />
+      </div>
+    ) : null}
 
     {/* Version history + rollback (#214) — edit mode only; a draft with no id
         has no history to show. Publishing above appends a version here. */}

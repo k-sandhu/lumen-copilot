@@ -38,6 +38,7 @@ import {
   listSources,
   publishAssistant,
   rollbackAssistant,
+  testAssistant,
   updateAssistant,
 } from '@/api';
 import type {
@@ -46,6 +47,8 @@ import type {
   AssistantList,
   AssistantPublishRequest,
   AssistantRollbackRequest,
+  AssistantTestRequest,
+  AssistantTestTrace,
   AssistantUpdate,
   AssistantVersion,
   AssistantVersionList,
@@ -157,6 +160,20 @@ export function useRollbackAssistant(id: string) {
       void qc.invalidateQueries({ queryKey: assistantKeys.list() });
       void qc.invalidateQueries({ queryKey: assistantKeys.versions(id) });
     },
+  });
+}
+
+/**
+ * Run a read-only test/preview of a draft assistant (#215, E6-5). Returns the debug
+ * trace (prompt, retrieval, tool calls, outputs, timing) with NO real side effect —
+ * write-tier tools simulate/deny, nothing is persisted. A 404 (non-owned/cross-tenant)
+ * or 422 (malformed) propagates as a typed `ApiError` the panel renders inline; it is
+ * NOT swallowed. Nothing is invalidated — a preview mutates no server state, so the
+ * library/detail caches are untouched.
+ */
+export function useTestAssistant(id: string) {
+  return useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
+    mutationFn: (body) => testAssistant(id, body),
   });
 }
 
