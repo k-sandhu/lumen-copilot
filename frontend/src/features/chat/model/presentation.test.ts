@@ -10,6 +10,7 @@ import {
   isStale,
   modelBadgeLabel,
   buildRetrievalSummary,
+  groupCitationsByDocument,
   passageFromCitation,
   sourceMetadataRows,
   METADATA_UNKNOWN,
@@ -36,6 +37,36 @@ function cite(over: Partial<UiCitation> = {}): UiCitation {
     ...over,
   };
 }
+
+describe('groupCitationsByDocument', () => {
+  it('returns an empty array for no citations', () => {
+    expect(groupCitationsByDocument([])).toEqual([]);
+  });
+
+  it('collapses many passages of one document into a single group', () => {
+    const cs = [
+      cite({ id: 'c1', documentId: 'd1', chunkId: 'k1' }),
+      cite({ id: 'c2', documentId: 'd1', chunkId: 'k2' }),
+      cite({ id: 'c3', documentId: 'd1', chunkId: 'k3' }),
+    ];
+    const groups = groupCitationsByDocument(cs);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.passages.map((p) => p.number)).toEqual([1, 2, 3]);
+  });
+
+  it('preserves first-appearance document order and keeps FLAT numbering across groups', () => {
+    const cs = [
+      cite({ id: 'a1', documentId: 'A', documentName: 'A.pdf' }),
+      cite({ id: 'b1', documentId: 'B', documentName: 'B.pdf' }),
+      cite({ id: 'a2', documentId: 'A', documentName: 'A.pdf' }),
+    ];
+    const groups = groupCitationsByDocument(cs);
+    expect(groups.map((g) => g.documentId)).toEqual(['A', 'B']); // first-appearance order
+    // Group A keeps flat numbers 1 and 3 (not renumbered 1,2); B keeps 2.
+    expect(groups[0]?.passages.map((p) => p.number)).toEqual([1, 3]);
+    expect(groups[1]?.passages.map((p) => p.number)).toEqual([2]);
+  });
+});
 
 describe('relativeTime', () => {
   it('returns null for absent / unparseable timestamps (pill is omitted)', () => {
@@ -111,6 +142,22 @@ describe('buildRetrievalSummary', () => {
     const result = buildRetrievalSummary([], []);
     expect(result.summary).toBe('Looked at 0 sources');
     expect(result.hasContent).toBe(false);
+  });
+
+  it('never says "0 sources · N passages" when passages arrive before citations (#248)', () => {
+    // Mid-stream: the search tool finished with 10 hits, but citation events have
+    // not populated yet (or the answer cited nothing). The trace must NOT read the
+    // contradictory "Looked at 0 sources · 10 passages".
+    const result = buildRetrievalSummary([], [doneTool({ hitCount: 10 })]);
+    expect(result.summary).toBe('Looked at 10 passages');
+    expect(result.summary).not.toMatch(/0 sources/);
+    expect(result.hasContent).toBe(true);
+  });
+
+  it('drops the leading "0 sources" but keeps passages + excluded when uncited', () => {
+    const result = buildRetrievalSummary([], [doneTool({ hitCount: 10 })], 38);
+    expect(result.summary).toBe('Looked at 10 passages · 38 excluded');
+    expect(result.summary).not.toMatch(/0 sources/);
   });
 });
 
