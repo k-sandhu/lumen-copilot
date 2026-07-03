@@ -347,6 +347,7 @@ async def test_collection_delete_enqueues_index_sync_per_document(
             session,
             tenant_id=tenant_id,
             owner_id=user_id,
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
             request_id="r",
             source_ip="i",
