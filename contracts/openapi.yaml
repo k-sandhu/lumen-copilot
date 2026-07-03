@@ -377,6 +377,104 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  # --- Artifacts (agent/run-produced files) : CC-B #208 / panel #222 ---------
+  /artifacts:
+    get:
+      operationId: listArtifacts
+      summary: List artifacts an agent/run produced, optionally filtered.
+      description: >
+        The caller's own produced artifacts (files the `write_file` tool #220 or
+        the code sandbox #230/#231 emitted), distinct from uploaded `documents`.
+        Cursor-paginated, newest first, tenant- and owner-scoped (spec 0004
+        INV-1/INV-2). Optional filters narrow the page by producing session
+        (`session_id`) or write origin (`produced_by`).
+      tags: [artifacts]
+      parameters:
+        - name: session_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Restrict to artifacts produced in one chat session.
+        - name: produced_by
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/ArtifactProducedBy" }
+          description: Restrict to one write origin (chat_session / run / tool).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of artifacts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /artifacts/{artifactId}:
+    parameters:
+      - { $ref: "#/components/parameters/ArtifactId" }
+    get:
+      operationId: getArtifact
+      summary: Get artifact metadata.
+      description: >
+        One of the caller's produced artifacts. Tenant- and owner-scoped: an
+        artifact in another tenant, or owned by another user, returns **404**
+        (existence non-disclosure, INV-1/INV-2), never 403. A malformed (non-uuid)
+        id is **422**.
+      tags: [artifacts]
+      responses:
+        "200":
+          description: The artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteArtifact
+      summary: Delete an artifact (row + stored object).
+      description: >
+        Removes the stored object and the artifact row. Visibility is established
+        before any write, so another tenant's / owner's artifact is reported as
+        **404** and left untouched (INV-1/INV-2). Audited `artifact.deleted`.
+      tags: [artifacts]
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /artifacts/{artifactId}/content:
+    parameters:
+      - { $ref: "#/components/parameters/ArtifactId" }
+    get:
+      operationId: getArtifactContent
+      summary: Download / view the artifact's bytes.
+      description: >
+        Returns the stored bytes for download or inline preview. Like
+        `/documents/{documentId}/content`, the server may instead respond **302**
+        to a short-TTL presigned URL (CC-12); clients must follow it. Visibility
+        is identical to `GET /artifacts/{artifactId}` (not visible → 404, never
+        403). Audited `artifact.downloaded`.
+      tags: [artifacts]
+      responses:
+        "200":
+          description: The raw artifact bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "302":
+          description: Redirect to a short-TTL presigned URL.
+          headers:
+            Location:
+              required: true
+              description: Short-TTL presigned URL for the object.
+              schema: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Chat (sessions, history, send → stream) : CC-6 #24 --------------------
   /chat/sessions:
     get:
@@ -1766,6 +1864,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     SessionId:
       name: sessionId
       in: path
@@ -1981,6 +2084,56 @@ components:
             True when the text was capped at the server limit
             (DOCUMENT_TEXT_MAX_BYTES); the UI should say so and offer the
             original-bytes download instead of implying completeness.
+
+    ArtifactProducedBy:
+      type: string
+      description: >
+        What produced an artifact (CC-B #208) — the write origin. `chat_session`
+        = written during an interactive chat turn; `run` = produced by a
+        background run; `tool` = emitted by a tool / code invocation.
+      enum: [chat_session, run, tool]
+
+    Artifact:
+      type: object
+      additionalProperties: false
+      description: >
+        A file an agent/run produced (CC-B #208), distinct from a user-uploaded
+        `Document`. Immutable (a new version is a new row — no `updated_at`).
+        Tenant- and owner-scoped. `produced_by` records the write origin and pins
+        which back-link id is set (`session_id` / `run_id` / `tool_invocation_id`).
+      required:
+        [id, filename, mime_type, size_bytes, owner_id, produced_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        mime_type: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+        owner_id: { type: string, format: uuid }
+        produced_by: { $ref: "#/components/schemas/ArtifactProducedBy" }
+        created_at: { type: string, format: date-time }
+        session_id:
+          type: [string, "null"]
+          format: uuid
+          description: The chat session that produced this artifact, when applicable.
+        run_id:
+          type: [string, "null"]
+          format: uuid
+          description: The background run that produced this artifact, when applicable.
+        tool_invocation_id:
+          type: [string, "null"]
+          format: uuid
+          description: The tool/code invocation that emitted this artifact, when applicable.
+
+    ArtifactList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Artifact" }
+        next_cursor:
+          type: [string, "null"]
 
     # --- Chat ---------------------------------------------------------------
     ChatSessionCreate:

@@ -27,6 +27,7 @@ import { groupCitationsByDocument, partitionCitations } from '../model/presentat
 import { ToolActivity } from './ToolActivity';
 import { AnswerFooter } from './AnswerFooter';
 import { CodeRunPanel } from '@/features/codeRuns';
+import { artifactHref } from '@/features/artifacts';
 import type {
   ToolActivity as ToolActivityItem,
   CodeRunActivity,
@@ -172,7 +173,12 @@ function MessageBubbleComponent({
             {codeRuns.length > 0 && (
               <div className="mt-1" aria-label="Code runs">
                 {codeRuns.map((run) => (
-                  <CodeRunPanel key={run.runId} runId={run.runId} activity={run} />
+                  <CodeRunPanel
+                    key={run.runId}
+                    runId={run.runId}
+                    activity={run}
+                    resolveArtifactHref={artifactHref}
+                  />
                 ))}
               </div>
             )}

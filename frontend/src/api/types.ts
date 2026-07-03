@@ -144,6 +144,49 @@ export interface DocumentText {
   truncated: boolean;
 }
 
+// --- Artifacts (contracts/openapi.yaml §artifacts, CC-B #208 / panel #222) ---
+
+/** What produced an artifact — the write origin. */
+export type ArtifactProducedBy = 'chat_session' | 'run' | 'tool';
+
+/**
+ * A file an agent/run produced (CC-B #208), distinct from a user-uploaded
+ * `Document`. Immutable (a new version is a new row — no `updated_at`). Tenant-
+ * and owner-scoped; `produced_by` records the write origin and pins which
+ * back-link id is set (session/run/tool).
+ */
+export interface Artifact {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  owner_id: string;
+  produced_by: ArtifactProducedBy;
+  created_at: string;
+  /** The chat session that produced this artifact, when applicable. */
+  session_id?: string | null;
+  /** The background run that produced this artifact, when applicable. */
+  run_id?: string | null;
+  /** The tool/code invocation that emitted this artifact, when applicable. */
+  tool_invocation_id?: string | null;
+}
+
+/** 200 from GET /artifacts — a cursor page of produced artifacts. */
+export interface ArtifactList {
+  items: Artifact[];
+  next_cursor?: string | null;
+}
+
+/** Query filters for GET /artifacts (session / write-origin). */
+export interface ArtifactListQuery {
+  /** Restrict to artifacts produced in one chat session. */
+  session_id?: string;
+  /** Restrict to one write origin (chat_session / run / tool). */
+  produced_by?: ArtifactProducedBy;
+  cursor?: string;
+  limit?: number;
+}
+
 // --- Shared error model: Problem (RFC-9457 application/problem+json) ---
 export interface ProblemFieldError {
   field: string;
