@@ -140,10 +140,16 @@ export function useChatStream({
           armWatchdog();
         }
         // Socket dropped mid-stream with no terminal envelope → terminal error.
+        // Close the client too (like every other terminal path: done/error/
+        // watchdog/cancel). Without this, WsClient.manuallyClosed stays false and
+        // its pending reconnect keeps firing behind a terminal "Connection lost"
+        // UI — a zombie socket re-authenticating every ~10s until unmount/Retry
+        // (#273). AC-5 treats any mid-stream disconnect as terminal.
         if (next === 'closed' && !terminalRef.current) {
           clearWatchdog();
           terminalRef.current = true;
           dispatch({ kind: 'disconnect' });
+          clientRef.current?.close();
         }
       },
       onEnvelope: (envelope) => {
