@@ -57,6 +57,12 @@ from app.domain.entities import (
     RecentSearch,
     RefreshToken,
     Role,
+    Run,
+    RunError,
+    RunStatus,
+    RunStep,
+    RunStepKind,
+    RunTrigger,
     SavedSearch,
     Secret,
     SecretKind,
@@ -393,6 +399,39 @@ def _to_assistant_version(row: models.AssistantVersion) -> AssistantVersion:
         config=dict(row.config or {}),
         notes=row.notes,
         diff_summary=row.diff_summary,
+        created_at=row.created_at,
+    )
+
+
+def _to_run(row: models.Run) -> Run:
+    return Run(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        assistant_id=row.assistant_id,
+        assistant_version_id=row.assistant_version_id,
+        schedule_id=row.schedule_id,
+        session_id=row.session_id,
+        trigger=RunTrigger(row.trigger),
+        status=RunStatus(row.status),
+        inputs=dict(row.inputs or {}),
+        summary=row.summary,
+        message_id=row.message_id,
+        error=RunError.from_dict(row.error),
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        created_at=row.created_at,
+    )
+
+
+def _to_run_step(row: models.RunStep) -> RunStep:
+    return RunStep(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        run_id=row.run_id,
+        seq=row.seq,
+        kind=RunStepKind(row.kind),
+        payload=dict(row.payload or {}),
         created_at=row.created_at,
     )
 
@@ -2626,6 +2665,231 @@ class AssistantVersionRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_assistant_version(r) for r in rows]
+
+
+class RunRepository(_TenantScopedRepository):
+    """Headless agent-run records within one tenant (ADR-0015 §2, #235).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``run_id``
+    resolves to ``None`` (the existence-non-disclosure 404 is enforced one layer
+    up in ``services.runs_service`` off the ``None`` return). Owner visibility is
+    layered in the service (deny-by-default, spec 0004 §2.2). Persists via the
+    session but does not commit — the caller owns the transaction boundary.
+
+    The run's ``status`` is written by the runtime as it walks the state machine
+    (``queued`` → ``running`` → a terminal); a crash-safe task always writes a
+    terminal, never leaving a stuck ``running`` (ADR-0015 §5, INV-8).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        assistant_id: UUID,
+        assistant_version_id: UUID | None,
+        trigger: RunTrigger,
+        inputs: dict[str, object] | None = None,
+        schedule_id: UUID | None = None,
+        run_id: UUID | None = None,
+    ) -> Run:
+        """Create a ``queued`` run for an assistant (ADR-0015 §4 — fire/run-now enqueue).
+
+        ``run_id`` may be pre-minted so it doubles as the WS ``streamId`` known to
+        the enqueuer before the task starts (ADR-0015 §3); omitted ⇒ generated.
+        """
+        row = models.Run(
+            id=run_id or uuid4(),
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            assistant_id=assistant_id,
+            assistant_version_id=assistant_version_id,
+            schedule_id=schedule_id,
+            trigger=trigger.value,
+            status=RunStatus.QUEUED.value,
+            inputs=dict(inputs or {}),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_run(row)
+
+    async def get(self, run_id: UUID) -> Run | None:
+        stmt = select(models.Run).where(
+            models.Run.tenant_id == self._tenant_id,
+            models.Run.id == run_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_run(row) if row is not None else None
+
+    async def count_active_for_schedule(self, schedule_id: UUID) -> int:
+        """Count a schedule's still-active runs (``queued``/``running``) — the overlap gate.
+
+        Tenant-scoped (INV-1). The dispatcher's overlap check (ADR-0015 §5) keys on
+        this before enqueuing so a slow scheduled run never stacks up under the
+        default ``skip`` policy. Zero for a schedule with no active run.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Run)
+            .where(
+                models.Run.tenant_id == self._tenant_id,
+                models.Run.schedule_id == schedule_id,
+                models.Run.status.in_(
+                    [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
+                ),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def mark_running(self, run_id: UUID, *, started_at: datetime) -> Run | None:
+        """Transition a run to ``running`` and stamp ``started_at``, tenant-scoped."""
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.status = RunStatus.RUNNING.value
+        row.started_at = started_at
+        await self._session.flush()
+        return _to_run(row)
+
+    async def mark_terminal(
+        self,
+        run_id: UUID,
+        *,
+        status: RunStatus,
+        finished_at: datetime,
+        summary: str | None = None,
+        message_id: UUID | None = None,
+        session_id: UUID | None = None,
+        error: RunError | None = None,
+    ) -> Run | None:
+        """Write a run's terminal status + outputs (ADR-0015 §5), tenant-scoped.
+
+        The single terminal-writing method: sets one of ``succeeded``/``failed``/
+        ``escalated``, ``finished_at``, and any produced ``summary``/``message_id``/
+        ``session_id``/``error``. A crash path calls this with ``failed`` + a typed
+        error so a run never ends in silence (INV-8, never a stuck ``running``).
+        """
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.status = status.value
+        row.finished_at = finished_at
+        if summary is not None:
+            row.summary = summary
+        if message_id is not None:
+            row.message_id = message_id
+        if session_id is not None:
+            row.session_id = session_id
+        row.error = error.to_dict() if error is not None else None
+        await self._session.flush()
+        return _to_run(row)
+
+    async def _get_row(self, run_id: UUID) -> models.Run | None:
+        stmt = select(models.Run).where(
+            models.Run.tenant_id == self._tenant_id,
+            models.Run.id == run_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_owner_page(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        assistant_id: UUID | None = None,
+        schedule_id: UUID | None = None,
+        status: RunStatus | None = None,
+    ) -> list[Run]:
+        """A keyset page of an owner's runs (newest first) — the ``/runs`` inbox.
+
+        Owner- *and* tenant-scoped (spec 0004 §2.2 + INV-1): a caller only ever
+        sees their own runs. Optional ``assistant_id`` / ``schedule_id`` / ``status``
+        filters compose (the frozen ``GET /runs`` query params). Ordered by
+        ``(created_at, id)`` **descending** with ``id`` the stable tiebreaker; the
+        id-only cursor resolves the boundary ``created_at`` by a correlated scalar
+        subquery (exact on Postgres + the offline SQLite), mirroring the assistants
+        keyset.
+        """
+        conditions = [
+            models.Run.tenant_id == self._tenant_id,
+            models.Run.owner_id == owner_id,
+        ]
+        if assistant_id is not None:
+            conditions.append(models.Run.assistant_id == assistant_id)
+        if schedule_id is not None:
+            conditions.append(models.Run.schedule_id == schedule_id)
+        if status is not None:
+            conditions.append(models.Run.status == status.value)
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Run.created_at)
+                .where(
+                    models.Run.tenant_id == self._tenant_id,
+                    models.Run.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Run.created_at < boundary_created_at,
+                    and_(
+                        models.Run.created_at == boundary_created_at,
+                        models.Run.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Run)
+            .where(*conditions)
+            .order_by(models.Run.created_at.desc(), models.Run.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_run(r) for r in rows]
+
+
+class RunStepRepository(_TenantScopedRepository):
+    """The append-only run-transcript (``run_steps``) within one tenant (#235).
+
+    Exposes ``add`` (append one envelope) + reads — there is intentionally no
+    update or delete: a transcript step is written once (the ``RunTranscriptSink``
+    appends per published envelope) and read back on the run detail. ``(run_id,
+    seq)`` is UNIQUE (the migration) so a step can never be duplicated or reordered.
+    Tenant-scoped (INV-1).
+    """
+
+    async def add(
+        self,
+        *,
+        run_id: UUID,
+        seq: int,
+        kind: RunStepKind,
+        payload: dict[str, object],
+    ) -> RunStep:
+        """Append one transcript step (the durable analogue of a WS envelope)."""
+        row = models.RunStep(
+            tenant_id=self._tenant_id,
+            run_id=run_id,
+            seq=seq,
+            kind=kind.value,
+            payload=dict(payload),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_run_step(row)
+
+    async def list_for_run(self, run_id: UUID) -> list[RunStep]:
+        """The full ordered transcript of a run (by ``seq`` ascending), tenant-scoped."""
+        stmt = (
+            select(models.RunStep)
+            .where(
+                models.RunStep.tenant_id == self._tenant_id,
+                models.RunStep.run_id == run_id,
+            )
+            .order_by(models.RunStep.seq.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_run_step(r) for r in rows]
 
 
 def normalize_query(query: str) -> str:

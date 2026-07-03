@@ -67,6 +67,8 @@ _ALL_TABLES = _MVP_TABLES | {
     "secrets",
     "assistants",
     "assistant_versions",
+    "runs",
+    "run_steps",
 }
 
 
@@ -91,7 +93,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0016_assistants"]
+    assert list(script.get_heads()) == ["0017_runs"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -137,6 +139,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     assistants = script.get_revision("0016_assistants")
     assert assistants is not None
     assert assistants.down_revision == "0015_secrets"
+    runs = script.get_revision("0017_runs")
+    assert runs is not None
+    assert runs.down_revision == "0016_assistants"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -619,6 +624,67 @@ def test_offline_assistants_migration_round_trips(
     assert "alter table chat_sessions drop column assistant_id" in down
     assert "drop table assistant_versions" in down
     assert "drop table assistants" in down
+
+
+def test_offline_runs_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0017 creates runs + run_steps + RLS; down() reverses (#235, ADR-0015 §2).
+
+    AC (ADR-0015 §2): the upgrade renders the tenant/owner-scoped ``runs`` table
+    (with its jsonb ``inputs``/``error``, the trigger + status CHECKs, the pinned
+    ``assistant_version_id`` + ``session_id`` + ``message_id`` SET-NULL FKs, and the
+    four tenant-leading filter indexes), the ``run_steps`` transcript (the per-run
+    ``(run_id, seq)`` UNIQUE, the seq-nonneg + kind CHECKs), and the same fail-closed
+    RLS policy the 0007 backstop uses on both new tables. The downgrade drops the
+    policies, disables RLS, and drops the tables (children → parents). Offline DDL
+    render (Postgres dialect) — structural reversibility without a DB (#70 lesson);
+    the behavioural proof is the runtime + service tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0016_assistants:0017_runs", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped runs table + its FKs.
+    assert "create table runs" in up
+    assert "create table run_steps" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK (the run's principal)
+    assert "references assistants" in up  # assistant_id FK
+    assert "references assistant_versions" in up  # the pinned version (SET NULL)
+    assert "references chat_sessions" in up  # the internal session (SET NULL)
+    assert "references messages" in up  # the produced message (SET NULL)
+    assert "references runs" in up  # run_steps.run_id FK (CASCADE)
+    # The jsonb columns.
+    assert "inputs jsonb" in up
+    assert "payload jsonb" in up
+    # The domain-pinning CHECKs.
+    assert "ck_runs_trigger" in up
+    assert "ck_runs_status" in up
+    assert "ck_run_steps_seq_nonneg" in up
+    assert "ck_run_steps_kind" in up
+    # The per-run monotonic-seq UNIQUE (the transcript ordering guarantee).
+    assert "uq_run_steps_run_seq" in up
+    # The four ``/runs`` filter indexes (owner inbox, by assistant, schedule, status).
+    assert "create index ix_runs_tenant_owner on runs (tenant_id, owner_id)" in up
+    assert "create index ix_runs_tenant_assistant on runs (tenant_id, assistant_id)" in up
+    assert "create index ix_runs_tenant_schedule on runs (tenant_id, schedule_id)" in up
+    assert "create index ix_runs_tenant_status on runs (tenant_id, status)" in up
+    # The RLS backstop on both new tables — same fail-closed GUC policy as 0007.
+    assert "alter table runs enable row level security" in up
+    assert "alter table runs force row level security" in up
+    assert "create policy rls_runs on runs" in up
+    assert "alter table run_steps enable row level security" in up
+    assert "create policy rls_run_steps on run_steps" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0017_runs:0016_assistants", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_runs on runs" in down
+    assert "drop policy if exists rls_run_steps on run_steps" in down
+    assert "drop table run_steps" in down
+    assert "drop table runs" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

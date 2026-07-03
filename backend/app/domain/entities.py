@@ -183,6 +183,60 @@ class KnowledgeMode(str, enum.Enum):
     MODEL = "model"
 
 
+class RunTrigger(str, enum.Enum):
+    """Why an assistant run fired (ADR-0015 §2, contract ``RunTrigger``).
+
+    ``SCHEDULE`` = a cadence fire (the scheduler #236 enqueues it); ``MANUAL`` =
+    a run-now (the API / test harness enqueues it). A run always records exactly
+    one trigger so the audit trail shows *why* it ran.
+    """
+
+    SCHEDULE = "schedule"
+    MANUAL = "manual"
+
+
+class RunStatus(str, enum.Enum):
+    """The run state machine (ADR-0015 §2, contract ``RunStatus``).
+
+    ``QUEUED`` → ``RUNNING`` → one terminal of ``SUCCEEDED`` / ``FAILED`` /
+    ``ESCALATED``. ``ESCALATED`` is a first-class terminal distinct from
+    ``FAILED`` (the run needs a human, ADR-0015 §6). A crash never leaves a run
+    stuck ``RUNNING``: the Celery task's failure path writes ``FAILED`` with a
+    typed error (INV-8 — an illegal transition is rejected). ``#239`` owns the
+    escalation triggers; this epic fixes only that ``escalated`` is a status.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ESCALATED = "escalated"
+
+
+# The terminal run statuses — a run in one of these will never transition again
+# (the exactly-one-terminal contract, mirroring the chat runtime's WS lifecycle).
+_TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset(
+    {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.ESCALATED}
+)
+
+
+class RunStepKind(str, enum.Enum):
+    """A run-transcript step kind (ADR-0015 §2, contract ``RunStepKind``).
+
+    The durable analogue of the WS envelope type set: ``DELTA`` (incremental
+    output), ``TOOL_CALL`` / ``TOOL_RESULT`` (a tool turn), ``CITATION`` (a
+    grounded passage), ``ERROR`` (a failure step). The :class:`RunTranscriptSink`
+    maps each published chat envelope to one of these so an unwatched run's
+    stream is fully reconstructable from ``run_steps``.
+    """
+
+    DELTA = "delta"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    CITATION = "citation"
+    ERROR = "error"
+
+
 @dataclass(frozen=True, slots=True)
 class KnowledgeScope:
     """The assistant's retrieval filter (ADR-0011 §1/§2, contract ``KnowledgeScope``).
@@ -645,3 +699,87 @@ class ToolInvocation:
     duration_ms: int
     run_id: UUID | None = None
     created_at: datetime = field(default_factory=lambda: datetime.min)
+
+
+@dataclass(frozen=True, slots=True)
+class RunError:
+    """A typed run failure / escalation reason — the ``runs.error`` jsonb (ADR-0015 §2).
+
+    Never a raw vendor string (the runtime's opaque-error rule): ``code`` is a
+    stable machine-readable reason (e.g. ``model_unavailable``, ``ambiguous``,
+    ``tool_failed``) and ``message`` a human line for the owner's inbox. Present
+    only on ``failed`` / ``escalated`` runs; the contract ``RunError`` shape.
+    """
+
+    code: str
+    message: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {"code": self.code, "message": self.message}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> RunError | None:
+        """Rebuild from a stored jsonb blob (``None`` / malformed ⇒ ``None``)."""
+        if not isinstance(raw, dict):
+            return None
+        code = raw.get("code")
+        message = raw.get("message")
+        if not isinstance(code, str) or not isinstance(message, str):
+            return None
+        return cls(code=code, message=message)
+
+
+@dataclass(frozen=True, slots=True)
+class Run:
+    """One execution of an assistant — scheduled or manual — the ``runs`` row (ADR-0015 §2).
+
+    Tenant- and owner-scoped (INV-1/INV-2): a run in another tenant or owned by
+    another user is a 404 (existence non-disclosure). It pins the exact
+    ``assistant_version_id`` executed so a run is reproducible after the assistant
+    is edited (E1 versioning). ``status`` walks the :class:`RunStatus` state
+    machine; a headless run persists its cited answer through the *same* messages
+    /citations chain (``message_id`` links it), so INV-3 holds identically to
+    interactive chat. ``id`` doubles as the WS ``streamId`` for live attach
+    (ADR-0015 §3). ``owner_id`` is the run's principal — retrieval runs *as* them.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    assistant_id: UUID
+    assistant_version_id: UUID | None
+    schedule_id: UUID | None
+    session_id: UUID | None
+    trigger: RunTrigger
+    status: RunStatus
+    inputs: dict[str, object]
+    summary: str | None
+    message_id: UUID | None
+    error: RunError | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+    @property
+    def is_terminal(self) -> bool:
+        """True once the run has reached a terminal status (never transitions again)."""
+        return self.status in _TERMINAL_RUN_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class RunStep:
+    """One ordered step of a run's persisted transcript — a ``run_steps`` row (ADR-0015 §2).
+
+    The durable equivalent of a WS envelope: ``seq`` is monotonic per run (the
+    same ordering guarantee as the WS ``seq``; ``(run_id, seq)`` is unique), and
+    ``payload`` carries the envelope ``data`` typed per ``kind``. Reconstructs
+    exactly what a live watcher would have seen for an unwatched run.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    run_id: UUID
+    seq: int
+    kind: RunStepKind
+    payload: dict[str, object]
+    created_at: datetime
