@@ -143,6 +143,22 @@ describe('buildRetrievalSummary', () => {
     expect(result.summary).toBe('Looked at 0 sources');
     expect(result.hasContent).toBe(false);
   });
+
+  it('never says "0 sources · N passages" when passages arrive before citations (#248)', () => {
+    // Mid-stream: the search tool finished with 10 hits, but citation events have
+    // not populated yet (or the answer cited nothing). The trace must NOT read the
+    // contradictory "Looked at 0 sources · 10 passages".
+    const result = buildRetrievalSummary([], [doneTool({ hitCount: 10 })]);
+    expect(result.summary).toBe('Looked at 10 passages');
+    expect(result.summary).not.toMatch(/0 sources/);
+    expect(result.hasContent).toBe(true);
+  });
+
+  it('drops the leading "0 sources" but keeps passages + excluded when uncited', () => {
+    const result = buildRetrievalSummary([], [doneTool({ hitCount: 10 })], 38);
+    expect(result.summary).toBe('Looked at 10 passages · 38 excluded');
+    expect(result.summary).not.toMatch(/0 sources/);
+  });
 });
 
 describe('passageFromCitation', () => {
