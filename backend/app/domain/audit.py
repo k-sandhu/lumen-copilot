@@ -86,6 +86,14 @@ class AuditAction(str, enum.Enum):
     # generic tool events and the retrieval event.
     TOOL_INVOKED = "tool.invoked"
     TOOL_RESULT = "tool.result"
+    # Admin per-tenant tool governance (issue #223). Additive to the §2.4 taxonomy
+    # — deny-by-default is preserved (the set only grows; no action is relaxed).
+    # Setting a tenant's per-tool ``enabled`` / ``requires_approval`` override is a
+    # reversible, tenant-scoped **T1** governance write (spec 0004 §2.5 —
+    # "authorized owner; audited; no extra approval"): admin-gated (INV-5) and
+    # audited here (INV-6). This is the switch the policy-driven approval gate
+    # consults, so its provenance (who enabled/pre-approved which tool) is provable.
+    TOOL_POLICY_UPDATED = "tool_policy.updated"
     # Custom assistants (ADR-0011, issue #211). Additive to the §2.4 taxonomy —
     # deny-by-default is preserved (the set only grows; no action is relaxed). An
     # assistant is a governed config; every lifecycle mutation is audited (INV-6):

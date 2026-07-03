@@ -774,6 +774,46 @@ class McpServer(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """A per-tenant admin override of one tool's governance (issue #223).
+
+    The persistence half of admin tool governance: one row is an admin's decision
+    for one registered tool within one tenant — is it ``enabled`` for the tenant,
+    and does an invocation still ``require_approval``. **Absence of a row means the
+    tool's built-in default applies** (deny-by-default): a ``requires_approval``
+    tool (e.g. ``run_python``) stays denied until an admin writes a row that
+    enables it AND pre-approves it (``enabled=true`` + ``requires_approval=false``).
+    That is the switch the policy-driven approval gate consults at invoke time.
+
+    ``tool_name`` is the registry's single source of truth (validated against the
+    registry in the service before a write — no free-text tool can be stored). The
+    unique ``(tenant_id, tool_name)`` constraint makes the override a per-tenant
+    upsert; ``updated_by`` records the admin who last set it (audit corroboration).
+    Tenant-scoped like every table (INV-1); the ``0021`` migration puts it under
+    the same fail-closed RLS backstop as every other tenant-scoped table.
+    """
+
+    __tablename__ = "tenant_tool_policy"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "tool_name", name="uq_tenant_tool_policy_tenant_tool"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The registered tool name (validated against the registry in the service).
+    tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # The admin who last set this override (INV-6 corroboration); SET NULL so a
+    # deprovisioned admin does not cascade-delete the tenant's live policy.
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 

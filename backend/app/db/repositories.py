@@ -78,6 +78,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    TenantToolPolicy,
     ToolInvocation,
     User,
     UserPreferences,
@@ -317,6 +318,19 @@ def _to_mcp_server(row: models.McpServer) -> McpServer:
         last_error=row.last_error,
         discovered_tools=list(row.discovered_tools or []),
         secret_hint=row.secret_hint,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_tenant_tool_policy(row: models.TenantToolPolicy) -> TenantToolPolicy:
+    return TenantToolPolicy(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        tool_name=row.tool_name,
+        enabled=row.enabled,
+        requires_approval=row.requires_approval,
+        updated_by=row.updated_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -2633,6 +2647,78 @@ class McpServerRepository(_TenantScopedRepository):
         await self._session.delete(row)
         await self._session.flush()
         return True
+
+
+class TenantToolPolicyRepository(_TenantScopedRepository):
+    """Per-tenant tool-governance overrides within one tenant (issue #223).
+
+    Tenant-scoped like every repository (INV-1): every query filters on
+    ``tenant_id``, so one tenant can never read or write another's policy. A row's
+    absence is meaningful — it means "use the tool's built-in default" (the
+    deny-by-default rule the service and the approval gate enforce), so this
+    exposes a plain ``get_by_tool`` returning ``None`` rather than fabricating a
+    default. Writes are flushed not committed; the caller owns the transaction
+    boundary (so the audit event commits atomically with the write).
+    """
+
+    async def list_all(self) -> list[TenantToolPolicy]:
+        """Every stored per-tool override for this tenant (stable order by tool name)."""
+        stmt = (
+            select(models.TenantToolPolicy)
+            .where(models.TenantToolPolicy.tenant_id == self._tenant_id)
+            .order_by(models.TenantToolPolicy.tool_name.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_tenant_tool_policy(r) for r in rows]
+
+    async def get_by_tool(self, tool_name: str) -> TenantToolPolicy | None:
+        """The tenant's override for ``tool_name``, or ``None`` if none is stored.
+
+        ``None`` is not an error — it means the tool's built-in default is in force
+        (deny-by-default for a ``requires_approval`` tool). Tenant-scoped (INV-1).
+        """
+        row = await self._get_row(tool_name)
+        return _to_tenant_tool_policy(row) if row is not None else None
+
+    async def _get_row(self, tool_name: str) -> models.TenantToolPolicy | None:
+        stmt = select(models.TenantToolPolicy).where(
+            models.TenantToolPolicy.tenant_id == self._tenant_id,
+            models.TenantToolPolicy.tool_name == tool_name,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def upsert(
+        self,
+        *,
+        tool_name: str,
+        enabled: bool,
+        requires_approval: bool,
+        updated_by: UUID | None,
+    ) -> TenantToolPolicy:
+        """Create or update the tenant's override for ``tool_name`` (a per-tenant upsert).
+
+        The ``(tenant_id, tool_name)`` unique constraint makes this a singleton per
+        tool per tenant: an existing row is updated in place, otherwise a new one is
+        inserted. Tenant-scoped (INV-1) — the write is always keyed to this
+        repository's tenant, never request input. Flushed, not committed.
+        """
+        row = await self._get_row(tool_name)
+        if row is None:
+            row = models.TenantToolPolicy(
+                tenant_id=self._tenant_id,
+                tool_name=tool_name,
+                enabled=enabled,
+                requires_approval=requires_approval,
+                updated_by=updated_by,
+            )
+            self._session.add(row)
+        else:
+            row.enabled = enabled
+            row.requires_approval = requires_approval
+            row.updated_by = updated_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant_tool_policy(row)
 
 
 class AuditEventRepository(_TenantScopedRepository):

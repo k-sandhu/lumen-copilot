@@ -597,6 +597,28 @@ class McpServer:
 
 
 @dataclass(frozen=True, slots=True)
+class TenantToolPolicy:
+    """An admin's per-tenant override of one tool's governance (issue #223).
+
+    One row of the ``tenant_tool_policy`` table: is ``tool_name`` ``enabled`` for
+    the tenant, and does an invocation still ``requires_approval``. Tenant-scoped
+    (INV-1); ``updated_by`` is the admin who last set it (may be ``None`` if that
+    user was later deprovisioned — the override outlives them). Absence of a row
+    (not represented here) means the tool's built-in default applies — the
+    deny-by-default rule the service and the approval gate enforce.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    tool_name: str
+    enabled: bool
+    requires_approval: bool
+    updated_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Chunk:
     """A retrievable passage of a document, with its embedding in-row.
 

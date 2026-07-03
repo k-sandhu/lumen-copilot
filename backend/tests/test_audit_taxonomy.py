@@ -73,6 +73,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # invocation emits both the intent and the outcome (INV-6).
         "tool.invoked",
         "tool.result",
+        # Admin per-tenant tool governance (issue #223) — additive; setting a
+        # tenant's per-tool enabled/requires_approval override (a T1 governance
+        # write) is audited (INV-6). This is the switch the approval gate consults.
+        "tool_policy.updated",
         # Custom assistants (ADR-0011 / issue #211) — additive; every assistant
         # lifecycle mutation (create/update/delete/publish/rollback) is audited.
         "assistant.created",
