@@ -97,6 +97,10 @@ class _FakeObjectStore:
     async def get(self, tenant_id: str, key: str) -> bytes:
         return self.objects[key]
 
+    async def delete(self, tenant_id: str, key: str) -> None:
+        # Idempotent, like the real MinIO adapter (a missing key is a no-op).
+        self.objects.pop(key, None)
+
 
 class _FakeGateway:
     """Fake LLM gateway: a deterministic vector per input (offline)."""
@@ -155,7 +159,9 @@ async def sqlite_engine() -> AsyncIterator[None]:
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
     db_session._engine = engine
-    db_session._sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+    db_session._sessionmaker = async_sessionmaker(
+        bind=engine, expire_on_commit=False, autoflush=False
+    )
     try:
         yield
     finally:
@@ -175,6 +181,7 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
             session,
             tenant_id=tenant.id,
             owner_id=user.id,
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
             request_id="r",
             source_ip="203.0.113.1",
@@ -332,6 +339,40 @@ async def test_resync_replaces_prior_docs(
     # after it (the stale-cleanup pass runs after the reconcile transaction).
     old_events = [op for op, doc_id in _FakeIndexStore.events if doc_id == old_doc.id]
     assert old_events and old_events[-1] == "delete"
+
+
+async def test_resync_deletes_prior_objects_no_orphans(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-sync removes the PRIOR documents' stored objects, not just their rows
+    — otherwise every re-sync leaks the previous object set into the bucket (#269).
+    Uses ONE shared object store across both syncs so the orphan is observable."""
+    tenant_id, source_id = await _seed_source()
+    store = _FakeObjectStore()
+    body = "Pack my box with five dozen liquor jugs. " * 8
+
+    async def run() -> None:
+        await sync_source_async(
+            tenant_id,
+            source_id,
+            settings=_settings(),
+            object_store=store,  # type: ignore[arg-type]
+            gateway=_FakeGateway(),  # type: ignore[arg-type]
+        )
+
+    _patch_sync(monkeypatch, [FetchedDoc(title="Old", text=body, url="http://93.184.216.34/old")])
+    await run()
+    keys_after_first = set(store.objects)
+    assert len(keys_after_first) == 1  # the "Old" object is stored
+
+    # Re-sync with a differently-titled doc → a NEW content-addressed key. The
+    # prior "Old" object must be removed, leaving exactly the "New" object.
+    _patch_sync(monkeypatch, [FetchedDoc(title="New", text=body, url="http://93.184.216.34/new")])
+    await run()
+
+    keys_after_resync = set(store.objects)
+    assert len(keys_after_resync) == 1, "the prior object must be deleted, not orphaned"
+    assert keys_after_resync.isdisjoint(keys_after_first), "the old key is gone, the new remains"
 
 
 # --- failure path -----------------------------------------------------------
@@ -500,6 +541,7 @@ async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: u
             session,
             tenant_id=tenant_id,
             owner_id=owner_id,
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
             request_id="r",
             source_ip="203.0.113.1",

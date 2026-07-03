@@ -35,10 +35,14 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
+from app.core.logging import get_logger
 from app.db.repositories import CollectionRepository, DocumentRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Collection
 from app.services.audit import AuditSink
+from app.storage import ObjectStore
+
+log = get_logger(__name__)
 
 # Pagination bounds mirror the contract's Limit parameter (min 1, max 100).
 _MIN_LIMIT = 1
@@ -128,6 +132,7 @@ class CollectionsService:
         *,
         tenant_id: UUID,
         owner_id: UUID,
+        object_store: ObjectStore,
         audit: AuditSink,
         request_id: str,
         source_ip: str,
@@ -137,6 +142,7 @@ class CollectionsService:
         self._repo = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
         self._owner_id = owner_id
+        self._object_store = object_store
         self._audit = audit
         self._request_id = request_id
         self._source_ip = source_ip
@@ -249,6 +255,14 @@ class CollectionsService:
         (AGENTS.md §4) — capturing exactly which documents the deletion removed.
         All audit rows flush within this request's transaction, committing
         atomically with the delete.
+
+        The backing **object-store** bytes of the cascaded documents ARE removed
+        here (#269) — the row+chunk cascade clears retrievable content, but the
+        content-addressed MinIO objects would otherwise be orphaned. Cleanup runs
+        after a ``flush`` and is guarded by ``count_by_storage_key``, so a
+        content-addressed object is deleted only once no surviving document (this
+        tenant) still references it; it is best-effort (a storage blip never fails
+        the delete). Mirrors ``DocumentService.delete``.
         """
         existing = await self._repo.get(collection_id)
         if existing is None or not self._owns(existing):
@@ -274,6 +288,24 @@ class CollectionsService:
             # (ADR-0010 §5) — after-commit, so a rollback never leaves the index
             # ahead of Postgres. Best-effort; the reindex command repairs gaps.
             self._enqueue_index_sync_after_commit(doc.id)
+
+        await self._session.flush()
+        # Remove the backing objects of the cascaded documents — the row+chunk
+        # cascade above clears retrievable content but leaves the content-addressed
+        # MinIO objects orphaned otherwise (#269). Best-effort + post-flush: a
+        # storage blip must not fail the delete, and only an object no surviving
+        # document (this tenant) still references is removed (shared-content guard).
+        for storage_key in {d.storage_key for d in documents}:
+            if await self._documents.count_by_storage_key(storage_key) == 0:
+                try:
+                    await self._object_store.delete(str(self._tenant_id), storage_key)
+                except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                    log.warning(
+                        "collection_delete.object_cleanup_failed",
+                        collection_id=str(collection_id),
+                        storage_key=storage_key,
+                        error=type(exc).__name__,
+                    )
         return True
 
     def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:

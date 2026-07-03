@@ -23,18 +23,33 @@ from app.core.errors import ValidationError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
+    DocumentRepository,
     SourceRepository,
     TenantRepository,
     UserRepository,
 )
 from app.domain.audit import AuditAction
-from app.domain.entities import Role, SourceStatus
+from app.domain.entities import DocumentStatus, Role, SourceStatus
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
+from app.storage.keys import assert_key_owned_by
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
 _PUBLIC = "93.184.216.34"
+
+
+class _FakeObjectStore:
+    """In-memory object store recording deletes (offline; no MinIO)."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+
+    async def delete(self, tenant_id: str, key: str) -> None:
+        assert_key_owned_by(key, tenant_id)
+        self.deleted.append(key)
+        self.objects.pop(key, None)
 
 
 class _Seeded:
@@ -92,11 +107,18 @@ def no_broker(monkeypatch: pytest.MonkeyPatch) -> list[tuple[uuid.UUID, uuid.UUI
     return calls
 
 
-def _service(session: AsyncSession, *, tenant_id: uuid.UUID, owner_id: uuid.UUID) -> SourcesService:
+def _service(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    store: _FakeObjectStore | None = None,
+) -> SourcesService:
     return SourcesService(
         session,
         tenant_id=tenant_id,
         owner_id=owner_id,
+        object_store=store or _FakeObjectStore(),  # type: ignore[arg-type]
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
         request_id="req-1",
         source_ip="203.0.113.5",
@@ -311,3 +333,47 @@ async def test_delete_other_owner_returns_false(
         assert ok is False
         # Bob's source still exists.
         assert await SourceRepository(session, seeded.tenant_a).get(bob_src.id) is not None
+
+
+async def test_delete_removes_ingested_document_objects(
+    sessionmaker: async_sessionmaker[AsyncSession], seeded: _Seeded
+) -> None:
+    """Deleting a source removes its ingested documents' backing objects (#269).
+
+    The row+chunk cascade clears retrievable content, but the content-addressed
+    MinIO objects would otherwise be orphaned. Simulate a completed sync by
+    creating documents against the source (its backing collection, ``source_id``
+    set) with distinct storage keys, then assert the fake store's ``deleted``
+    records exactly those keys on source delete.
+    """
+    store = _FakeObjectStore()
+    async with sessionmaker() as session:
+        src = await _service(session, tenant_id=seeded.tenant_a, owner_id=seeded.alice).add(
+            source_type="web", url=f"http://{_PUBLIC}/a"
+        )
+        await session.commit()
+        collection_id = uuid.UUID(str(src.config["collection_id"]))
+
+        documents = DocumentRepository(session, seeded.tenant_a)
+        key_a = f"{seeded.tenant_a}/{'a' * 64}/page-a.txt"
+        key_b = f"{seeded.tenant_a}/{'b' * 64}/page-b.txt"
+        for key in (key_a, key_b):
+            await documents.create(
+                owner_id=seeded.alice,
+                collection_id=collection_id,
+                filename=key.rsplit("/", 1)[1],
+                mime_type="text/plain",
+                size_bytes=1,
+                storage_key=key,
+                status=DocumentStatus.READY,
+                source_id=src.id,
+            )
+        await session.commit()
+
+        ok = await _service(
+            session, tenant_id=seeded.tenant_a, owner_id=seeded.alice, store=store
+        ).delete(src.id)
+        await session.commit()
+
+    assert ok is True
+    assert set(store.deleted) == {key_a, key_b}

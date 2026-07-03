@@ -6,7 +6,7 @@
  * zero-citation notice (no fabricated refs). User input rendered as plain text.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MessageBubble } from './MessageBubble';
 import type { UiCitation } from '../model/citation';
@@ -77,6 +77,53 @@ describe('MessageBubble', () => {
       />,
     );
     expect(screen.getByText('2d ago')).toBeInTheDocument();
+  });
+
+  it('groups multiple passages of one document into a single source card (#248)', () => {
+    // Ten citations, all the SAME document → one card, ten numbered passage
+    // buttons, the document name shown once (not ten times).
+    const many: UiCitation[] = Array.from({ length: 10 }, (_, i) => ({
+      ...CITATION,
+      id: `c${i + 1}`,
+      chunkId: `k${i + 1}`,
+      charStart: i * 10,
+      charEnd: i * 10 + 5,
+    }));
+    render(
+      <MessageBubble role="assistant" content="Answer." citations={many} onOpenCitation={() => {}} />,
+    );
+    const list = screen.getByRole('list');
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1); // one document card
+    // The document name appears once (the group header), not per passage.
+    expect(within(list).getAllByText('Q4 strategy.pdf')).toHaveLength(1);
+    // Ten passage buttons, flat-numbered 1..10.
+    for (let n = 1; n <= 10; n++) {
+      expect(
+        within(list).getByRole('button', { name: `Citation ${n}: Q4 strategy.pdf` }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it('renders one card per document and keeps citation numbers flat across groups (#248)', async () => {
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const docA: UiCitation = { ...CITATION, id: 'a1', documentId: 'A', documentName: 'A.pdf' };
+    const docA2: UiCitation = { ...docA, id: 'a2', chunkId: 'ka2' };
+    const docB: UiCitation = { ...CITATION, id: 'b1', documentId: 'B', documentName: 'B.pdf' };
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={[docA, docA2, docB]}
+        onOpenCitation={onOpen}
+      />,
+    );
+    const list = screen.getByRole('list');
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2); // two documents
+    // Document B's first (and only) passage is flat #3, not renumbered to #1.
+    const third = within(list).getByRole('button', { name: 'Citation 3: B.pdf' });
+    await user.click(third);
+    expect(onOpen).toHaveBeenCalledWith(docB, undefined);
   });
 
   it('renders a model badge and a collapsible retrieval trace (#89)', async () => {
