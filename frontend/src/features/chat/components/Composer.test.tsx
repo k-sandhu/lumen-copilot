@@ -1,22 +1,25 @@
 /**
  * Composer (AC-1): send a message (button + Enter), Shift+Enter newline,
  * Send→Stop while streaming (cancellable), disabled empty state. The model
- * picker is embedded.
+ * picker + knowledge-mode control (#221) are embedded.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Composer } from './Composer';
-import type { ChatModelInfo } from '@/api';
+import type { ChatModelInfo, KnowledgeMode } from '@/api';
 
 const MODELS: ChatModelInfo[] = [
   { id: 'm1', label: 'Model One', provider: 'p', tier: 'frontier', is_default: true },
 ];
 
+const DEFAULT_MODES: KnowledgeMode[] = ['company', 'uploaded'];
+
 function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const onSend = vi.fn();
   const onStop = vi.fn();
   const onModelChange = vi.fn();
+  const onModesChange = vi.fn();
   render(
     <Composer
       models={MODELS}
@@ -26,10 +29,12 @@ function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
       streaming={false}
       onSend={onSend}
       onStop={onStop}
+      modes={DEFAULT_MODES}
+      onModesChange={onModesChange}
       {...overrides}
     />,
   );
-  return { onSend, onStop, onModelChange };
+  return { onSend, onStop, onModelChange, onModesChange };
 }
 
 describe('Composer', () => {
@@ -76,49 +81,51 @@ describe('Composer', () => {
 
   it('offers "Set as default" and reports the chosen model (#144)', async () => {
     const onSetDefaultModel = vi.fn();
-    render(
-      <Composer
-        models={MODELS}
-        model="m1"
-        onModelChange={vi.fn()}
-        busy={false}
-        streaming={false}
-        onSend={vi.fn()}
-        onStop={vi.fn()}
-        defaultModelId={null}
-        onSetDefaultModel={onSetDefaultModel}
-      />,
-    );
+    setup({ defaultModelId: null, onSetDefaultModel });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /set as default/i }));
     expect(onSetDefaultModel).toHaveBeenCalledTimes(1);
   });
 
   it('shows a "Default" tag (not the button) when the model is already the default (#144)', () => {
-    render(
-      <Composer
-        models={MODELS}
-        model="m1"
-        onModelChange={vi.fn()}
-        busy={false}
-        streaming={false}
-        onSend={vi.fn()}
-        onStop={vi.fn()}
-        defaultModelId="m1"
-        onSetDefaultModel={vi.fn()}
-      />,
-    );
+    setup({ defaultModelId: 'm1', onSetDefaultModel: vi.fn() });
     expect(screen.queryByRole('button', { name: /set as default/i })).not.toBeInTheDocument();
     expect(screen.getByText('Default')).toBeInTheDocument();
   });
 
-  it('surfaces the knowledge-mode chips, "Company sources" active by default (#89)', () => {
+  it('surfaces the knowledge-mode control with the active modes pressed (#221)', () => {
     setup();
-    const group = screen.getByRole('group', { name: /knowledge mode/i });
-    const company = within(group).getByRole('button', { name: /company sources/i });
-    expect(company).toHaveAttribute('aria-pressed', 'true');
-    // "Selected sources" is offered but disabled until a collection scope exists
-    // (we never imply a capability that isn't wired).
-    expect(within(group).getByRole('button', { name: /selected sources/i })).toBeDisabled();
+    const group = screen.getByRole('group', { name: /knowledge modes/i });
+    // Company + Uploaded are active by default; each is a pressed toggle.
+    expect(within(group).getByRole('button', { name: /company/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(group).getByRole('button', { name: /uploaded/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // Model is offered but off by default.
+    expect(within(group).getByRole('button', { name: /model/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('disables the Web mode toggle with a reason when web is not enabled (#221 AC-3)', () => {
+    setup();
+    const web = screen.getByRole('button', { name: 'Web' });
+    expect(web).toBeDisabled();
+    // The disabled reason is discoverable (tooltip + accessible description),
+    // never a silent no-op.
+    expect(web).toHaveAttribute('title', expect.stringMatching(/not enabled|off/i));
+  });
+
+  it('reports a mode toggle to the parent (#221)', async () => {
+    const { onModesChange } = setup();
+    const user = userEvent.setup();
+    // Toggling "Model" on adds it to the active set, preserving canonical order.
+    await user.click(screen.getByRole('button', { name: /model/i }));
+    expect(onModesChange).toHaveBeenCalledWith(['company', 'uploaded', 'model']);
   });
 });

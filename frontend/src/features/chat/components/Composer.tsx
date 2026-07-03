@@ -4,15 +4,20 @@
  * streaming, Send becomes Stop (cancellable streams — frontend/AGENTS.md). The
  * input is local UI state (draft), so it lives here, not in a server cache.
  *
- * Trust-signal re-skin (#89): a knowledge-mode chip group surfaces WHAT the next
- * answer is grounded on (the wireframe composer), defaulting to "Company
- * sources" — the existing behavior (retrieve across all permitted docs).
+ * Trust-signal re-skin (#89): a knowledge-mode control surfaces WHAT the next
+ * answer may draw on (the wireframe composer). #221 (epic E3-12) evolves it into
+ * the four wire modes (company / uploaded / web / model), reflecting the active
+ * assistant's `knowledgeScope.modes` with a per-chat override, and rendering the
+ * governed WEB toggle disabled-with-a-reason when it isn't enabled.
  */
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
-import type { ChatModelInfo } from '@/api';
+import type { ChatModelInfo, KnowledgeMode } from '@/api';
 import { Icon } from '@/ui';
 import { ModelPicker } from './ModelPicker';
-import { KnowledgeModeChips, type KnowledgeMode } from './KnowledgeModeChips';
+import {
+  KnowledgeModeControl,
+  type ModeAvailability,
+} from './KnowledgeModeControl';
 
 export interface ComposerProps {
   models: ChatModelInfo[];
@@ -33,6 +38,11 @@ export interface ComposerProps {
   onSetDefaultModel?: () => void;
   /** True while the default-model preference write is in flight. */
   settingDefault?: boolean;
+  /** The active knowledge modes for the next turn (#221). */
+  modes: readonly KnowledgeMode[];
+  onModesChange: (next: KnowledgeMode[]) => void;
+  /** Per-mode availability (web is governed / disabled-with-reason; #221). */
+  modeAvailability?: Partial<Record<KnowledgeMode, ModeAvailability>>;
 }
 
 export function Composer({
@@ -47,12 +57,11 @@ export function Composer({
   defaultModelId,
   onSetDefaultModel,
   settingDefault = false,
+  modes,
+  onModesChange,
+  modeAvailability,
 }: ComposerProps) {
   const [draft, setDraft] = useState('');
-  // Knowledge mode is a presentational scope indicator (#89). It defaults to
-  // "company" (all permitted docs — the existing behavior); "selected" stays
-  // disabled until a collection scope is wired, so we never imply a fake feature.
-  const [knowledgeMode, setKnowledgeMode] = useState<KnowledgeMode>('company');
   const canSend = draft.trim().length > 0 && !busy && !disabled;
 
   function submit(e: FormEvent) {
@@ -75,9 +84,10 @@ export function Composer({
   return (
     <form className="lc-composer" onSubmit={submit} aria-label="Message composer">
       <div className="lc-composer__chips">
-        <KnowledgeModeChips
-          value={knowledgeMode}
-          onChange={setKnowledgeMode}
+        <KnowledgeModeControl
+          value={modes}
+          onChange={onModesChange}
+          availability={modeAvailability}
           disabled={disabled || streaming}
         />
       </div>
