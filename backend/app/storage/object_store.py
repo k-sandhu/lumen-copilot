@@ -98,6 +98,28 @@ class ObjectStore:
             config=self._client_config,
         )
 
+    def _presign_client(self) -> Any:
+        """Client used only to MINT presigned URLs (#241).
+
+        Presigning is pure client-side signing (no network I/O), but SigV4
+        binds the signature to the Host header — a URL presigned against the
+        in-network endpoint (``http://minio:9000`` inside compose) is both
+        unreachable from a browser and unfixable after the fact (rewriting the
+        host invalidates the signature). When ``S3_PUBLIC_ENDPOINT_URL`` is set,
+        sign against it; otherwise fall back to the internal client. Object
+        I/O (``put``/``get``/``delete``) always stays on the internal endpoint.
+        """
+        public = self._settings.s3_public_endpoint_url
+        if public is None:
+            return self._client()
+        return self._session.client(
+            "s3",
+            endpoint_url=public,
+            aws_access_key_id=self._settings.s3_access_key,
+            aws_secret_access_key=self._settings.s3_secret_key,
+            config=self._client_config,
+        )
+
     # --- Bootstrap / health ---------------------------------------------------
 
     async def ensure_bucket(self) -> None:
@@ -214,7 +236,7 @@ class ObjectStore:
             max_bytes=self._settings.max_upload_bytes,
         )
         key = build_key(tenant_id, data, filename)
-        async with self._client() as client:
+        async with self._presign_client() as client:
             url: str = await client.generate_presigned_url(
                 "put_object",
                 Params={
@@ -234,7 +256,7 @@ class ObjectStore:
         be issued for another tenant's object.
         """
         assert_key_owned_by(key, tenant_id)
-        async with self._client() as client:
+        async with self._presign_client() as client:
             url: str = await client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._bucket, "Key": key},

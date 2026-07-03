@@ -128,6 +128,10 @@ services:
       # `env_file`, and ${...} interpolates from the host shell then .env, so a
       # blank value in .env never shadows a real host key. .env stays the fallback.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Presigned URLs must be reachable from the BROWSER, not just the compose
+      # network (#241): sign them against MinIO's published host port. Deployments
+      # with a real public object-store URL override this via .env / host env.
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:47184}
     env_file:
       - .env
     ports:
