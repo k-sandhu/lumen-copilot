@@ -283,6 +283,12 @@
   width: calc(12px * var(--fs));
   height: calc(12px * var(--fs));
 }
+/* web-source host chip (#221): the globe + registrable host, tinted so a
+   web-sourced citation reads as distinct from a corpus document. */
+.lc-meta-item--web {
+  color: var(--accent-strong, var(--accent));
+  font-weight: 600;
+}
 
 /* generic state blocks (loading / empty / error) shared by the kit */
 .lc-state {

@@ -69,4 +69,22 @@ describe('SourceInspector', () => {
     await user.click(screen.getByRole('button', { name: /close source inspector/i }));
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it('renders the web variant: host chip + "Open page" link (#221)', () => {
+    render(
+      <SourceInspector
+        title="A web page"
+        passage={PASSAGE}
+        web={{ host: 'example.org' }}
+        href="https://example.org/page"
+      />,
+    );
+    // Host is shown as a distinct meta chip, and the outbound link reads
+    // "Open page" (not "Open in source") and is safe.
+    expect(screen.getByText('example.org')).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /open page/i });
+    expect(link).toHaveAttribute('href', 'https://example.org/page');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.queryByRole('link', { name: /open in source/i })).not.toBeInTheDocument();
+  });
 });

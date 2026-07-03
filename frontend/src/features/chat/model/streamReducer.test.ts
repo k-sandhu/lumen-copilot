@@ -49,6 +49,27 @@ function citation(seq: number, id: string): EventEnvelope {
     },
   };
 }
+/**
+ * A WEB citation (#221): carries a `url` and NO `documentId` (a web result has
+ * no corpus document — INV-3). The reducer must accept it so it reaches the
+ * renderer, which classifies web-vs-document by URL presence.
+ */
+function webCitation(seq: number, id: string, url: string): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'citation',
+    data: {
+      id,
+      documentName: 'A web page',
+      snippet: 'a web snippet',
+      charStart: 0,
+      charEnd: 13,
+      url,
+    },
+  };
+}
 function toolCall(seq: number, callId: string): EventEnvelope {
   return {
     type: 'event',
@@ -121,6 +142,29 @@ describe('reduceStream', () => {
     );
     expect(s.citations.map((c) => c.id)).toEqual(['cite-1', 'cite-2']);
     expect(s.citations[0]).toMatchObject({ documentId: 'doc-1', charStart: 10, charEnd: 40 });
+  });
+
+  it('accepts a web citation (url, no documentId) so it reaches the renderer (#221)', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      delta(1, 'answer'),
+      webCitation(2, 'web-1', 'https://example.com/a'),
+    );
+    expect(s.citations).toHaveLength(1);
+    expect(s.citations[0]).toMatchObject({ id: 'web-1', url: 'https://example.com/a' });
+  });
+
+  it('still rejects a malformed citation with neither documentId nor url (#221)', () => {
+    const bad: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'citation',
+      data: { id: 'x', snippet: 's', charStart: 0, charEnd: 1 },
+    };
+    const s = fold(initialStreamState, start(0), bad);
+    expect(s.citations).toHaveLength(0);
   });
 
   it('reaches done with the terminal summary (AC-2 persist trigger)', () => {
