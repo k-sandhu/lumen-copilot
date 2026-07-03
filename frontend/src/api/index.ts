@@ -75,6 +75,13 @@ export { listRuns, getRun } from './runs';
 export type { RunPageQuery } from './runs';
 export { getCodeRun } from './codeRuns';
 export {
+  listArtifacts,
+  getArtifact,
+  deleteArtifact,
+  fetchArtifactContent,
+} from './artifacts';
+export type { ArtifactContent } from './artifacts';
+export {
   listMcpServers,
   registerMcpServer,
   getMcpServer,
