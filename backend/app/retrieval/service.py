@@ -231,8 +231,12 @@ class RetrievalService:
 
         Returns documents in the principal's allow-set whose filename matches
         ``name_or_query`` (case-insensitive substring; the MVP metadata signal).
-        Permission-filtered (INV-1/INV-2): never another user's or tenant's
-        documents. The returned :class:`DocumentMatch` ids feed :meth:`get_document`.
+        Permission-filtered (INV-1/INV-2) by the **same** owner-or-grant predicate
+        as :meth:`get_document` and the engine-backed :meth:`search_text`
+        (``queries._document_permitted``): a document owned by the caller **or**
+        explicitly granted to them (directly or via its collection) is returned; a
+        document in another tenant, or one the caller neither owns nor was granted,
+        never is. The returned :class:`DocumentMatch` ids feed :meth:`get_document`.
         A blank query yields ``[]``.
         """
         if not name_or_query.strip():
@@ -264,10 +268,17 @@ class RetrievalService:
         """Agent tool ``get_document``: fetch a permitted document's text, or ``None``.
 
         Returns the reassembled text (chunks in order) of ``document_id`` **iff**
-        it is in the principal's allow-set (same tenant + owned by them). A
-        document that is missing, in another tenant, or owned by another user
-        yields ``None`` — the runtime treats that as "not found" (existence
-        non-disclosure, INV-2; never reveals that a foreign document exists).
+        it is in the principal's allow-set: same tenant **and** owned by them
+        **or** explicitly granted to them (directly, or via a grant on its
+        collection — the cascade). This is the identical owner-or-grant predicate
+        the engine-backed :meth:`search`/:meth:`search_text` and the relational
+        :meth:`search_documents` use (``queries._document_permitted``), so the
+        three agent tools never disagree about what the caller may read (the
+        consistency #181 established, proven across all three in the live parity
+        test). A document that is missing, in another tenant, or neither owned nor
+        granted yields ``None`` — the runtime treats that as "not found"
+        (existence non-disclosure, INV-2; never reveals a foreign document
+        exists).
         """
         allow_set = AllowSet.for_principal(principal)
         row = await queries.load_document_text(

@@ -825,3 +825,181 @@ async def test_live_hybrid_search_honors_grant() -> None:
         async with engine.begin() as conn:
             await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()
+
+
+@_live
+async def test_live_agent_tools_share_owner_or_grant_path() -> None:
+    """The three agent tools agree on owner-or-grant (ADR-0010 slice 4, #192).
+
+    ``search_text`` runs on OpenSearch; ``search_documents`` / ``get_document``
+    stay relational. This proves all three apply the **identical** permission
+    predicate — a document owned by the caller **or** granted to them, directly
+    **or via a grant on its collection** (the cascade).
+
+    Owner A has three matching documents, one per collection:
+
+    * ``doc1`` — DOCUMENT-granted to B;
+    * ``doc2`` — its collection COLLECTION-granted to B (cascade);
+    * ``doc3`` — not granted.
+
+    For grantee B, every tool returns exactly {doc1, doc2} and never doc3; the
+    owner sees all three; a foreign-tenant user sees none — so the agent surface
+    can never disagree about what B may read (the #181 consistency, across all
+    three tools and both grant kinds).
+    """
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.ext.asyncio import create_async_engine as _create
+
+    from app.search import IndexedChunk, OpenSearchStore
+
+    engine = _create(_PG_URL)
+    schema = f"tools_test_{uuid.uuid4().hex[:8]}"
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=f"lumen-test-{uuid.uuid4().hex[:8]}",
+        dimensions=_EMBED_DIM,
+        timeout_seconds=30.0,
+    )
+    hot = 9
+    query_text = "quarterly revenue plan"
+    chunk_body = "quarterly revenue plan for the fiscal year"
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await conn.execute(sql_text(f'CREATE SCHEMA "{schema}"'))
+            await conn.execute(sql_text(f'SET search_path TO "{schema}", public'))
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        async with factory() as sess:
+            await sess.execute(sql_text(f'SET search_path TO "{schema}", public'))
+
+            tenant = (await TenantRepository(sess).create(name="A")).id
+            foreign_tenant = (await TenantRepository(sess).create(name="F")).id
+            owner = await UserRepository(sess, tenant).create(
+                email="owner@x.test", password_hash="h", roles=[Role.MEMBER]
+            )
+            grantee = await UserRepository(sess, tenant).create(
+                email="grantee@x.test", password_hash="h", roles=[Role.MEMBER]
+            )
+            outsider = await UserRepository(sess, foreign_tenant).create(
+                email="outsider@y.test", password_hash="h", roles=[Role.MEMBER]
+            )
+
+            indexed: list[IndexedChunk] = []
+
+            async def _doc(filename: str) -> tuple[uuid.UUID, uuid.UUID]:
+                """Owner's doc in its own collection + one matching chunk; index it."""
+                coll = await CollectionRepository(sess, tenant).create(
+                    owner_id=owner.id, name=filename
+                )
+                doc = await DocumentRepository(sess, tenant).create(
+                    owner_id=owner.id,
+                    collection_id=coll.id,
+                    filename=filename,
+                    mime_type="text/plain",
+                    size_bytes=1,
+                    storage_key="k",
+                    status=DocumentStatus.READY,
+                )
+                chunks = await ChunkRepository(sess, tenant).replace_for_document(
+                    doc.id,
+                    [
+                        ChunkInput(
+                            text=chunk_body,
+                            char_start=0,
+                            char_end=len(chunk_body),
+                            embedding=_unit_vector(_EMBED_DIM, hot),
+                        )
+                    ],
+                )
+                indexed.extend(
+                    IndexedChunk(
+                        chunk_id=c.id,
+                        tenant_id=c.tenant_id,
+                        document_id=c.document_id,
+                        owner_id=owner.id,
+                        collection_id=coll.id,
+                        ord=c.ord,
+                        text=c.text,
+                        embedding=c.embedding,
+                        char_start=c.char_start,
+                        char_end=c.char_end,
+                    )
+                    for c in chunks
+                )
+                return coll.id, doc.id
+
+            # All three filenames share the "quarterly" token so the relational
+            # filename match can't be the differentiator — only permission is.
+            _coll1, doc1 = await _doc("quarterly-alpha.txt")
+            coll2, doc2 = await _doc("quarterly-beta.txt")
+            _coll3, doc3 = await _doc("quarterly-gamma.txt")
+            await sess.commit()
+
+            await store.ensure_index()
+            await store.upsert_chunks(indexed, refresh=True)
+
+            # Owner A grants B: a DOCUMENT grant on doc1, a COLLECTION grant on
+            # doc2's collection (cascade). doc3 stays private.
+            grants = GrantsService(
+                sess,
+                tenant_id=tenant,
+                owner_id=owner.id,
+                roles=(Role.MEMBER,),
+                audit=AuditSink(AuditEventRepository(sess, tenant)),
+                request_id="req-live",
+                source_ip="203.0.113.9",
+            )
+            await grants.create_grant(
+                resource_type=GrantResourceType.DOCUMENT,
+                resource_id=doc1,
+                principal_id=grantee.id,
+            )
+            await grants.create_grant(
+                resource_type=GrantResourceType.COLLECTION,
+                resource_id=coll2,
+                principal_id=grantee.id,
+            )
+            await sess.commit()
+
+            gateway = _FakeGateway(_unit_vector(_EMBED_DIM, hot))
+            svc = RetrievalService(sess, gateway=gateway, store=store)
+            grantee_p = _principal(grantee.id, tenant)
+
+            # search_text (OpenSearch): exactly the two granted docs, never doc3.
+            passages = await svc.search_text(principal=grantee_p, query=query_text, k=10)
+            assert {p.document_id for p in passages} == {doc1, doc2}
+
+            # search_documents (relational): the same two, never doc3.
+            matches = await svc.search_documents(principal=grantee_p, name_or_query="quarterly")
+            assert {m.document_id for m in matches} == {doc1, doc2}
+
+            # get_document (relational): granted -> text; non-granted -> None.
+            assert await svc.get_document(principal=grantee_p, document_id=doc1) is not None
+            assert await svc.get_document(principal=grantee_p, document_id=doc2) is not None
+            assert await svc.get_document(principal=grantee_p, document_id=doc3) is None
+
+            # Owner sees all three across the same three tools.
+            owner_p = _principal(owner.id, tenant)
+            owner_passages = await svc.search_text(principal=owner_p, query=query_text, k=10)
+            assert {p.document_id for p in owner_passages} == {doc1, doc2, doc3}
+            owner_matches = await svc.search_documents(principal=owner_p, name_or_query="quarterly")
+            assert {m.document_id for m in owner_matches} == {doc1, doc2, doc3}
+            assert await svc.get_document(principal=owner_p, document_id=doc3) is not None
+
+            # A foreign-tenant user sees nothing from any tool (INV-1).
+            outsider_p = _principal(outsider.id, foreign_tenant)
+            assert await svc.search_text(principal=outsider_p, query=query_text, k=10) == []
+            assert await svc.search_documents(principal=outsider_p, name_or_query="quarterly") == []
+            assert await svc.get_document(principal=outsider_p, document_id=doc1) is None
+    finally:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(base_url=_OS_URL, timeout=15.0) as cleanup:
+            await cleanup.delete(f"/{store._index}")  # noqa: SLF001 — test teardown
+            await cleanup.delete(f"/_search/pipeline/{store._index}-hybrid")  # noqa: SLF001
+        await store.aclose()
+        async with engine.begin() as conn:
+            await conn.execute(sql_text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
