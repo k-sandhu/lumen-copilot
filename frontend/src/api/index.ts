@@ -67,6 +67,7 @@ export {
 export type { SchedulePageQuery } from './schedules';
 export { listRuns, getRun } from './runs';
 export type { RunPageQuery } from './runs';
+export { getCodeRun } from './codeRuns';
 export {
   getAccessToken,
   hasAccessToken,
