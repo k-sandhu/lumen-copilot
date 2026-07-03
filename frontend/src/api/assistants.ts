@@ -9,17 +9,20 @@
  *   PATCH  /assistants/{id}               {…}                  → Assistant
  *   DELETE /assistants/{id}                                    → 204
  *   POST   /assistants/{id}/publish       {notes?}             → AssistantVersion
+ *   GET    /assistants/{id}/versions      ?cursor&limit        → AssistantVersionList
+ *   POST   /assistants/{id}/rollback      {version, notes?}    → AssistantVersion
  *
  * Assistants are tenant- and owner/grant-scoped (spec 0004 INV-1/INV-2): a caller
  * only sees / mutates their own (or granted) assistants within their tenant.
  * Negative paths surface as typed `ApiError`s the UI branches on (problem body,
  * not status text): a missing/expired token → 401 (INV-4); a malformed body → 422
  * (INV-8); publishing without owner + backup owner → 422; a non-owned /
- * cross-tenant / unknown id → 404 (existence non-disclosure, INV-1/INV-2).
+ * cross-tenant / unknown id → 404 (existence non-disclosure, INV-1/INV-2); a
+ * rollback to an unknown/malformed `version` → 422.
  *
- * Version-history + rollback (GET /versions, POST /rollback) are deliberately out
- * of scope for #212 (they belong to F-AB-4); this client covers only the
- * builder + library surface.
+ * Version-history + rollback (GET /versions, POST /rollback) power the F-AB-4
+ * (#214) versions panel — the append-only history is immutable (ADR-0011 §1): a
+ * rollback creates a NEW head version equal to the target, never mutating history.
  */
 import { request } from './client';
 import type {
@@ -27,9 +30,11 @@ import type {
   AssistantCreate,
   AssistantList,
   AssistantPublishRequest,
+  AssistantRollbackRequest,
   AssistantStatus,
   AssistantUpdate,
   AssistantVersion,
+  AssistantVersionList,
 } from './types';
 
 /** Cursor-page + status-filter params for the list endpoint. */
@@ -37,6 +42,12 @@ export interface AssistantPageQuery {
   cursor?: string;
   limit?: number;
   status?: AssistantStatus;
+}
+
+/** Cursor-page params for the version-history endpoint. */
+export interface AssistantVersionPageQuery {
+  cursor?: string;
+  limit?: number;
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {
@@ -92,4 +103,33 @@ export function publishAssistant(
   body: AssistantPublishRequest = {},
 ): Promise<AssistantVersion> {
   return request<AssistantVersion>(`/assistants/${id}/publish`, { method: 'POST', json: body });
+}
+
+/**
+ * List an assistant's immutable published versions (newest first), one cursor
+ * page (ADR-0011 §1). The history is append-only — publishing and rolling back
+ * each append a version, nothing is ever mutated or deleted. A non-owned /
+ * cross-tenant / unknown id → 404 (INV-1/INV-2).
+ */
+export function listAssistantVersions(
+  id: string,
+  query: AssistantVersionPageQuery = {},
+  signal?: AbortSignal,
+): Promise<AssistantVersionList> {
+  return request<AssistantVersionList>(`/assistants/${id}/versions${buildQuery({ ...query })}`, {
+    signal,
+  });
+}
+
+/**
+ * Roll the head back to a prior version (ADR-0011 §1). Creates a **new** head
+ * version whose config copies the named prior version — history is never mutated
+ * or deleted. An unknown / malformed `version` → 422; a non-owned / cross-tenant
+ * id → 404. Returns the newly-created head version.
+ */
+export function rollbackAssistant(
+  id: string,
+  body: AssistantRollbackRequest,
+): Promise<AssistantVersion> {
+  return request<AssistantVersion>(`/assistants/${id}/rollback`, { method: 'POST', json: body });
 }

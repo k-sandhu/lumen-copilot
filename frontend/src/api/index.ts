@@ -58,8 +58,10 @@ export {
   updateAssistant,
   deleteAssistant,
   publishAssistant,
+  listAssistantVersions,
+  rollbackAssistant,
 } from './assistants';
-export type { AssistantPageQuery } from './assistants';
+export type { AssistantPageQuery, AssistantVersionPageQuery } from './assistants';
 export {
   listSchedules,
   createSchedule,

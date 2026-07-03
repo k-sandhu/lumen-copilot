@@ -94,3 +94,15 @@ export function ownerLabel(ownerId: string, members: Member[] | undefined): stri
 export function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
+
+/**
+ * Format an ISO timestamp as a short local datetime for the version-history panel
+ * (#214), or an em-dash placeholder for a missing/invalid value (never a blank
+ * cell). Locale-driven; not faked when absent.
+ */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}

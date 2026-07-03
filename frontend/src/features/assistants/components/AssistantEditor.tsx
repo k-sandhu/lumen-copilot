@@ -46,6 +46,7 @@ import {
 import { KnowledgeScopePicker } from './KnowledgeScopePicker';
 import { ToolAllowlist } from './ToolAllowlist';
 import { OwnerPickers } from './OwnerPickers';
+import { VersionHistory } from './VersionHistory';
 
 interface AssistantEditorProps {
   /** The assistant id in edit mode; null for `/assistants/new`. */
@@ -170,8 +171,9 @@ function EditorForm({
   const isNew = assistantId === null;
 
   return (
+    <div className="mx-auto max-w-3xl space-y-8 px-5 py-6">
     <form
-      className="mx-auto max-w-3xl space-y-6 px-5 py-6"
+      className="space-y-6"
       onSubmit={(e) => {
         e.preventDefault();
         handleSave();
@@ -364,6 +366,15 @@ function EditorForm({
         </p>
       ) : null}
     </form>
+
+    {/* Version history + rollback (#214) — edit mode only; a draft with no id
+        has no history to show. Publishing above appends a version here. */}
+    {!isNew && current ? (
+      <div className="border-t border-border pt-6">
+        <VersionHistory assistant={current} members={members.data?.items} />
+      </div>
+    ) : null}
+    </div>
   );
 }
 
