@@ -22,11 +22,13 @@ reference data (the same for every tenant), so they need only the role gate.
 
 **Read-before-write (spec 0004 §2.5).** The governance surfaces (members, model
 governance, risk tiers) are read-only — the admin console reflects governance, it
-never changes it. The one write is ``PATCH /admin/settings`` (issue #148): a
-reversible, tenant-scoped **T1** action (spec 0004 §2.5 — "authorized owner;
-audited; no extra approval") that sets a tenant's chat tool-turn budget. It is
-admin-gated like every route here (INV-5) and audited in the service (INV-6); an
-out-of-range value is a **422** (INV-8). No T2+ governance mutation exists.
+never changes it. The writes are all reversible, tenant-scoped **T1** actions
+(spec 0004 §2.5 — "authorized owner; audited; no extra approval"), admin-gated
+like every route here (INV-5) and audited in the service (INV-6): ``PATCH
+/admin/settings`` sets a tenant's chat tool-turn budget (issue #148; an
+out-of-range value is a **422**, INV-8), and ``PUT`` / ``DELETE /admin/branding``
+set or clear the tenant's application logo (an over-size logo is **413**, a
+non-image **415**). No T2+ governance mutation exists.
 """
 
 from __future__ import annotations
@@ -34,17 +36,19 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    ObjectStoreDep,
     SettingsDep,
     extract_request_id,
     require_roles,
 )
+from app.core.errors import ValidationError
 from app.domain.entities import Role
 from app.services.admin_service import (
     AdminService,
@@ -154,6 +158,18 @@ class TenantSettingsUpdateRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     max_tool_turns: int | None = Field(ge=1, le=50)
+
+
+class TenantBrandingResponse(BaseModel):
+    """``#/components/schemas/TenantBranding`` — the tenant's application logo URL.
+
+    ``logo_url`` is a short-TTL presigned GET URL for the tenant's uploaded logo,
+    or ``null`` when none is set (the shell then renders the default brand mark).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    logo_url: str | None = None
 
 
 class ToolPolicyEntryResponse(BaseModel):
@@ -401,6 +417,74 @@ async def update_tenant_settings(
     )
     await session.commit()
     return _to_tenant_settings(view)
+
+
+@router.put("/branding", response_model=TenantBrandingResponse)
+async def update_tenant_branding(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    object_store: ObjectStoreDep,
+    file: Annotated[UploadFile, File()],
+) -> TenantBrandingResponse:
+    """Upload the tenant's application logo (admin only; T1, audited).
+
+    An admin sets the per-tenant brand mark shown in the app shell for every user
+    of the tenant. Stores the image (MinIO, #22) and persists its key on the tenant
+    row; the shell reads the resulting presigned URL from ``GET /auth/me`` (and the
+    admin panel from this 200). Admin-only via the router gate (INV-5); tenant-scoped
+    via ``current_tenant`` (INV-1); the service audits the change (INV-6). Over-size →
+    **413**, a non-image content-type → **415**, a missing/blank filename → **422**.
+    """
+    data = await file.read()
+    # The declared content-type drives the allowlist check; default to the generic
+    # octet-stream so a client that omits it is rejected by the allowlist (415)
+    # rather than silently accepted.
+    content_type = file.content_type or "application/octet-stream"
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise ValidationError("upload is missing a filename", code="missing_filename")
+
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    logo_url = await service.set_tenant_logo(
+        object_store=object_store,
+        logo_bytes=data,
+        logo_content_type=content_type,
+        logo_filename=filename,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return TenantBrandingResponse(logo_url=logo_url)
+
+
+@router.delete("/branding", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_tenant_branding(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> Response:
+    """Clear the tenant's application logo (admin only; T1, audited).
+
+    Reverts the shell to the default brand mark for every user of the tenant. The
+    reverse of ``PUT /branding``: sets the tenant's ``logo_key`` to null. Admin-only
+    via the router gate (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the
+    service audits the change (INV-6). Idempotent — clearing an already-unset logo
+    succeeds with **204**.
+    """
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    await service.clear_tenant_logo(
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/tool-policy", response_model=ToolPolicyResponse)

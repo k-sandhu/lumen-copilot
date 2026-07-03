@@ -29,12 +29,15 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.deps import get_db_session
+from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
 from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+from app.storage.keys import assert_key_owned_by, build_key
+from app.storage.object_store import StoredObject
+from app.storage.validation import validate_upload
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -48,6 +51,42 @@ _ADMIN_PATHS = (
     "/api/v1/admin/tool-policy",
     "/api/v1/admin/sandbox-policy",
 )
+
+
+class FakeObjectStore:
+    """In-memory stand-in for the #22 ``ObjectStore`` (no MinIO needed).
+
+    Implements just the surface the branding + /auth/me paths use: ``put_logo``
+    (validates against the **logo** allowlist/limit via the real ``validate_upload``,
+    so 413/415 negatives are exercised end-to-end) and the generic ``presign_get``
+    (tenant-prefix seam enforced by the real ``assert_key_owned_by``). Records puts
+    so a test can assert the object was stored.
+    """
+
+    def __init__(self) -> None:
+        from app.core.config import get_settings
+
+        self._settings = get_settings()
+        self.objects: dict[str, bytes] = {}
+
+    async def put_logo(
+        self, tenant_id: str, data: bytes, content_type: str, filename: str
+    ) -> StoredObject:
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.logo_allowed_content_types,
+            max_bytes=self._settings.max_logo_bytes,
+        )
+        key = build_key(tenant_id, data, filename)
+        self.objects[key] = data
+        return StoredObject(
+            key=key, sha256=key.split("/")[1], size_bytes=len(data), content_type=content_type
+        )
+
+    async def presign_get(self, tenant_id: str, key: str) -> str:
+        assert_key_owned_by(key, tenant_id)
+        return f"https://storage.test/{key}?sig=fake"
 
 
 class _Seeded:
@@ -126,8 +165,16 @@ def seeded(sessionmaker: async_sessionmaker[AsyncSession]) -> _Seeded:
 
 
 @pytest.fixture
-def app(sessionmaker: async_sessionmaker[AsyncSession]) -> Iterator[FastAPI]:
-    """The app with its DB session dependency pointed at the SQLite engine."""
+def store() -> FakeObjectStore:
+    """The in-memory object store the branding + /auth/me paths use (offline)."""
+    return FakeObjectStore()
+
+
+@pytest.fixture
+def app(
+    sessionmaker: async_sessionmaker[AsyncSession], store: FakeObjectStore
+) -> Iterator[FastAPI]:
+    """The app with its DB session + object store pointed at offline fakes."""
     application = create_app()
 
     async def _override_session() -> AsyncIterator[AsyncSession]:
@@ -135,6 +182,7 @@ def app(sessionmaker: async_sessionmaker[AsyncSession]) -> Iterator[FastAPI]:
             yield session
 
     application.dependency_overrides[get_db_session] = _override_session
+    application.dependency_overrides[get_object_store_dep] = lambda: store
     yield application
     application.dependency_overrides.clear()
 
@@ -845,5 +893,162 @@ async def test_patch_sandbox_policy_emits_audit_event(
     ev = policy_events[0]
     assert ev.metadata["enabled"] is True
     assert ev.metadata["egress_allowed"] is True
+    assert ev.resource_type == "tenant"
+    assert ev.resource_id == str(seeded.tenant_a)
+
+
+# --- PUT/DELETE /admin/branding (per-tenant application logo) -----------------
+#
+# A tenant admin uploads a logo; it stores + persists a key on the tenant row;
+# the presigned URL surfaces on both the PUT 200 and GET /auth/me. A non-admin is
+# 403; an over-size or non-image file is rejected; DELETE clears it back to the
+# default (null on /auth/me). All admin-gated (INV-5), tenant-scoped (INV-1),
+# audited (INV-6). The object store is the offline FakeObjectStore.
+
+# A minimal 1x1 PNG (real magic bytes + IHDR) so the image allowlist accepts it.
+_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6360000002000154a24f1e0000000049454e44ae426082"
+)
+
+
+def _logo_file(
+    data: bytes = _PNG_1X1, name: str = "logo.png", content_type: str = "image/png"
+) -> dict[str, tuple[str, bytes, str]]:
+    """A multipart ``files=`` dict for the branding upload."""
+    return {"file": (name, data, content_type)}
+
+
+async def test_put_branding_uploads_logo_and_returns_url(
+    client: AsyncClient, seeded: _Seeded, store: FakeObjectStore
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.put(
+        "/api/v1/admin/branding", headers=_auth(token), files=_logo_file()
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == {"logo_url"}
+    assert isinstance(body["logo_url"], str) and body["logo_url"]
+    # The bytes were actually stored under tenant A's prefix.
+    assert any(key.startswith(f"{seeded.tenant_a}/") for key in store.objects)
+
+
+async def test_me_returns_logo_url_null_before_and_set_after(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    # Before any upload, /auth/me carries logo_url = null (→ default brand mark).
+    before = await client.get("/api/v1/auth/me", headers=_auth(token))
+    assert before.status_code == 200, before.text
+    assert "logo_url" in before.json()
+    assert before.json()["logo_url"] is None
+
+    # After an upload, /auth/me carries the presigned URL for every user of the tenant.
+    put = await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
+    assert put.status_code == 200, put.text
+    after = await client.get("/api/v1/auth/me", headers=_auth(token))
+    assert after.json()["logo_url"] is not None
+    assert isinstance(after.json()["logo_url"], str)
+
+
+async def test_delete_branding_clears_logo(client: AsyncClient, seeded: _Seeded) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
+    # DELETE reverts to the default: /auth/me logo_url is null again.
+    resp = await client.delete("/api/v1/admin/branding", headers=_auth(token))
+    assert resp.status_code == 204, resp.text
+    me = await client.get("/api/v1/auth/me", headers=_auth(token))
+    assert me.json()["logo_url"] is None
+
+
+async def test_delete_branding_is_idempotent(client: AsyncClient, seeded: _Seeded) -> None:
+    # Clearing an already-unset logo still succeeds (204).
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.delete("/api/v1/admin/branding", headers=_auth(token))
+    assert resp.status_code == 204, resp.text
+
+
+async def test_put_branding_rejects_non_image_415(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.put(
+        "/api/v1/admin/branding",
+        headers=_auth(token),
+        files=_logo_file(data=b"not an image", name="notes.txt", content_type="text/plain"),
+    )
+    # A non-image content-type is outside the logo allowlist → 415 (INV-8 family).
+    assert resp.status_code == 415, resp.text
+
+
+async def test_put_branding_rejects_oversize_413(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    # One byte over the configured cap (declared as an allowed image type).
+    oversize = b"\x00" * (get_settings().max_logo_bytes + 1)
+    resp = await client.put(
+        "/api/v1/admin/branding",
+        headers=_auth(token),
+        files=_logo_file(data=oversize, name="huge.png", content_type="image/png"),
+    )
+    assert resp.status_code == 413, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_put_branding_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    # The branding write is admin-only (INV-5) — member/security are 403.
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.put(
+        "/api/v1/admin/branding", headers=_auth(token), files=_logo_file()
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_delete_branding_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.delete("/api/v1/admin/branding", headers=_auth(token))
+    assert resp.status_code == 403, resp.text
+
+
+async def test_branding_unauthenticated_is_401(client: AsyncClient) -> None:
+    put = await client.put("/api/v1/admin/branding", files=_logo_file())
+    assert put.status_code == 401
+    delete = await client.delete("/api/v1/admin/branding")
+    assert delete.status_code == 401
+
+
+async def test_put_branding_is_tenant_scoped(client: AsyncClient, seeded: _Seeded) -> None:
+    # Admin A sets a logo; admin B's tenant is untouched (INV-1 → still default).
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.put("/api/v1/admin/branding", headers=_auth(token_a), files=_logo_file())
+    token_b = await _login(client, seeded.admin_b_email)
+    me_b = await client.get("/api/v1/auth/me", headers=_auth(token_b))
+    assert me_b.json()["logo_url"] is None
+
+
+async def test_put_branding_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
+    assert resp.status_code == 200, resp.text
+    # The write emits exactly one branding audit event for this tenant (INV-6).
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    branding_events = [e for e in events if e.action == "tenant.branding_updated"]
+    assert len(branding_events) == 1
+    ev = branding_events[0]
+    assert ev.metadata["has_logo"] is True
     assert ev.resource_type == "tenant"
     assert ev.resource_id == str(seeded.tenant_a)

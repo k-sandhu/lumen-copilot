@@ -469,6 +469,10 @@ class Tenant:
     # set it caps how many tool-calling turns the answer runtime may take before
     # it forces a final synthesis (1–50). A tenant admin configures it.
     max_tool_turns: int | None = None
+    # Per-tenant application logo (object-store key); ``None`` ⇒ the default brand
+    # mark. A tenant admin uploads it (admin branding); the shell renders it via a
+    # presigned GET URL delivered on ``GET /auth/me``.
+    logo_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

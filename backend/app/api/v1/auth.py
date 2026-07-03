@@ -25,6 +25,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    ObjectStoreDep,
     SettingsDep,
     extract_request_id,
 )
@@ -70,7 +71,7 @@ class TokenResponse(BaseModel):
 
 
 class CurrentUserResponse(BaseModel):
-    """``#/components/schemas/CurrentUser`` — id, email, tenant, roles."""
+    """``#/components/schemas/CurrentUser`` — id, email, tenant, roles, logo."""
 
     model_config = {"extra": "forbid"}
 
@@ -80,6 +81,10 @@ class CurrentUserResponse(BaseModel):
     tenant_name: str
     roles: list[str]
     created_at: datetime
+    # The tenant's application logo as a short-TTL presigned GET URL, or null when
+    # none is set (the shell then renders the default brand mark). Per-tenant
+    # branding — the same for every user of the tenant (admin uploads it).
+    logo_url: str | None = None
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -188,13 +193,16 @@ async def get_current_user(
     principal: CurrentUser,
     session: DbSession,
     tenant_id: CurrentTenant,
+    object_store: ObjectStoreDep,
 ) -> CurrentUserResponse:
-    """The authenticated principal (id, tenant, roles) — from the token, hydrated.
+    """The authenticated principal (id, tenant, roles, logo) — from the token, hydrated.
 
     The token carries id/tenant/roles; we read the user row (tenant-scoped) for
     the email + ``created_at`` and the tenant row for ``tenant_name`` (so the UI
-    never has to surface the raw tenant UUID, #247). A token whose subject no
-    longer exists is treated as unauthenticated (401).
+    never has to surface the raw tenant UUID, #247) and the per-tenant application
+    ``logo_key``. When a logo is set, we mint a short-TTL presigned GET URL for the
+    shell to render (else ``logo_url`` is null → the default brand mark). A token
+    whose subject no longer exists is treated as unauthenticated (401).
 
     Depends on ``CurrentTenant`` (not just the principal's ``tenant_id``) so the
     RLS GUC is bound on this request session before the tenant-scoped read (#17);
@@ -206,6 +214,11 @@ async def get_current_user(
     tenant = await TenantRepository(session).get(tenant_id)
     if tenant is None:  # pragma: no cover — a resolved principal always has a tenant
         raise InvalidTokenError()
+    logo_url = (
+        await object_store.presign_get(str(tenant_id), tenant.logo_key)
+        if tenant.logo_key is not None
+        else None
+    )
     return CurrentUserResponse(
         id=str(user.id),
         email=user.email,
@@ -213,4 +226,5 @@ async def get_current_user(
         tenant_name=tenant.name,
         roles=[r.value for r in user.roles],
         created_at=user.created_at,
+        logo_url=logo_url,
     )

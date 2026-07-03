@@ -9,22 +9,50 @@
  *   GET   /admin/risk-tiers                      → RiskTierList
  *   GET   /admin/tool-policy                      → ToolPolicy
  *   PATCH /admin/tool-policy      {tool_name,…}   → ToolPolicy
+ *   PUT    /admin/branding        (multipart file) → TenantBranding
+ *   DELETE /admin/branding                         → 204
  *
  * The tool-policy PATCH (issue #223) is the one governance WRITE here — a
  * tenant-scoped T1 action, audited server-side; an unknown tool name → 422 (INV-8).
  * Negative paths surface as typed `ApiError`s: 401 (INV-4) for a missing/expired
  * token, 403 (INV-5) for a non-admin caller.
  */
-import { request } from './client';
+import { ApiError, request, withRefreshRetry } from './client';
+import { API_BASE_URL } from './env';
+import { getAccessToken } from './token';
 import type {
   MemberList,
   ModelGovernance,
+  Problem,
   RiskTierList,
   SandboxPolicy,
   SandboxPolicyUpdate,
+  TenantBranding,
   ToolPolicy,
   ToolPolicyUpdate,
 } from './types';
+
+function joinApi(path: string): string {
+  const b = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${b}${p}`;
+}
+
+function isProblem(value: unknown): value is Problem {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.title === 'string' && typeof v.status === 'number';
+}
+
+async function safeProblem(response: Response): Promise<Problem | undefined> {
+  try {
+    const data: unknown = await response.json();
+    if (isProblem(data)) return data;
+  } catch {
+    // Non-JSON / empty body — fall through.
+  }
+  return undefined;
+}
 
 export interface PageQuery {
   cursor?: string;
@@ -83,4 +111,52 @@ export function getSandboxPolicy(signal?: AbortSignal): Promise<SandboxPolicy> {
  */
 export function updateSandboxPolicy(body: SandboxPolicyUpdate): Promise<SandboxPolicy> {
   return request<SandboxPolicy>('/admin/sandbox-policy', { method: 'PATCH', json: body });
+}
+
+/**
+ * Upload the tenant's application logo via `PUT /admin/branding` (multipart, admin
+ * only, audited). Uses `fetch` + `FormData` (no JSON body): the browser sets the
+ * multipart boundary; the bearer token is attached and the shared 401-refresh-retry
+ * policy applies. A 413 (over-size) / 415 (non-image) / 403 (non-admin) surfaces as
+ * a typed `ApiError` carrying the Problem body. Returns the new `{ logo_url }`.
+ */
+export function updateTenantBranding(file: File): Promise<TenantBranding> {
+  return withRefreshRetry<TenantBranding>(async () => {
+    const url = joinApi('/admin/branding');
+    const headers = new Headers();
+    headers.set('Accept', 'application/json, application/problem+json');
+    const token = getAccessToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    // NB: do NOT set Content-Type — the browser adds the multipart boundary.
+    const form = new FormData();
+    form.append('file', file);
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'PUT',
+        credentials: 'include',
+        headers,
+        body: form,
+      });
+    } catch (cause) {
+      throw new ApiError(cause instanceof Error ? cause.message : 'Network request failed', 0);
+    }
+    if (!response.ok) {
+      throw new ApiError(
+        `Request to ${url} failed with ${response.status}`,
+        response.status,
+        await safeProblem(response),
+      );
+    }
+    return (await response.json()) as TenantBranding;
+  });
+}
+
+/**
+ * Clear the tenant's application logo via `DELETE /admin/branding` (admin only,
+ * audited) so the shell reverts to the default brand mark. Idempotent (204).
+ */
+export function clearTenantBranding(): Promise<void> {
+  return request<void>('/admin/branding', { method: 'DELETE' });
 }

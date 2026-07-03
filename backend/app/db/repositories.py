@@ -99,6 +99,7 @@ def _to_tenant(row: models.Tenant) -> Tenant:
         created_at=row.created_at,
         updated_at=row.updated_at,
         max_tool_turns=row.max_tool_turns,
+        logo_key=row.logo_key,
     )
 
 
@@ -674,6 +675,24 @@ class TenantRepository:
             return None
         row.max_tool_turns = max_tool_turns
         await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant(row)
+
+    async def set_logo_key(self, tenant_id: UUID, *, logo_key: str | None) -> Tenant | None:
+        """Set (or clear) the tenant's per-tenant application-logo key (admin branding).
+
+        ``logo_key`` is written as given: a non-null object-store key points the app
+        shell at the tenant's uploaded logo, ``None`` clears it so the default brand
+        mark applies again. Returns the updated entity, or ``None`` if no tenant with
+        that id exists.
+        """
+        row = await self._session.get(models.Tenant, tenant_id)
+        if row is None:
+            return None
+        row.logo_key = logo_key
+        await self._session.flush()
+        # Refresh so ``_to_tenant`` reads freshly-populated attributes rather than
+        # triggering a lazy reload in a sync context (mirrors ``update``).
         await self._session.refresh(row)
         return _to_tenant(row)
 

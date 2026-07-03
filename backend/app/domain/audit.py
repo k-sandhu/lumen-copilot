@@ -60,6 +60,11 @@ class AuditAction(str, enum.Enum):
     # a reversible, tenant-scoped T1 action (spec 0004 §2.5 — "authorized owner;
     # audited; no extra approval"), audited like every consequential action.
     TENANT_SETTINGS_UPDATED = "tenant.settings_updated"
+    # Admin per-tenant application logo (branding). Additive to the §2.4 taxonomy —
+    # deny-by-default is preserved (the set only grows). A reversible, tenant-scoped
+    # T1 action (spec 0004 §2.5 — "authorized owner; audited; no extra approval"):
+    # an admin sets or clears the tenant's logo, audited like every /admin write.
+    TENANT_BRANDING_UPDATED = "tenant.branding_updated"
     # Per-tenant secrets vault (issue #209). Additive to the §2.4 taxonomy —
     # deny-by-default is preserved (the set only grows). Credential handling is a
     # single-chokepoint concern like auth/audit: storing, *reading* (which
