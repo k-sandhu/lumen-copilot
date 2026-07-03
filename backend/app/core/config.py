@@ -458,14 +458,10 @@ class Settings(BaseSettings):
     # SearXNG JSON endpoint the adapter queries. Inside compose this is the service
     # name; on the host (tests/dev outside compose) the default targets the
     # compose-mapped host port so a live probe reaches the same engine.
-    web_search_endpoint: str = Field(
-        default="http://localhost:47187", alias="WEB_SEARCH_ENDPOINT"
-    )
+    web_search_endpoint: str = Field(default="http://localhost:47187", alias="WEB_SEARCH_ENDPOINT")
     # Per-request wall-clock budget for the query leg (adapter -> SearXNG). A
     # stalled provider surfaces as a tool timeout, never a hung run.
-    web_search_timeout_seconds: float = Field(
-        default=10.0, alias="WEB_SEARCH_TIMEOUT_SECONDS"
-    )
+    web_search_timeout_seconds: float = Field(default=10.0, alias="WEB_SEARCH_TIMEOUT_SECONDS")
     # Default number of results returned when the model does not specify ``k``.
     web_search_default_k: int = Field(default=5, alias="WEB_SEARCH_DEFAULT_K")
     # Hard cap on the requested ``k`` (a hostile/large value is clamped to this).
@@ -480,12 +476,8 @@ class Settings(BaseSettings):
     # outbound requests (search calls + result-page fetches) — a DoS/amplification
     # pivot. An over-budget search is refused as a tool result (throttled), not an
     # HTTP error. Distinct keyspace from the connector-sync limiter.
-    web_search_rate_max_per_window: int = Field(
-        default=20, alias="WEB_SEARCH_RATE_MAX_PER_WINDOW"
-    )
-    web_search_rate_window_seconds: int = Field(
-        default=60, alias="WEB_SEARCH_RATE_WINDOW_SECONDS"
-    )
+    web_search_rate_max_per_window: int = Field(default=20, alias="WEB_SEARCH_RATE_MAX_PER_WINDOW")
+    web_search_rate_window_seconds: int = Field(default=60, alias="WEB_SEARCH_RATE_WINDOW_SECONDS")
 
     @field_validator(
         "web_search_default_k",
@@ -514,6 +506,91 @@ class Settings(BaseSettings):
         """Result-page fetch count must be >= 0 (``0`` = snippets only, no fetch)."""
         if value < 0:
             raise ValueError("WEB_SEARCH_FETCH_TOP_N must be >= 0 (0 disables page fetching)")
+        return value
+
+    # --- MCP client adapter + egress (ADR-0012, issue #225) ------------------
+    # The remote MCP client (``app/mcp/``) connects to user-supplied MCP server
+    # endpoints, so — like the web connector — every outbound connection is
+    # SSRF-guarded and per-tenant rate-limited (ADR-0012 §4). ALL knobs are config,
+    # never a literal at the call site (backend/AGENTS.md).
+    #
+    # Which remote transports the adapter will open. Only the remote transports
+    # ship in v1 (ADR-0012 §1); stdio/local-process is deferred behind the
+    # code-execution sandbox and is not even a valid value. Comma-separated
+    # override; an unknown transport name fails fast at startup.
+    mcp_allowed_transports: frozenset[str] = Field(
+        default=frozenset({"streamable_http", "sse"}),
+        alias="MCP_ALLOWED_TRANSPORTS",
+    )
+    # Per-connect wall-clock budget (adapter -> MCP server). A stalled server
+    # surfaces as a contained ``mcp_timeout`` result, never a hung run.
+    mcp_connect_timeout_seconds: float = Field(default=15.0, alias="MCP_CONNECT_TIMEOUT_SECONDS")
+    # Per-call wall-clock budget for one tool invocation / discovery / probe.
+    mcp_call_timeout_seconds: float = Field(default=30.0, alias="MCP_CALL_TIMEOUT_SECONDS")
+    # Per-tenant MCP egress rate limit, reusing the Redis fixed-window limiter
+    # (``tasks/rate_limit.py``; ADR-0012 §4). Bounds how many MCP connections one
+    # tenant may open per window so a single tenant cannot fan out unbounded
+    # outbound requests. Over-budget → a contained ``mcp_rate_limited`` result,
+    # never an HTTP error. Distinct keyspace from the connector-sync / web-search
+    # / run limiters.
+    mcp_rate_max_per_window: int = Field(default=30, alias="MCP_RATE_MAX_PER_WINDOW")
+    mcp_rate_window_seconds: int = Field(default=60, alias="MCP_RATE_WINDOW_SECONDS")
+    # Optional admin endpoint allowlist (ADR-0012 §4 — defence-in-depth). A
+    # comma-separated set of permitted MCP endpoint hosts; **empty = no allowlist**
+    # (the SSRF guard is the mandatory control). An allowlist only *narrows*
+    # (deny-by-default on top of SSRF), never widens — an allowlisted host still
+    # passes the full range check. Not required for v1.
+    mcp_endpoint_allowlist: frozenset[str] = Field(
+        default=frozenset(), alias="MCP_ENDPOINT_ALLOWLIST"
+    )
+
+    @field_validator("mcp_allowed_transports", "mcp_endpoint_allowlist", mode="before")
+    @classmethod
+    def _split_mcp_sets(cls, value: object) -> object:
+        """Accept a comma-separated env string for the MCP transport/allowlist sets."""
+        if isinstance(value, str):
+            return frozenset(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("mcp_allowed_transports")
+    @classmethod
+    def _mcp_transports_known(cls, value: frozenset[str]) -> frozenset[str]:
+        """Reject any transport that is not a shipped remote transport (ADR-0012 §1).
+
+        Only ``streamable_http`` / ``sse`` are valid; ``stdio`` (or anything else)
+        is deferred and must not be configurable — a misconfiguration fails fast at
+        startup rather than letting an unshippable transport be requested.
+        """
+        allowed = {"streamable_http", "sse"}
+        unknown = value - allowed
+        if unknown:
+            raise ValueError(
+                f"MCP_ALLOWED_TRANSPORTS may only contain {sorted(allowed)} "
+                f"(remote only, ADR-0012 §1); rejected: {sorted(unknown)}"
+            )
+        if not value:
+            raise ValueError("MCP_ALLOWED_TRANSPORTS must list at least one transport")
+        return value
+
+    @field_validator(
+        "mcp_connect_timeout_seconds",
+        "mcp_call_timeout_seconds",
+        "mcp_rate_max_per_window",
+        "mcp_rate_window_seconds",
+    )
+    @classmethod
+    def _mcp_bounds_positive(cls, value: float) -> float:
+        """A non-positive MCP timeout/rate would disable a bound — reject (fail fast).
+
+        The per-call timeouts and the per-tenant egress rate limit are load-bearing
+        (ADR-0012 §4/§7); a zero or negative value would let a call run unbounded or
+        make the limiter admit everything, so a misconfiguration fails fast.
+        """
+        if value <= 0:
+            raise ValueError(
+                "MCP_CONNECT_TIMEOUT_SECONDS / MCP_CALL_TIMEOUT_SECONDS / MCP_RATE_* "
+                "must be positive (ADR-0012 §4/§7)"
+            )
         return value
 
     # --- Dynamic per-tenant scheduler (ADR-0015 §7, issue #236) -------------
@@ -608,9 +685,7 @@ class Settings(BaseSettings):
     sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
-    sandbox_output_bytes_cap: int = Field(
-        default=1 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
-    )
+    sandbox_output_bytes_cap: int = Field(default=1 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP")
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
     # Per-tenant quotas (ADR-0013 §6). Max simultaneous runs (concurrency) and the
     # aggregate wall-clock/day a tenant may consume; exceeding either refuses the run
@@ -642,9 +717,7 @@ class Settings(BaseSettings):
         or refuse everything, so a misconfiguration must fail fast at startup.
         """
         if value <= 0:
-            raise ValueError(
-                "SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)"
-            )
+            raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)")
         return value
 
     @field_validator("sandbox_runtime")
