@@ -98,6 +98,13 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "schedule.paused",
         "schedule.resumed",
         "schedule.run_now",
+        # Scheduled-run delivery (ADR-0015 §6 / issue #238) — additive; a completed
+        # run's output is delivered to the owner's in-app inbox (run.delivered),
+        # rolled into a periodic in-app digest (run.digest_sent), or marked read by
+        # the owner (run.delivery_read). In-app only — no external egress (INV-7).
+        "run.delivered",
+        "run.delivery_read",
+        "run.digest_sent",
         # Sandbox code execution (ADR-0013 §4 / issue #230) — additive; every run is
         # bracketed by code_run.started/code_run.finished (INV-6) and a run refused
         # before execution is audited code_run.denied (never a silent drop).

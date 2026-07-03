@@ -27,8 +27,10 @@ import {
   getRun,
   getSchedule,
   listAssistants,
+  listRunDeliveries,
   listRuns,
   listSchedules,
+  markRunDeliveryRead,
   pauseSchedule,
   resumeSchedule,
   runScheduleNow,
@@ -37,6 +39,8 @@ import {
 import type {
   AssistantList,
   Run,
+  RunDelivery,
+  RunDeliveryList,
   RunEnqueued,
   RunList,
   Schedule,
@@ -46,6 +50,7 @@ import type {
 } from '@/api';
 import type { SchedulePageQuery } from '@/api';
 import type { RunPageQuery } from '@/api';
+import type { RunDeliveryPageQuery } from '@/api';
 
 /** Default page size for the run inbox + schedule list. */
 export const PAGE_LIMIT = 20;
@@ -61,6 +66,11 @@ export const runKeys = {
   all: ['runs'] as const,
   list: (q: RunPageQuery) => [...runKeys.all, 'list', q] as const,
   detail: (id: string) => [...runKeys.all, 'detail', id] as const,
+};
+
+export const deliveryKeys = {
+  all: ['run-deliveries'] as const,
+  list: (q: RunDeliveryPageQuery) => [...deliveryKeys.all, 'list', q] as const,
 };
 
 // --- Schedules --------------------------------------------------------------
@@ -183,6 +193,36 @@ export function useRun(id: string | null): UseQueryResult<Run> {
       const status = query.state.data?.status;
       return status === 'queued' || status === 'running' ? 4_000 : false;
     },
+  });
+}
+
+// --- Run deliveries (the in-app inbox, #238) --------------------------------
+
+/**
+ * A page of the caller's run deliveries (the in-app inbox) for the given filters.
+ * A short stale time + refetch-on-focus keeps a completed run's delivery appearing
+ * without a manual reload.
+ */
+export function useRunDeliveries(
+  query: RunDeliveryPageQuery,
+): UseQueryResult<RunDeliveryList> {
+  return useQuery<RunDeliveryList>({
+    queryKey: deliveryKeys.list(query),
+    queryFn: ({ signal }) => listRunDeliveries({ ...query, limit: PAGE_LIMIT }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5_000,
+  });
+}
+
+/**
+ * Mark one delivery read (idempotent). Invalidates the inbox so the unread badge +
+ * the read state update. A 404 (non-owned / cross-tenant) surfaces as a typed error.
+ */
+export function useMarkDeliveryRead() {
+  const qc = useQueryClient();
+  return useMutation<RunDelivery, unknown, string>({
+    mutationFn: (id) => markRunDeliveryRead(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: deliveryKeys.all }),
   });
 }
 

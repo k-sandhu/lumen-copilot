@@ -1053,6 +1053,48 @@ export interface RunList {
   next_cursor?: string | null;
 }
 
+// --- Run deliveries (contracts/openapi.yaml §run-deliveries, ADR-0015 / #238) -
+// One in-app delivery of a completed run's output — the run inbox. Tenant- and
+// owner-scoped (INV-1/INV-2): a foreign id → 404. External channels (email/Slack)
+// are deferred T2-ish egress — this surface is in-app only.
+
+/**
+ * How a completed run's output reached the owner (ADR-0015 §6). `inbox` = an
+ * immediate in-app delivery on completion; `digest` = a run rolled into a periodic
+ * in-app digest batch.
+ */
+export type RunDeliveryKind = 'inbox' | 'digest';
+
+/**
+ * The lifecycle of one in-app run delivery (ADR-0015 §6). `pending` = awaiting its
+ * digest batch; `delivered` = visible in the inbox (unread); `read` = the owner
+ * opened it; `failed` = could not be produced (visible + retryable, never a silent
+ * drop).
+ */
+export type RunDeliveryStatus = 'pending' | 'delivered' | 'read' | 'failed';
+
+/** One in-app delivery of a completed run (GET /run-deliveries item). */
+export interface RunDelivery {
+  id: string;
+  /** The completed run this delivery is for — a link to its full cited transcript. */
+  run_id: string;
+  /** The schedule that fired the run, or null for a manual run. */
+  schedule_id?: string | null;
+  kind: RunDeliveryKind;
+  status: RunDeliveryStatus;
+  /** The inbox line — the run's short summary. */
+  summary?: string | null;
+  created_at: string;
+  /** When the owner opened the delivery, or null while unread. */
+  read_at?: string | null;
+}
+
+/** 200 from GET /run-deliveries — a cursor page of deliveries (newest first). */
+export interface RunDeliveryList {
+  items: RunDelivery[];
+  next_cursor?: string | null;
+}
+
 // --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------
 // One agent-authored sandbox code run, inspectable via GET /code-runs/{id}. Runs
 // are created by the `run_python` tool off the request path — there is no public

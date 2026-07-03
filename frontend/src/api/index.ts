@@ -77,6 +77,8 @@ export {
 export type { SchedulePageQuery } from './schedules';
 export { listRuns, getRun } from './runs';
 export type { RunPageQuery } from './runs';
+export { listRunDeliveries, markRunDeliveryRead } from './runDeliveries';
+export type { RunDeliveryPageQuery } from './runDeliveries';
 export { getCodeRun } from './codeRuns';
 export {
   listArtifacts,

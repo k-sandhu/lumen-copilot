@@ -45,7 +45,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import (
-    AuditEventRepository,
     RunDeliveryRepository,
     RunRepository,
     ScheduleRepository,
