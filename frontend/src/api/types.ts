@@ -1093,6 +1093,17 @@ export interface RunList {
   next_cursor?: string | null;
 }
 
+/**
+ * Body for POST /runs/{id}/reroute (E7-5, #239) — reassign an escalated run to
+ * another owner. `to_owner_id` becomes the run's execution principal, so the
+ * re-driven run retrieves only what the new owner may (INV-2). Must be a user in
+ * the caller's tenant and not the current owner.
+ */
+export interface RunReroute {
+  /** The user to reassign the run to (its new execution principal). */
+  to_owner_id: string;
+}
+
 // --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------
 // One agent-authored sandbox code run, inspectable via GET /code-runs/{id}. Runs
 // are created by the `run_python` tool off the request path — there is no public

@@ -92,6 +92,13 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # bracketed by run.started/run.finished (INV-6), actor = the run owner.
         "run.started",
         "run.finished",
+        # Run failure & escalation handling (ADR-0015 §6 / E7-5 / issue #239) —
+        # additive; an escalated run's human handoff (resume/cancel/reroute) is
+        # audited so it is never silently dropped, and the escalate itself is trailed.
+        "run.escalated",
+        "run.resumed",
+        "run.cancelled",
+        "run.rerouted",
         # Dynamic per-tenant scheduler (ADR-0015 §6 / issue #236) — additive; every
         # schedule lifecycle mutation + control is audited (INV-6): create/update/
         # delete, pause/resume, and run-now (the owner's control over the schedule; a

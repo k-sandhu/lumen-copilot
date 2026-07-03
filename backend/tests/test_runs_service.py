@@ -85,6 +85,25 @@ class _BoomGateway:
         yield  # pragma: no cover — makes this an async generator
 
 
+class _AppErrorGateway:
+    """A gateway that fails the run with a typed :class:`AppError` (escalation codes).
+
+    The runtime maps a raised :class:`AppError` to a terminal ``error`` envelope whose
+    ``code`` is the app error's code — e.g. ``ForbiddenError`` → ``forbidden``
+    (restricted data, escalation-worthy), ``DependencyError`` → ``dependency_unavailable``
+    (transient). This lets a run's terminal reason be scripted offline.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def stream_tools(
+        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+    ) -> AsyncIterator[StreamEvent]:
+        raise self._exc
+        yield  # pragma: no cover — makes this an async generator
+
+
 class _PermissionedRetrieval:
     """Retrieval that returns a passage **only** to principals in ``allowed_users``.
 
@@ -564,4 +583,307 @@ async def test_enqueue_manual_run_unpublished_assistant_is_422(ctx: _Ctx) -> Non
                 tenant_id=ctx.tenant_a,
                 owner_id=ctx.alice_id,
                 assistant_id=draft_id,
+            )
+
+
+# --- E7-5 (#239): escalation on a human-decidable failure -------------------
+
+
+async def test_restricted_data_failure_escalates_not_failed(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a run that fails for a human-decidable reason ends ``escalated``, not silent.
+
+    A ``ForbiddenError`` (restricted data) surfaces as ``error.code == "forbidden"``,
+    which the classifier routes to ``escalated`` — a human should decide, so the run
+    is NOT silently dropped and NOT a plain ``failed``.
+    """
+    from app.core.errors import ForbiddenError
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=_AppErrorGateway(ForbiddenError("You cannot read this.")),
+        retrieval=_PermissionedRetrieval(_passage(ctx), {ctx.alice_id}),
+    )
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+
+    status = await runs_service.execute_run(run_id, ctx.tenant_a)
+
+    assert status is RunStatus.ESCALATED
+    async with ctx.sessionmaker() as session:
+        run = await RunRepository(session, ctx.tenant_a).get(run_id)
+        assert run is not None
+        assert run.status is RunStatus.ESCALATED  # a human must handle it
+        assert run.finished_at is not None  # a real terminal, never stuck
+        assert run.error is not None and run.error.code == "forbidden"
+
+
+async def test_escalation_is_audited(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-2/INV-6: an escalation emits ``run.escalated`` with the blocking reason."""
+    from app.core.errors import ForbiddenError
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=_AppErrorGateway(ForbiddenError("nope")),
+        retrieval=_PermissionedRetrieval(_passage(ctx), {ctx.alice_id}),
+    )
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+    await runs_service.execute_run(run_id, ctx.tenant_a)
+
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+    events = [e for e in recent if e.resource_id == str(run_id)]
+    actions = {e.action for e in events}
+    assert "run.escalated" in actions  # the owner is notified via the audited status
+    escalated = next(e for e in events if e.action == "run.escalated")
+    assert escalated.metadata.get("reason") == "restricted_data"
+    assert escalated.actor_id == ctx.alice_id  # the run's owner
+
+
+async def test_internal_failure_stays_failed_not_escalated(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deny-by-default: a generic internal defect stays ``failed`` (not a human's job)."""
+    _wire_alice_grant(ctx, monkeypatch, gateway=_BoomGateway())  # → internal_error
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+
+    status = await runs_service.execute_run(run_id, ctx.tenant_a)
+
+    assert status is RunStatus.FAILED
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+    actions = {e.action for e in recent if e.resource_id == str(run_id)}
+    assert "run.escalated" not in actions
+
+
+# --- AC-3: transient faults retry with backoff before a terminal ------------
+
+
+async def test_transient_fault_retries_before_terminal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a transient dependency fault (budget left) re-queues + signals a retry.
+
+    ``execute_run`` raises :class:`TransientRunRetry` (the Celery wrapper turns that
+    into ``self.retry``) and leaves the run ``queued`` — never a terminal on the first
+    transient blip. This is the "retry before escalation, never silently drop" path.
+    """
+    from app.core.errors import DependencyError
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=_AppErrorGateway(DependencyError("model briefly down")),
+        retrieval=_PermissionedRetrieval(_passage(ctx), {ctx.alice_id}),
+    )
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+
+    with pytest.raises(runs_service.TransientRunRetry) as excinfo:
+        await runs_service.execute_run(run_id, ctx.tenant_a, attempt=0)
+    assert excinfo.value.backoff_seconds > 0
+
+    async with ctx.sessionmaker() as session:
+        run = await RunRepository(session, ctx.tenant_a).get(run_id)
+        assert run is not None
+        # Reset to queued for the re-drive — NOT a terminal, NOT stuck running.
+        assert run.status is RunStatus.QUEUED
+        assert run.finished_at is None
+        assert run.error is None
+
+
+async def test_transient_fault_terminal_after_retries_exhausted(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: once the retry budget is exhausted a transient fault reaches ``failed``.
+
+    A run is never dropped: on the final attempt the fold writes a queryable terminal
+    (a transient reason is NOT escalation-worthy, so it stays ``failed`` — a human is
+    not paged for a dependency blip).
+    """
+    from app.core.errors import DependencyError
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=_AppErrorGateway(DependencyError("still down")),
+        retrieval=_PermissionedRetrieval(_passage(ctx), {ctx.alice_id}),
+    )
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+
+    # attempt == run_max_retries ⇒ budget exhausted ⇒ terminal, no retry raised.
+    from app.core.config import get_settings
+
+    exhausted = get_settings().run_max_retries
+    status = await runs_service.execute_run(run_id, ctx.tenant_a, attempt=exhausted)
+
+    assert status is RunStatus.FAILED
+    async with ctx.sessionmaker() as session:
+        run = await RunRepository(session, ctx.tenant_a).get(run_id)
+        assert run is not None
+        assert run.status is RunStatus.FAILED
+        assert run.error is not None and run.error.code == "dependency_unavailable"
+
+
+# --- Resume / cancel / reroute (the human handoff) --------------------------
+
+
+async def _escalate_run(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
+    """Drive a run to the ``escalated`` terminal (a restricted-data stop) and return it."""
+    from app.core.errors import ForbiddenError
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=_AppErrorGateway(ForbiddenError("nope")),
+        retrieval=_PermissionedRetrieval(_passage(ctx), {ctx.alice_id}),
+    )
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+    status = await runs_service.execute_run(run_id, ctx.tenant_a)
+    assert status is RunStatus.ESCALATED
+    return run_id
+
+
+def _control_service(
+    ctx: _Ctx, session: AsyncSession, *, owner_id: uuid.UUID
+) -> runs_service.RunsControlService:
+    from app.db.repositories import AuditEventRepository
+    from app.services.audit import AuditSink
+
+    return runs_service.RunsControlService(
+        session,
+        tenant_id=ctx.tenant_a,
+        owner_id=owner_id,
+        audit=AuditSink(AuditEventRepository(session, ctx.tenant_a)),
+        request_id="test-req",
+        source_ip="203.0.113.1",
+    )
+
+
+async def test_owner_resume_requeues_escalated_run(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the owner resumes an escalated run — it goes back to ``queued`` + is audited."""
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        result = await _control_service(ctx, session, owner_id=ctx.alice_id).resume(run_id)
+        await session.commit()
+        assert result.requeued is True
+        assert result.run.status is RunStatus.QUEUED
+        assert result.run.error is None  # the escalation reason is cleared
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+    actions = {e.action for e in recent if e.resource_id == str(run_id)}
+    assert "run.resumed" in actions
+
+
+async def test_owner_cancel_closes_escalated_run(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: cancel closes an escalated run to a permanent terminal (never re-queued)."""
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        result = await _control_service(ctx, session, owner_id=ctx.alice_id).cancel(run_id)
+        await session.commit()
+        assert result.requeued is False
+        assert result.run.status is RunStatus.FAILED
+        assert result.run.error is not None and result.run.error.code == "cancelled"
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+    actions = {e.action for e in recent if e.resource_id == str(run_id)}
+    assert "run.cancelled" in actions
+
+
+async def test_owner_reroute_reassigns_and_requeues(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: reroute reassigns the run to another owner (its new principal) + re-queues."""
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        result = await _control_service(ctx, session, owner_id=ctx.alice_id).reroute(
+            run_id, to_owner_id=ctx.bob_id
+        )
+        await session.commit()
+        assert result.requeued is True
+        assert result.run.status is RunStatus.QUEUED
+        assert result.run.owner_id == ctx.bob_id  # bob is the new execution principal
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+    rerouted = next(
+        e for e in recent if e.resource_id == str(run_id) and e.action == "run.rerouted"
+    )
+    assert rerouted.metadata.get("to_owner_id") == str(ctx.bob_id)
+
+
+# --- Negatives: not-escalated → 409, non-owner/cross-tenant → 404 -----------
+
+
+async def test_resume_non_escalated_run_is_409(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INV-8: resuming a run that is not escalated is an illegal transition → 409."""
+    from app.core.errors import ConflictError
+
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+    await runs_service.execute_run(run_id, ctx.tenant_a)  # → succeeded, not escalated
+    async with ctx.sessionmaker() as session:
+        with pytest.raises(ConflictError):
+            await _control_service(ctx, session, owner_id=ctx.alice_id).resume(run_id)
+
+
+async def test_non_owner_cannot_resume_escalated_run_404(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-2: a non-owner cannot act on another user's escalated run (404, non-disclosure)."""
+    from app.core.errors import NotFoundError
+
+    run_id = await _escalate_run(ctx, monkeypatch)  # alice owns it
+    async with ctx.sessionmaker() as session:
+        with pytest.raises(NotFoundError):
+            await _control_service(ctx, session, owner_id=ctx.bob_id).resume(run_id)
+        with pytest.raises(NotFoundError):
+            await _control_service(ctx, session, owner_id=ctx.bob_id).cancel(run_id)
+
+
+async def test_cross_tenant_cannot_resume_escalated_run_404(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-1: a reader scoped to another tenant cannot resume the run (404)."""
+    from app.core.errors import NotFoundError
+    from app.services.audit import AuditSink
+
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        control = runs_service.RunsControlService(
+            session,
+            tenant_id=ctx.tenant_b,  # a different tenant
+            owner_id=ctx.alice_id,
+            audit=AuditSink(AuditEventRepository(session, ctx.tenant_b)),
+            request_id="r",
+            source_ip="203.0.113.1",
+        )
+        with pytest.raises(NotFoundError):
+            await control.resume(run_id)
+
+
+async def test_reroute_to_current_owner_is_422(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-8: a no-op reroute (to the current owner) is malformed → 422."""
+    from app.core.errors import ValidationError
+
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        with pytest.raises(ValidationError):
+            await _control_service(ctx, session, owner_id=ctx.alice_id).reroute(
+                run_id, to_owner_id=ctx.alice_id
+            )
+
+
+async def test_reroute_to_unknown_target_is_404(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-1: rerouting to a user not in the tenant is 404 (existence non-disclosure)."""
+    from app.core.errors import NotFoundError
+
+    run_id = await _escalate_run(ctx, monkeypatch)
+    async with ctx.sessionmaker() as session:
+        with pytest.raises(NotFoundError):
+            await _control_service(ctx, session, owner_id=ctx.alice_id).reroute(
+                run_id, to_owner_id=uuid.uuid4()
             )
