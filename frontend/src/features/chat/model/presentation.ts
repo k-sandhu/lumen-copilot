@@ -92,7 +92,15 @@ export function buildRetrievalSummary(
   const sourceCount = new Set(citations.map((c) => c.documentId)).size;
   const passageCount = tools.reduce((sum, t) => sum + (t.hitCount ?? 0), 0);
 
-  const parts: string[] = [`${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}`];
+  // Only lead with the source count when there ARE cited sources. During
+  // retrieval, passages arrive (hitCount > 0) BEFORE citation events populate,
+  // and an answer can search passages yet cite nothing — in both cases leading
+  // with "0 sources" reads as a contradiction next to "N passages" (#248). Omit
+  // it instead; the empty-turn fallback below still reads "Looked at 0 sources".
+  const parts: string[] = [];
+  if (sourceCount > 0) {
+    parts.push(`${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}`);
+  }
   if (passageCount > 0) {
     parts.push(`${groupThousands(passageCount)} ${passageCount === 1 ? 'passage' : 'passages'}`);
   }
@@ -118,7 +126,9 @@ export function buildRetrievalSummary(
   }
 
   return {
-    summary: `Looked at ${parts.join(' · ')}`,
+    // With no sources, passages, or exclusions the parts are empty — fall back
+    // to the honest empty-turn label rather than a bare "Looked at ".
+    summary: parts.length ? `Looked at ${parts.join(' · ')}` : 'Looked at 0 sources',
     steps,
     hasContent: sourceCount > 0 || passageCount > 0 || excludedCount > 0,
   };
