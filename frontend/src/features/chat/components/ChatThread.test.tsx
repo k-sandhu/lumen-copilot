@@ -42,6 +42,7 @@ function live(text: string): LiveAnswer {
     text,
     citations: [],
     tools: [],
+    codeRuns: [],
     problem: null,
     model: 'frontier/opus',
   };

@@ -298,6 +298,7 @@ function ActiveSession({
         text: stream.text,
         citations: stream.citations,
         tools: stream.tools,
+        codeRuns: stream.codeRuns,
         problem: stream.problem,
         model: stream.start?.model ?? model,
       }
