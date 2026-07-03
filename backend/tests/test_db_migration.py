@@ -71,6 +71,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "run_steps",
     "schedules",
     "code_runs",
+    "mcp_servers",
 }
 
 
@@ -95,7 +96,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0019_code_runs"]
+    assert list(script.get_heads()) == ["0020_mcp_servers"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -150,6 +151,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     code_runs = script.get_revision("0019_code_runs")
     assert code_runs is not None
     assert code_runs.down_revision == "0018_schedules"
+    mcp_servers = script.get_revision("0020_mcp_servers")
+    assert mcp_servers is not None
+    assert mcp_servers.down_revision == "0019_code_runs"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -808,6 +812,56 @@ def test_offline_code_runs_migration_round_trips(
     assert "drop index ix_code_runs_tenant_status" in down
     assert "drop index ix_code_runs_tenant_owner" in down
     assert "drop table code_runs" in down
+
+
+def test_offline_mcp_servers_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0020 creates the tenant/owner-scoped ``mcp_servers`` table + RLS; down() reverses (#226).
+
+    AC (ADR-0012 §5, spec 0004 §2.1/§2.2): the upgrade renders the ``mcp_servers``
+    table with its ``owner_id`` (CASCADE) FK, the ``auth_secret_ref`` FK → ``secrets``
+    (SET NULL — the credential lives in the CC-C vault, never this row), the
+    transport + status CHECKs (remote transports only — ``stdio`` can never be
+    stored), the ``endpoint_url`` / ``secret_hint`` / ``last_error`` columns, the
+    ``discovered_tools`` jsonb, the tenant-leading indexes, and the same fail-closed
+    RLS policy the 0007 backstop uses (``mcp_servers`` is tenant-scoped, INV-1). The
+    downgrade drops the policy, disables RLS, drops the indexes, and drops the table.
+    Offline DDL render (Postgres dialect) — structural reversibility without a DB
+    (#70 lesson); the behavioural proof is the mcp_servers API/service tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0019_code_runs:0020_mcp_servers", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped mcp_servers table + its FKs.
+    assert "create table mcp_servers" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK (the registering user, CASCADE)
+    assert "references secrets" in up  # auth_secret_ref FK (→ CC-C vault, SET NULL)
+    # The endpoint + secret-hint + health columns (never the credential value).
+    assert "endpoint_url text" in up
+    assert "secret_hint" in up
+    assert "last_error text" in up
+    assert "discovered_tools jsonb" in up
+    # The domain-pinning CHECKs (remote transports only; the health state machine).
+    assert "ck_mcp_servers_transport" in up
+    assert "ck_mcp_servers_status" in up
+    # The tenant-leading index (owner list/lookup path).
+    assert "create index ix_mcp_servers_tenant_owner on mcp_servers (tenant_id, owner_id)" in up
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table mcp_servers enable row level security" in up
+    assert "alter table mcp_servers force row level security" in up
+    assert "create policy rls_mcp_servers on mcp_servers" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0020_mcp_servers:0019_code_runs", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_mcp_servers on mcp_servers" in down
+    assert "alter table mcp_servers disable row level security" in down
+    assert "drop index ix_mcp_servers_tenant_owner" in down
+    assert "drop table mcp_servers" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

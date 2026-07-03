@@ -149,6 +149,20 @@ class SecretKind(str, enum.Enum):
     OTHER = "other"
 
 
+class McpServerStatus(str, enum.Enum):
+    """Health state of a registered MCP server (ADR-0012 §5, contract ``McpServerStatus``).
+
+    ``PENDING`` before the first successful probe (a freshly registered server),
+    ``READY`` after a healthy handshake, ``ERROR`` when the last probe failed
+    (see ``last_error``). Mirrors the ``mcp_servers.status`` CHECK domain and the
+    frozen ``McpServerStatus`` contract enum.
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    ERROR = "error"
+
+
 class AutonomyLevel(str, enum.Enum):
     """How much an assistant may act on its own (ADR-0011 §3, contract ``AutonomyLevel``).
 
@@ -544,6 +558,40 @@ class Source:
     indexed_count: int
     last_synced_at: datetime | None
     last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class McpServer:
+    """A registered remote MCP server — the full ``mcp_servers`` row (ADR-0012 §5).
+
+    Tenant- and owner-scoped, deny-by-default: only the registering user (within
+    their tenant) can retrieve/manage it (INV-1/INV-2). ``transport`` is the remote
+    transport (``streamable_http``/``sse`` — stdio is impossible by type);
+    ``endpoint_url`` is the https endpoint (SSRF-checked on register and every
+    connect). ``auth_secret_ref`` is the id of a CC-C secret (a ``SecretRef.id``
+    stringified) — **never the credential itself**; ``None`` for an anonymous
+    server. ``secret_hint`` is the masked tail projected from that secret for the
+    UI (also never the value). ``status`` tracks the health lifecycle;
+    ``last_health_at`` is the last successful probe, ``last_error`` the last safe
+    failure reason; ``discovered_tools`` is the last ``list_tools()`` snapshot
+    (names + schemas + read-only annotations), stored as portable JSON.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    transport: str
+    endpoint_url: str
+    auth_secret_ref: str | None
+    enabled: bool
+    status: McpServerStatus
+    last_health_at: datetime | None
+    last_error: str | None
+    discovered_tools: list[dict[str, object]]
+    secret_hint: str | None
     created_at: datetime
     updated_at: datetime
 

@@ -44,6 +44,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.crypto import EncryptedSecret, SecretsCipher
 from app.core.errors import NotFoundError, ValidationError
 from app.db.repositories import SecretRepository
@@ -321,4 +322,36 @@ class SecretsService:
         return plaintext
 
 
-__all__ = ["SecretsService"]
+def build_secrets_service(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    tenant_id: UUID,
+    owner_id: UUID,
+    roles: tuple[Role, ...],
+    audit: AuditSink,
+    request_id: str,
+    source_ip: str,
+) -> SecretsService:
+    """Assemble a :class:`SecretsService` from settings (the production wiring).
+
+    The envelope :class:`~app.core.crypto.SecretsCipher` is built here from the
+    configured master key (``core/config`` is the single env reader). This factory
+    keeps the cipher import confined to the secrets service (the ADR-0004
+    chokepoint the architecture test enforces): a caller that needs a vault-backed
+    service — e.g. the MCP registration service — asks for one here rather than
+    importing the cipher itself, so no ``api/`` module ever touches plaintext.
+    """
+    return SecretsService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=owner_id,
+        roles=roles,
+        cipher=SecretsCipher(settings.secrets_encryption_key),
+        audit=audit,
+        request_id=request_id,
+        source_ip=source_ip,
+    )
+
+
+__all__ = ["SecretsService", "build_secrets_service"]

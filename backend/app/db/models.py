@@ -712,6 +712,68 @@ class Secret(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class McpServer(TenantScopedMixin, TimestampMixin, Base):
+    """A registered remote MCP server (ADR-0012 §5, issue #226). Ownership-bearing.
+
+    Tenant- and owner-scoped, deny-by-default (INV-1/§2.2): only the registering
+    user (or a tenant admin) sees/manages it, and a cross-tenant id is invisible.
+    **No column holds the credential** — the auth token/header lives in the CC-C
+    ``secrets`` vault (issue #209), and this row keeps only ``auth_secret_ref`` (the
+    secret's id, SET NULL so removing the secret does not orphan the server) plus
+    ``secret_hint`` (a masked tail projected from the secret at register/rotate for
+    the UI). ``transport`` / ``status`` are ``CheckConstraint``-pinned enum domains
+    (remote transports only — ``stdio`` can never be stored; ADR-0012 §1).
+    ``endpoint_url`` is the https endpoint (SSRF-checked in the service before a row
+    is written, and again on every connect). ``discovered_tools`` is the last
+    ``list_tools()`` snapshot as portable JSON. Tenant-scoped like every table
+    (INV-1); the ``0020`` migration puts it under the RLS backstop.
+    """
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (
+        Index("ix_mcp_servers_tenant_owner", "tenant_id", "owner_id"),
+        CheckConstraint(
+            "transport in ('streamable_http', 'sse')",
+            name="ck_mcp_servers_transport",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'ready', 'error')",
+            name="ck_mcp_servers_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    transport: Mapped[str] = mapped_column(String(20), nullable=False)
+    endpoint_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The CC-C secret's id (a SecretRef.id), never the credential itself; SET NULL
+    # so deleting the vault secret does not cascade-delete the server row.
+    auth_secret_ref: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("secrets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A masked tail of the stored credential for the UI (e.g. ``****abcd``); never
+    # the value. NULL when no auth is stored (an anonymous server).
+    secret_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    last_health_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The last list_tools() snapshot (names + schemas + read-only annotations).
+    discovered_tools: Mapped[list[dict[str, object]]] = mapped_column(
+        _JSON, nullable=False, default=list
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 
