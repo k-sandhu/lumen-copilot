@@ -51,6 +51,7 @@ from app.db.repositories import (
     AssistantVersionRepository,
     CollectionRepository,
     GrantRepository,
+    McpServerRepository,
     SourceRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
@@ -67,6 +68,11 @@ from app.domain.entities import (
     Role,
 )
 from app.services.audit import AuditSink
+from app.services.tools.mcp_bridge import (
+    is_mcp_tool_name,
+    namespaced_tool_name,
+    slug_for_server,
+)
 from app.services.tools.registry import registered_names
 
 _MIN_LIMIT = 1
@@ -174,6 +180,7 @@ class AssistantsService:
         self._collections = CollectionRepository(session, tenant_id)
         self._sources = SourceRepository(session, tenant_id)
         self._grants = GrantRepository(session, tenant_id)
+        self._mcp_servers = McpServerRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
@@ -226,22 +233,57 @@ class AssistantsService:
 
     # --- validation ---------------------------------------------------------
 
-    def _validate_tool_allowlist(self, tool_allowlist: tuple[str, ...]) -> None:
-        """Every allow-list entry must be a tool the CC-A registry knows (422 else).
+    async def _validate_tool_allowlist(self, tool_allowlist: tuple[str, ...]) -> None:
+        """Every allow-list entry must be a real tool the caller may grant (422 else).
 
-        Deny-by-default (issue #207): an unknown tool name in the allow-list is a
-        configuration error caught here, so an assistant can never be saved
+        Deny-by-default (issue #207 / #227): an unknown tool name in the allow-list
+        is a configuration error caught here, so an assistant can never be saved
         referencing a tool that does not exist — and the runner's allow-list is
-        always a subset of the real registry. ``[]`` is valid (⇒ the ad-hoc default
-        set at run time).
+        always a subset of the real registry. ``[]`` is valid (the ad-hoc default set
+        at run time). Two namespaces are validated against two sources of truth:
+
+        * a **native** name against the static CC-A registry (``registered_names``);
+        * an **``mcp:*``** name against *this caller's own* registered MCP tools
+          (ADR-0012 §6). MCP tools are tenant-/owner-scoped and dynamic, so they are
+          NOT in the global registry — validating them against the caller's own
+          servers keeps INV-1/INV-2 (an assistant can never name an MCP tool on a
+          server the caller did not register, and cross-tenant server ids are never
+          even considered).
         """
-        known = registered_names()
-        unknown = [t for t in tool_allowlist if t not in known]
+        native = {t for t in tool_allowlist if not is_mcp_tool_name(t)}
+        mcp = {t for t in tool_allowlist if is_mcp_tool_name(t)}
+        unknown = [t for t in native if t not in registered_names()]
+        if mcp:
+            known_mcp = await self._known_mcp_tool_names()
+            unknown.extend(t for t in mcp if t not in known_mcp)
         if unknown:
             raise ValidationError(
                 f"Unknown tool(s) in allow-list: {', '.join(sorted(set(unknown)))}.",
                 code="unknown_tool",
             )
+
+    async def _known_mcp_tool_names(self) -> set[str]:
+        """The namespaced MCP tool names the caller may grant (own registered servers).
+
+        Every discovered tool of every server this owner registered in this tenant,
+        namespaced ``mcp:<slug>:<tool>`` — including servers not currently ``enabled``
+        (a temporarily-disabled server's tools stay *nameable* in the builder; the
+        run-time resolver, not this configure-time check, is what refuses a disabled
+        server, so re-enabling it does not require re-editing the assistant). A
+        foreign-tenant/non-owned server is never listed, so its tools can never be
+        named (INV-1/INV-2).
+        """
+        servers = await self._mcp_servers.list_for_owner_page(self._owner_id, limit=_MAX_LIMIT)
+        names: set[str] = set()
+        for server in servers:
+            slug = slug_for_server(server)
+            for raw in server.discovered_tools:
+                if not isinstance(raw, dict):
+                    continue
+                raw_name = str(raw.get("name", "")).strip()
+                if raw_name:
+                    names.add(namespaced_tool_name(slug, raw_name))
+        return names
 
     async def _validate_knowledge_scope(self, scope: KnowledgeScope) -> None:
         """Every scoped collection/source id must be owned-or-granted (422 else).
@@ -341,7 +383,7 @@ class AssistantsService:
         if not name.strip():
             raise ValidationError("Assistant name must not be blank.", code="invalid_name")
         scope = knowledge_scope or KnowledgeScope.empty()
-        self._validate_tool_allowlist(tool_allowlist)
+        await self._validate_tool_allowlist(tool_allowlist)
         await self._validate_knowledge_scope(scope)
         await self._validate_backup_owner(backup_owner_id)
 
@@ -429,7 +471,7 @@ class AssistantsService:
         if tool_allowlist is not UNSET:
             assert isinstance(tool_allowlist, list)
             allowlist = tuple(str(t) for t in tool_allowlist)
-            self._validate_tool_allowlist(allowlist)
+            await self._validate_tool_allowlist(allowlist)
             fields["tool_allowlist"] = allowlist
         if autonomy_level is not UNSET:
             assert isinstance(autonomy_level, AutonomyLevel)
@@ -488,7 +530,7 @@ class AssistantsService:
         # Re-validate the frozen config's allow-list + scope so a published version
         # is never internally inconsistent (a tool removed from the registry since
         # the draft was saved would block publish, not ship a dangling reference).
-        self._validate_tool_allowlist(assistant.tool_allowlist)
+        await self._validate_tool_allowlist(assistant.tool_allowlist)
         await self._validate_knowledge_scope(assistant.knowledge_scope)
 
         version_number = await self._versions.next_version(assistant.id)

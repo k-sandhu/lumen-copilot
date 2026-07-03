@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -67,9 +67,10 @@ from app.services.audit import AuditSink
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
+from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import SandboxToolRunner, ToolContext
+from app.services.tools.types import SandboxToolRunner, ToolContext, ToolDefinition
 
 log = get_logger(__name__)
 
@@ -100,6 +101,16 @@ class SandboxContext:
 # allow-list offers ``run_python``, so the seam is never built for a session that
 # cannot use it.
 SandboxFactory = Callable[["SandboxContext"], SandboxToolRunner | None]
+
+
+# The injected MCP-tools resolver (issue #227): given the runtime's own DB session,
+# return the caller's tenant-scoped registered+enabled MCP tools as governed CC-A
+# :class:`ToolDefinition`s (namespaced ``mcp:<slug>:<tool>``), keyed by name. The
+# runtime calls it **only** when the run's allow-list names at least one ``mcp:*``
+# tool (deny-by-default: an ad-hoc / native-only run never touches the MCP servers
+# table or opens a client). ``None`` (the default / offline case) ⇒ no MCP tools
+# are resolved, so a stray ``mcp:*`` call is an ordinary ``tool_not_found``.
+McpToolsFactory = Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]
 
 
 # How many tool-calling turns the agent may take before the runtime forces a
@@ -166,6 +177,7 @@ class ChatRuntime:
         default_max_tool_turns: int = _DEFAULT_MAX_TOOL_TURNS,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
+        mcp_tools_factory: McpToolsFactory | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -189,6 +201,13 @@ class ChatRuntime:
         # / no-code case) ⇒ ``run_python`` invocations report a typed ``ok=False``
         # rather than executing. The API wires the live factory (issue #231).
         self._sandbox_factory = sandbox_factory
+        # The #227 MCP-tools resolver. Called ONLY when a run's allow-list names an
+        # ``mcp:*`` tool (below) — an ad-hoc / native-only run never resolves MCP
+        # tools (deny-by-default; no client/DB work on a path that cannot use them).
+        # ``None`` (the default / offline case) means no MCP tools, so a stray
+        # ``mcp:*`` call is an ordinary ``tool_not_found``. The API wires the live
+        # resolver (per-tenant, per-owner, SSRF-guarded via mcp_servers_service).
+        self._mcp_tools_factory = mcp_tools_factory
 
     async def run(
         self,
@@ -330,6 +349,15 @@ class ChatRuntime:
         allowed = (
             assistant_config.allowed if assistant_config is not None else default_allowlist()
         )
+        # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
+        # (never a global registration — they are tenant-scoped and dynamic, so a
+        # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
+        # names an ``mcp:*`` tool, so an ad-hoc / native-only run never touches the
+        # MCP servers table or opens a client. Each is a namespaced ``mcp:<slug>:
+        # <tool>`` ``ToolDefinition`` whose handler invokes through the SSRF-guarded,
+        # auth-resolving adapter; the runner then governs it on the SAME allow-list /
+        # approval / audit path as a native tool.
+        mcp_tools = await self._resolve_mcp_tools(session, allowed)
         # The assistant's knowledge scope is an ADDITIONAL narrowing filter over
         # any send-time collection_ids — it can only intersect (narrow), never widen
         # (INV-2). The per-user permission predicate still runs inside retrieval/,
@@ -354,11 +382,14 @@ class ChatRuntime:
             request_id=self._request_id,
             source_ip=self._source_ip,
             session_id=session_id,
+            extra_tools=mcp_tools,
         )
-        # The tool schemas advertised to the model — exactly the allow-list, so the
-        # model is only *offered* tools it may call (the runner still enforces the
-        # allow-list as the hard gate).
-        advertised = tool_specs(allowed)
+        # The tool schemas advertised to the model — exactly the allow-list (native
+        # + the resolved MCP tools it names), so the model is only *offered* tools it
+        # may call (the runner still enforces the allow-list as the hard gate). An
+        # allow-listed ``mcp:*`` tool whose server is disabled / unregistered simply
+        # is not in ``mcp_tools`` and so is silently not offered (deny-by-default).
+        advertised = tool_specs(allowed) + _mcp_tool_specs(mcp_tools, allowed)
         # The loop bound: this tenant's ``max_tool_turns`` override if set, else
         # the configured system default (issue #148).
         max_tool_turns = await self._resolve_max_tool_turns(session, tenant_id)
@@ -522,6 +553,30 @@ class ChatRuntime:
             completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens,
         )
+
+    async def _resolve_mcp_tools(
+        self, session: AsyncSession, allowed: frozenset[str]
+    ) -> dict[str, ToolDefinition]:
+        """The run's tenant-scoped MCP tools, resolved only if the allow-list names one.
+
+        Deny-by-default + no-untested-plumbing (mirrors the ``run_python`` seam): the
+        resolver is invoked **only** when a live factory is wired *and* the run's
+        allow-list actually names at least one ``mcp:*`` tool. An ad-hoc / native-
+        only run never touches the MCP servers table or opens a client. The resolver
+        itself lists only the caller's own enabled servers in this tenant
+        (INV-1/INV-2), so a disabled / foreign server contributes nothing. Any
+        resolver failure is contained as "no MCP tools" — a broken MCP registry must
+        never break an otherwise-answerable chat run.
+        """
+        if self._mcp_tools_factory is None:
+            return {}
+        if not any(is_mcp_tool_name(name) for name in allowed):
+            return {}
+        try:
+            return await self._mcp_tools_factory(session)
+        except Exception:  # noqa: BLE001 — a broken MCP registry must not break the run
+            log.warning("chat_runtime.mcp_resolve_failed")
+            return {}
 
     def _build_sandbox_seam(
         self,
@@ -827,6 +882,28 @@ class _RunResult:
     total_tokens: int
 
 
+def _mcp_tool_specs(
+    mcp_tools: dict[str, ToolDefinition], allowed: frozenset[str]
+) -> tuple[ToolSpec, ...]:
+    """Render the allow-listed MCP tools to the ``ToolSpec``s advertised to the model.
+
+    Only tools that are BOTH resolved (a registered, enabled server of the caller's)
+    AND in the run's allow-list are offered — the same restriction ``tool_specs``
+    applies to native tools, so the model is offered exactly what it may call. The
+    runner still enforces the allow-list as the hard chokepoint. Deterministically
+    ordered by name so the offered set is stable.
+    """
+    return tuple(
+        ToolSpec(
+            name=defn.name,
+            description=defn.description,
+            parameters=defn.json_schema,
+        )
+        for name, defn in sorted(mcp_tools.items())
+        if name in allowed
+    )
+
+
 def _narrow_collection_ids(
     send_ids: list[UUID] | None, assistant_ids: list[UUID] | None
 ) -> list[UUID] | None:
@@ -882,4 +959,4 @@ _RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-__all__ = ["ChatRuntime", "SandboxContext", "SandboxFactory"]
+__all__ = ["ChatRuntime", "McpToolsFactory", "SandboxContext", "SandboxFactory"]
