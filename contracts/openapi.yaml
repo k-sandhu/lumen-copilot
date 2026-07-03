@@ -3586,11 +3586,6 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
-    Conflict:
-      description: Conflict — the request conflicts with the current resource state (e.g. an illegal state transition, INV-8).
-      content:
-        application/problem+json:
-          schema: { $ref: "#/components/schemas/Problem" }
     NotFound:
       description: Not found — or in another tenant / not permitted (INV-1/INV-2).
       content:
