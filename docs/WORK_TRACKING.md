@@ -1,8 +1,8 @@
 # WORK_TRACKING.md — cold-start handoff
 
-What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells you where work lives, how to claim it, and how to turn user stories into issues.
+What a fresh agent session reads **after** [AGENTS.md](../AGENTS.md). It tells you where work lives, how to claim it, and how work is structured.
 
-*Last reviewed: 2026-06-17.*
+*Last reviewed: 2026-07-02.*
 
 ---
 
@@ -11,8 +11,20 @@ Work is executed by a small fleet of single-purpose agents that hand off through
 
 ## Where work is tracked
 - **Source of truth: the GitHub Projects board "Lumen Copilot"** — *not* a markdown table (tables drift). Status field: **Backlog / Ready / In Progress / In Review / Blocked / Done**.
-- Issues live in the `k-sandhu/lumen-copilot` repo; each traces to a user story (or is a `type:chore` / `type:bug` / `type:adr` / `type:docs` item).
+- Issues live in the `k-sandhu/lumen-copilot` repo. The **unit of claim is the Feature** (`type:feature`), not the user story — stories are traceability (the *why*). Foundations are `type:cross-cutting`; investigations that end in an ADR are `type:spike`; plus `type:epic` / `type:chore` / `type:bug` / `type:adr` / `type:docs`. This layer model is [spec 0002](specs/0002-feature-issue-structure.md), reconciled in [consolidated-structure.md](product/consolidated-structure.md) §2; the Planner cuts these by hand ([docs/roles/planner.md](roles/planner.md)) — see the pipeline note below.
 - Board: **[#7 — Lumen Copilot](https://github.com/users/k-sandhu/projects/7)** (Status: Backlog / Ready / In Progress / In Review / Blocked / Done).
+
+## Milestones (delivery waves — the board's cadence axis)
+Milestones are **thematic waves**, not the numbered iterations spec 0002 §7.3 originally sketched. Current map:
+
+| Milestone | State | What it covers |
+|---|---|---|
+| M0 Foundations · M1 Grounded Chat v0 · M2 Trust Surfaces | **done** | Tenancy, permissioned retrieval, upload+ingest, grounded chat with citations, search, audit, admin, connector framework + web source. |
+| **M2.5 Stabilization** | **active** | Hardening of the M0–M2 QA waves + the ADR-0010 OpenSearch retrieval-store cutover ([#189](https://github.com/k-sandhu/lumen-copilot/issues/189)). Umbrella: [#288](https://github.com/k-sandhu/lumen-copilot/issues/288). Runs **in parallel** with M3. |
+| **M3 Agents & Extensibility** · **M4 Agent Governance & Autonomy** | **active** | The committed agents/extensibility program ([#196](https://github.com/k-sandhu/lumen-copilot/issues/196)): custom assistants, tool platform, MCP, sandbox, scheduled runs. |
+| *(gated next-wave epics, no milestone yet)* | **Backlog** | Connector breadth, knowledge trust, collaboration/trust, actions & approvals, proactive, research & artifacts, AgentOps — each awaits a sponsor commitment before it earns a milestone (spec 0003 §4 pattern). |
+
+M2.5 and M3/M4 are **disjoint lanes** — a stabilization team and an agents team run concurrently without shared files. The one shared seam was [#192](https://github.com/k-sandhu/lumen-copilot/issues/192)↔[#207](https://github.com/k-sandhu/lumen-copilot/issues/207) (retrieval ↔ tool registry); [#207](https://github.com/k-sandhu/lumen-copilot/issues/207) has since merged, so [#192](https://github.com/k-sandhu/lumen-copilot/issues/192) now lands against the settled registry and the lanes are effectively fully disjoint.
 
 ## Branch model
 - `main` advances **only** by merging a PR with `Closes #<N>` — no direct commits to `main`.
@@ -42,30 +54,24 @@ Work is executed by a small fleet of single-purpose agents that hand off through
 
 ---
 
-## The story → issue pipeline (the "user-stories-first" path)
+## How work gets created (the operating model)
 
-**Goal:** turn `glean-user-stories.md` (being finalized by a parallel effort) into **one issue per story**, grouped by epic (milestone) and tagged by persona, all on the board.
+**The Planner cuts issues by hand** from the groomed backlog ([docs/roles/planner.md](roles/planner.md)); the layer model is [spec 0002](specs/0002-feature-issue-structure.md). A Feature satisfies 3–7 stories, owns one `area:*`, and is claimable only when it passes the **Definition of Ready** (capability paragraph · ≥1 testable AC incl. a negative · IN/OUT scope fences · dependencies listed · `area:`+`size:` · milestone or "unassigned" · no `needs-spec`/`needs-adr` · no open `blocked-by`). Cross-cuttings are filed and Ready **before** the Features that depend on them; Spikes close an open decision into an ADR. Dependency edges (`blocked-by:`/`blocks:`) live in the issue body and gate the board.
 
-### Phase 1 — done now (mechanism in place)
+> **Why not a bulk story→issue generator?** The `stories-to-issues.ps1` path below exists and works, but the fleet **did not** mass-generate one-issue-per-story: that model conflates the unit of *traceability* (the 136+ stories) with the unit of *claim* (~30–50 Features), and it can't surface the invisible foundations (auth, tenancy, ingestion, the tool registry…) that aren't user stories at all. See [spec 0002](specs/0002-feature-issue-structure.md) §1 and [consolidated-structure.md](product/consolidated-structure.md) §2 for the reasoning. The generator remains useful for **seeding a fresh epic's stories** as traceability stubs; treat it as a helper, not the pipeline.
+
+### The generator (available helper, not the default path)
 - **Issue forms:** [`.github/ISSUE_TEMPLATE/user-story.yml`](../.github/ISSUE_TEMPLATE/user-story.yml), [`epic.yml`](../.github/ISSUE_TEMPLATE/epic.yml).
 - **Base labels + board:** `powershell -File .\scripts\setup-board-and-labels.ps1` (idempotent).
-- **Generator:** [`scripts/stories-to-issues.ps1`](../scripts/stories-to-issues.ps1) — idempotent, **dry-run by default**.
+- **Generator:** [`scripts/stories-to-issues.ps1`](../scripts/stories-to-issues.ps1) — idempotent, **dry-run by default**, canonical source `docs/product/user-stories.md`.
 
-### Phase 2 — after the user stories settle (you trigger this)
 ```powershell
-# 1. Preview — writes nothing (dry run is the default):
-powershell -File .\scripts\stories-to-issues.ps1
-
-# 2. Read the printed plan (titles, labels, milestones, what already exists).
-
-# 3. Create for real:
-powershell -File .\scripts\stories-to-issues.ps1 -Execute
+# Preview (writes nothing — dry run is the default):
+powershell -File .\scripts\stories-to-issues.ps1 -StoriesFile docs/product/user-stories.md
+# Create for real (only after a human confirms the slice):
+powershell -File .\scripts\stories-to-issues.ps1 -StoriesFile docs/product/user-stories.md -Execute
 ```
-> Use `-StoriesFile <path>` if the finalized stories live in a different file, and `powershell` (Windows PowerShell 5.1, present on this machine) or `pwsh` (PowerShell 7+, if installed) — the scripts target both.
-
-**What the generator does per story:** creates a `[E?-?] <capability>` issue with the story + AC + feature in the body; labels it `type:user-story` + `epic:<n>` + `persona:<tag>`; attaches the `EPIC <n>` milestone; adds it to the board. It is **idempotent** — re-running skips any story whose issue already exists (matched by the `[E?-?]` title prefix), so you can safely run it again after the stories change.
-
-> Epic milestones and `epic:*` / `persona:*` labels are created **at run time from the file**, not hardcoded — so they stay correct no matter how the stories are reorganized before they settle.
+> Use `powershell` (Windows PowerShell 5.1) or `pwsh` (PowerShell 7+). **Known gotcha** ([consolidated-structure.md](product/consolidated-structure.md) §11): under Windows PowerShell 5.1 the script must be UTF-8 **with BOM** or the em-dash in the `# EPIC n —` heading regex breaks and milestones preview as bare `EPIC`. It is idempotent — re-running skips any story whose `[E?-?]` issue already exists.
 
 ---
 
@@ -77,8 +83,9 @@ powershell -File .\scripts\stories-to-issues.ps1 -Execute
 
 ## Parallel-agent isolation
 - Multiple agents: one issue each, distinct branches, **claim on the board before editing** to avoid collisions.
-- `glean-user-stories.md` is owned by a parallel effort right now — **don't edit it** unless that's your assigned task.
-- *(once a stack exists)* isolate runtime via distinct compose project names + non-overlapping ports + unique test-data prefixes.
+- WIP cap (spec 0002 §8): one agent = at most **1 Feature + 1 Cross-cutting**; two agents don't own the same `area:*` unless the dependency edge is explicit. Cross-cuttings are claimed **before** their dependents — the single largest parallelization unlock.
+- `glean-user-stories.md` remains **read-only** for agents ([AGENTS.md](../AGENTS.md) §7.9) — the vendor-neutral rewrite it fed (`docs/product/user-stories.md`) is the working corpus.
+- Isolate runtime via distinct compose project names + non-overlapping ports (`471xx`, [ADR-0005](architecture/0005-local-run-and-developer-workflow.md)) + unique test-data prefixes.
 
 ## Final-report discipline
 Every handoff ends with: **what changed, which gates ran (and results), what was exercised, what was deferred and its residual risk.**

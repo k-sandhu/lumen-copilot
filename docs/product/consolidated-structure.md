@@ -1,10 +1,12 @@
 # Lumen Copilot — Consolidated Feature / Epic / Story Structure (multi-model reconciliation)
 
-Status: candidate product-scope input (reconciliation of parallel planning artifacts).
-Last updated: 2026-06-16.
+Status: **adopted** (was discovery input; the structure it proposed is now the operating model).
+Last updated: 2026-07-02.
 Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/3.
 
-This document **reconciles the product-discovery planning artifacts authored in parallel by three different models** into one coherent structure for building the product. It is discovery input only and **does not close OD-1** (product scope) in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). Adopting any board/label/milestone change here still requires a tracked `type:chore`/`type:docs` issue + PR per [AGENTS.md](../../AGENTS.md) §7.
+> **Adoption status (2026-07-02).** When written this was discovery input; it has since been adopted. OD-1 closed using this doc as an input ([spec 0003](../specs/0003-product-scope-and-mission.md)); the layer model (§2), reconciled labels (§8), and 6-state board (§9) are live ([spec 0002](../specs/0002-feature-issue-structure.md) is marked adopted). **Divergences from what's below:** milestones are **thematic waves** with descriptive names (`M2 Trust Surfaces`, `M3 Agents & Extensibility`, `M2.5 Stabilization`) rather than §10's numbered ladder, though the *sequencing logic* (read-only value first, write-back behind approval, autonomy last) held. The §11 generator blocker is **moot** — the fleet cuts Features by hand (the mass story→issue path was not taken; see [../WORK_TRACKING.md](../WORK_TRACKING.md)). The story corpus grew to **17 epics / 144 stories** (EPIC 17 appended 2026-07-02; §3 is updated to match — the §§1–2 reconciliation prose and §11 dry-run numbers still describe the original 16/136 corpus as authored 2026-06-16). The current backlog beyond the committed M3 program is a set of **sponsor-gated next-wave epics** (connector breadth, knowledge trust, collaboration/trust, actions, proactive, research, AgentOps) mapped onto the roadmap below.
+
+This document **reconciles the product-discovery planning artifacts authored in parallel by three different models** into one coherent structure for building the product. It was discovery input; adopting its board/label/milestone changes was done via tracked `type:chore`/`type:docs` issues + PRs per [AGENTS.md](../../AGENTS.md) §7 (fleet-tooling [#7](https://github.com/k-sandhu/lumen-copilot/issues/7)/[#9](https://github.com/k-sandhu/lumen-copilot/issues/9)).
 
 ## 1. Inputs reconciled (who contributed what)
 
@@ -31,9 +33,9 @@ Adopted from minimax-m3 §3, with the Opus backlog supplying the Story layer.
 
 **Key reconciliation:** the **136 stories are traceability (the *why*)**, not the work unit. The **Feature is the claim unit** (~30–40 total). **Cross-cuttings and Spikes are first-class issues that stories never surface** — they're how foundations and open decisions get front-loaded.
 
-## 3. Canonical backlog — 16 epics / 136 stories
+## 3. Canonical backlog — 17 epics / 144 stories
 
-Source of truth: [user-stories.md](user-stories.md) (generator-parseable). Workstream/area assignments reconcile gpt-5.5's workstreams with minimax's `area:*` labels.
+Source of truth: [user-stories.md](user-stories.md) (generator-parseable). Workstream/area assignments reconcile gpt-5.5's workstreams with minimax's `area:*` labels. *(EPIC 17 appended 2026-07-02; the multi-model reconciliation narrative in §§1–2 and the §11 dry-run numbers describe the original 16-epic / 136-story corpus as authored 2026-06-16.)*
 
 | Epic | Title | Stories | Workstream (gpt-5.5) | Primary `area:*` (minimax) |
 |---:|---|---:|---|---|
@@ -53,7 +55,8 @@ Source of truth: [user-stories.md](user-stories.md) (generator-parseable). Works
 | 14 | Admin, Analytics, AgentOps & Adoption | 8 | Foundation / Agents | observability, admin |
 | 15 | Developer Platform & Interoperability | 9 | Developer platform | api, developer-platform |
 | 16 | Computer Use & Browser/Desktop Automation | 4 | Browser & desktop | browser-desktop |
-| | **Total** | **136** | 9 workstreams | 16 areas |
+| 17 | Collaboration, Trust & Reach Surfaces | 8 | Assistant & productivity | ui, api, proactive |
+| | **Total** | **144** | 9 workstreams | 16 areas |
 
 Per-story detail (persona, AC) lives in `user-stories.md`; the dry-run issue plan is in [feature-build-plan.md](feature-build-plan.md).
 

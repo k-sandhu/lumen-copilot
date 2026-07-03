@@ -1,6 +1,8 @@
 # Feature Build Issue Plan
 
-Status: dry-run planning document.
+> **⚠️ SUPERSEDED — historical record (2026-06-16 dry run).** This document describes the repo *before* the stack landed: it says the repo is in "bootstrap mode", the board "has one issue in progress", and OD-1..OD-7 are all open. All of that is now false — OD-1..OD-5 closed, the stack shipped (M0–M2 done), and the board carries the full Feature/Cross-cutting/Spike backlog. Its enduring contributions (parallel workstreams, the cross-cutting *contracts* idea, the label taxonomy) were **reconciled and adopted** in [consolidated-structure.md](consolidated-structure.md) and [../specs/0002-feature-issue-structure.md](../specs/0002-feature-issue-structure.md). For the current operating model read [../WORK_TRACKING.md](../WORK_TRACKING.md). Kept unedited below as provenance for how the backlog structure was derived.
+
+Status: dry-run planning document (superseded — see banner).
 Prepared by: gpt-5.5.
 Date: 2026-06-16.
 Tracking issue: https://github.com/k-sandhu/lumen-copilot/issues/1.
