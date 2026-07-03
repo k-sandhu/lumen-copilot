@@ -725,6 +725,56 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/tool-policy:
+    get:
+      operationId: getToolPolicy
+      summary: The per-tenant tool-governance policy (admin only).
+      description: >
+        The caller's tenant's tool-governance policy (issue #223): for **every**
+        registered tool, its static `risk_tier` (for display) plus the effective
+        per-tenant flags `enabled` and `requires_approval`. Absence of an admin
+        override falls back to the tool's built-in default, so a `requires_approval`
+        tool (e.g. `run_python`) is **denied by default** until an admin enables and
+        pre-approves it. Restricted to the `admin` role; any other role receives
+        **403** (INV-5). Tenant-scoped (INV-1): the policy is the caller's own
+        tenant's.
+      tags: [admin]
+      responses:
+        "200":
+          description: The per-tenant tool-governance policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateToolPolicy
+      summary: Set the per-tenant flags for one tool (admin only).
+      description: >
+        Set the per-tenant `enabled` / `requires_approval` flags for one registered
+        tool (issue #223). A tenant-scoped **T1** governance write (spec 0004 §2.5 —
+        "authorized owner; audited; no extra approval"): `admin`-only (**403**
+        otherwise, INV-5), audited as `tool_policy.updated` (INV-6). Turning a
+        `requires_approval` tool's `requires_approval` to `false` while `enabled` is
+        `true` is the admin **pre-approval** that lets the policy-driven approval
+        gate execute it (the `run_python` unlock). An unknown `tool_name` (not in the
+        registry) is **422** (INV-8). Returns the full resulting policy.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ToolPolicyUpdate" }
+      responses:
+        "200":
+          description: The updated per-tenant tool-governance policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
     get:
@@ -2427,6 +2477,77 @@ components:
             An integer in 1–50 sets the per-tenant override; `null` clears it so
             the system default applies again (the system default is configured
             server-side, `CHAT_MAX_TOOL_TURNS`).
+
+    # --- Tool governance policy (per-tenant enable + approval, #223) ---------
+    ToolPolicyEntry:
+      type: object
+      additionalProperties: false
+      description: >
+        The effective governance for one registered tool in this tenant (issue
+        #223). `risk_tier` is the tool's static tier (spec 0004 §2.5), for display.
+        `enabled` and `requires_approval` are the effective per-tenant flags — an
+        admin override if one exists, else the tool's built-in default. A
+        `requires_approval` tool executes only when `enabled` AND NOT
+        `requires_approval` (the admin pre-approved it); otherwise the policy-driven
+        approval gate denies it (deny-by-default).
+      required: [tool_name, risk_tier, read_only, enabled, requires_approval, is_default]
+      properties:
+        tool_name:
+          type: string
+          description: The registered tool name (the registry's single source of truth).
+        risk_tier: { $ref: "#/components/schemas/RiskTier/properties/tier" }
+        read_only:
+          type: boolean
+          description: True for a read-only (T0) tool; write-tier tools are not read-only.
+        enabled:
+          type: boolean
+          description: Whether the tool is enabled for this tenant.
+        requires_approval:
+          type: boolean
+          description: >
+            Whether an invocation still needs approval. For a write-tier tool this
+            is the admin's pre-approval switch — `false` (with `enabled` true) lets
+            the approval gate execute it; `true` keeps it gated (denied).
+        is_default:
+          type: boolean
+          description: >
+            True when no per-tenant admin override exists and the tool's built-in
+            default flags are in force (deny-by-default for a `requires_approval`
+            tool).
+
+    ToolPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The per-tenant tool-governance policy: one entry per registered tool
+        (issue #223), deterministically ordered by tool name.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ToolPolicyEntry" }
+
+    ToolPolicyUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set the per-tenant `enabled` / `requires_approval` flags for one registered
+        tool (issue #223). Both flags are required so the stored override is
+        explicit. An unknown `tool_name` is rejected 422 (INV-8).
+      required: [tool_name, enabled, requires_approval]
+      properties:
+        tool_name:
+          type: string
+          minLength: 1
+          description: The registered tool name to set the policy for (must exist in the registry).
+        enabled:
+          type: boolean
+          description: Whether the tool is enabled for this tenant.
+        requires_approval:
+          type: boolean
+          description: >
+            Whether an invocation still needs approval. Set `false` (with `enabled`
+            true) to pre-approve a write-tier tool so the approval gate executes it.
 
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:
