@@ -22,6 +22,9 @@ import type {
   ChatStartData,
   ChatToolCall,
   ChatToolResult,
+  CodeOutput,
+  CodeResult,
+  CodeRunStatus,
   WsEnvelope,
   WsProblem,
 } from '@/api';
@@ -39,6 +42,36 @@ export interface ToolActivity {
   summary?: string;
 }
 
+/**
+ * A sandbox code run in flight on the chat stream (#232), assembled live from the
+ * `code_output` chunks and finalized by the single `code_result`. The full record
+ * (code, resource usage) is fetched after-the-fact from GET /code-runs/{runId} —
+ * the stream carries only the id + streamed output + terminal outcome, so the
+ * inspector shows something the instant a run starts, then backfills.
+ */
+export interface CodeRunActivity {
+  /** The code_runs.id — the key to GET /code-runs/{id} for the full record. */
+  runId: string;
+  /** The originating run_python tool_call, when correlated. */
+  callId?: string;
+  /**
+   * 'running' until the code_result arrives, then its terminal status. `queued` is
+   * never seen on the stream (output only flows once running), so the live start
+   * state is 'running'.
+   */
+  status: CodeRunStatus;
+  /** stdout accumulated from code_output chunks (may be truncated at the cap, G7). */
+  stdout: string;
+  /** stderr accumulated from code_output chunks (may be truncated at the cap, G7). */
+  stderr: string;
+  /** Exit code from the code_result; null/absent until it finishes (or if killed). */
+  exitCode?: number | null;
+  /** Wall-clock duration (ms) from the code_result; absent until it finishes. */
+  durationMs?: number | null;
+  /** Artifact ids from the code_result; empty until (and unless) it emits files. */
+  artifactIds: string[];
+}
+
 export interface StreamState {
   phase: StreamPhase;
   /** Accumulated assistant answer text (may be empty until the first delta). */
@@ -47,6 +80,8 @@ export interface StreamState {
   citations: ChatCitation[];
   /** Retrieval-tool activity, in arrival order (for "searching…" UX). */
   tools: ToolActivity[];
+  /** Sandbox code runs on this stream, in first-seen order (the inspector, #232). */
+  codeRuns: CodeRunActivity[];
   /** start.data, once the stream opens. */
   start: ChatStartData | null;
   /** done.data, on terminal success. */
@@ -62,6 +97,7 @@ export const initialStreamState: StreamState = {
   text: '',
   citations: [],
   tools: [],
+  codeRuns: [],
   start: null,
   done: null,
   problem: null,
@@ -108,6 +144,83 @@ function asToolResult(data: unknown): ChatToolResult | null {
   const t = data as Record<string, unknown>;
   if (typeof t.callId !== 'string' || typeof t.hitCount !== 'number') return null;
   return data as ChatToolResult;
+}
+
+function asCodeOutput(data: unknown): CodeOutput | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const c = data as Record<string, unknown>;
+  if (typeof c.runId !== 'string') return null;
+  if (c.stream !== 'stdout' && c.stream !== 'stderr') return null;
+  if (typeof c.text !== 'string') return null;
+  return data as CodeOutput;
+}
+
+function asCodeResult(data: unknown): CodeResult | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const c = data as Record<string, unknown>;
+  if (typeof c.runId !== 'string' || typeof c.status !== 'string') return null;
+  if (!Array.isArray(c.artifactIds)) return null;
+  return data as CodeResult;
+}
+
+/**
+ * Fold a code_output chunk into the code-run list — creating the run (as
+ * 'running') on its first chunk, or appending to the matching stream buffer.
+ */
+function applyCodeOutput(runs: CodeRunActivity[], out: CodeOutput): CodeRunActivity[] {
+  const existing = runs.find((r) => r.runId === out.runId);
+  if (!existing) {
+    return [
+      ...runs,
+      {
+        runId: out.runId,
+        ...(out.callId !== undefined ? { callId: out.callId } : {}),
+        status: 'running',
+        stdout: out.stream === 'stdout' ? out.text : '',
+        stderr: out.stream === 'stderr' ? out.text : '',
+        artifactIds: [],
+      },
+    ];
+  }
+  return runs.map((r) =>
+    r.runId === out.runId
+      ? {
+          ...r,
+          stdout: out.stream === 'stdout' ? r.stdout + out.text : r.stdout,
+          stderr: out.stream === 'stderr' ? r.stderr + out.text : r.stderr,
+        }
+      : r,
+  );
+}
+
+/**
+ * Fold the single code_result into the code-run list — finalizing the run's
+ * status/exit/duration/artifacts. A code_result with no preceding code_output
+ * (e.g. a `denied` run that never ran) still creates the run so it's inspectable
+ * (never a blank pane — AC-2).
+ */
+function applyCodeResult(runs: CodeRunActivity[], res: CodeResult): CodeRunActivity[] {
+  const finalize = (r: CodeRunActivity): CodeRunActivity => ({
+    ...r,
+    status: res.status,
+    exitCode: res.exitCode ?? null,
+    durationMs: res.durationMs ?? null,
+    artifactIds: res.artifactIds,
+  });
+  if (!runs.some((r) => r.runId === res.runId)) {
+    return [
+      ...runs,
+      finalize({
+        runId: res.runId,
+        ...(res.callId !== undefined ? { callId: res.callId } : {}),
+        status: res.status,
+        stdout: '',
+        stderr: '',
+        artifactIds: [],
+      }),
+    ];
+  }
+  return runs.map((r) => (r.runId === res.runId ? finalize(r) : r));
 }
 
 function deltaText(data: unknown): string | null {
@@ -170,6 +283,16 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
             : t,
         );
         return { ...base, tools };
+      }
+      if (envelope.name === 'code_output') {
+        const out = asCodeOutput(envelope.data);
+        if (!out) return base;
+        return { ...base, codeRuns: applyCodeOutput(base.codeRuns, out) };
+      }
+      if (envelope.name === 'code_result') {
+        const res = asCodeResult(envelope.data);
+        if (!res) return base;
+        return { ...base, codeRuns: applyCodeResult(base.codeRuns, res) };
       }
       // Unknown side-band event — ignore but keep the stream healthy.
       return base;

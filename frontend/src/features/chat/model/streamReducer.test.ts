@@ -88,6 +88,41 @@ function toolResult(seq: number, callId: string, hitCount: number): EventEnvelop
     data: { callId, tool: 'search_text', hitCount, summary: 'found passages' },
   };
 }
+function codeOutput(
+  seq: number,
+  runId: string,
+  stream: 'stdout' | 'stderr',
+  text: string,
+): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'code_output',
+    data: { runId, callId: 'call-1', stream, text },
+  };
+}
+function codeResult(
+  seq: number,
+  runId: string,
+  status: 'succeeded' | 'failed' | 'timeout' | 'killed' | 'denied',
+  over: { exitCode?: number | null; durationMs?: number | null; artifactIds?: string[] } = {},
+): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'code_result',
+    data: {
+      runId,
+      callId: 'call-1',
+      status,
+      exitCode: over.exitCode ?? null,
+      durationMs: over.durationMs ?? null,
+      artifactIds: over.artifactIds ?? [],
+    },
+  };
+}
 function done(seq: number, citationCount: number): DoneEnvelope {
   return {
     type: 'done',
@@ -205,5 +240,91 @@ describe('reduceStream', () => {
   it('does not override an existing terminal on disconnect', () => {
     const finished = fold(initialStreamState, start(0), done(1, 0));
     expect(terminateWithDisconnect(finished)).toBe(finished);
+  });
+
+  // --- code runs (#232) ------------------------------------------------------
+
+  it('assembles a code run: creates it running on the first code_output chunk (AC-1)', () => {
+    const s = fold(initialStreamState, start(0), codeOutput(1, 'run-1', 'stdout', 'Hello'));
+    expect(s.codeRuns).toHaveLength(1);
+    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-1', status: 'running', stdout: 'Hello', stderr: '' });
+  });
+
+  it('appends streamed stdout/stderr chunks in order onto the matching run (AC-1)', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      codeOutput(1, 'run-1', 'stdout', 'line 1\n'),
+      codeOutput(2, 'run-1', 'stderr', 'warn: x\n'),
+      codeOutput(3, 'run-1', 'stdout', 'line 2\n'),
+    );
+    expect(s.codeRuns[0]?.stdout).toBe('line 1\nline 2\n');
+    expect(s.codeRuns[0]?.stderr).toBe('warn: x\n');
+  });
+
+  it('finalizes the run on code_result with status/exit/duration/artifacts (AC-1)', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      codeOutput(1, 'run-1', 'stdout', 'done'),
+      codeResult(2, 'run-1', 'succeeded', {
+        exitCode: 0,
+        durationMs: 820,
+        artifactIds: ['art-1', 'art-2'],
+      }),
+    );
+    expect(s.codeRuns[0]).toMatchObject({
+      status: 'succeeded',
+      exitCode: 0,
+      durationMs: 820,
+      artifactIds: ['art-1', 'art-2'],
+      stdout: 'done',
+    });
+  });
+
+  it('creates an inspectable run from a lone code_result with no output — e.g. denied (AC-2)', () => {
+    // A denied run never executes, so no code_output precedes its result. The
+    // reducer still records it so the inspector is never blank.
+    const s = fold(initialStreamState, start(0), codeResult(1, 'run-x', 'denied'));
+    expect(s.codeRuns).toHaveLength(1);
+    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-x', status: 'denied', stdout: '', stderr: '' });
+  });
+
+  it('tracks two concurrent runs independently by runId', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      codeOutput(1, 'run-1', 'stdout', 'a'),
+      codeOutput(2, 'run-2', 'stdout', 'b'),
+      codeResult(3, 'run-1', 'succeeded', { exitCode: 0 }),
+    );
+    expect(s.codeRuns).toHaveLength(2);
+    expect(s.codeRuns.find((r) => r.runId === 'run-1')?.status).toBe('succeeded');
+    expect(s.codeRuns.find((r) => r.runId === 'run-2')?.status).toBe('running');
+  });
+
+  it('ignores a malformed code_output (bad stream / missing text) without corrupting state', () => {
+    const bad: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 1,
+      name: 'code_output',
+      data: { runId: 'run-1', stream: 'stdxxx', text: 'x' },
+    };
+    const s = fold(initialStreamState, start(0), bad);
+    expect(s.codeRuns).toHaveLength(0);
+  });
+
+  it('code_result is a run-terminal, not a stream-terminal — the stream still streams', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      codeOutput(1, 'run-1', 'stdout', 'x'),
+      codeResult(2, 'run-1', 'succeeded', { exitCode: 0 }),
+      delta(3, ' and the answer continues'),
+    );
+    expect(s.phase).toBe('streaming');
+    expect(s.text).toBe(' and the answer continues');
+    expect(s.codeRuns[0]?.status).toBe('succeeded');
   });
 });
