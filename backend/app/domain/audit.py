@@ -105,6 +105,14 @@ class AuditAction(str, enum.Enum):
     ASSISTANT_DELETED = "assistant.deleted"
     ASSISTANT_PUBLISHED = "assistant.published"
     ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
+    # Conversational agent builder (E6-1, issue #213). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Drafting a config from a plain-language description creates NOTHING
+    # (nothing is persisted until the user saves via ``assistant.created``); it is
+    # still a consequential read of the caller's collections/sources + a model call,
+    # so the *intent* to draft is audited (INV-6) — who asked the builder to draft
+    # what, and how many clarifications/omissions it surfaced.
+    ASSISTANT_DRAFTED = "assistant.drafted"
     # Headless agent runs (ADR-0015 §4, issue #235). Additive to the §2.4 taxonomy
     # — deny-by-default is preserved (the set only grows; no action is relaxed).
     # Every run is bracketed by ``run.started``/``run.finished`` (INV-6) so the

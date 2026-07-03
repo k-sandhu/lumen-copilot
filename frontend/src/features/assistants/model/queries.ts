@@ -29,6 +29,7 @@ import {
 import {
   createAssistant,
   deleteAssistant,
+  draftAssistant,
   getAssistant,
   listAssistantVersions,
   listAssistants,
@@ -43,6 +44,8 @@ import {
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraft,
+  AssistantDraftRequest,
   AssistantList,
   AssistantPublishRequest,
   AssistantRollbackRequest,
@@ -87,6 +90,20 @@ export function useCreateAssistant() {
   return useMutation<Assistant, unknown, AssistantCreate>({
     mutationFn: (body) => createAssistant(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: assistantKeys.list() }),
+  });
+}
+
+/**
+ * Draft an assistant config from a plain-language description (E6-1, #213). This
+ * creates NOTHING on the server — it returns a suggested config + clarifications
+ * the "Describe your assistant" surface loads into the editor for review. So it does
+ * NOT invalidate the library (nothing was created); the actual create happens when
+ * the user saves the pre-filled editor. A 422 (blank/oversize description)
+ * propagates as an `ApiError` the caller renders inline — it is NOT swallowed here.
+ */
+export function useDraftAssistant() {
+  return useMutation<AssistantDraft, unknown, AssistantDraftRequest>({
+    mutationFn: (body) => draftAssistant(body),
   });
 }
 

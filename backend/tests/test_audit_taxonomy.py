@@ -84,6 +84,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Conversational agent builder (E6-1 / issue #213) — additive; drafting a
+        # config from a description is audited (INV-6) even though nothing is
+        # persisted until the user saves via assistant.created.
+        "assistant.drafted",
         # Headless agent runs (ADR-0015 / issue #235) — additive; every run is
         # bracketed by run.started/run.finished (INV-6), actor = the run owner.
         "run.started",

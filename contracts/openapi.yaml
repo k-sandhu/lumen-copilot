@@ -1466,6 +1466,38 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /assistants/draft:
+    post:
+      operationId: draftAssistant
+      summary: Draft an assistant config from a plain-language description (E6-1).
+      description: >
+        The conversational agent builder (issue #213): given a plain-language
+        `description`, returns a **draft** config the client loads into the editor
+        for review + save — it creates **nothing** (nothing is persisted until the
+        user saves via `POST /assistants`). Owner-scoped (INV-1/INV-2): the draft
+        can only reference tools that exist and collections/sources the caller owns;
+        a tool the description named that is unknown, or a collection/source the
+        caller cannot see, is **omitted** from the draft with an explanatory `note`
+        (deny-by-default) rather than surfaced. `clarifications` are questions the
+        builder asks for anything the description left ambiguous (missing scope,
+        owner, or risk acknowledgement, E6-3); `warnings` flag any drafted high-risk
+        (write-tier / approval-gated) tool. Audited `assistant.drafted` (INV-6). A
+        blank or oversize `description` → 422 (INV-8).
+      tags: [assistants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantDraftRequest" }
+      responses:
+        "200":
+          description: The drafted config plus clarifications, notes, and warnings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantDraft" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /assistants/{assistantId}:
     parameters:
       - { $ref: "#/components/parameters/AssistantId" }
@@ -3694,6 +3726,71 @@ components:
         next_cursor:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
+
+    AssistantDraftRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Ask the conversational builder to draft an assistant (E6-1, issue #213)
+        from a plain-language description. A blank/oversize description → 422.
+      required: [description]
+      properties:
+        description:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: Plain-language description of the assistant to draft.
+
+    AssistantDraftConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        The drafted, editable config the client pre-fills into the editor (E6-1) —
+        the subset of `AssistantVersionConfig` the editor owns. Nothing is created
+        until the user saves via `POST /assistants`.
+      required: [name, model, knowledgeScope, toolAllowlist, autonomyLevel]
+      properties:
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, "null"] }
+        instructions: { type: [string, "null"] }
+        model:
+          type: [string, "null"]
+          description: A model id from GET /models; null ⇒ the smart server default.
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+          description: Registered tool names the draft keeps (unknown names are omitted).
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+
+    AssistantDraft:
+      type: object
+      additionalProperties: false
+      description: >
+        The builder's answer (E6-1, issue #213): a draft config the client loads
+        into the editor for review + save, plus clarifying questions and notes.
+      required: [draft]
+      properties:
+        draft: { $ref: "#/components/schemas/AssistantDraftConfig" }
+        clarifications:
+          type: array
+          items: { type: string }
+          description: >
+            Questions the builder asks for anything the description left ambiguous —
+            missing knowledge scope, owner/backup, or a risk acknowledgement (E6-3).
+        notes:
+          type: array
+          items: { type: string }
+          description: >
+            Transparency notes for any field omitted from the draft because it
+            referenced an unknown tool or a collection/source the caller cannot
+            access (deny-by-default; INV-2).
+        warnings:
+          type: array
+          items: { type: string }
+          description: >
+            Warnings for any drafted high-risk (write-tier / approval-gated) tool the
+            user should acknowledge before publishing (CC-A tiers).
 
     # --- merged schemas: CodeRunStatus, ResourceUsage, CodeRun ---
     CodeRunStatus:
