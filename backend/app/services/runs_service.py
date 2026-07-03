@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.principal import Principal
 from app.core.config import Settings, get_settings
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import (
     AssistantRepository,
@@ -66,6 +66,7 @@ from app.domain.entities import (
     RunStep,
     RunTrigger,
 )
+from app.domain.escalation import classify_terminal, is_transient, normalize_reason
 from app.llm import LLMGateway
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
@@ -82,6 +83,25 @@ _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 20
 
 _RUN_CURSOR_PREFIX = "run:"
+
+
+class TransientRunRetry(Exception):
+    """A run hit a transient dependency fault and should be re-driven (ADR-0015 §5, AC-3).
+
+    Raised by :func:`execute_run` when the run's outcome is a **transient** fault (a
+    briefly-unavailable model/db/storage) and the retry budget is not yet exhausted.
+    The run has been reset to ``queued`` (not made terminal), so the Celery wrapper
+    reschedules it after ``backoff_seconds``. A run is never silently dropped — on
+    retry exhaustion the fold writes a queryable ``failed`` terminal instead of
+    raising this. Not an :class:`~app.core.errors.AppError`: it never surfaces on an
+    HTTP path, only inside the worker.
+    """
+
+    def __init__(self, *, attempt: int, backoff_seconds: int, error: RunError) -> None:
+        super().__init__(f"transient run fault (attempt {attempt}): {error.code}")
+        self.attempt = attempt
+        self.backoff_seconds = backoff_seconds
+        self.error = error
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -211,6 +231,7 @@ async def execute_run(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     request_id: str = "run-task",
     source_ip: str = "system",
+    attempt: int = 0,
 ) -> RunStatus:
     """Execute one headless run end-to-end and persist its terminal outcome (ADR-0015 §4).
 
@@ -230,13 +251,20 @@ async def execute_run(
        :class:`RunTranscriptSink` — no socket present. A live watcher would attach
        over the chat WS with the run id as the ``streamId`` (the run task itself does
        not dual-publish; the scheduler wires the tee when a watcher is present).
-    4. Fold the sink's terminal into the run status (``done`` → ``succeeded`` +
-       summary; ``error`` → ``failed`` + typed error), persist the transcript, and
-       audit ``run.finished`` with the terminal status.
+    4. Fold the sink's terminal into the run status: a **transient** dependency fault
+       with retry budget left (``attempt < run_max_retries``) resets the run to
+       ``queued`` and raises :class:`TransientRunRetry` so the Celery task re-drives it
+       with backoff (AC-3 — never a silent drop); otherwise ``done`` → ``succeeded`` +
+       summary, and a failure routes to ``escalated`` (a human should handle it, E7-5)
+       or ``failed`` (exhausted transient / internal). Persist the transcript and audit
+       ``run.finished`` (+ ``run.escalated`` when escalated).
+
+    ``attempt`` is the 0-based retry count the Celery wrapper threads through (from
+    ``self.request.retries``); it drives the transient-retry budget only.
 
     Any unexpected exception marks the run ``failed`` with a typed, opaque error and
     audits ``run.finished`` — **a run never ends in silence** (ADR-0015 §5). Returns
-    the terminal :class:`RunStatus`.
+    the terminal :class:`RunStatus` (or raises :class:`TransientRunRetry` to retry).
     """
     settings = settings or get_settings()
     gateway = gateway or LLMGateway(settings)
@@ -353,18 +381,44 @@ async def execute_run(
         return RunStatus.FAILED
 
     # --- Phase 3: fold the terminal, persist the transcript, audit finish. ---
+    # Route a failure a human should handle (ambiguity / missing input / restricted
+    # data / an unrecoverable tool failure / an approval with no approver) to the
+    # ``escalated`` terminal rather than ``failed`` (E7-5, #239). Deny-by-default: a
+    # transient/internal failure stays ``failed`` so the retry policy can re-drive it
+    # before a human is paged. Either way the run reaches a queryable terminal — never
+    # a silent drop.
     outcome = sink.outcome()
+
+    # A transient dependency fault with retry budget left is re-driven with backoff
+    # BEFORE it ever reaches a terminal (AC-3): reset the run to ``queued`` and raise
+    # so the Celery wrapper reschedules. Never a silent drop — on exhaustion the fold
+    # below writes a terminal. Escalation-worthy failures are never transient, so they
+    # escalate immediately (they never enter this branch).
+    if is_transient(outcome.error) and attempt < settings.run_max_retries:
+        async with tenant_session_scope(tenant_id) as session:
+            requeued = RunRepository(session, tenant_id)
+            reset = await requeued.get(run.id)
+            if reset is not None and not reset.is_terminal:
+                await requeued.mark_queued(run.id)
+        assert outcome.error is not None  # is_transient(None) is False
+        raise TransientRunRetry(
+            attempt=attempt,
+            backoff_seconds=settings.run_retry_backoff_seconds * (2**attempt),
+            error=outcome.error,
+        )
+
+    terminal_status = classify_terminal(outcome.status, outcome.error)
     async with tenant_session_scope(tenant_id) as session:
         runs = RunRepository(session, tenant_id)
         steps = RunStepRepository(session, tenant_id)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
         current = await runs.get(run.id)
         if current is None:  # pragma: no cover — the run row cannot vanish mid-flight
-            return outcome.status
+            return terminal_status
         await sink.persist(runs=runs, steps=steps, run_id=run.id)
         await runs.mark_terminal(
             run.id,
-            status=outcome.status,
+            status=terminal_status,
             finished_at=datetime.now(UTC),
             summary=outcome.summary,
             message_id=sink.message_id(),
@@ -378,12 +432,31 @@ async def execute_run(
             request_id=request_id,
             source_ip=source_ip,
             metadata={
-                "status": outcome.status.value,
+                "status": terminal_status.value,
                 "session_id": str(session_id),
                 **({"error_code": outcome.error.code} if outcome.error is not None else {}),
             },
         )
-    return outcome.status
+        if terminal_status is RunStatus.ESCALATED:
+            # Notify the owner + trail the escalation. #238's in-app delivery is not
+            # merged, so the notification is the audited status itself: the run lands
+            # ``escalated`` in the owner's inbox with the blocking reason, and a
+            # ``run.escalated`` event records that a human is now needed (INV-6).
+            await _audit_run(
+                audit,
+                action=AuditAction.RUN_ESCALATED,
+                run=current,
+                request_id=request_id,
+                source_ip=source_ip,
+                metadata={
+                    "session_id": str(session_id),
+                    "reason": normalize_reason(outcome.error.code)
+                    if outcome.error is not None
+                    else "unknown",
+                    **({"error_code": outcome.error.code} if outcome.error is not None else {}),
+                },
+            )
+    return terminal_status
 
 
 async def _fail_run(
@@ -584,10 +657,159 @@ class RunsReadService:
         return RunDetail(run=run, steps=steps, citations=citations)
 
 
+# --- Control service (POST /runs/{id}/resume|cancel|reroute) ----------------
+
+
+@dataclass(frozen=True, slots=True)
+class RunControlResult:
+    """The outcome of a human handoff action on an escalated run (#239).
+
+    ``run`` is the run after the action; ``requeued`` is True when the action put the
+    run back on the queue (resume / reroute) so the caller enqueues the run task
+    **after-commit** (mirroring run-now); cancel does not re-enqueue.
+    """
+
+    run: Run
+    requeued: bool
+
+
+class RunsControlService:
+    """Resume / cancel / reroute an **escalated** run — the human handoff (E7-5, #239).
+
+    Constructed per-request with the session + the resolved ``tenant_id`` / ``owner_id``
+    (from the token, never request input) + the audit sink. Owner-scoped like the read
+    service: a run in another tenant or owned by another user is **404** (existence
+    non-disclosure, INV-1/INV-2), never 403. An escalated run is **never silently
+    dropped** — every handoff writes a new status and audits the human's decision
+    (INV-6). Acting on a run that is *not* escalated is a **409** (illegal transition,
+    INV-8) — resume/cancel/reroute apply only to a run awaiting a human.
+
+    The caller owns the transaction boundary (the service flushes, the router commits);
+    for resume/reroute the router enqueues the run task after-commit (the run-now
+    pattern) so a broker outage never rolls back the requeue.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        owner_id: UUID,
+        audit: AuditSink,
+        request_id: str,
+        source_ip: str,
+    ) -> None:
+        self._session = session
+        self._runs = RunRepository(session, tenant_id)
+        self._users = UserRepository(session, tenant_id)
+        self._tenant_id = tenant_id
+        self._owner_id = owner_id
+        self._audit = audit
+        self._request_id = request_id
+        self._source_ip = source_ip
+
+    async def resume(self, run_id: UUID) -> RunControlResult:
+        """Resume an escalated run — re-enqueue it from the escalation point (E7-5).
+
+        Resets the run to ``queued`` (clearing the escalation error) so the run task
+        re-drives it, and audits ``run.resumed``. Not escalated → 409; not visible →
+        404. The router enqueues the task after-commit.
+        """
+        run = await self._load_escalated(run_id)
+        requeued = await self._runs.mark_queued(run.id)
+        assert requeued is not None
+        await self._emit(AuditAction.RUN_RESUMED, run, metadata={"from_status": run.status.value})
+        return RunControlResult(run=requeued, requeued=True)
+
+    async def cancel(self, run_id: UUID) -> RunControlResult:
+        """Cancel an escalated run — acknowledge and close it (E7-5).
+
+        Writes a permanent terminal (``failed`` with a ``cancelled`` reason — the run
+        status set has no distinct ``cancelled`` member, so the human's decision is
+        carried in the typed ``error`` + the ``run.cancelled`` audit event) and does
+        **not** re-enqueue. Not escalated → 409; not visible → 404. An escalated run is
+        never silently dropped: cancel is an explicit, audited human decision.
+        """
+        run = await self._load_escalated(run_id)
+        cancelled = await self._runs.mark_terminal(
+            run.id,
+            status=RunStatus.FAILED,
+            finished_at=datetime.now(UTC),
+            error=RunError(
+                code="cancelled",
+                message="The escalated run was cancelled by its owner.",
+            ),
+        )
+        assert cancelled is not None
+        await self._emit(AuditAction.RUN_CANCELLED, run, metadata={"from_status": run.status.value})
+        return RunControlResult(run=cancelled, requeued=False)
+
+    async def reroute(self, run_id: UUID, *, to_owner_id: UUID) -> RunControlResult:
+        """Reroute an escalated run to another owner, then re-enqueue it (E7-5).
+
+        Reassigns the run's ``owner_id`` (its execution principal) to ``to_owner_id``
+        and resets it to ``queued`` so it re-drives **as the new owner** — the reroute
+        never widens access (the new owner's grants apply, INV-2). ``to_owner_id`` must
+        be a user in the caller's tenant (else 404, existence non-disclosure) and not
+        the current owner (else 422 — a no-op reroute is malformed). Not escalated →
+        409; not visible → 404. Audits ``run.rerouted`` with both owners.
+        """
+        run = await self._load_escalated(run_id)
+        if to_owner_id == run.owner_id:
+            raise ValidationError(
+                "Cannot reroute a run to its current owner.", code="reroute_same_owner"
+            )
+        target = await self._users.get(to_owner_id)
+        if target is None:
+            # A cross-tenant / unknown target is non-existent to this tenant (INV-1).
+            raise NotFoundError("Reroute target not found.")
+        await self._runs.reassign_owner(run.id, owner_id=to_owner_id)
+        requeued = await self._runs.mark_queued(run.id)
+        assert requeued is not None
+        await self._emit(
+            AuditAction.RUN_REROUTED,
+            run,
+            metadata={"from_owner_id": str(run.owner_id), "to_owner_id": str(to_owner_id)},
+        )
+        return RunControlResult(run=requeued, requeued=True)
+
+    async def _load_escalated(self, run_id: UUID) -> Run:
+        """Load an owned, escalated run or raise (404 not visible / 409 not escalated)."""
+        run = await self._runs.get(run_id)
+        if run is None or run.owner_id != self._owner_id:
+            # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
+            raise NotFoundError("Run not found.")
+        if run.status is not RunStatus.ESCALATED:
+            # Only a run awaiting a human can be resumed/cancelled/rerouted (INV-8).
+            raise ConflictError(
+                "Only an escalated run can be resumed, cancelled, or rerouted.",
+                code="run_not_escalated",
+            )
+        return run
+
+    async def _emit(
+        self, action: AuditAction, run: Run, *, metadata: dict[str, object]
+    ) -> None:
+        """Audit a human handoff on the escalated run (INV-6), actor = the caller."""
+        await self._audit.emit(
+            action=action,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="run",
+            resource_id=str(run.id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata=metadata,
+        )
+
+
 __all__ = [
+    "RunControlResult",
     "RunDetail",
     "RunPage",
+    "RunsControlService",
     "RunsReadService",
+    "TransientRunRetry",
     "enqueue_manual_run",
     "execute_run",
 ]
