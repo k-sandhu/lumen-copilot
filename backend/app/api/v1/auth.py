@@ -30,7 +30,7 @@ from app.api.deps import (
 )
 from app.auth import InvalidTokenError
 from app.core.config import Settings
-from app.db.repositories import UserRepository
+from app.db.repositories import TenantRepository, UserRepository
 from app.services.auth_service import AuthService, IssuedTokens
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -77,6 +77,7 @@ class CurrentUserResponse(BaseModel):
     id: str
     email: str
     tenant_id: str
+    tenant_name: str
     roles: list[str]
     created_at: datetime
 
@@ -191,7 +192,8 @@ async def get_current_user(
     """The authenticated principal (id, tenant, roles) — from the token, hydrated.
 
     The token carries id/tenant/roles; we read the user row (tenant-scoped) for
-    the email + ``created_at`` the contract requires. A token whose subject no
+    the email + ``created_at`` and the tenant row for ``tenant_name`` (so the UI
+    never has to surface the raw tenant UUID, #247). A token whose subject no
     longer exists is treated as unauthenticated (401).
 
     Depends on ``CurrentTenant`` (not just the principal's ``tenant_id``) so the
@@ -201,10 +203,14 @@ async def get_current_user(
     user = await UserRepository(session, tenant_id).get(principal.user_id)
     if user is None:
         raise InvalidTokenError()
+    tenant = await TenantRepository(session).get(tenant_id)
+    if tenant is None:  # pragma: no cover — a resolved principal always has a tenant
+        raise InvalidTokenError()
     return CurrentUserResponse(
         id=str(user.id),
         email=user.email,
         tenant_id=str(user.tenant_id),
+        tenant_name=tenant.name,
         roles=[r.value for r in user.roles],
         created_at=user.created_at,
     )
