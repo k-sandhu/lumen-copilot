@@ -41,6 +41,15 @@ dependencies = [
     "python-docx==1.1.2",  # DOCX paragraph text
     "python-pptx==1.0.2",  # PPTX text frames
     "openpyxl==3.1.5",  # XLSX cell values
+    # Official MCP (Model Context Protocol) Python SDK — the remote MCP client
+    # (Streamable HTTP + SSE transports, capability negotiation, JSON-RPC framing).
+    # ADR-0012 §2 adopts the maintained reference implementation for protocol
+    # correctness/forward-compat, as a documented exception to ADR-0004's
+    # SDK-avoidance preference. Imported ONLY by app/mcp/ — the single owning
+    # module (ADR-0004 boundary row); an architecture test asserts no other module
+    # imports it. Its transports are injected with an SSRF-guarded httpx client so
+    # every outbound hop passes the connectors/web/fetch.py egress discipline.
+    "mcp==1.12.4",
 ]
 
 [project.optional-dependencies]

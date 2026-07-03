@@ -27,13 +27,18 @@ swap in a blocked address (TOCTOU defense).
 from __future__ import annotations
 
 import ipaddress
-import socket
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.connectors.base import ConnectorConfigError, ConnectorError
+from app.net.egress import (
+    EgressBlockedError,
+    is_blocked_ip,
+    pin_url_to_ip,
+    resolve_safe_ip,
+)
 
 # Schemes a public fetch may use. Everything else (file/ftp/gopher/data/…) is a
 # hard reject before any network work (ADR-0009 §3).
@@ -95,68 +100,36 @@ class UrlBlockedError(ConnectorConfigError):
         super().__init__(detail, code="url_blocked")
 
 
+# The SSRF range predicate + resolver now live in the shared ``app.net.egress``
+# primitive so the web fetcher and the MCP adapter (``app/mcp/``) share ONE
+# definition (ADR-0009 §3 / ADR-0012 §4). These thin aliases keep this module's
+# established internal names/behaviour (and its negative tests) unchanged while
+# the implementation is single-sourced.
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True when ``ip`` is in a range a server-side fetch must never reach.
 
-    Blocks loopback, private (RFC-1918 + IPv6 ULA), link-local (incl. the
-    cloud-metadata ``169.254.169.254``), CGNAT (100.64.0.0/10), unspecified,
-    reserved, and multicast. IPv4-mapped IPv6 addresses are unwrapped first so
-    ``::ffff:127.0.0.1`` cannot smuggle a loopback target past the check.
+    Delegates to :func:`app.net.egress.is_blocked_ip` — the one canonical
+    predicate (loopback / private / link-local incl. metadata / CGNAT /
+    unspecified / reserved / multicast, IPv4-mapped IPv6 unwrapped first).
     """
-    # Unwrap an IPv4-mapped IPv6 address (``::ffff:a.b.c.d``) to its IPv4 form so
-    # the IPv4 range checks below apply — otherwise a mapped loopback slips by.
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-
-    if (
-        ip.is_loopback
-        or ip.is_private  # RFC-1918 (v4) / ULA fc00::/7 (v6)
-        or ip.is_link_local  # 169.254.0.0/16 incl. metadata; fe80::/10
-        or ip.is_unspecified  # 0.0.0.0 / ::
-        or ip.is_reserved
-        or ip.is_multicast
-    ):
-        return True
-    # CGNAT 100.64.0.0/10 — not flagged by ``is_private`` but never publicly
-    # routable to a tenant's content; a common SSRF pivot.
-    if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.ip_network("100.64.0.0/10"):
-        return True
-    return False
+    return is_blocked_ip(ip)
 
 
 def _resolve_safe_ip(host: str) -> str:
-    """Resolve ``host`` and return one validated, non-blocked IP literal, or raise.
+    """Resolve ``host`` to one validated non-blocked IP literal, or raise (→ 422).
 
-    Resolves **all** A/AAAA records and rejects the host if *any* of them is a
-    blocked address (no partial allow — a name that resolves to both a public and
-    a private IP is refused, closing the rebind window). Returns the first
-    validated IP as a string so the caller can pin the connection to it.
+    Delegates to :func:`app.net.egress.resolve_safe_ip` (resolve-all, reject-any)
+    and re-raises its :class:`~app.net.egress.EgressBlockedError` as this module's
+    :class:`UrlBlockedError` so the API still surfaces the stable ``url_blocked``
+    Problem code.
 
     Raises:
         UrlBlockedError: the host does not resolve, or resolves to a blocked range.
     """
     try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise UrlBlockedError(f"could not resolve host {host!r}") from exc
-
-    resolved: list[str] = []
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:  # pragma: no cover — getaddrinfo returns valid literals
-            raise UrlBlockedError(f"unparseable address for host {host!r}") from None
-        if _is_blocked_ip(ip):
-            raise UrlBlockedError(
-                f"host {host!r} resolves to a blocked address ({addr}); "
-                "loopback/private/link-local/metadata targets are refused"
-            )
-        resolved.append(addr)
-
-    if not resolved:  # pragma: no cover — getaddrinfo raises rather than empty
-        raise UrlBlockedError(f"host {host!r} did not resolve to any address")
-    return resolved[0]
+        return resolve_safe_ip(host)
+    except EgressBlockedError as exc:
+        raise UrlBlockedError(str(exc)) from exc
 
 
 def validate_url_syntactic(url: str) -> str:
@@ -256,18 +229,11 @@ async def _read_capped(response: httpx.Response, *, max_bytes: int) -> bytes:
 def _pin_url(url: str, safe_ip: str) -> str:
     """Rewrite ``url``'s host to the validated IP so the socket connects to it.
 
-    The original host is preserved in the ``Host`` header (set by the caller via
-    ``extensions``/headers) so TLS SNI + virtual hosting still work, but the TCP
-    connection is pinned to the IP we already validated — a DNS rebind between
-    check and connect cannot redirect it to a blocked address (TOCTOU defense).
-    For an IPv6 literal the host is bracketed.
+    Delegates to :func:`app.net.egress.pin_url_to_ip` — the shared IP-pinning
+    rewrite (TOCTOU defence). The original host is preserved in the ``Host``
+    header + TLS SNI (set by the caller) so virtual hosting still works.
     """
-    parts = urlsplit(url)
-    host_literal = f"[{safe_ip}]" if ":" in safe_ip else safe_ip
-    netloc = host_literal
-    if parts.port:
-        netloc = f"{host_literal}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return pin_url_to_ip(url, safe_ip)
 
 
 async def fetch_url(
