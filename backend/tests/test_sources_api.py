@@ -30,17 +30,53 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.deps import get_db_session
+from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
+from app.core.errors import NotFoundError
 from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+from app.storage.keys import assert_key_owned_by, build_key
+from app.storage.object_store import StoredObject
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
 _PASSWORD = "devpassword"
 _PUBLIC = "93.184.216.34"
+
+
+class FakeObjectStore:
+    """In-memory stand-in for the #22 ``ObjectStore`` (no MinIO on delete paths).
+
+    Mirrors the surface ``SourcesService`` relies on: content-addressed keys and
+    a tenant-prefix-checked, idempotent ``delete`` that records removed keys so
+    the delete route never reaches real MinIO.
+    """
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+
+    async def put(
+        self, tenant_id: str, data: bytes, content_type: str, filename: str
+    ) -> StoredObject:
+        key = build_key(tenant_id, data, filename)
+        self.objects[key] = data
+        return StoredObject(
+            key=key, sha256=key.split("/")[1], size_bytes=len(data), content_type=content_type
+        )
+
+    async def get(self, tenant_id: str, key: str) -> bytes:
+        assert_key_owned_by(key, tenant_id)
+        if key not in self.objects:
+            raise NotFoundError("object not found", code="object_not_found")
+        return self.objects[key]
+
+    async def delete(self, tenant_id: str, key: str) -> None:
+        assert_key_owned_by(key, tenant_id)
+        self.deleted.append(key)
+        self.objects.pop(key, None)
 
 
 class _Seeded:
@@ -101,7 +137,14 @@ def no_broker(monkeypatch: pytest.MonkeyPatch) -> list[tuple[uuid.UUID, uuid.UUI
 
 
 @pytest.fixture
-def app(sessionmaker: async_sessionmaker[AsyncSession]) -> Iterator[FastAPI]:
+def store() -> FakeObjectStore:
+    return FakeObjectStore()
+
+
+@pytest.fixture
+def app(
+    sessionmaker: async_sessionmaker[AsyncSession], store: FakeObjectStore
+) -> Iterator[FastAPI]:
     application = create_app()
 
     async def _override_session() -> AsyncIterator[AsyncSession]:
@@ -109,6 +152,8 @@ def app(sessionmaker: async_sessionmaker[AsyncSession]) -> Iterator[FastAPI]:
             yield session
 
     application.dependency_overrides[get_db_session] = _override_session
+    # Keep the delete route's #269 object cleanup off real MinIO (offline-safe).
+    application.dependency_overrides[get_object_store_dep] = lambda: store
     yield application
     application.dependency_overrides.clear()
 

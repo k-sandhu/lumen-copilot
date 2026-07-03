@@ -62,7 +62,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
         async with factory() as sess:
             yield sess
     finally:
@@ -427,6 +427,53 @@ async def test_collection_count_documents(
             storage_key=f"k{i}",
         )
     assert await collections.count_documents(coll.id) == 3
+
+
+async def test_document_count_by_storage_key(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """count_by_storage_key counts THIS tenant's docs sharing an object key —
+    the guard the sync/delete paths use before removing a content-addressed
+    object so they never delete bytes another live document still references
+    (#269). Tenant-scoped: a foreign tenant's identical key is not counted."""
+    tenant_a, tenant_b = two_tenants
+    user_a = await UserRepository(session, tenant_a).create(
+        email="o@acme.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    coll_a = await CollectionRepository(session, tenant_a).create(owner_id=user_a.id, name="c")
+    docs_a = DocumentRepository(session, tenant_a)
+
+    shared = f"{tenant_a}/deadbeef/shared.txt"
+    assert await docs_a.count_by_storage_key(shared) == 0
+
+    d1 = await docs_a.create(
+        owner_id=user_a.id, collection_id=coll_a.id, filename="a.txt",
+        mime_type="text/plain", size_bytes=1, storage_key=shared,
+    )
+    await docs_a.create(
+        owner_id=user_a.id, collection_id=coll_a.id, filename="b.txt",
+        mime_type="text/plain", size_bytes=1, storage_key=shared,
+    )
+    assert await docs_a.count_by_storage_key(shared) == 2  # two docs share it
+
+    # Another tenant's document under the same key string is not counted (INV-1).
+    user_b = await UserRepository(session, tenant_b).create(
+        email="o@globex.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    coll_b = await CollectionRepository(session, tenant_b).create(owner_id=user_b.id, name="c")
+    await DocumentRepository(session, tenant_b).create(
+        owner_id=user_b.id, collection_id=coll_b.id, filename="c.txt",
+        mime_type="text/plain", size_bytes=1, storage_key=shared,
+    )
+    assert await docs_a.count_by_storage_key(shared) == 2  # unchanged by tenant B
+
+    # Deleting one leaves the object still referenced by the other → guard keeps it.
+    # The count must run AFTER the delete is flushed: the app sessionmaker uses
+    # autoflush=False (db/session.py) and DocumentRepository.delete does not flush,
+    # so callers (DocumentService.delete, the sync reconcile) flush before counting.
+    await docs_a.delete(d1.id)
+    await session.flush()
+    assert await docs_a.count_by_storage_key(shared) == 1
 
 
 async def test_collection_update_partial(

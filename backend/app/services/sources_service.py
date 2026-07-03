@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.connectors.base import ConnectorConfigError
 from app.connectors.registry import UnknownConnectorError, get_connector
 from app.core.errors import ValidationError
+from app.core.logging import get_logger
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -55,6 +56,9 @@ from app.db.repositories import (
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Source, SourceStatus
 from app.services.audit import AuditSink
+from app.storage import ObjectStore
+
+log = get_logger(__name__)
 
 # Pagination bounds mirror the contract's Limit parameter (min 1, max 100).
 _MIN_LIMIT = 1
@@ -116,6 +120,7 @@ class SourcesService:
         *,
         tenant_id: UUID,
         owner_id: UUID,
+        object_store: ObjectStore,
         audit: AuditSink,
         request_id: str,
         source_ip: str,
@@ -126,6 +131,7 @@ class SourcesService:
         self._documents = DocumentRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._object_store = object_store
         self._audit = audit
         self._request_id = request_id
         self._source_ip = source_ip
@@ -320,10 +326,13 @@ class SourcesService:
 
         Audits ``source.deleted`` (INV-6). Returns ``False`` when not visible.
 
-        Note: ingested **object-store** bytes are not swept here (consistent with
-        ``CollectionsService.delete``) — removing the rows + chunks clears the
-        retrievable content; the content-addressed, tenant-scoped objects are a
-        separate storage-sweep concern (out of this issue's scope).
+        The ingested documents' **object-store** bytes ARE removed here (#269),
+        consistent with ``CollectionsService.delete`` / ``DocumentService.delete``:
+        removing the rows + chunks clears the retrievable content, but the
+        content-addressed MinIO objects would otherwise be orphaned. Cleanup runs
+        after a ``flush`` and is guarded by ``count_by_storage_key`` — an object is
+        deleted only once no surviving document (this tenant) still references it —
+        and is best-effort (a storage blip never fails the delete).
         """
         source = await self._visible(source_id)
         if source is None:
@@ -388,6 +397,26 @@ class SourcesService:
             source_ip=self._source_ip,
             metadata={"type": source.type},
         )
+
+        await self._session.flush()
+        # Remove the backing objects of the source's removed documents — the
+        # row+chunk cascade above clears retrievable content but leaves the
+        # content-addressed MinIO objects orphaned otherwise (#269). Best-effort +
+        # post-flush: a storage blip must not fail the delete, and only an object
+        # no surviving document (this tenant) still references is removed (the
+        # shared-content guard). The reclaimed backing collection only ever held
+        # these same documents, so their keys cover its objects too.
+        for storage_key in {d.storage_key for d in source_documents}:
+            if await self._documents.count_by_storage_key(storage_key) == 0:
+                try:
+                    await self._object_store.delete(str(self._tenant_id), storage_key)
+                except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                    log.warning(
+                        "source_delete.object_cleanup_failed",
+                        source_id=str(source_id),
+                        storage_key=storage_key,
+                        error=type(exc).__name__,
+                    )
         return True
 
     # --- enqueue seam -------------------------------------------------------
