@@ -12,10 +12,14 @@ dev and tests.
    persisted user message + a `stream_id`.
 2. **Subscribe** to that `stream_id` over the WS envelope at `/chat/<streamId>`:
    `start` → ( `delta`(token) | `event:tool_call` | `event:tool_result` |
-   `event:citation` )\* → `done` | `error`.
+   `event:citation` | `event:code_output` | `event:code_result` )\* →
+   `done` | `error`.
 3. **Render live**: delta tokens stream into the assistant bubble; tool activity
    shows "searching documents…"; each `event:citation` becomes a clickable
-   passage-level reference.
+   passage-level reference; a `run_python` sub-stream
+   (`event:code_output` chunks terminated by one `event:code_result` per `runId`,
+   #232) renders an inspectable code-run panel with live stdout/stderr, exit
+   status/duration, and output-file links (see `features/codeRuns`).
 4. **Persist**: on `done` the messages query is refetched; the live turn is
    retired only once the persisted assistant message (`done.messageId`) appears in
    the reloaded `GET .../messages` — so the answer never flickers out.
@@ -37,8 +41,10 @@ Transport (the `api/` boundary — the only backend caller):
 Feature (`features/chat`):
 
 - `model/streamReducer.ts` — **pure** reducer folding the WS envelopes into UI
-  state (text, citations, tool activity, terminal). Dedupes by `seq`. Unit-tested
-  in isolation including terminal `error` and synthetic disconnect.
+  state (text, citations, tool activity, code runs, terminal). Dedupes by `seq`.
+  `code_output`/`code_result` assemble a per-run `CodeRunActivity` (live
+  stdout/stderr + terminal outcome, #232). Unit-tested in isolation including
+  terminal `error` and synthetic disconnect.
 - `model/useChatStream.ts` — subscribes to one stream via the WS client and the
   reducer; an unexpected disconnect or first-token/idle watchdog expiry becomes
   a terminal error with retry. Clean terminal envelopes close the socket so
@@ -52,9 +58,10 @@ Feature (`features/chat`):
   the retrieval-trace summary/steps (`buildRetrievalSummary`), relative-time +
   staleness, the model-badge label, the SourceInspector passage, and the
   source-inspector metadata rows (`sourceMetadataRows`, #120). No I/O.
-- `components/` — `ChatView` (orchestrator), `ChatThread`, `MessageBubble`,
-  `Composer`, `ModelPicker`, `HistorySidebar`, `KnowledgeModeChips`,
-  `ToolActivity`, `DocumentViewer`, `AnswerFooter`.
+- `components/` — `ChatView` (orchestrator), `ChatThread`, `MessageBubble`
+  (renders a `CodeRunPanel` per code run, #232), `Composer`, `ModelPicker`,
+  `HistorySidebar`, `KnowledgeModeChips`, `ToolActivity`, `DocumentViewer`,
+  `AnswerFooter`. The code-run inspector itself lives in `features/codeRuns`.
 
 ## Trust-signal re-skin (#89, ADR-0007 §1 / DESIGN.md §1/§6)
 

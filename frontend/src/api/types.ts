@@ -920,6 +920,77 @@ export interface RunList {
   next_cursor?: string | null;
 }
 
+// --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------
+// One agent-authored sandbox code run, inspectable via GET /code-runs/{id}. Runs
+// are created by the `run_python` tool off the request path — there is no public
+// execute endpoint. Tenant- and owner-scoped (INV-1/INV-2): a foreign id → 404.
+
+/**
+ * The lifecycle of a sandbox code run (ADR-0013 §4 `code_runs.status`).
+ * `queued`/`running` are non-terminal; `succeeded` = exit 0; `failed` = non-zero
+ * exit; `timeout` = wall-clock-killed; `killed` = OOM/pids-capped; `denied` =
+ * refused before execution (code execution disabled, or a policy/quota block).
+ */
+export type CodeRunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'timeout'
+  | 'killed'
+  | 'denied';
+
+/**
+ * Measured resource consumption for a finished run (ADR-0013 §4). Fields are
+ * best-effort — null when the runtime did not report them; the whole object is
+ * null while the run is queued/running.
+ */
+export interface ResourceUsage {
+  /** Peak resident memory the run reached, in bytes. */
+  peak_memory_bytes?: number | null;
+  /** Total CPU time consumed, in milliseconds. */
+  cpu_time_ms?: number | null;
+  /** Peak number of processes/threads the run spawned. */
+  max_pids?: number | null;
+  /** Total captured stdout+stderr size in bytes (subject to the output cap, G7). */
+  output_bytes?: number | null;
+}
+
+/**
+ * One agent-authored sandbox code run, for inspection/history (ADR-0013 §4,
+ * E15-7 / E6-5), tenant- and owner-scoped (INV-1/INV-2). `stdout`/`stderr` are
+ * output-size-capped (G7, may be truncated); `exit_code`, `duration_ms`,
+ * `resource_usage`, and `artifact_ids` populate as the run finishes (null/empty
+ * while queued or running).
+ */
+export interface CodeRun {
+  id: string;
+  status: CodeRunStatus;
+  /** The exact Python source that was executed (inspectable, E15-7 / E6-5). */
+  code: string;
+  /** Captured standard output (output-size-capped; may be truncated, G7). */
+  stdout: string;
+  /** Captured standard error (output-size-capped; may be truncated, G7). */
+  stderr: string;
+  /** Process exit code once finished; null while queued/running or killed/denied. */
+  exit_code?: number | null;
+  /** Wall-clock execution time in milliseconds; null until the run finishes. */
+  duration_ms?: number | null;
+  /** Measured resource consumption; null until the run finishes. */
+  resource_usage?: ResourceUsage | null;
+  /** Ids of artifacts the run emitted (CC-B #208); empty until it produces files. */
+  artifact_ids: string[];
+  /** The pinned base-image digest actually used (reproducibility, E3-7); null until start. */
+  image_digest?: string | null;
+  /** Links the run to the parent agent trace (E15-7); null when unlinked. */
+  trace_id?: string | null;
+  created_at: string;
+  /** When execution began; null while still queued. */
+  started_at?: string | null;
+  /** When the run reached a terminal status; null until then. */
+  finished_at?: string | null;
+}
+
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
 // Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
 export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';
@@ -1054,6 +1125,47 @@ export interface ChatDoneData {
     completionTokens?: number;
     totalTokens?: number;
   };
+}
+
+/**
+ * `event.data` for name=code_output (ADR-0013 §4, #232) — one streamed chunk of a
+ * sandbox code run's output, emitted within the chat answer stream while the
+ * `run_python` tool executes. `stream` says stdout vs stderr; multiple per `runId`
+ * arrive in `seq` order. Non-terminal — the run's outcome arrives as a single
+ * code_result. Chunks are output-size-capped (may be truncated, G7).
+ */
+export interface CodeOutput {
+  /** The code_runs.id this output belongs to (matches GET /code-runs/{id}). */
+  runId: string;
+  /** Correlates to the originating run_python tool_call (ChatToolCall.callId). */
+  callId?: string;
+  /** Which output stream this chunk came from. */
+  stream: 'stdout' | 'stderr';
+  /** The chunk of captured output (may be truncated at the output cap, G7). */
+  text: string;
+}
+
+/**
+ * `event.data` for name=code_result (ADR-0013 §4, #232) — the terminal outcome of
+ * a sandbox code run. Exactly one arrives per `runId` after its code_output
+ * chunks, carrying the final `status`, `exitCode`, `durationMs`, and the ids of
+ * any emitted artifacts. This is a RUN-level terminal, NOT the chat stream's
+ * terminal — the chat stream still ends with its own done|error. The full record
+ * (code, stdout/stderr, resource usage) is inspectable via GET /code-runs/{runId}.
+ */
+export interface CodeResult {
+  /** The code_runs.id this result finalizes (matches GET /code-runs/{id}). */
+  runId: string;
+  /** Correlates to the originating run_python tool_call (ChatToolCall.callId). */
+  callId?: string;
+  /** The run's terminal status (CodeRunStatus minus the non-terminal queued/running). */
+  status: 'succeeded' | 'failed' | 'timeout' | 'killed' | 'denied';
+  /** Process exit code; null when killed/timeout/denied before producing one. */
+  exitCode?: number | null;
+  /** Wall-clock execution time in milliseconds; null when the run never started (denied). */
+  durationMs?: number | null;
+  /** Ids of artifacts the run emitted (CC-B #208); empty when it produced none. */
+  artifactIds: string[];
 }
 
 // --- Preferences / saved searches / suggestions (spec 0005, epic #144) ------

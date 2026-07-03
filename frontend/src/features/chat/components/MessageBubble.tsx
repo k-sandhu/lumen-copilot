@@ -26,7 +26,11 @@ import { hostOf, isSafeHttpUrl, type UiCitation } from '../model/citation';
 import { groupCitationsByDocument, partitionCitations } from '../model/presentation';
 import { ToolActivity } from './ToolActivity';
 import { AnswerFooter } from './AnswerFooter';
-import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
+import { CodeRunPanel } from '@/features/codeRuns';
+import type {
+  ToolActivity as ToolActivityItem,
+  CodeRunActivity,
+} from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
 export interface SourceMeta {
@@ -51,6 +55,14 @@ export interface MessageBubbleProps {
   traceSteps?: TraceStep[];
   /** Live tool activity (assistant streaming turn only). */
   tools?: ToolActivityItem[];
+  /**
+   * Sandbox code runs on this turn (#232). While streaming these carry live
+   * stdout/stderr folded from the WS; each renders an inspectable CodeRunPanel
+   * that also backfills the full record from GET /code-runs/{id}. Only the live
+   * turn passes this today — the chat-message wire carries no run reference yet,
+   * so a persisted turn renders none (a past run is inspected via CodeRunDetail).
+   */
+  codeRuns?: CodeRunActivity[];
   /** True while this assistant turn is still streaming (shows a caret). */
   streaming?: boolean;
   /**
@@ -81,6 +93,7 @@ function MessageBubbleComponent({
   traceSummary,
   traceSteps,
   tools = [],
+  codeRuns = [],
   streaming = false,
   answeredAt,
   showNoCitationsNotice = false,
@@ -152,6 +165,17 @@ function MessageBubbleComponent({
               <MarkdownView className="lc-answer">{content}</MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>
+
+            {/* Sandbox code runs (#232, E3-7): computed results separated from the
+                narrative, each inspectable (code + streamed output + result +
+                artifacts). Rendered after the answer so the prose leads. */}
+            {codeRuns.length > 0 && (
+              <div className="mt-1" aria-label="Code runs">
+                {codeRuns.map((run) => (
+                  <CodeRunPanel key={run.runId} runId={run.runId} activity={run} />
+                ))}
+              </div>
+            )}
 
             {docCitations.length > 0 && (
               <>
