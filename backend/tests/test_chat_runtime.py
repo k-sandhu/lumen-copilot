@@ -627,3 +627,7 @@ async def test_retrieval_and_answer_audit_events_emitted(ctx: _Ctx) -> None:
     assert "answer.generated" in actions
     answer_ev = next(e for e in events if e.action == "answer.generated")
     assert answer_ev.metadata["citation_count"] == 1
+    # The distinct cited document id is recorded on the answer event (#249) so
+    # the audit read-path can synthesise an allow-candidate and the "Answers
+    # cited" KPI counts this grounded answer as cited.
+    assert answer_ev.metadata["document_ids"] == [str(ctx.document_id)]
