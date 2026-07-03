@@ -43,6 +43,8 @@ from app.domain.entities import (
     AutonomyLevel,
     Chunk,
     Citation,
+    CodeRun,
+    CodeRunStatus,
     Collection,
     DigestCadence,
     Document,
@@ -58,6 +60,7 @@ from app.domain.entities import (
     OverlapPolicy,
     RecentSearch,
     RefreshToken,
+    ResourceUsage,
     Role,
     Run,
     RunError,
@@ -437,6 +440,29 @@ def _to_run_step(row: models.RunStep) -> RunStep:
         seq=row.seq,
         kind=RunStepKind(row.kind),
         payload=dict(row.payload or {}),
+        created_at=row.created_at,
+    )
+
+
+def _to_code_run(row: models.CodeRun) -> CodeRun:
+    return CodeRun(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        status=CodeRunStatus(row.status),
+        code=row.code,
+        stdout=row.stdout,
+        stderr=row.stderr,
+        artifact_ids=[UUID(x) for x in (row.artifact_ids or [])],
+        session_id=row.session_id,
+        run_id=row.run_id,
+        trace_id=row.trace_id,
+        exit_code=row.exit_code,
+        duration_ms=row.duration_ms,
+        resource_usage=ResourceUsage.from_dict(row.resource_usage),
+        image_digest=row.image_digest,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
         created_at=row.created_at,
     )
 
@@ -2981,6 +3007,157 @@ class RunStepRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_run_step(r) for r in rows]
+
+
+class CodeRunRepository(_TenantScopedRepository):
+    """Sandbox code-run records within one tenant (ADR-0013 §4, #230).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``code_run_id``
+    resolves to ``None`` (the existence-non-disclosure 404 is enforced one layer up
+    in ``services.sandbox_service`` off the ``None`` return). Owner visibility is
+    layered in the service (deny-by-default, spec 0004 §2.2). Persists via the
+    session but does not commit — the caller owns the transaction boundary.
+
+    The run's ``status`` is written as the sandbox walks the state machine
+    (``queued`` → ``running`` → a terminal); a crash-safe task always writes a
+    terminal, never leaving a stuck ``running`` (ADR-0013 §5, INV-8). Concurrency
+    accounting (the per-tenant cap, §6) reads :meth:`count_active`.
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        code: str,
+        status: CodeRunStatus = CodeRunStatus.QUEUED,
+        session_id: UUID | None = None,
+        run_id: UUID | None = None,
+        trace_id: UUID | None = None,
+        code_run_id: UUID | None = None,
+    ) -> CodeRun:
+        """Create a ``queued`` (or already-``denied``) code run (ADR-0013 §4 enqueue).
+
+        ``code_run_id`` may be pre-minted so it doubles as the WS ``runId`` known to
+        the enqueuer before the task starts (the ``code_output``/``code_result``
+        correlation id); omitted ⇒ generated. A run refused before execution (quota /
+        disabled tenant, §6) is created directly with ``status=denied``.
+        """
+        row = models.CodeRun(
+            id=code_run_id or uuid4(),
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            status=status.value,
+            code=code,
+            stdout="",
+            stderr="",
+            artifact_ids=[],
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_code_run(row)
+
+    async def get(self, code_run_id: UUID) -> CodeRun | None:
+        stmt = select(models.CodeRun).where(
+            models.CodeRun.tenant_id == self._tenant_id,
+            models.CodeRun.id == code_run_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_code_run(row) if row is not None else None
+
+    async def count_active(self) -> int:
+        """Count the tenant's still-active runs (``queued``/``running``) — the concurrency gate.
+
+        Tenant-scoped (INV-1). The per-tenant concurrency cap (ADR-0013 §6) keys on
+        this before enqueuing so a single tenant cannot monopolise the sandbox pool.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.CodeRun)
+            .where(
+                models.CodeRun.tenant_id == self._tenant_id,
+                models.CodeRun.status.in_(
+                    [CodeRunStatus.QUEUED.value, CodeRunStatus.RUNNING.value]
+                ),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def runtime_ms_since(self, since: datetime) -> int:
+        """Sum ``duration_ms`` across the tenant's runs finished since ``since`` — the daily cap.
+
+        Tenant-scoped (INV-1). Backs the per-tenant daily-runtime cap (ADR-0013 §6):
+        the aggregate wall-clock the tenant's runs have already consumed in the
+        window. A run with a null ``duration_ms`` (queued/denied) contributes 0.
+        """
+        stmt = select(func.coalesce(func.sum(models.CodeRun.duration_ms), 0)).where(
+            models.CodeRun.tenant_id == self._tenant_id,
+            models.CodeRun.finished_at.is_not(None),
+            models.CodeRun.finished_at >= since,
+        )
+        total = (await self._session.execute(stmt)).scalar_one()
+        return int(total or 0)
+
+    async def mark_running(
+        self, code_run_id: UUID, *, started_at: datetime, image_digest: str | None = None
+    ) -> CodeRun | None:
+        """Transition a run to ``running`` and stamp ``started_at`` (+ the image digest)."""
+        row = await self._get_row(code_run_id)
+        if row is None:
+            return None
+        row.status = CodeRunStatus.RUNNING.value
+        row.started_at = started_at
+        if image_digest is not None:
+            row.image_digest = image_digest
+        await self._session.flush()
+        return _to_code_run(row)
+
+    async def mark_terminal(
+        self,
+        code_run_id: UUID,
+        *,
+        status: CodeRunStatus,
+        finished_at: datetime,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        resource_usage: ResourceUsage | None = None,
+        image_digest: str | None = None,
+        artifact_ids: list[UUID] | None = None,
+    ) -> CodeRun | None:
+        """Write a run's terminal status + captured result (ADR-0013 §4/§5), tenant-scoped.
+
+        The single terminal-writing method: sets one of ``succeeded``/``failed``/
+        ``timeout``/``killed``/``denied``, ``finished_at``, and the captured
+        output/exit/timing/resource-usage/artifacts. A crash path calls this with
+        ``failed`` + an error message on ``stderr`` so a run never ends in silence
+        (INV-8, never a stuck ``running``).
+        """
+        row = await self._get_row(code_run_id)
+        if row is None:
+            return None
+        row.status = status.value
+        row.finished_at = finished_at
+        row.stdout = stdout
+        row.stderr = stderr
+        row.exit_code = exit_code
+        row.duration_ms = duration_ms
+        row.resource_usage = resource_usage.to_dict() if resource_usage is not None else None
+        if image_digest is not None:
+            row.image_digest = image_digest
+        row.artifact_ids = [str(a) for a in (artifact_ids or [])]
+        await self._session.flush()
+        return _to_code_run(row)
+
+    async def _get_row(self, code_run_id: UUID) -> models.CodeRun | None:
+        stmt = select(models.CodeRun).where(
+            models.CodeRun.tenant_id == self._tenant_id,
+            models.CodeRun.id == code_run_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
 class ScheduleRepository(_TenantScopedRepository):

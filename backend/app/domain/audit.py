@@ -120,6 +120,17 @@ class AuditAction(str, enum.Enum):
     SCHEDULE_PAUSED = "schedule.paused"
     SCHEDULE_RESUMED = "schedule.resumed"
     SCHEDULE_RUN_NOW = "schedule.run_now"
+    # Sandbox code execution (ADR-0013 §4, issue #230). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Every code run is bracketed by ``code_run.started``/``code_run.finished``
+    # (INV-6) so the trail shows who ran adversarial-by-assumption Python (the owner),
+    # the terminal status (succeeded/failed/timeout/killed), and any produced
+    # artifacts. ``code_run.denied`` records a run refused BEFORE execution — code
+    # execution disabled for the tenant, or a policy/quota block (§6): a refusal is
+    # audited, never a silent drop.
+    CODE_RUN_STARTED = "code_run.started"
+    CODE_RUN_FINISHED = "code_run.finished"
+    CODE_RUN_DENIED = "code_run.denied"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"

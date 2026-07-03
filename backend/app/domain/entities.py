@@ -222,6 +222,39 @@ _TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset(
 )
 
 
+class CodeRunStatus(str, enum.Enum):
+    """The sandbox code-run state machine (ADR-0013 §4, contract ``CodeRunStatus``).
+
+    ``QUEUED`` (enqueued, not yet started) → ``RUNNING`` (executing in the ephemeral
+    container) → one terminal of ``SUCCEEDED`` (exit 0) / ``FAILED`` (non-zero exit) /
+    ``TIMEOUT`` (wall-clock-killed, G6) / ``KILLED`` (OOM-killed or pids-capped, G6) /
+    ``DENIED`` (refused **before** execution — code execution disabled for the tenant,
+    a policy/quota block, §6). A crash never leaves a run stuck ``RUNNING``: the Celery
+    task's failure path writes ``FAILED`` with a typed error (INV-8 — the sandbox never
+    ends in silence, ADR-0013 §5).
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    KILLED = "killed"
+    DENIED = "denied"
+
+
+# The terminal code-run statuses — a run in one of these never transitions again.
+_TERMINAL_CODE_RUN_STATUSES: frozenset[CodeRunStatus] = frozenset(
+    {
+        CodeRunStatus.SUCCEEDED,
+        CodeRunStatus.FAILED,
+        CodeRunStatus.TIMEOUT,
+        CodeRunStatus.KILLED,
+        CodeRunStatus.DENIED,
+    }
+)
+
+
 class OverlapPolicy(str, enum.Enum):
     """What happens when a schedule fires while its prior run is still active (ADR-0015 §5).
 
@@ -864,3 +897,90 @@ class Schedule:
     last_status: RunStatus | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceUsage:
+    """Measured resource consumption for a finished code run (ADR-0013 §4, contract).
+
+    Best-effort — a field is ``None`` when the runtime did not report it. Stored as
+    the ``code_runs.resource_usage`` jsonb and projected to the contract
+    ``ResourceUsage`` shape. ``output_bytes`` is the captured stdout+stderr size
+    (subject to the output-size cap, G7).
+    """
+
+    peak_memory_bytes: int | None = None
+    cpu_time_ms: int | None = None
+    max_pids: int | None = None
+    output_bytes: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Render to the stored jsonb (omitting ``None`` fields)."""
+        raw: dict[str, object] = {}
+        if self.peak_memory_bytes is not None:
+            raw["peak_memory_bytes"] = self.peak_memory_bytes
+        if self.cpu_time_ms is not None:
+            raw["cpu_time_ms"] = self.cpu_time_ms
+        if self.max_pids is not None:
+            raw["max_pids"] = self.max_pids
+        if self.output_bytes is not None:
+            raw["output_bytes"] = self.output_bytes
+        return raw
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ResourceUsage | None:
+        """Rebuild from a stored jsonb blob (``None`` / non-dict ⇒ ``None``)."""
+        if not isinstance(raw, dict):
+            return None
+
+        def _int(key: str) -> int | None:
+            value = raw.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        return cls(
+            peak_memory_bytes=_int("peak_memory_bytes"),
+            cpu_time_ms=_int("cpu_time_ms"),
+            max_pids=_int("max_pids"),
+            output_bytes=_int("output_bytes"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CodeRun:
+    """One agent-authored sandbox code run — the ``code_runs`` row (ADR-0013 §4).
+
+    Tenant- and owner-scoped (INV-1/INV-2): a run in another tenant or owned by
+    another user is a 404 (existence non-disclosure). Records the exact ``code``
+    executed (inspectable, E15-7/E6-5), the pinned ``image_digest`` actually used
+    (reproducibility, E3-7), captured (output-size-capped, G7) ``stdout``/``stderr``,
+    the ``exit_code``, ``duration_ms``, and measured ``resource_usage``. ``status``
+    walks the :class:`CodeRunStatus` machine; a crash writes a terminal
+    (``failed``), never a stuck ``running`` (ADR-0013 §5). ``artifact_ids`` are the
+    output files the run emitted, collected via CC-B (#208) and tenant-scoped like
+    any artifact. ``trace_id`` links the run to the parent agent trace (E15-7). The
+    exact ``code`` + input refs + image digest are enough to re-run it.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    status: CodeRunStatus
+    code: str
+    stdout: str
+    stderr: str
+    artifact_ids: list[UUID]
+    created_at: datetime
+    session_id: UUID | None = None
+    run_id: UUID | None = None
+    trace_id: UUID | None = None
+    exit_code: int | None = None
+    duration_ms: int | None = None
+    resource_usage: ResourceUsage | None = None
+    image_digest: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        """True once the run has reached a terminal status (never transitions again)."""
+        return self.status in _TERMINAL_CODE_RUN_STATUSES

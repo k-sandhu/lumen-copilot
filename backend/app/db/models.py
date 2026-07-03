@@ -1080,3 +1080,84 @@ class Schedule(TenantScopedMixin, TimestampMixin, Base):
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class CodeRun(TenantScopedMixin, Base):
+    """One agent-authored sandbox code run — the ``code_runs`` row (ADR-0013 §4, #230).
+
+    The durable record of a run of adversarial-by-assumption Python in the isolated
+    sandbox: the exact ``code`` executed (inspectable, E15-7/E6-5), the pinned
+    ``image_digest`` actually used (reproducibility, E3-7), captured (output-size-
+    capped, G7) ``stdout``/``stderr``, ``exit_code``, ``duration_ms``, measured
+    ``resource_usage`` (jsonb), and the ``artifact_ids`` of any output files
+    collected via CC-B (#208). Tenant- and owner-scoped (INV-1/INV-2): a run in
+    another tenant / owned by another user is a 404 (existence non-disclosure). The
+    nullable ``session_id`` (a real FK — its table exists, SET NULL) links a run
+    fired inside a chat turn; ``run_id`` / ``trace_id`` are plain nullable UUIDs
+    (their referent tables are the run/agent-trace framework — they become FKs when
+    those land, mirroring ``artifacts``).
+
+    ``status`` walks the :class:`~app.domain.entities.CodeRunStatus` machine; a
+    crash-safe task always writes a terminal, never a stuck ``running`` (ADR-0013 §5,
+    INV-8). No ``TimestampMixin``/``updated_at``: the lifecycle is ``created_at`` →
+    ``started_at`` → ``finished_at`` + ``status``. Tenant-scoped like every table
+    (INV-1); the ``0019`` migration puts it under the RLS backstop.
+    """
+
+    __tablename__ = "code_runs"
+    __table_args__ = (
+        Index("ix_code_runs_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_code_runs_tenant_status", "tenant_id", "status"),
+        Index("ix_code_runs_session_id", "session_id"),
+        CheckConstraint(
+            "status in ('queued', 'running', 'succeeded', 'failed', 'timeout', "
+            "'killed', 'denied')",
+            name="ck_code_runs_status",
+        ),
+        CheckConstraint(
+            "exit_code is null or exit_code >= 0", name="ck_code_runs_exit_code_nonneg"
+        ),
+        CheckConstraint(
+            "duration_ms is null or duration_ms >= 0", name="ck_code_runs_duration_nonneg"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The run's principal — the sandbox runs code *on this user's behalf* (INV-2).
+    # SET NULL on user delete so a completed run's record survives deprovisioning.
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    # The chat session the run fired inside (only real link FK; its table exists).
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The parent agent run / trace — plain nullable UUIDs until those tables land.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    trace_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    # The exact Python source executed — inspectable (E15-7/E6-5), reproducible.
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    # Captured, output-size-capped (G7). Default empty (never null) so a queued run
+    # already has readable (empty) output fields.
+    stdout: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    stderr: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Measured peak mem / cpu time / max pids / output bytes (best-effort).
+    resource_usage: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # The pinned base-image digest actually used (reproducibility, E3-7).
+    image_digest: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Ids of artifacts the run emitted (collected via CC-B, tenant-scoped). Stored as
+    # a portable string array; default empty until the run produces output files.
+    artifact_ids: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
