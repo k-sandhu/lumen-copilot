@@ -140,8 +140,13 @@ class McpSession:
         return _to_tool_result(name, result)
 
     async def aclose(self) -> None:
-        """Tear down the session + transport (and its guarded httpx client)."""
-        await self._exit_stack.aclose()
+        """Tear down the session + transport (and its guarded httpx client).
+
+        Teardown noise from the SDK's task groups is contained (a genuine
+        cancellation is preserved) so closing a session never raises out of the
+        module.
+        """
+        await _safe_aclose(self._exit_stack)
 
     async def __aenter__(self) -> McpSession:
         return self
@@ -250,27 +255,23 @@ class McpClient:
 
         exit_stack = AsyncExitStack()
         try:
-            session = await asyncio.wait_for(
-                self._open_session(server, headers, exit_stack),
-                timeout=self._connect_timeout_seconds,
-            )
+            session = await self._open_session(server, headers, exit_stack)
         except McpConnectError as exc:
-            await exit_stack.aclose()
+            await _safe_aclose(exit_stack)
+            if exc.error_code == MCP_ERROR_TIMEOUT:
+                _log.warning("mcp.connect_timeout", slug=server.slug)
             raise McpConnectionFailed(exc.error_code, exc.detail) from exc
-        except TimeoutError as exc:
-            await exit_stack.aclose()
-            _log.warning("mcp.connect_timeout", slug=server.slug)
-            raise McpConnectionFailed(
-                MCP_ERROR_TIMEOUT, f"connecting to MCP server {server.slug!r} timed out"
-            ) from exc
         except McpEgressBlockedError as exc:
-            await exit_stack.aclose()
+            await _safe_aclose(exit_stack)
             _log.warning("mcp.connect_egress_blocked", slug=server.slug)
             raise McpConnectionFailed(MCP_ERROR_EGRESS_BLOCKED, str(exc)) from exc
-        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - contain everything
-            await exit_stack.aclose()
-            # An egress rejection can arrive wrapped by the SDK's exception-group
-            # machinery; unwrap to preserve the specific reason/code.
+        except BaseException as exc:  # noqa: BLE001 - contain EVERYTHING (incl. ExceptionGroup)
+            await _safe_aclose(exit_stack)
+            # A genuine external cancellation (our caller cancelled us) is preserved;
+            # any other failure (incl. the SDK's anyio (Base)ExceptionGroup or its
+            # cancel-scope artifact) is a contained connect failure.
+            if isinstance(exc, asyncio.CancelledError) and _is_genuine_cancellation():
+                raise
             code, detail = _classify_connect_failure(exc, server.slug)
             _log.warning("mcp.connect_failed", slug=server.slug, error=type(exc).__name__)
             raise McpConnectionFailed(code, detail) from exc
@@ -430,13 +431,84 @@ class McpClient:
                     read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
                 )
             )
-            await session.initialize()
+            # Bound the handshake so a server that accepts the connection but never
+            # completes ``initialize`` cannot hang the caller.
+            await asyncio.wait_for(session.initialize(), timeout=self._connect_timeout_seconds)
         except McpEgressBlockedError as exc:
             raise McpConnectError(MCP_ERROR_EGRESS_BLOCKED, str(exc)) from exc
-        except (Exception, asyncio.CancelledError) as exc:
+        except TimeoutError as exc:
+            raise McpConnectError(
+                MCP_ERROR_TIMEOUT,
+                f"handshake with MCP server {server.slug!r} timed out",
+            ) from exc
+        except asyncio.CancelledError:
+            # The SDK's anyio task group cancels this coroutine's cancel scope when a
+            # *sibling* transport task fails (server down / refused / protocol fault).
+            # A genuine external cancellation is preserved; otherwise the real cause
+            # surfaces as the exit stack tears down — capture it so :meth:`connect`
+            # reports the specific reason, not a bare cancellation.
+            if _is_genuine_cancellation():
+                raise
+            cause = await _surface_taskgroup_error(exit_stack, server.slug)
+            code, detail = _classify_connect_failure(cause, server.slug)
+            raise McpConnectError(code, detail) from cause
+        except BaseException as exc:  # noqa: BLE001 - the SDK raises (Base)ExceptionGroup
             code, detail = _classify_connect_failure(exc, server.slug)
             raise McpConnectError(code, detail) from exc
         return session
+
+
+def _is_genuine_cancellation() -> bool:
+    """True when the current task is really being cancelled by an outer caller.
+
+    anyio cancels a coroutine's cancel scope when a *sibling* task in the same task
+    group fails — surfacing a ``CancelledError`` here that is NOT a real external
+    cancellation. ``Task.cancelling()`` counts pending ``Task.cancel()`` requests
+    from the outside, so a non-zero count means a genuine cancellation we must not
+    swallow; zero means the ``CancelledError`` is an anyio artifact of a sibling
+    transport failure (a connect failure to contain).
+    """
+    task = asyncio.current_task()
+    if task is None:  # pragma: no cover — always inside a task here
+        return False
+    cancelling = getattr(task, "cancelling", None)
+    if cancelling is None:  # pragma: no cover — 3.11+ always has it
+        return True
+    return bool(cancelling() > 0)
+
+
+async def _surface_taskgroup_error(exit_stack: AsyncExitStack, slug: str) -> BaseException:
+    """Tear down ``exit_stack`` to surface the SDK task group's real failure cause.
+
+    When a transport task fails, the true exception is delivered as the task group's
+    ``__aexit__`` raises it (as an ExceptionGroup). Closing the stack here lets us
+    capture that cause so :meth:`connect` reports the specific reason (down/refused/
+    protocol) rather than a bare cancellation. Returns the captured cause (or a
+    generic marker if teardown surfaced none).
+    """
+    try:
+        await exit_stack.aclose()
+    except asyncio.CancelledError:  # pragma: no cover — teardown re-cancellation
+        raise
+    except BaseException as exc:  # noqa: BLE001 - this IS the cause we want
+        return exc
+    return McpConnectError(MCP_ERROR_UNAVAILABLE, f"MCP server {slug!r} is unavailable")
+
+
+async def _safe_aclose(exit_stack: AsyncExitStack) -> None:
+    """Close ``exit_stack`` swallowing any teardown error (failure isolation).
+
+    On a failed connect the SDK's transport context managers re-raise their task
+    group's exception when torn down; that teardown noise must not escape ``app/mcp/``
+    (we are already raising a typed :class:`McpConnectionFailed` for the real cause).
+    A genuine cancellation is preserved.
+    """
+    try:
+        await exit_stack.aclose()
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - teardown noise is contained here
+        _log.debug("mcp.teardown_suppressed", error=type(exc).__name__)
 
 
 def _egress_block_in(exc: BaseException) -> McpEgressBlockedError | None:
