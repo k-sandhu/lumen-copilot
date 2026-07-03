@@ -7,6 +7,7 @@ export { AssistantsPage } from './components/AssistantsPage';
 export { AssistantLibrary } from './components/AssistantLibrary';
 export { AssistantCard } from './components/AssistantCard';
 export { AssistantEditor } from './components/AssistantEditor';
+export { VersionHistory } from './components/VersionHistory';
 export {
   useAssistants,
   useAssistant,
@@ -14,6 +15,8 @@ export {
   useUpdateAssistant,
   usePublishAssistant,
   useDeleteAssistant,
+  useAssistantVersions,
+  useRollbackAssistant,
   assistantKeys,
 } from './model/queries';
 export {
