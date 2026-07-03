@@ -1894,6 +1894,68 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # --- Scheduled-run delivery: the in-app run inbox (issue #238) ---
+  /run-deliveries:
+    get:
+      operationId: listRunDeliveries
+      summary: The run inbox — list a completed run's in-app deliveries (newest first).
+      description: >
+        Lists the caller's in-app run deliveries, tenant- and owner-scoped (ADR-0015
+        §6, spec 0004 INV-1/INV-2), newest first. A completed scheduled/manual run
+        lands here with its `summary` and its `run_id` (a link to the full cited
+        transcript, `GET /runs/{runId}`) so results reach the owner without opening
+        the app. Filter by `status`, or pass `unread=true` for the unread inbox.
+        Digest deliveries are batched by a periodic beat and surface as `delivered`.
+        External channels (email/Slack) are deferred T2-ish egress (INV-7) — this
+        surface is in-app only.
+      tags: [run-deliveries]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/RunDeliveryStatus" }
+          description: Filter to one delivery status.
+        - name: unread
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: When true, exclude already-read deliveries (the unread inbox).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of run deliveries (newest first).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDeliveryList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /run-deliveries/{deliveryId}/read:
+    parameters:
+      - name: deliveryId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The run-delivery id.
+    post:
+      operationId: markRunDeliveryRead
+      summary: Mark one run delivery as read (idempotent).
+      description: >
+        Marks the delivery read and stamps `read_at`; idempotent (re-marking a read
+        delivery returns it unchanged). Owner-scoped — a delivery in another tenant or
+        addressed to another user is **404** (existence non-disclosure, INV-1/INV-2).
+        Audited (`run.delivery_read`, INV-6).
+      tags: [run-deliveries]
+      responses:
+        "200":
+          description: The updated (read) delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDelivery" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -4043,6 +4105,65 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/Run" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    RunDeliveryKind:
+      type: string
+      description: >
+        How a completed run's output reached the owner (ADR-0015 §6, #238). `inbox`
+        = an immediate in-app inbox delivery on completion (the default); `digest` =
+        a run rolled into a periodic in-app digest batch. External channels
+        (email/Slack) are deferred T2-ish egress — no kind here.
+      enum: [inbox, digest]
+
+    RunDeliveryStatus:
+      type: string
+      description: >
+        The lifecycle of one in-app run delivery (ADR-0015 §6, #238). `pending` =
+        created, awaiting its digest batch; `delivered` = visible in the inbox
+        (unread); `read` = the owner opened it; `failed` = the delivery could not be
+        produced (visible + retryable via the run detail, never a silent drop).
+      enum: [pending, delivered, read, failed]
+
+    RunDelivery:
+      type: object
+      additionalProperties: false
+      description: >
+        One in-app delivery of a completed run's output (issue #238). Tenant- and
+        owner-scoped (INV-1/§2.2): a delivery in another tenant / addressed to another
+        user is 404. `run_id` links to the full cited transcript (`GET /runs/{id}`).
+      required: [id, run_id, kind, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id:
+          type: string
+          format: uuid
+          description: The completed run this delivery is for (link to its transcript).
+        schedule_id:
+          type: [string, "null"]
+          format: uuid
+          description: The schedule that fired the run, or null for a manual run.
+        kind: { $ref: "#/components/schemas/RunDeliveryKind" }
+        status: { $ref: "#/components/schemas/RunDeliveryStatus" }
+        summary:
+          type: [string, "null"]
+          description: The inbox line — the run's short summary.
+        created_at: { type: string, format: date-time }
+        read_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the owner opened the delivery, or null while unread.
+
+    RunDeliveryList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RunDelivery" }
         next_cursor:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.

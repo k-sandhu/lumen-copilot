@@ -1241,6 +1241,73 @@ class Schedule(TenantScopedMixin, TimestampMixin, Base):
     last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
+class RunDelivery(TenantScopedMixin, Base):
+    """One in-app delivery of a completed run's output — a ``run_deliveries`` row (#238).
+
+    The persistence of the run inbox (ADR-0015 §6): when a run reaches a terminal, a
+    delivery lands here so the owner sees its ``summary`` + a link to the full cited
+    transcript without opening the app. Tenant- and owner-scoped (INV-1/§2.2):
+    ``recipient_id`` is the owner the run ran *as*, so a delivery in another tenant /
+    addressed to another user is a 404 (existence non-disclosure, enforced one layer
+    up in the service off the tenant-scoped repository's ``None``). ``run_id``
+    (CASCADE — a delivery is meaningless without its run) links back to
+    ``GET /runs/{id}``; the nullable ``schedule_id`` (SET NULL) records the schedule
+    that fired it (null for a manual run). ``kind`` distinguishes an immediate inbox
+    delivery from a digest-batched one; ``status`` walks the
+    :class:`~app.domain.entities.RunDeliveryStatus` machine; both enum domains are
+    ``CheckConstraint``-pinned so a bad value can never be stored. ``read_at`` stamps
+    when the owner opened it. Tenant-scoped like every table (INV-1); the ``0023``
+    migration puts it under the RLS backstop.
+
+    No ``TimestampMixin``/``updated_at``: a delivery's lifecycle is ``created_at`` +
+    ``read_at`` + ``status``, not a generic updated stamp.
+    """
+
+    __tablename__ = "run_deliveries"
+    __table_args__ = (
+        # The owner inbox reads (newest first) + the pending-digest sweep; each
+        # tenant-leading so the equality filter uses one index (INV-1).
+        Index("ix_run_deliveries_tenant_recipient", "tenant_id", "recipient_id"),
+        Index("ix_run_deliveries_tenant_status", "tenant_id", "status"),
+        Index("ix_run_deliveries_run_id", "run_id"),
+        CheckConstraint("kind in ('inbox', 'digest')", name="ck_run_deliveries_kind"),
+        CheckConstraint(
+            "status in ('pending', 'delivered', 'read', 'failed')",
+            name="ck_run_deliveries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The owner the run ran as — the delivery recipient (INV-2/§2.2). SET NULL on
+    # user delete so a delivery record survives deprovisioning, never cascade-deleted.
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    # CASCADE: a delivery is meaningless without its run.
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The schedule that fired the run (null for a manual run). SET NULL so the
+    # delivery outlives the schedule that produced it (like ``runs.schedule_id``).
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("schedules.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="inbox")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="delivered")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CodeRun(TenantScopedMixin, Base):
     """One agent-authored sandbox code run — the ``code_runs`` row (ADR-0013 §4, #230).
 

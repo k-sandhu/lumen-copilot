@@ -613,6 +613,14 @@ class Settings(BaseSettings):
     # monopolize the worker pool. A fire that would exceed it is deferred, not
     # dropped. 0 would disable the cap → rejected (fail fast).
     run_max_in_flight_per_tenant: int = Field(default=20, alias="RUN_MAX_IN_FLIGHT_PER_TENANT")
+    # How often the digest beat rolls pending low-urgency run deliveries into an
+    # in-app digest (ADR-0015 §6, issue #238). A completed run whose schedule opted
+    # into a digest lands as a ``pending`` delivery; the periodic sweep marks the
+    # batch ``delivered`` so the owner is notified once per window, not per fire. The
+    # default is hourly (3600s) — the sweep is idempotent and cheap; the *cadence*
+    # (daily/weekly) the schedule opted into is a product notion, this is just how
+    # often the beat drains the pending batch. Non-positive would disable batching.
+    run_digest_interval_seconds: int = Field(default=3600, alias="RUN_DIGEST_INTERVAL_SECONDS")
 
     @field_validator(
         "redbeat_lock_timeout_seconds",
@@ -620,6 +628,7 @@ class Settings(BaseSettings):
         "run_rate_window_seconds",
         "run_rate_backoff_seconds",
         "run_max_in_flight_per_tenant",
+        "run_digest_interval_seconds",
     )
     @classmethod
     def _scheduler_counts_positive(cls, value: int) -> int:
@@ -633,7 +642,7 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError(
                 "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
-                "must be positive (ADR-0015 §5/§7)"
+                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
             )
         return value
 

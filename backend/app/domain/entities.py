@@ -966,6 +966,78 @@ class RunStep:
     created_at: datetime
 
 
+class RunDeliveryKind(str, enum.Enum):
+    """How a completed run's output reached the owner (ADR-0015 §6, issue #238).
+
+    ``INBOX`` = an immediate in-app inbox delivery on run completion (the T0/T1-safe
+    default); ``DIGEST`` = a run rolled into a periodic in-app digest batch (a
+    low-urgency run the schedule opted into a daily/weekly roll-up, so it does not
+    ping the owner per fire). External channels (email/Slack) are deferred T2-ish
+    egress (INV-7) — no kind here, by design.
+    """
+
+    INBOX = "inbox"
+    DIGEST = "digest"
+
+
+class RunDeliveryStatus(str, enum.Enum):
+    """The lifecycle of one in-app run delivery (ADR-0015 §6, issue #238).
+
+    ``PENDING`` = created, not yet surfaced to the owner (a run awaiting its digest
+    batch); ``DELIVERED`` = visible in the owner's inbox (unread); ``READ`` = the
+    owner opened it; ``FAILED`` = the delivery could not be produced (visible +
+    retryable, never a silent drop — AC-3). A delivery walks
+    ``PENDING`` → ``DELIVERED`` → ``READ`` (or ``FAILED`` on the produce path).
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    READ = "read"
+    FAILED = "failed"
+
+
+# The terminal-for-reading statuses — a delivery the owner has already seen.
+_READ_RUN_DELIVERY_STATUSES: frozenset[RunDeliveryStatus] = frozenset(
+    {RunDeliveryStatus.READ}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RunDelivery:
+    """One in-app delivery of a completed run's output — a ``run_deliveries`` row (#238).
+
+    The persistence of "a completed scheduled run appears in the recipient's in-app
+    inbox with a summary + a link to the run" (AC-1). Tenant- and owner-scoped
+    (INV-1/§2.2): ``recipient_id`` is the owner the run ran *as* — a delivery in
+    another tenant or addressed to another user is a 404 (existence non-disclosure).
+    ``run_id`` links back to the full cited transcript (``GET /runs/{id}``);
+    ``summary`` is the inbox line (the run's ``summary``); ``kind`` distinguishes an
+    immediate inbox delivery from a digest-batched one; ``status`` walks the
+    :class:`RunDeliveryStatus` machine. ``read_at`` stamps when the owner opened it.
+
+    A **failed** delivery is a queryable row (``status=failed``), never a silent
+    drop (AC-3) — the run itself still carries its terminal outcome, but the delivery
+    surface records that its inbox notification could not be produced so it can be
+    retried.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    recipient_id: UUID
+    run_id: UUID
+    schedule_id: UUID | None
+    kind: RunDeliveryKind
+    status: RunDeliveryStatus
+    summary: str | None
+    created_at: datetime
+    read_at: datetime | None = None
+
+    @property
+    def is_read(self) -> bool:
+        """True once the owner has opened this delivery (never reverts)."""
+        return self.status in _READ_RUN_DELIVERY_STATUSES
+
+
 @dataclass(frozen=True, slots=True)
 class Schedule:
     """A user-defined recurring run of a saved assistant — the ``schedules`` row (ADR-0015 §2).

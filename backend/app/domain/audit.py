@@ -128,6 +128,18 @@ class AuditAction(str, enum.Enum):
     SCHEDULE_PAUSED = "schedule.paused"
     SCHEDULE_RESUMED = "schedule.resumed"
     SCHEDULE_RUN_NOW = "schedule.run_now"
+    # Scheduled-run delivery (ADR-0015 §6, issue #238). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). A completed run's output is delivered to the owner's in-app inbox
+    # (``run.delivered``), rolled into a periodic in-app digest (``run.digest_sent``),
+    # or marked read by the owner (``run.delivery_read``). Delivery v1 is in-app
+    # only — external channels (email/Slack) are deferred T2-ish egress (INV-7) and
+    # would each be a new §6 boundary row when they land. Every delivery is audited
+    # (INV-6) so a run's output is never a silent side-channel: the trail shows what
+    # reached whom and when it was read.
+    RUN_DELIVERED = "run.delivered"
+    RUN_DELIVERY_READ = "run.delivery_read"
+    RUN_DIGEST_SENT = "run.digest_sent"
     # Sandbox code execution (ADR-0013 §4, issue #230). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Every code run is bracketed by ``code_run.started``/``code_run.finished``
