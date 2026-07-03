@@ -850,9 +850,15 @@ class ToolInvocation(TenantScopedMixin, Base):
         nullable=True,
     )
     # The assistant message the call contributed to (nullable, same rationale).
+    # DEFERRABLE INITIALLY DEFERRED: the chat runtime records a tool_invocations
+    # row *during* the tool loop keyed to the pre-minted assistant message id,
+    # but that message row is only INSERTed by `_persist` at the end of the SAME
+    # transaction. The reference is a legitimate intra-transaction forward ref, so
+    # the FK is validated at COMMIT (message present) rather than at flush (would
+    # spuriously fail with an IntegrityError and abort every tool-using answer).
     message_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("messages.id", ondelete="SET NULL"),
+        ForeignKey("messages.id", ondelete="SET NULL", deferrable=True, initially="DEFERRED"),
         nullable=True,
     )
     # Reserved for a future multi-step agent-run grouping (E14); no FK yet.
