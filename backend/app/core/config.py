@@ -504,6 +504,50 @@ class Settings(BaseSettings):
             raise ValueError("WEB_SEARCH_FETCH_TOP_N must be >= 0 (0 disables page fetching)")
         return value
 
+    # --- Dynamic per-tenant scheduler (ADR-0015 §7, issue #236) -------------
+    # celery-redbeat rides the EXISTING Redis broker (no new infra): the derived
+    # live schedule entries live under this key prefix, and Beat holds a leader lock
+    # so only one Beat process fires (safe to run a single ``beat`` service). All
+    # config, never a literal at the call site (backend/AGENTS.md).
+    redbeat_key_prefix: str = Field(default="lumen:redbeat:", alias="REDBEAT_KEY_PREFIX")
+    redbeat_lock_timeout_seconds: int = Field(default=90, alias="REDBEAT_LOCK_TIMEOUT_SECONDS")
+    # Per-tenant run enqueue rate cap (ADR-0015 §5) — reuses the Redis fixed-window
+    # limiter pattern (``tasks/rate_limit.py``). A tenant cannot flood the worker
+    # pool with scheduled/run-now runs: the first N enqueues per window are admitted;
+    # beyond the cap a fire is deferred with backoff (never dropped). Distinct
+    # keyspace from the connector-sync + web-search limiters.
+    run_rate_max_per_window: int = Field(default=60, alias="RUN_RATE_MAX_PER_WINDOW")
+    run_rate_window_seconds: int = Field(default=60, alias="RUN_RATE_WINDOW_SECONDS")
+    run_rate_backoff_seconds: int = Field(default=30, alias="RUN_RATE_BACKOFF_SECONDS")
+    # Per-tenant simultaneous in-flight run cap (ADR-0015 §5): bounds how many runs a
+    # single tenant may have ``queued``/``running`` at once so one tenant cannot
+    # monopolize the worker pool. A fire that would exceed it is deferred, not
+    # dropped. 0 would disable the cap → rejected (fail fast).
+    run_max_in_flight_per_tenant: int = Field(default=20, alias="RUN_MAX_IN_FLIGHT_PER_TENANT")
+
+    @field_validator(
+        "redbeat_lock_timeout_seconds",
+        "run_rate_max_per_window",
+        "run_rate_window_seconds",
+        "run_rate_backoff_seconds",
+        "run_max_in_flight_per_tenant",
+    )
+    @classmethod
+    def _scheduler_counts_positive(cls, value: int) -> int:
+        """A non-positive lock/rate/concurrency value would disable bounding — reject.
+
+        The per-tenant run rate + concurrency caps are load-bearing availability
+        controls (ADR-0015 §5); a zero or negative window/limit/lock would either
+        admit everything, divide by a zero window, or disable the Beat lock, so a
+        misconfiguration must fail fast at startup.
+        """
+        if value <= 0:
+            raise ValueError(
+                "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
+                "must be positive (ADR-0015 §5/§7)"
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_chunk_overlap(self) -> Settings:
         """Enforce ``0 <= overlap < size`` so chunking always makes progress."""

@@ -179,6 +179,41 @@ services:
       backend:
         condition: service_healthy
 
+  # Dynamic per-tenant Beat scheduler (ADR-0015 §7, #236): reads the `schedules`
+  # table (Postgres authoritative) and fires `lumen.fire_schedule` at each schedule's
+  # cadence via celery-redbeat, whose live entries ride the EXISTING Redis broker (no
+  # new infra). Reuses the worker image; a thin add — it holds no state of its own.
+  # A single beat process is correct (RedBeat holds a Redis leader lock).
+  beat:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command:
+      - "celery"
+      - "-A"
+      - "app.tasks.celery_app"
+      - "beat"
+      - "--scheduler"
+      - "redbeat.RedBeatScheduler"
+      - "--loglevel=info"
+    environment:
+      # Mirror the worker/backend: the host OPENROUTER_API_KEY always wins, .env is
+      # the fallback (Beat itself makes no model call, but shares the image/env).
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Beat reconciles its RedBeat entries from Postgres on boot, so wait for the web
+      # service to have run `alembic upgrade head` (the `schedules` table must exist).
+      backend:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
