@@ -69,6 +69,16 @@ export { listRuns, getRun } from './runs';
 export type { RunPageQuery } from './runs';
 export { getCodeRun } from './codeRuns';
 export {
+  listMcpServers,
+  registerMcpServer,
+  getMcpServer,
+  updateMcpServer,
+  deleteMcpServer,
+  testMcpServer,
+  listMcpServerTools,
+} from './mcpServers';
+export type { McpPageQuery } from './mcpServers';
+export {
   getAccessToken,
   hasAccessToken,
   setAccessToken,

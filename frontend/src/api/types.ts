@@ -1248,3 +1248,131 @@ export interface RecentSearch {
 export interface RecentSearchList {
   items: RecentSearch[];
 }
+
+// --- MCP servers (contracts/openapi.yaml §mcp-servers, ADR-0012 / #224) ------
+
+/**
+ * The remote MCP transport (ADR-0012 §1). Only remote transports ship in v1;
+ * `stdio`/local-process is deferred and rejected at registration with a 422
+ * `unsupported_transport`.
+ */
+export type McpTransport = 'streamable_http' | 'sse';
+
+/**
+ * Health state from the last probe (ADR-0012 §5). `pending` before the first
+ * successful probe, `ready` after a healthy handshake, `error` when the last
+ * probe failed (see `last_error`).
+ */
+export type McpServerStatus = 'pending' | 'ready' | 'error';
+
+/**
+ * Inferred governance tier for a discovered tool (ADR-0012 §6, spec 0004 §2.5).
+ * Default T2 (approval-gated) unless the server annotates the tool
+ * read-only/non-destructive, which maps to T0 — trust is earned, never assumed.
+ */
+export type McpRiskTier = RiskTierId;
+
+/**
+ * One registered MCP server, tenant- and owner-scoped (ADR-0012 §5, spec 0004
+ * INV-1/INV-2). The response NEVER includes the stored credential value — only a
+ * masked `secret_hint` (CC-C #209). The `auth_ref` is a server-internal detail
+ * and is not exposed.
+ */
+export interface McpServer {
+  id: string;
+  /** Display name. */
+  name: string;
+  transport: McpTransport;
+  /** The remote MCP endpoint (https only; SSRF-checked on register + every connect). */
+  endpoint_url: string;
+  /** Owner toggle — when false the server's tools are not offered to assistants. */
+  enabled: boolean;
+  status: McpServerStatus;
+  /** When the last successful health probe finished (null before the first). */
+  last_health_at?: string | null;
+  /** Safe failure reason when status is error (never contains the credential). */
+  last_error?: string | null;
+  /** Tools discovered on the last successful probe (0 until first discovery). */
+  discovered_tool_count: number;
+  /**
+   * A MASKED hint at the stored credential (e.g. `"••••abcd"`), or null when no
+   * auth is stored. This is the ONLY credential-derived value ever returned — the
+   * actual secret is write-only and never serialized (ADR-0012 §5, CC-C #209).
+   */
+  secret_hint?: string | null;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /mcp-servers — a cursor page of registered servers. */
+export interface McpServerList {
+  items: McpServer[];
+  next_cursor?: string | null;
+}
+
+/**
+ * Write-only auth material for the MCP endpoint (ADR-0012 §5). Sent on
+ * register/update, envelope-encrypted into the CC-C vault as an `auth_ref`, and
+ * NEVER returned by any endpoint. A `bearer` token or a custom `header`.
+ */
+export interface McpServerAuth {
+  type: 'bearer' | 'header';
+  /** The secret value (write-only — never echoed back). */
+  value: string;
+  /** The header name to attach the value to (required when type is `header`). */
+  header_name?: string;
+}
+
+/**
+ * POST /mcp-servers body (ADR-0012 §5). `transport` is constrained to the remote
+ * values (`stdio` → 422 `unsupported_transport`); `endpoint_url` must be https
+ * and pass the SSRF check (else 422 `endpoint_blocked`). The optional `auth`
+ * credential is write-only — stored via CC-C and never returned.
+ */
+export interface McpServerCreate {
+  name: string;
+  transport: McpTransport;
+  endpoint_url: string;
+  auth?: McpServerAuth;
+}
+
+/**
+ * PATCH /mcp-servers/{id} body (ADR-0012 §5). Any subset; at least one field.
+ * Rotating `auth` replaces the stored CC-C credential (write-only, never
+ * returned); send `auth: null` to clear it. Changing `endpoint_url` re-runs the
+ * https + SSRF validation (else 422).
+ */
+export interface McpServerUpdate {
+  name?: string;
+  transport?: McpTransport;
+  endpoint_url?: string;
+  enabled?: boolean;
+  /** Rotate the write-only credential, or null to clear it. */
+  auth?: McpServerAuth | null;
+}
+
+/**
+ * One tool discovered from an MCP server (ADR-0012 §6). Injected into the tool
+ * registry under its namespaced name so it flows through the same allow-list /
+ * approval / audit path as native tools.
+ */
+export interface McpTool {
+  /** The namespaced registry name `mcp:<server_slug>:<tool>` — collision-free. */
+  name: string;
+  /** The tool's original (un-namespaced) name as advertised by the server. */
+  raw_name?: string;
+  /** The server-advertised tool description (may be null). */
+  description?: string | null;
+  /** The tool's advertised argument JSON Schema (opaque pass-through). */
+  input_schema: Record<string, unknown>;
+  risk_tier: McpRiskTier;
+  /** True when the server annotated the tool read-only/non-destructive (⇒ T0). */
+  read_only?: boolean;
+}
+
+/** 200 from GET /mcp-servers/{id}/tools — a cursor page of discovered tools. */
+export interface McpToolList {
+  items: McpTool[];
+  next_cursor?: string | null;
+}
