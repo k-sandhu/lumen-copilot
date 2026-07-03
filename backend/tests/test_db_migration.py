@@ -70,6 +70,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "runs",
     "run_steps",
     "schedules",
+    "code_runs",
 }
 
 
@@ -94,7 +95,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0018_schedules"]
+    assert list(script.get_heads()) == ["0019_code_runs"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -146,6 +147,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     schedules = script.get_revision("0018_schedules")
     assert schedules is not None
     assert schedules.down_revision == "0017_runs"
+    code_runs = script.get_revision("0019_code_runs")
+    assert code_runs is not None
+    assert code_runs.down_revision == "0018_schedules"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -748,6 +752,62 @@ def test_offline_schedules_migration_round_trips(
     assert "alter table runs drop constraint fk_runs_schedule_id" in down
     assert "drop index ix_schedules_tenant_enabled" in down
     assert "drop table schedules" in down
+
+
+def test_offline_code_runs_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0019 creates the tenant/owner-scoped ``code_runs`` table + RLS; down() reverses (#230).
+
+    AC (ADR-0013 §4, spec 0004 §2.1/§2.2): the upgrade renders the ``code_runs`` table
+    with its ``owner_id`` (SET NULL) + ``session_id`` (SET NULL) FKs, the status +
+    exit-code/duration CHECKs, the ``code``/``stdout``/``stderr``/``image_digest``
+    columns, the ``resource_usage`` jsonb, the ``artifact_ids`` array, the three
+    tenant-leading indexes (owner history, status filter, session link), and the same
+    fail-closed RLS policy the 0007 backstop uses (``code_runs`` is tenant-scoped,
+    INV-1). The downgrade drops the policy, disables RLS, drops the indexes, and drops
+    the table. Offline DDL render (Postgres dialect) — structural reversibility without
+    a DB (#70 lesson); the behavioural proof is the sandbox service + isolation tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0018_schedules:0019_code_runs", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant/owner-scoped code_runs table + its FKs.
+    assert "create table code_runs" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # owner_id FK (the run's principal, SET NULL)
+    assert "references chat_sessions" in up  # session_id FK (SET NULL)
+    # The captured-result + reproducibility columns.
+    assert "code text" in up
+    assert "stdout text" in up
+    assert "stderr text" in up
+    assert "image_digest" in up
+    assert "resource_usage jsonb" in up
+    assert "artifact_ids" in up
+    # The domain-pinning CHECKs.
+    assert "ck_code_runs_status" in up
+    assert "ck_code_runs_exit_code_nonneg" in up
+    assert "ck_code_runs_duration_nonneg" in up
+    # The three tenant-leading indexes (owner history, status filter, session link).
+    assert "create index ix_code_runs_tenant_owner on code_runs (tenant_id, owner_id)" in up
+    assert "create index ix_code_runs_tenant_status on code_runs (tenant_id, status)" in up
+    assert "create index ix_code_runs_session_id on code_runs (session_id)" in up
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table code_runs enable row level security" in up
+    assert "alter table code_runs force row level security" in up
+    assert "create policy rls_code_runs on code_runs" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0019_code_runs:0018_schedules", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_code_runs on code_runs" in down
+    assert "alter table code_runs disable row level security" in down
+    assert "drop index ix_code_runs_session_id" in down
+    assert "drop index ix_code_runs_tenant_status" in down
+    assert "drop index ix_code_runs_tenant_owner" in down
+    assert "drop table code_runs" in down
 
 
 def test_audit_index_names_match_model_and_migration() -> None:

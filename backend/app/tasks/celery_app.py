@@ -36,15 +36,16 @@ celery_app.conf.update(
     # Modules the worker imports to register tasks. Explicit so the worker
     # entrypoint (``-A app.tasks.celery_app``) discovers the ingestion task (#21),
     # the connector sync task (#20), the artifact-retention janitor (#208), the
-    # headless agent-run task (#235), and the schedule-fire dispatcher (#236)
-    # regardless of package ``__init__`` side effects. The ``beat`` process fires
-    # ``lumen.fire_schedule``; the worker consumes it.
+    # headless agent-run task (#235), the schedule-fire dispatcher (#236), and the
+    # sandbox code-run task (#230) regardless of package ``__init__`` side effects.
+    # The ``beat`` process fires ``lumen.fire_schedule``; the worker consumes it.
     imports=(
         "app.tasks.ingest",
         "app.tasks.sync_source",
         "app.tasks.artifact_retention",
         "app.tasks.run_assistant",
         "app.tasks.scheduler",
+        "app.tasks.run_sandbox",
     ),
     # Fail fast when publishing to an unreachable broker rather than looping
     # through a long reconnect cycle: a producer (the API after-commit enqueue)
