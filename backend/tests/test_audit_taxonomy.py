@@ -109,6 +109,11 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # is a T1 governance write audited (INV-6). This is the policy the sandbox
         # admission path consults per run.
         "sandbox_policy.updated",
+        # Admin per-tenant autonomy cap (ADR-0011 §3 / issue #218) — additive; setting
+        # the tenant's maximum assistant autonomy (the ceiling an assistant's EFFECTIVE
+        # autonomy is min'd to) is a T1 governance write audited (INV-6). This is the cap
+        # the publish path and the run-time autonomy gate consult.
+        "autonomy_cap.updated",
         # Per-tenant MCP server registration (ADR-0012 §5 / issue #226) — additive;
         # register/update/delete of a remote MCP server (a T1 config write) and the
         # on-demand health/discovery probe are each audited (INV-6). The stored

@@ -169,12 +169,46 @@ class AutonomyLevel(str, enum.Enum):
     Capped by the risk tier of the assistant's allowed tools; at MVP the whole
     product is T0/T1, so autonomy governs only app-local tools through the CC-A
     approval seam. ``SUGGEST`` is the default for a new assistant.
+
+    The four values are **totally ordered** by how far the assistant may act
+    (``SUGGEST`` < ``DRAFT`` < ``ACT_WITH_APPROVAL`` < ``ACT_AUTO``) so an admin's
+    per-tenant cap can be a ``min`` (issue #218): an assistant's EFFECTIVE autonomy
+    is ``min(assistant.autonomy_level, tenant cap)``, and a T1 side-effecting tool
+    is gated by that effective level at run time.
     """
 
     SUGGEST = "suggest"
     DRAFT = "draft"
     ACT_WITH_APPROVAL = "act_with_approval"
     ACT_AUTO = "act_auto"
+
+    @property
+    def rank(self) -> int:
+        """The numeric autonomy rank (0–3) — higher means the assistant may act further.
+
+        ``SUGGEST`` = 0 … ``ACT_AUTO`` = 3. Lets a cap be expressed as a ``min`` and a
+        run-time gate as a ``>=`` comparison without a lookup table (issue #218).
+        """
+        return _AUTONOMY_ORDER.index(self)
+
+    def clamped_to(self, cap: AutonomyLevel) -> AutonomyLevel:
+        """This level, lowered to ``cap`` if it exceeds it (the tenant-cap ``min``).
+
+        The EFFECTIVE autonomy of an assistant is ``min(assistant, tenant cap)``: an
+        assistant configured above the tenant ceiling runs at the ceiling, never above
+        it (issue #218). Returns ``self`` when already at or below the cap.
+        """
+        return self if self.rank <= cap.rank else cap
+
+
+# The autonomy values in ascending order (SUGGEST lowest, ACT_AUTO highest). The
+# single source for ``AutonomyLevel.rank`` so the ordering is defined once.
+_AUTONOMY_ORDER: tuple[AutonomyLevel, ...] = (
+    AutonomyLevel.SUGGEST,
+    AutonomyLevel.DRAFT,
+    AutonomyLevel.ACT_WITH_APPROVAL,
+    AutonomyLevel.ACT_AUTO,
+)
 
 
 class AssistantStatus(str, enum.Enum):
@@ -366,6 +400,10 @@ class Assistant:
     only their own (or granted) assistants; a cross-tenant/non-owned id is 404.
     ``current_version`` is the published head version number (``None`` while never
     published) — a projection the service fills, not a stored column.
+    ``effective_autonomy`` is the assistant's autonomy after the tenant admin cap is
+    applied (``min(autonomy_level, tenant cap)``, issue #218) — also a projection the
+    service fills (``None`` until filled), so the library/run detail can show how far
+    the assistant may *actually* act versus its configured level.
     """
 
     id: UUID
@@ -383,6 +421,7 @@ class Assistant:
     created_at: datetime
     updated_at: datetime
     current_version: int | None = None
+    effective_autonomy: AutonomyLevel | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,6 +683,29 @@ class TenantSandboxPolicy:
     max_memory_mb: int
     daily_runtime_cap_s: int
     max_concurrency: int
+    updated_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TenantAutonomyPolicy:
+    """An admin's per-tenant autonomy cap (issue #218).
+
+    One row of the ``tenant_autonomy_policy`` table: the maximum
+    :class:`AutonomyLevel` any assistant in the tenant may effectively run at
+    (``max_autonomy``). Tenant-scoped (INV-1); ``updated_by`` is the admin who last
+    set it (may be ``None`` if that user was later deprovisioned — the cap outlives
+    them). Absence of a row (not represented here) means **no ceiling** — an
+    assistant runs at its own configured level (the permissive default, mirroring
+    how the tool/sandbox policies fall back to their built-in defaults). An
+    assistant's EFFECTIVE autonomy is ``min(assistant.autonomy_level, max_autonomy)``,
+    enforced at publish time and at run time.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    max_autonomy: AutonomyLevel
     updated_by: UUID | None
     created_at: datetime
     updated_at: datetime

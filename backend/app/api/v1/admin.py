@@ -45,7 +45,7 @@ from app.api.deps import (
     extract_request_id,
     require_roles,
 )
-from app.domain.entities import Role
+from app.domain.entities import AutonomyLevel, Role
 from app.services.admin_service import (
     AdminService,
     MemberPage,
@@ -53,6 +53,7 @@ from app.services.admin_service import (
     RiskTierView,
     TenantSettingsView,
 )
+from app.services.autonomy_policy_service import AutonomyPolicyService, AutonomyPolicyView
 from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
 from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
 
@@ -234,6 +235,28 @@ class SandboxPolicyUpdateRequest(BaseModel):
     max_concurrency: int = Field(ge=1)
 
 
+class AutonomyPolicyResponse(BaseModel):
+    """``#/components/schemas/AutonomyPolicy`` — the per-tenant assistant autonomy cap."""
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+    is_default: bool
+    levels: list[AutonomyLevel]
+
+
+class AutonomyPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/AutonomyPolicyUpdate`` — set the per-tenant autonomy cap.
+
+    ``max_autonomy`` is constrained to the ``AutonomyLevel`` enum at the wire (an
+    unknown value → 422, INV-8), so no invalid ceiling can reach the service.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -305,6 +328,14 @@ def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
         max_memory_mb_ceiling=view.max_memory_mb_ceiling,
         daily_runtime_cap_s_ceiling=view.daily_runtime_cap_s_ceiling,
         max_concurrency_ceiling=view.max_concurrency_ceiling,
+    )
+
+
+def _to_autonomy_policy(view: AutonomyPolicyView) -> AutonomyPolicyResponse:
+    return AutonomyPolicyResponse(
+        max_autonomy=view.max_autonomy,
+        is_default=view.is_default,
+        levels=list(view.levels),
     )
 
 
@@ -504,3 +535,48 @@ async def update_sandbox_policy(
     )
     await session.commit()
     return _to_sandbox_policy(view)
+
+
+@router.get("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def get_autonomy_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """The caller's tenant's assistant autonomy cap (admin only; tenant-scoped; #218).
+
+    ``max_autonomy`` is the ceiling an assistant's EFFECTIVE autonomy is min'd to;
+    ``is_default`` is true when no cap is stored (no ceiling — an assistant runs at its
+    own configured level). Admin-only via the router gate (INV-5); tenant-scoped via
+    ``current_tenant`` (INV-1).
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    return _to_autonomy_policy(await service.get_policy())
+
+
+@router.patch("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def update_autonomy_policy(
+    body: AutonomyPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """Set the per-tenant assistant autonomy cap (admin only; T1, audited; #218).
+
+    A reversible, tenant-scoped **T1** governance write: admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the service audits
+    ``autonomy_cap.updated`` (INV-6). The cap only ever NARROWS — it lowers an
+    assistant's EFFECTIVE autonomy, never raises it. Publishing an assistant above the
+    new ceiling is rejected (422), and a running assistant above it is clamped at the
+    run-time tool gate. An unknown ``max_autonomy`` is **422** at the wire (INV-8).
+    Returns the resulting cap.
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    view = await service.set_policy(
+        max_autonomy=body.max_autonomy,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_autonomy_policy(view)
