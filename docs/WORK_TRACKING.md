@@ -24,7 +24,7 @@ Milestones are **thematic waves**, not the numbered iterations spec 0002 §7.3 o
 | **M3 Agents & Extensibility** · **M4 Agent Governance & Autonomy** | **active** | The committed agents/extensibility program ([#196](https://github.com/k-sandhu/lumen-copilot/issues/196)): custom assistants, tool platform, MCP, sandbox, scheduled runs. |
 | *(gated next-wave epics, no milestone yet)* | **Backlog** | Connector breadth, knowledge trust, collaboration/trust, actions & approvals, proactive, research & artifacts, AgentOps — each awaits a sponsor commitment before it earns a milestone (spec 0003 §4 pattern). |
 
-M2.5 and M3/M4 are **disjoint lanes** — a stabilization team and an agents team run concurrently without shared files (the one shared seam is [#192](https://github.com/k-sandhu/lumen-copilot/issues/192)↔[#207](https://github.com/k-sandhu/lumen-copilot/issues/207), called out in both).
+M2.5 and M3/M4 are **disjoint lanes** — a stabilization team and an agents team run concurrently without shared files. The one shared seam was [#192](https://github.com/k-sandhu/lumen-copilot/issues/192)↔[#207](https://github.com/k-sandhu/lumen-copilot/issues/207) (retrieval ↔ tool registry); [#207](https://github.com/k-sandhu/lumen-copilot/issues/207) has since merged, so [#192](https://github.com/k-sandhu/lumen-copilot/issues/192) now lands against the settled registry and the lanes are effectively fully disjoint.
 
 ## Branch model
 - `main` advances **only** by merging a PR with `Closes #<N>` — no direct commits to `main`.
