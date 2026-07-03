@@ -420,6 +420,136 @@
   color: var(--text-muted);
 }
 
+/* ── web citations (#221) — distinct from corpus-document sources ────────── */
+.lc-web-sources {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8px * var(--space));
+}
+.lc-web-source {
+  display: flex;
+  align-items: stretch;
+  gap: calc(8px * var(--space));
+  padding: calc(9px * var(--space)) calc(11px * var(--space));
+  border-radius: var(--r-md);
+  /* an accent-tinted left edge marks these as web-sourced at a glance */
+  border: 1px solid var(--accent-line, var(--border));
+  border-left-width: 3px;
+  background: var(--accent-weak, var(--surface-2));
+  transition:
+    border-color var(--dur-1),
+    background var(--dur-1);
+}
+.lc-web-source:hover,
+.lc-web-source:focus-within {
+  background: var(--surface);
+}
+.lc-web-source__btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: calc(10px * var(--space));
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.lc-web-source__icon {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: calc(22px * var(--fs));
+  height: calc(22px * var(--fs));
+  margin-top: calc(1px * var(--space));
+}
+.lc-web-source__favicon {
+  position: relative;
+  z-index: 1;
+  width: calc(16px * var(--fs));
+  height: calc(16px * var(--fs));
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+/* the globe sits beneath the favicon as an always-present fallback: if the
+   favicon image fails to load it shows through as the alt affordance. */
+.lc-web-source__globe {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: calc(16px * var(--fs));
+  height: calc(16px * var(--fs));
+  color: var(--accent-strong, var(--accent));
+}
+.lc-web-source__main {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+.lc-web-source__title {
+  display: block;
+  font-size: calc(13px * var(--fs));
+  font-weight: 560;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-web-source__host {
+  display: block;
+  margin-top: calc(1px * var(--space));
+  font-size: calc(11px * var(--fs));
+  font-weight: 600;
+  color: var(--accent-strong, var(--accent));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-web-source__snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: calc(4px * var(--space));
+  font-size: calc(12px * var(--fs));
+  color: var(--text-muted);
+}
+.lc-web-source__link {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: calc(30px * var(--fs));
+  border-radius: var(--r-sm);
+  color: var(--text-subtle);
+  transition:
+    color var(--dur-1),
+    background var(--dur-1);
+}
+.lc-web-source__link:hover,
+.lc-web-source__link:focus-visible {
+  color: var(--accent-strong, var(--accent));
+  background: var(--surface-3);
+}
+
+/* "web sources were used" disclosure on a settled answer (E3-12) */
+.lc-web-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6px * var(--space));
+  margin-top: calc(12px * var(--space));
+  font-size: calc(12px * var(--fs));
+  font-weight: 540;
+  color: var(--accent-strong, var(--accent));
+}
+.lc-web-disclosure .lc-icon {
+  width: calc(13px * var(--fs));
+  height: calc(13px * var(--fs));
+}
+
 /* wide GFM tables scroll within the reading column instead of forcing a
    thread-wide horizontal scrollbar (code blocks already do via .prose-md pre). */
 .lc-answer table {

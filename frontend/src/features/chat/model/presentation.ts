@@ -8,9 +8,10 @@
  */
 import type { TraceStep } from '@/ui';
 import type { SourcePassage } from '@/ui';
-import type { ChatSession } from '@/api';
-import type { UiCitation } from './citation';
+import type { ChatSession, KnowledgeMode } from '@/api';
+import { kindOfCitation, type UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
+import type { ModeAvailability } from './knowledgeModes';
 
 /** Compact thousands formatting, e.g. 1204 → "1,204". */
 function groupThousands(n: number): string {
@@ -324,4 +325,78 @@ export function sessionMeta(session: ChatSession, now: number = Date.now()): str
   const updated = relativeTime(session.updated_at, now);
   if (updated) parts.push(updated);
   return parts.join(' · ');
+}
+
+/* ── knowledge modes + web disclosure (issue #221, epic E3-12) ──────────────
+ * The composer surfaces which knowledge modes the next answer may draw on, and
+ * a settled answer discloses which modes it actually used. Both are derived here
+ * (pure) from the session scope + the turn's citations/tools so every edge (no
+ * assistant scope, web disabled, no web result) is unit-testable off React. */
+
+/** The default knowledge modes for an ad-hoc chat (no launching assistant). */
+export const DEFAULT_CHAT_MODES: readonly KnowledgeMode[] = ['company', 'uploaded'] as const;
+
+/**
+ * The web toggle's reason string when web is not enabled for this session
+ * (governed / off by default — ADR-0014). Shown on the disabled toggle so the
+ * user learns WHY, never a silent no-op.
+ */
+export const WEB_DISABLED_REASON =
+  'Web search is not enabled for this chat — turn it on for the assistant to allow it.';
+
+/**
+ * The initial composer mode selection for a session. From an assistant we seed
+ * the assistant's declared modes; an ad-hoc chat falls back to the corpus
+ * default. WEB is only pre-selected if the assistant actually declared it.
+ */
+export function initialModes(scopeModes: readonly KnowledgeMode[] | undefined): KnowledgeMode[] {
+  if (scopeModes && scopeModes.length > 0) return [...scopeModes];
+  return [...DEFAULT_CHAT_MODES];
+}
+
+/**
+ * Per-mode availability for the composer control. WEB is available only when the
+ * session's scope includes it (the assistant declared web, or an ad-hoc chat
+ * with web explicitly allowed); otherwise it is disabled WITH a reason (E3-12
+ * negative / AC-3). Company/uploaded/model are always available for the caller to
+ * toggle — the actual retrieval is still permission-gated server-side (INV-2).
+ */
+export function modeAvailability(
+  scopeModes: readonly KnowledgeMode[] | undefined,
+): Partial<Record<KnowledgeMode, ModeAvailability>> {
+  const webAllowed = (scopeModes ?? []).includes('web');
+  return {
+    web: webAllowed
+      ? { available: true }
+      : { available: false, reason: WEB_DISABLED_REASON },
+  };
+}
+
+/**
+ * Whether an answer used web search — the trigger for the "web sources were
+ * used" disclosure (E3-12: answers disclose which modes were used). True when a
+ * web citation is present, OR a `web_search` tool ran (a web lookup happened
+ * even if it produced no citation). Purely derived from what the turn has.
+ */
+export function usedWebSearch(citations: UiCitation[], tools: ToolActivity[]): boolean {
+  if (citations.some((c) => kindOfCitation(c) === 'web')) return true;
+  return tools.some((t) => t.tool === 'web_search');
+}
+
+/**
+ * Split citations into web vs corpus-document groups, preserving order. The
+ * renderer shows each group distinctly (#221 AC-2). Classification is by URL
+ * presence until the contract types it (see citation.ts TODO).
+ */
+export function partitionCitations(citations: UiCitation[]): {
+  web: UiCitation[];
+  documents: UiCitation[];
+} {
+  const web: UiCitation[] = [];
+  const documents: UiCitation[] = [];
+  for (const c of citations) {
+    if (kindOfCitation(c) === 'web') web.push(c);
+    else documents.push(c);
+  }
+  return { web, documents };
 }

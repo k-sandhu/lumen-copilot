@@ -10,13 +10,14 @@
  * the sidebar lists/creates/renames/deletes sessions. AC-5: a WS error or
  * disconnect is terminal with a Retry; a zero-citation answer is shown honestly.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, SendMessageRequest } from '@/api';
+import type { ChatModelInfo, KnowledgeMode, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
-import { useChatStore } from '../model/chatStore';
+import { useChatStore, type SessionScope } from '../model/chatStore';
+import { initialModes, modeAvailability } from '../model/presentation';
 import '../chat.css';
 import {
   useMessages,
@@ -31,6 +32,7 @@ import { HistorySidebar } from './HistorySidebar';
 import { ChatThread, type LiveAnswer } from './ChatThread';
 import { Composer } from './Composer';
 import { DocumentViewer } from './DocumentViewer';
+import { WebSourceView } from './WebSourceView';
 
 function defaultModelId(models: ChatModelInfo[] | undefined): string {
   if (!models || models.length === 0) return '';
@@ -47,6 +49,7 @@ export function ChatView() {
   const viewer = useChatStore((s) => s.viewer);
   const openViewer = useChatStore((s) => s.openViewer);
   const closeViewer = useChatStore((s) => s.closeViewer);
+  const sessionScope = useChatStore((s) => s.sessionScope);
 
   const models = useModels();
   const queryClient = useQueryClient();
@@ -108,6 +111,11 @@ export function ChatView() {
             <ActiveSession
               key={activeSessionId}
               sessionId={activeSessionId}
+              scope={
+                sessionScope && sessionScope.sessionId === activeSessionId
+                  ? sessionScope
+                  : null
+              }
               models={models.data?.items}
               modelsLoading={models.isLoading}
               activeStreamId={activeStreamId}
@@ -146,24 +154,45 @@ export function ChatView() {
 
       {viewer && (
         <aside className="lc-chat__inspector">
-          <ErrorBoundary label="Document viewer">
-            <DocumentViewer
-              citation={{
-                id: `${viewer.documentId}:${viewer.charStart}`,
-                documentId: viewer.documentId,
-                documentName: viewer.documentName,
-                chunkId: '',
-                snippet: viewer.snippet,
-                charStart: viewer.charStart,
-                charEnd: viewer.charEnd,
-              }}
-              // No source owner / last-modified / last-indexed is on the chat
-              // wire, and the answer/message time is the answer's age, not the
-              // source's — so the viewer shows "Not available" rather than
-              // present the answer time as source provenance (#120 GUARD).
-              onClose={closeViewer}
-            />
-          </ErrorBoundary>
+          {viewer.url ? (
+            // A web citation (#221): render the web-source pane (host + snippet +
+            // safe external link), NOT the document-bytes viewer — a web result
+            // has no corpus document to fetch (INV-3).
+            <ErrorBoundary label="Web source">
+              <WebSourceView
+                citation={{
+                  id: `${viewer.url}:${viewer.charStart}`,
+                  documentId: viewer.documentId,
+                  documentName: viewer.documentName,
+                  chunkId: '',
+                  snippet: viewer.snippet,
+                  charStart: viewer.charStart,
+                  charEnd: viewer.charEnd,
+                  url: viewer.url,
+                }}
+                onClose={closeViewer}
+              />
+            </ErrorBoundary>
+          ) : (
+            <ErrorBoundary label="Document viewer">
+              <DocumentViewer
+                citation={{
+                  id: `${viewer.documentId}:${viewer.charStart}`,
+                  documentId: viewer.documentId,
+                  documentName: viewer.documentName,
+                  chunkId: '',
+                  snippet: viewer.snippet,
+                  charStart: viewer.charStart,
+                  charEnd: viewer.charEnd,
+                }}
+                // No source owner / last-modified / last-indexed is on the chat
+                // wire, and the answer/message time is the answer's age, not the
+                // source's — so the viewer shows "Not available" rather than
+                // present the answer time as source provenance (#120 GUARD).
+                onClose={closeViewer}
+              />
+            </ErrorBoundary>
+          )}
         </aside>
       )}
     </div>
@@ -172,6 +201,8 @@ export function ChatView() {
 
 interface ActiveSessionProps {
   sessionId: string;
+  /** The knowledge scope this session was launched with (#221), or null. */
+  scope: SessionScope | null;
   models: ChatModelInfo[] | undefined;
   modelsLoading: boolean;
   activeStreamId: string | null;
@@ -183,12 +214,14 @@ interface ActiveSessionProps {
     charStart: number;
     charEnd: number;
     snippet: string;
+    url?: string;
   }) => void;
   onDoneReload: () => void;
 }
 
 function ActiveSession({
   sessionId,
+  scope,
   models,
   modelsLoading,
   activeStreamId,
@@ -206,6 +239,14 @@ function ActiveSession({
   // The selected model: default until the user changes it (AC-3). The session
   // model is persisted via PATCH when changed.
   const [model, setModel] = useState<string>('');
+
+  // The active knowledge modes for the next turn (#221). Seeded from the
+  // launching assistant's scope (or the ad-hoc default), then a per-chat
+  // override the user can toggle. WEB is available only when the scope allowed
+  // it — otherwise the composer renders it disabled with a reason (AC-3).
+  const scopeModes = scope?.modes;
+  const [modes, setModes] = useState<KnowledgeMode[]>(() => initialModes(scopeModes));
+  const availability = useMemo(() => modeAvailability(scopeModes), [scopeModes]);
   // Remember the last request so a stream error/disconnect can be retried (AC-5).
   const lastSendRef = useRef<SendMessageRequest | null>(null);
 
@@ -317,12 +358,15 @@ function ActiveSession({
             // The viewer carries only what the citation wire provides about the
             // source; the answer-time `meta` is NOT a source-provenance signal
             // and is intentionally not forwarded as freshness/last-indexed (#120).
+            // A web citation (#221) forwards its `url` so the inspector opens the
+            // web-source pane instead of trying to fetch corpus bytes.
             openViewer({
               documentId: c.documentId,
               documentName: c.documentName,
               charStart: c.charStart,
               charEnd: c.charEnd,
               snippet: c.snippet,
+              ...(c.url ? { url: c.url } : {}),
             })
           }
         />
@@ -346,6 +390,9 @@ function ActiveSession({
           defaultModelId={prefs.data?.default_model_id ?? null}
           onSetDefaultModel={onSetDefaultModel}
           settingDefault={setDefaultPref.isPending}
+          modes={modes}
+          onModesChange={setModes}
+          modeAvailability={availability}
         />
       </div>
     </div>

@@ -24,6 +24,7 @@ import {
   isStale,
   modelBadgeLabel,
   relativeTime,
+  usedWebSearch,
 } from '../model/presentation';
 import type { StreamPhase, ToolActivity } from '../model/streamReducer';
 import type { ChatCitation } from '@/api';
@@ -174,6 +175,9 @@ export function ChatThread({
               traceSteps={trace.steps}
               answeredAt={answeredAt}
               showNoCitationsNotice={isAssistant && citations.length === 0}
+              // Persisted turns don't replay tool activity, so web usage is
+              // derived from the presence of a web citation (#221).
+              webUsed={isAssistant && usedWebSearch(citations, [])}
               onOpenCitation={onOpenCitation}
             />
           );
@@ -198,6 +202,9 @@ export function ChatThread({
                   // A just-settled live answer was produced now → "answered Just now".
                   answeredAt={live.phase === 'done' ? 'Just now' : undefined}
                   showNoCitationsNotice={live.phase === 'done' && live.citations.length === 0}
+                  // The disclosure only shows on a settled turn (E3-12) — while
+                  // streaming, a web lookup may still be in flight.
+                  webUsed={live.phase === 'done' && usedWebSearch(liveCitations, live.tools)}
                   onOpenCitation={onOpenCitation}
                 />
                 {live.phase === 'error' && (

@@ -82,8 +82,17 @@ export const DISCONNECT_PROBLEM: WsProblem = {
 function asCitation(data: unknown): ChatCitation | null {
   if (typeof data !== 'object' || data === null) return null;
   const c = data as Record<string, unknown>;
-  if (typeof c.id !== 'string' || typeof c.documentId !== 'string') return null;
+  if (typeof c.id !== 'string') return null;
   if (typeof c.charStart !== 'number' || typeof c.charEnd !== 'number') return null;
+  // A corpus-document citation carries a `documentId`; a web citation (#221)
+  // carries a `url` instead (and no document_id — INV-3). Accept EITHER shape so
+  // web citations survive the reducer; the renderer classifies by URL presence
+  // (see model/citation.ts). Everything else stays required.
+  const hasDoc = typeof c.documentId === 'string';
+  const hasUrl = typeof c.url === 'string' && (c.url as string).trim().length > 0;
+  if (!hasDoc && !hasUrl) return null;
+  // Preserve any additive web fields (url/webTitle) verbatim — they ride through
+  // the reducer to fromWsCitation. The cast is honest: the shape is a superset.
   return data as ChatCitation;
 }
 
