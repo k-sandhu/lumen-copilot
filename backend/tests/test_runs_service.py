@@ -63,7 +63,15 @@ class _ScriptedGateway:
     """A gateway that searches once, then answers from the retrieved passage."""
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -79,7 +87,15 @@ class _ScriptedGateway:
 
 class _BoomGateway:
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — makes this an async generator
@@ -98,7 +114,15 @@ class _AppErrorGateway:
         self._exc = exc
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+
     ) -> AsyncIterator[StreamEvent]:
         raise self._exc
         yield  # pragma: no cover — makes this an async generator

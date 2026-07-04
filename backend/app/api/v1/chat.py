@@ -57,6 +57,7 @@ from app.services.chat_service import (
     SessionView,
 )
 from app.services.mcp_servers_service import build_mcp_servers_service
+from app.services.provider_models import ModelRouteResolver, build_model_route_resolver
 from app.services.tools.types import SandboxToolRunner, ToolDefinition
 from app.storage import ObjectStore
 
@@ -518,6 +519,12 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
+        model_route_resolver=_build_model_route_resolver(
+            principal=principal,
+            settings=settings,
+            request_id=request_id,
+            source_ip=source_ip,
+        ),
     )
     history = _to_chat_messages(result.history)
 
@@ -612,3 +619,30 @@ def _build_mcp_tools_factory(
         return await service.resolve_run_tools()
 
     return _factory
+
+
+def _build_model_route_resolver(
+    *,
+    principal: CurrentUser,
+    settings: Settings,
+    request_id: str,
+    source_ip: str,
+) -> ModelRouteResolver:
+    """Wire the live per-tenant model-route resolver the runtime calls (PR 2a).
+
+    A thin adapter over the ``services`` factory
+    (:func:`~app.services.provider_models.build_model_route_resolver`) scoped to the
+    streaming principal (tenant + owner + roles from the token, never model input).
+    The resolver decrypts a per-tenant provider's key **inside** ``services/`` (the
+    CC-C vault never enters ``api/`` — the architecture test forbids a router
+    importing the secrets service or naming ``get_secret_plaintext``); this router
+    only builds it and hands it to the runtime, which invokes it once per answer.
+    """
+    return build_model_route_resolver(
+        settings=settings,
+        tenant_id=principal.tenant_id,
+        owner_id=principal.user_id,
+        roles=principal.roles,
+        request_id=request_id,
+        source_ip=source_ip,
+    )

@@ -116,9 +116,24 @@ class LLMGateway:
                 code="llm_unconfigured",
             )
 
-    def _credentials(self) -> dict[str, Any]:
-        """LiteLLM kwargs carrying the provider key (never logged)."""
-        return {"api_key": self._settings.openrouter_api_key}
+    def _credentials(
+        self, *, api_key: str | None = None, api_base: str | None = None
+    ) -> dict[str, Any]:
+        """LiteLLM kwargs carrying the provider key + base (never logged).
+
+        Defaults to the process ``OPENROUTER_API_KEY`` and the provider's native
+        route (no ``api_base``). A per-call ``api_key`` / ``api_base`` OVERRIDES
+        those — this is how a per-tenant LLM provider routes a completion through
+        its own base URL + decrypted key (PR 2a). Both are stateless per call: they
+        are never stored on ``self``. ``None`` (the default) ⇒ behaviour is exactly
+        as before.
+        """
+        creds: dict[str, Any] = {
+            "api_key": api_key if api_key is not None else self._settings.openrouter_api_key
+        }
+        if api_base is not None:
+            creds["api_base"] = api_base
+        return creds
 
     @staticmethod
     def _to_wire_messages(messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
@@ -171,12 +186,16 @@ class LLMGateway:
         messages: Sequence[ChatMessage],
         *,
         model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> Completion:
         """Return a single (non-streamed) completion for ``messages``.
 
         ``model`` defaults to ``Settings.llm_model`` when not passed (AC-1). The
         returned :class:`Completion` carries token usage for later cost &
-        observability (AC-5).
+        observability (AC-5). ``api_key`` / ``api_base`` OVERRIDE the process
+        defaults when given — the seam a per-tenant LLM provider routes through
+        (PR 2a); ``None`` ⇒ the default credentials, unchanged.
         """
         self._require_enabled()
         import litellm  # lazy: no network/import cost until first use
@@ -188,7 +207,7 @@ class LLMGateway:
                 messages=self._to_wire_messages(messages),
                 stream=False,
                 timeout=self._settings.llm_timeout_seconds,
-                **self._credentials(),
+                **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
@@ -206,13 +225,17 @@ class LLMGateway:
         messages: Sequence[ChatMessage],
         *,
         model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> AsyncIterator[CompletionChunk]:
         """Yield incremental completion chunks for ``messages`` (AC-2).
 
         This is an async generator. Breaking out of the consumer loop (or the
         consumer being cancelled) closes the underlying provider stream in the
         ``finally`` block, so generation stops cleanly and no task or HTTP
-        connection is leaked.
+        connection is leaked. ``api_key`` / ``api_base`` OVERRIDE the process
+        defaults when given (a per-tenant provider route, PR 2a); ``None`` ⇒ the
+        default credentials, unchanged.
         """
         self._require_enabled()
         import litellm  # lazy
@@ -224,7 +247,7 @@ class LLMGateway:
                 messages=self._to_wire_messages(messages),
                 stream=True,
                 timeout=self._settings.llm_timeout_seconds,
-                **self._credentials(),
+                **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
@@ -253,6 +276,8 @@ class LLMGateway:
         tools: Sequence[ToolSpec],
         model: str | None = None,
         tool_choice: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -274,6 +299,9 @@ class LLMGateway:
 
         Like :meth:`stream`, this is a cancellable async generator: breaking out
         of the consumer closes the provider stream in the ``finally`` block.
+        ``api_key`` / ``api_base`` OVERRIDE the process defaults when given (a
+        per-tenant provider route, PR 2a); ``None`` ⇒ the default credentials,
+        unchanged.
         """
         self._require_enabled()
         import litellm  # lazy
@@ -293,7 +321,7 @@ class LLMGateway:
                 stream_options={"include_usage": True},
                 timeout=self._settings.llm_timeout_seconds,
                 **extra,
-                **self._credentials(),
+                **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
@@ -338,28 +366,33 @@ class LLMGateway:
         inputs: Sequence[str],
         *,
         model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
     ) -> list[Embedding]:
         """Return one :class:`Embedding` per input string (AC-3).
 
         Inputs are sent in a single batched call; results preserve input order.
-        ``model`` defaults to ``Settings.llm_embedding_model``.
+        ``model`` defaults to ``Settings.llm_embedding_model``. ``api_key`` /
+        ``api_base`` OVERRIDE the process defaults when given (accepted for
+        symmetry with the chat methods so a future embedding-routing PR reuses this
+        seam; ``None`` ⇒ the configured embedding endpoint, unchanged).
         """
         self._require_enabled()
         import litellm  # lazy
 
         model_id = model or self._settings.llm_embedding_model
         # OpenRouter embeddings ride its OpenAI-compatible endpoint (#32): send
-        # api_base when configured. Chat does not — it uses the native route.
-        extra: dict[str, Any] = {}
-        if self._settings.llm_embedding_api_base:
-            extra["api_base"] = self._settings.llm_embedding_api_base
+        # api_base when configured. Chat does not — it uses the native route. A
+        # per-call ``api_base`` overrides the configured embedding base.
+        effective_api_base = (
+            api_base if api_base is not None else self._settings.llm_embedding_api_base
+        )
         try:
             response = await litellm.aembedding(
                 model=model_id,
                 input=list(inputs),
                 timeout=self._settings.llm_timeout_seconds,
-                **extra,
-                **self._credentials(),
+                **self._credentials(api_key=api_key, api_base=effective_api_base or None),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None

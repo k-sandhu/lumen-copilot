@@ -44,4 +44,53 @@ describe('ModelPicker', () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]).toHaveAttribute('label', 'Fast');
   });
+
+  it('groups per-tenant provider models under their provider name (PR 2a)', () => {
+    // A namespaced provider model arrives in the same /models list; it renders as a
+    // selectable option in its own provider-named group, after the built-in tiers.
+    const withProvider: ChatModelInfo[] = [
+      ...MODELS,
+      {
+        id: 'provider:3f2504e0-4f89-41d3-9a0c-0305e82c3301:openai/gpt-4o',
+        label: 'GPT-4o · Acme OpenAI',
+        provider: 'Acme OpenAI',
+        tier: 'frontier',
+        is_default: false,
+      },
+    ];
+    render(<ModelPicker models={withProvider} value="anthropic/opus" onChange={() => {}} />);
+    const select = screen.getByRole('combobox', { name: /model/i });
+    const groups = within(select).getAllByRole('group');
+    // Built-in tiers first, then the provider group.
+    expect(groups.map((g) => g.getAttribute('label'))).toEqual([
+      'Frontier',
+      'Fast',
+      'Open source',
+      'Acme OpenAI',
+    ]);
+    // The provider model is a selectable option carrying its namespaced id.
+    const option = screen.getByRole('option', { name: /GPT-4o · Acme OpenAI/i });
+    expect(option).toHaveValue('provider:3f2504e0-4f89-41d3-9a0c-0305e82c3301:openai/gpt-4o');
+  });
+
+  it('lets the user select a provider model by its namespaced id', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    const withProvider: ChatModelInfo[] = [
+      ...MODELS,
+      {
+        id: 'provider:abc:openai/gpt-4o',
+        label: 'GPT-4o · Acme',
+        provider: 'Acme',
+        tier: 'frontier',
+        is_default: false,
+      },
+    ];
+    render(<ModelPicker models={withProvider} value="anthropic/opus" onChange={onChange} />);
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /model/i }),
+      'provider:abc:openai/gpt-4o',
+    );
+    expect(onChange).toHaveBeenCalledWith('provider:abc:openai/gpt-4o');
+  });
 });
