@@ -125,6 +125,7 @@ describe('AdminPage', () => {
     expect(tablist).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /members & roles/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /model governance/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /llm providers/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /approvals & risk/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /tool governance/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /sandbox governance/i })).toBeInTheDocument();
@@ -161,9 +162,9 @@ describe('AdminPage', () => {
     await screen.findByText('admin@acme.test');
     expect(screen.getByText(/not available here/i)).toBeInTheDocument();
     // The Members panel (the default) carries no mutation control — the write
-    // surfaces are the Tool governance + Sandbox governance tabs, not mounted here.
+    // surfaces are the Tool / Sandbox governance + LLM providers tabs, not mounted here.
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(6);
+    expect(tabs).toHaveLength(7);
     expect(screen.queryAllByRole('switch')).toHaveLength(0);
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });

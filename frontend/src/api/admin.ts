@@ -17,6 +17,10 @@
  */
 import { request } from './client';
 import type {
+  LlmProvider,
+  LlmProviderCreate,
+  LlmProviderList,
+  LlmProviderUpdate,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -83,4 +87,54 @@ export function getSandboxPolicy(signal?: AbortSignal): Promise<SandboxPolicy> {
  */
 export function updateSandboxPolicy(body: SandboxPolicyUpdate): Promise<SandboxPolicy> {
   return request<SandboxPolicy>('/admin/sandbox-policy', { method: 'PATCH', json: body });
+}
+
+// --- LLM providers (per-tenant registration + model auto-discovery) ---
+//
+// Foundation PR: a tenant admin registers OpenAI-compatible providers; the backend
+// auto-discovers each provider's models. The stored API key is WRITE-ONLY — sent in
+// the create/update `api_key` field, never returned; the response carries only a
+// masked `secret_hint`. All admin-only (403 otherwise, INV-5) + tenant-scoped
+// (INV-1): a cross-tenant id → 404. Routing chat/embeddings through a provider is a
+// SEPARATE follow-up PR.
+
+/** The tenant's registered LLM providers, each with discovered models + status (admin only). */
+export function listLlmProviders(signal?: AbortSignal): Promise<LlmProviderList> {
+  return request<LlmProviderList>('/admin/llm-providers', { signal });
+}
+
+/**
+ * Register an LLM provider and auto-discover its models (admin only). The server
+ * validates the provider type + https/SSRF of `base_url` (unsupported/blocked → 422)
+ * and stores any `api_key` write-only via CC-C. The returned provider is `ready` with
+ * `discovered_models` on a reachable provider, or `error` + `last_error` on a bad
+ * key/url (never a 500).
+ */
+export function createLlmProvider(body: LlmProviderCreate): Promise<LlmProvider> {
+  return request<LlmProvider>('/admin/llm-providers', { method: 'POST', json: body });
+}
+
+/**
+ * Update a registered LLM provider (rename, retarget `base_url`, toggle `enabled`, or
+ * rotate/clear the write-only `api_key` — send `api_key: null` to clear). At least one
+ * field. Changing `base_url` or rotating the key re-runs model discovery. A blocked
+ * URL → 422; a cross-tenant id → 404.
+ */
+export function updateLlmProvider(id: string, body: LlmProviderUpdate): Promise<LlmProvider> {
+  return request<LlmProvider>(`/admin/llm-providers/${id}`, { method: 'PATCH', json: body });
+}
+
+/** Remove a registered LLM provider and its stored API key (204). A cross-tenant id → 404. */
+export function deleteLlmProvider(id: string): Promise<void> {
+  return request<void>(`/admin/llm-providers/${id}`, { method: 'DELETE' });
+}
+
+/**
+ * Re-run model discovery for a provider (admin only). Returns the UPDATED provider: a
+ * reachable provider → `status: ready` (+ a fresh `discovered_models`); an
+ * unreachable/erroring probe → `status: error` (+ a safe `last_error`). BOTH outcomes
+ * return 200 — the result is in `status`, not the HTTP code. A cross-tenant id → 404.
+ */
+export function refreshLlmProvider(id: string): Promise<LlmProvider> {
+  return request<LlmProvider>(`/admin/llm-providers/${id}/refresh`, { method: 'POST' });
 }

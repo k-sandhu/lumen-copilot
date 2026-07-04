@@ -631,6 +631,82 @@ export interface SandboxPolicyUpdate {
   max_concurrency: number;
 }
 
+// --- Admin LLM providers (contracts §admin — per-tenant registration + discovery) ---
+
+/**
+ * The API shape a registered LLM provider speaks. `openai_compatible` covers
+ * OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `/v1/models` +
+ * `/v1/chat/completions` shape. The enum is small but extensible.
+ */
+export type LlmProviderType = 'openai_compatible';
+
+/**
+ * Model-discovery state from the last probe. `pending` before the first discovery,
+ * `ready` after a successful `GET /models` snapshot, `error` when the last discovery
+ * failed (see `last_error`).
+ */
+export type LlmProviderStatus = 'pending' | 'ready' | 'error';
+
+/** One model discovered from the provider's `/models` catalog. */
+export interface LlmProviderModel {
+  id: string;
+  label: string | null;
+}
+
+/**
+ * 200/201 item from the /admin/llm-providers surface — one registered per-tenant LLM
+ * provider (foundation PR). The response NEVER includes the stored API key — only a
+ * masked `secret_hint`. `discovered_models` is the last successful `GET /models`
+ * snapshot. This catalog is not yet wired into the chat model picker or completion
+ * routing (a follow-up PR).
+ */
+export interface LlmProvider {
+  id: string;
+  name: string;
+  provider_type: LlmProviderType;
+  base_url: string;
+  enabled: boolean;
+  status: LlmProviderStatus;
+  last_discovery_at: string | null;
+  last_error: string | null;
+  discovered_models: LlmProviderModel[];
+  secret_hint: string | null;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /admin/llm-providers — the tenant's registered providers. */
+export interface LlmProviderList {
+  items: LlmProvider[];
+}
+
+/**
+ * POST /admin/llm-providers body — register a provider. `provider_type` is
+ * constrained to the supported values; `base_url` must be https and pass the SSRF
+ * check (else 422). The optional `api_key` is write-only — stored in the CC-C vault,
+ * never returned. The backend auto-discovers the provider's models on create.
+ */
+export interface LlmProviderCreate {
+  name: string;
+  provider_type: LlmProviderType;
+  base_url: string;
+  api_key?: string;
+}
+
+/**
+ * PATCH /admin/llm-providers/{id} body — update a provider (any subset, at least one).
+ * Rotating `api_key` replaces the stored key (write-only, never returned); send
+ * `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF validation
+ * (else 422) and re-runs model discovery.
+ */
+export interface LlmProviderUpdate {
+  name?: string;
+  base_url?: string;
+  enabled?: boolean;
+  api_key?: string | null;
+}
+
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
 
 /**

@@ -163,6 +163,35 @@ class McpServerStatus(str, enum.Enum):
     ERROR = "error"
 
 
+class LlmProviderStatus(str, enum.Enum):
+    """Discovery state of a registered per-tenant LLM provider (contract ``LlmProviderStatus``).
+
+    ``PENDING`` before the first model-discovery probe (a freshly registered
+    provider), ``READY`` after a successful ``GET {base_url}/models`` snapshot,
+    ``ERROR`` when the last discovery failed (see ``last_error``). Mirrors the
+    ``llm_providers.status`` CHECK domain and the frozen ``LlmProviderStatus``
+    contract enum. This is the model-catalog discovery lifecycle only — routing
+    chat/embeddings through a provider is a follow-up PR.
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    ERROR = "error"
+
+
+class LlmProviderType(str, enum.Enum):
+    """What API shape a registered LLM provider speaks (contract ``LlmProviderType``).
+
+    ``OPENAI_COMPATIBLE`` covers OpenRouter / OpenAI / vLLM and any host exposing
+    the OpenAI ``GET /v1/models`` + ``POST /v1/chat/completions`` shape — one small
+    but extensible enum (a new provider family adds a value + a discovery mapper,
+    never a schema migration). Mirrors the ``llm_providers.provider_type`` CHECK
+    domain.
+    """
+
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
 class AutonomyLevel(str, enum.Enum):
     """How much an assistant may act on its own (ADR-0011 §3, contract ``AutonomyLevel``).
 
@@ -592,6 +621,43 @@ class McpServer:
     last_error: str | None
     discovered_tools: list[dict[str, object]]
     secret_hint: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LlmProvider:
+    """A registered per-tenant LLM provider — the full ``llm_providers`` row.
+
+    Tenant- and owner-scoped, deny-by-default: only the registering admin (within
+    their tenant) can retrieve/manage it (INV-1/INV-2). ``provider_type`` is the
+    API shape (``openai_compatible``); ``base_url`` is the provider's OpenAI-
+    compatible API root (SSRF-checked on register and every discovery). The API key
+    is **never** on this row — it lives in the CC-C secrets vault; ``api_key_secret_ref``
+    is the id of that secret (a ``SecretRef.id`` stringified), ``None`` for an
+    anonymous provider, and ``secret_hint`` is the masked tail projected from it for
+    the UI (also never the value). ``status`` tracks the discovery lifecycle;
+    ``last_discovery_at`` is the last successful discovery, ``last_error`` the last
+    safe failure reason; ``discovered_models`` is the last ``GET /models`` snapshot
+    (a list of ``{"id": str, "label": str | None}``), stored as portable JSON.
+
+    This is the model-catalog foundation only: nothing here surfaces a provider in
+    the chat picker or routes a completion — that is a follow-up PR.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    name: str
+    provider_type: str
+    base_url: str
+    api_key_secret_ref: str | None
+    secret_hint: str | None
+    enabled: bool
+    status: LlmProviderStatus
+    last_discovery_at: datetime | None
+    last_error: str | None
+    discovered_models: list[dict[str, object]]
     created_at: datetime
     updated_at: datetime
 

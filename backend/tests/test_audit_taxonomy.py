@@ -128,6 +128,15 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "mcp_server.updated",
         "mcp_server.deleted",
         "mcp_server.tested",
+        # Per-tenant LLM providers (foundation PR) — additive; register/update/delete
+        # of an OpenAI-compatible provider (a T1 admin config write) and the on-demand
+        # model-discovery probe are each audited (INV-6). The stored API key (CC-C
+        # #209) is never in the metadata — only its masked hint. Routing chat/
+        # embeddings through a provider is a follow-up PR.
+        "llm_provider.created",
+        "llm_provider.updated",
+        "llm_provider.deleted",
+        "llm_provider.discovered",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
