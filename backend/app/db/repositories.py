@@ -41,6 +41,7 @@ from app.domain.entities import (
     AuditEvent,
     AuditOutcome,
     AutonomyLevel,
+    CertificationState,
     Chunk,
     Citation,
     CodeRun,
@@ -81,6 +82,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    TenantAutonomyPolicy,
     TenantSandboxPolicy,
     TenantToolPolicy,
     ToolInvocation,
@@ -359,6 +361,17 @@ def _to_tenant_sandbox_policy(row: models.TenantSandboxPolicy) -> TenantSandboxP
     )
 
 
+def _to_tenant_autonomy_policy(row: models.TenantAutonomyPolicy) -> TenantAutonomyPolicy:
+    return TenantAutonomyPolicy(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        max_autonomy=AutonomyLevel(row.max_autonomy),
+        updated_by=row.updated_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 def _to_audit_event(row: models.AuditEvent) -> AuditEvent:
     return AuditEvent(
         id=row.id,
@@ -451,6 +464,10 @@ def _to_assistant(row: models.Assistant) -> Assistant:
         tool_allowlist=tuple(str(t) for t in (row.tool_allowlist or [])),
         autonomy_level=AutonomyLevel(row.autonomy_level),
         status=AssistantStatus(row.status),
+        certification_state=CertificationState(row.certification_state),
+        featured=bool(row.featured),
+        category=row.category,
+        disabled_at=row.disabled_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -2862,6 +2879,61 @@ class TenantSandboxPolicyRepository(_TenantScopedRepository):
         return _to_tenant_sandbox_policy(row)
 
 
+class TenantAutonomyPolicyRepository(_TenantScopedRepository):
+    """The per-tenant assistant autonomy cap within one tenant (issue #218).
+
+    Tenant-scoped like every repository (INV-1): every query filters on ``tenant_id``,
+    so one tenant can never read or write another's cap. A row's absence is meaningful
+    — it means "no ceiling" (an assistant runs at its own configured level), so this
+    exposes a plain ``get`` returning ``None`` rather than fabricating a default.
+    Writes are flushed not committed; the caller owns the transaction boundary (so the
+    audit event commits atomically with the write).
+    """
+
+    async def get(self) -> TenantAutonomyPolicy | None:
+        """The tenant's autonomy cap, or ``None`` if none is stored (no ceiling).
+
+        ``None`` is not an error — it means there is no per-tenant ceiling (the
+        permissive default). Tenant-scoped (INV-1).
+        """
+        row = await self._get_row()
+        return _to_tenant_autonomy_policy(row) if row is not None else None
+
+    async def _get_row(self) -> models.TenantAutonomyPolicy | None:
+        stmt = select(models.TenantAutonomyPolicy).where(
+            models.TenantAutonomyPolicy.tenant_id == self._tenant_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def upsert(
+        self,
+        *,
+        max_autonomy: AutonomyLevel,
+        updated_by: UUID | None,
+    ) -> TenantAutonomyPolicy:
+        """Create or update the tenant's autonomy cap (a per-tenant singleton upsert).
+
+        The ``(tenant_id)`` unique constraint makes this a singleton per tenant: an
+        existing row is updated in place, otherwise a new one is inserted. Tenant-scoped
+        (INV-1) — the write is always keyed to this repository's tenant, never request
+        input. Flushed, not committed.
+        """
+        row = await self._get_row()
+        if row is None:
+            row = models.TenantAutonomyPolicy(
+                tenant_id=self._tenant_id,
+                max_autonomy=max_autonomy.value,
+                updated_by=updated_by,
+            )
+            self._session.add(row)
+        else:
+            row.max_autonomy = max_autonomy.value
+            row.updated_by = updated_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant_autonomy_policy(row)
+
+
 class AuditEventRepository(_TenantScopedRepository):
     """Append-only product-audit log within one tenant (spec 0004 §2.4).
 
@@ -3097,11 +3169,56 @@ class AssistantRepository(_TenantScopedRepository):
                 row.autonomy_level = value.value
             elif key == "status" and isinstance(value, AssistantStatus):
                 row.status = value.value
+            elif key == "certification_state" and isinstance(value, CertificationState):
+                row.certification_state = value.value
             else:
                 setattr(row, key, value)
         await self._session.flush()
         await self._session.refresh(row)
         return _to_assistant(row)
+
+    async def list_for_tenant_page(
+        self,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+    ) -> list[Assistant]:
+        """A keyset page of ALL the tenant's assistants (newest first) — admin governance.
+
+        Tenant-scoped only (INV-1): unlike ``list_for_owner_page`` this is the
+        admin library view (#217), so it spans every owner in the tenant (the caller
+        is role-gated to ``admin`` one layer up). Ordered by ``(created_at, id)``
+        **descending** with ``id`` the stable tiebreaker; the id-only cursor resolves
+        the boundary ``created_at`` by a correlated scalar subquery (exact on Postgres
+        + the offline SQLite), mirroring ``list_for_owner_page``.
+        """
+        conditions = [models.Assistant.tenant_id == self._tenant_id]
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.Assistant.created_at)
+                .where(
+                    models.Assistant.tenant_id == self._tenant_id,
+                    models.Assistant.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.Assistant.created_at < boundary_created_at,
+                    and_(
+                        models.Assistant.created_at == boundary_created_at,
+                        models.Assistant.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.Assistant)
+            .where(*conditions)
+            .order_by(models.Assistant.created_at.desc(), models.Assistant.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assistant(r) for r in rows]
 
     async def delete(self, assistant_id: UUID) -> bool:
         """Delete an assistant head (cascades to its version history), tenant-scoped."""
@@ -3310,6 +3427,41 @@ class RunRepository(_TenantScopedRepository):
             return None
         row.status = RunStatus.RUNNING.value
         row.started_at = started_at
+        await self._session.flush()
+        return _to_run(row)
+
+    async def mark_queued(self, run_id: UUID) -> Run | None:
+        """Reset a run to ``queued`` for a re-drive (transient retry / human resume/reroute).
+
+        Tenant-scoped. Clears the prior terminal so a re-delivered run task claims it
+        again (``execute_run`` only runs a ``queued`` run). Clears ``finished_at`` +
+        ``error`` (this attempt is superseded); ``started_at`` is stamped fresh on the
+        next ``mark_running``. Used by the transient-retry fold and by the escalation
+        resume/reroute handoff (#239) so an escalated run is re-driven, not stuck.
+        """
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.status = RunStatus.QUEUED.value
+        row.started_at = None
+        row.finished_at = None
+        row.error = None
+        await self._session.flush()
+        return _to_run(row)
+
+    async def reassign_owner(self, run_id: UUID, *, owner_id: UUID) -> Run | None:
+        """Reassign a run to a different owner (the escalation *reroute* handoff, #239).
+
+        Tenant-scoped (INV-1 — the new owner must be in the same tenant; the service
+        enforces that). The run's ``owner_id`` is its execution **principal**: after a
+        reroute the run retrieves only what the *new* owner could retrieve (INV-2), so
+        a reroute never widens access. The caller pairs this with :meth:`mark_queued`
+        to re-drive the run as the new owner.
+        """
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.owner_id = owner_id
         await self._session.flush()
         return _to_run(row)
 

@@ -29,6 +29,7 @@ import {
 import {
   createAssistant,
   deleteAssistant,
+  draftAssistant,
   getAssistant,
   listAssistantVersions,
   listAssistants,
@@ -38,14 +39,19 @@ import {
   listSources,
   publishAssistant,
   rollbackAssistant,
+  testAssistant,
   updateAssistant,
 } from '@/api';
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraft,
+  AssistantDraftRequest,
   AssistantList,
   AssistantPublishRequest,
   AssistantRollbackRequest,
+  AssistantTestRequest,
+  AssistantTestTrace,
   AssistantUpdate,
   AssistantVersion,
   AssistantVersionList,
@@ -87,6 +93,20 @@ export function useCreateAssistant() {
   return useMutation<Assistant, unknown, AssistantCreate>({
     mutationFn: (body) => createAssistant(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: assistantKeys.list() }),
+  });
+}
+
+/**
+ * Draft an assistant config from a plain-language description (E6-1, #213). This
+ * creates NOTHING on the server — it returns a suggested config + clarifications
+ * the "Describe your assistant" surface loads into the editor for review. So it does
+ * NOT invalidate the library (nothing was created); the actual create happens when
+ * the user saves the pre-filled editor. A 422 (blank/oversize description)
+ * propagates as an `ApiError` the caller renders inline — it is NOT swallowed here.
+ */
+export function useDraftAssistant() {
+  return useMutation<AssistantDraft, unknown, AssistantDraftRequest>({
+    mutationFn: (body) => draftAssistant(body),
   });
 }
 
@@ -157,6 +177,20 @@ export function useRollbackAssistant(id: string) {
       void qc.invalidateQueries({ queryKey: assistantKeys.list() });
       void qc.invalidateQueries({ queryKey: assistantKeys.versions(id) });
     },
+  });
+}
+
+/**
+ * Run a read-only test/preview of a draft assistant (#215, E6-5). Returns the debug
+ * trace (prompt, retrieval, tool calls, outputs, timing) with NO real side effect —
+ * write-tier tools simulate/deny, nothing is persisted. A 404 (non-owned/cross-tenant)
+ * or 422 (malformed) propagates as a typed `ApiError` the panel renders inline; it is
+ * NOT swallowed. Nothing is invalidated — a preview mutates no server state, so the
+ * library/detail caches are untouched.
+ */
+export function useTestAssistant(id: string) {
+  return useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
+    mutationFn: (body) => testAssistant(id, body),
   });
 }
 

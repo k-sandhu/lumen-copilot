@@ -927,6 +927,54 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/autonomy-policy:
+    get:
+      operationId: getAutonomyPolicy
+      summary: The per-tenant assistant autonomy cap (admin only).
+      description: >
+        The caller's tenant's autonomy cap (issue #218, ADR-0011 §3): `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so every assistant runs at its
+        own configured level (permissive default). Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1).
+      tags: [admin]
+      responses:
+        "200":
+          description: The per-tenant assistant autonomy cap.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateAutonomyPolicy
+      summary: Set the per-tenant assistant autonomy cap (admin only).
+      description: >
+        Set the caller's tenant's autonomy cap (issue #218): `max_autonomy` is the
+        maximum `AutonomyLevel` any assistant may effectively run at. A tenant-scoped
+        **T1** governance write (spec 0004 §2.5 — "authorized owner; audited; no extra
+        approval"): `admin`-only (**403** otherwise, INV-5), audited as
+        `autonomy_cap.updated` (INV-6). The cap only ever NARROWS — it lowers an
+        assistant's effective autonomy, never raises it. Publishing an assistant above
+        the ceiling is rejected **422**, and a running assistant above it is clamped at
+        the run-time tool gate. An unknown `max_autonomy` is **422** (INV-8). Returns
+        the resulting cap.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomyPolicyUpdate" }
+      responses:
+        "200":
+          description: The updated per-tenant assistant autonomy cap.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
     get:
@@ -1466,6 +1514,38 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /assistants/draft:
+    post:
+      operationId: draftAssistant
+      summary: Draft an assistant config from a plain-language description (E6-1).
+      description: >
+        The conversational agent builder (issue #213): given a plain-language
+        `description`, returns a **draft** config the client loads into the editor
+        for review + save — it creates **nothing** (nothing is persisted until the
+        user saves via `POST /assistants`). Owner-scoped (INV-1/INV-2): the draft
+        can only reference tools that exist and collections/sources the caller owns;
+        a tool the description named that is unknown, or a collection/source the
+        caller cannot see, is **omitted** from the draft with an explanatory `note`
+        (deny-by-default) rather than surfaced. `clarifications` are questions the
+        builder asks for anything the description left ambiguous (missing scope,
+        owner, or risk acknowledgement, E6-3); `warnings` flag any drafted high-risk
+        (write-tier / approval-gated) tool. Audited `assistant.drafted` (INV-6). A
+        blank or oversize `description` → 422 (INV-8).
+      tags: [assistants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantDraftRequest" }
+      responses:
+        "200":
+          description: The drafted config plus clarifications, notes, and warnings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantDraft" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /assistants/{assistantId}:
     parameters:
       - { $ref: "#/components/parameters/AssistantId" }
@@ -1590,6 +1670,50 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AssistantVersion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /assistants/{assistantId}/test:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: testAssistant
+      summary: Preview/test/debug a draft assistant with NO real side effect (E6-5).
+      description: >
+        Runs the assistant's **working (draft) config** against a sample input with
+        **write-tier tools forced into simulate/deny mode** (CC-A #207 read-only
+        demotion), and returns the debug trace (ADR-0011, issue #215). A T1
+        file-writing tool (`write_file`) builds + validates but persists **no**
+        artifact; the T2 code-execution tool (`run_python`) is denied — no container
+        launches. So a test run produces **no artifact, no code run, and no external
+        effect** — it is a safe preview before publishing.
+
+
+        The trace carries the effective system `prompt` (persona-augmented), the
+        sample `input`, the resolved `model`, the `retrieval` grounding (permitted
+        passages only — INV-3, keyed off the caller so a preview can never surface a
+        passage the caller could not retrieve), each `toolCalls` entry (args +
+        result), the streamed `outputs`, any typed `errors`, whether the run
+        `succeeded`, and the wall-clock `durationMs`.
+
+
+        Owner-scoped (owner-or-admin, the same rule the CRUD surface uses): a
+        non-owned / cross-tenant id → **404** (existence non-disclosure,
+        INV-1/INV-2). A malformed body → 422 (INV-8). Audited `assistant.tested`
+        (INV-6); no other row is persisted (the internal transcript is rolled back).
+      tags: [assistants]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantTestRequest" }
+      responses:
+        "200":
+          description: The debug trace of the read-only test run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantTestTrace" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
@@ -1894,7 +2018,253 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  # --- Scheduled-run delivery: the in-app run inbox (issue #238) ---
+  # --- Escalation handoff: resume / cancel / reroute an escalated run (E7-5, #239) ---
+  # A run that escalated (status=escalated) is handed to a human who resumes it
+  # (re-enqueue), cancels it (acknowledge + close), or reroutes it (reassign to another
+  # owner, re-enqueue as them — INV-2, the reroute never widens access). Owner-scoped:
+  # a run in another tenant / owned by another user is 404 (existence non-disclosure).
+  # Acting on a run that is NOT escalated is 409 (illegal transition, INV-8). Each
+  # action is audited (run.resumed / run.cancelled / run.rerouted).
+  /runs/{runId}/resume:
+    parameters:
+      - { $ref: "#/components/parameters/RunId" }
+    post:
+      operationId: resumeRun
+      summary: Resume an escalated run — re-enqueue it from the escalation point.
+      description: >
+        The owner resumes an **escalated** run (E7-5): it is reset to `queued` and
+        re-driven by the run task, clearing the escalation reason. Returns the run in
+        its `queued` state. Not escalated → **409** (INV-8); not visible/owned → **404**
+        (INV-1/INV-2). Audited `run.resumed`.
+      tags: [runs]
+      responses:
+        "202":
+          description: The run, reset to queued and re-enqueued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /runs/{runId}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/RunId" }
+    post:
+      operationId: cancelRun
+      summary: Cancel an escalated run — acknowledge and close it.
+      description: >
+        The owner cancels an **escalated** run (E7-5): it is closed to a permanent
+        terminal with a `cancelled` reason in `error` and is not re-enqueued. Returns
+        the closed run. Not escalated → **409** (INV-8); not visible/owned → **404**.
+        An escalated run is never silently dropped — cancel is an explicit, audited
+        (`run.cancelled`) human decision.
+      tags: [runs]
+      responses:
+        "200":
+          description: The run, closed by the owner's cancellation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /runs/{runId}/reroute:
+    parameters:
+      - { $ref: "#/components/parameters/RunId" }
+    post:
+      operationId: rerouteRun
+      summary: Reroute an escalated run to another owner, then re-enqueue it.
+      description: >
+        The owner reroutes an **escalated** run (E7-5) to another user in the tenant:
+        the run's owner (its execution principal) is reassigned and the run is reset to
+        `queued`, so it re-drives **as the new owner** — the new owner's grants apply
+        (INV-2), never a widening of access. The target must be a user in the caller's
+        tenant (else **404**, existence non-disclosure) and not the current owner (else
+        **422**). Not escalated → **409** (INV-8); not visible/owned → **404**. Audited
+        `run.rerouted`.
+      tags: [runs]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RunReroute" }
+      responses:
+        "202":
+          description: The run, reassigned to the new owner and re-enqueued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+
+  # --- merged: /admin/assistants, /admin/assistants/disable-orphans, /admin/assistants/{assistantId}/certify, /admin/assistants/{assistantId}/feature, /admin/assistants/{assistantId}/disable, /admin/assistants/{assistantId}/transfer-ownership ---
+  /admin/assistants:
+    get:
+      operationId: listGovernedAssistants
+      summary: Every assistant in the tenant with its governance state (admin only).
+      description: >
+        The admin library view (E6-6, #217): all assistants across every owner in the
+        tenant, each carrying its certification / featured / disabled state, category,
+        and the `ownerOrphaned` flag (owner no longer a tenant member — flag for
+        reassignment, E6-8). Restricted to the `admin` role; any other role receives
+        **403** (INV-5). Tenant-scoped (INV-1). Cursor-paginated; a malformed cursor is
+        **422** (INV-8).
+      tags: [admin]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A cursor page of the tenant's assistants with governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistantList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/disable-orphans:
+    post:
+      operationId: disableOrphanedAssistants
+      summary: Disable every orphaned assistant in the tenant (admin only).
+      description: >
+        Bulk E6-8 control (#217): disable every orphaned assistant (owner
+        deprovisioned) so an abandoned assistant does not keep running unattended.
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audits each
+        `assistant.disabled` (INV-6). Idempotent — an already-disabled orphan is
+        skipped. Returns the affected ids.
+      tags: [admin]
+      responses:
+        "200":
+          description: The bulk-sweep outcome (affected ids + the applied action).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkOrphanResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/assistants/{assistantId}/certify:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: certifyAssistant
+      summary: Set an assistant's certification verdict (admin only).
+      description: >
+        Certify / deprecate / clear an assistant's library certification (E6-6, #217) —
+        an orthogonal governance axis. `admin`-only (**403** otherwise, INV-5);
+        tenant-scoped (INV-1); audited `assistant.certified` / `assistant.deprecated`
+        (INV-6). A cross-tenant / missing id is **404** (existence non-disclosure).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantCertifyRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/feature:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: featureAssistant
+      summary: Feature / unfeature an assistant in the library (admin only).
+      description: >
+        Feature / unfeature an assistant (E6-6, #217). `admin`-only (**403** otherwise,
+        INV-5); tenant-scoped (INV-1); audited `assistant.featured` (INV-6). A
+        cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantFeatureRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/disable:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: disableAssistant
+      summary: Disable / re-enable an assistant (admin only).
+      description: >
+        Disable / re-enable an assistant (E6-6, #217). Disabling flips the lifecycle
+        status to `disabled` (and stamps `disabledAt`) so the existing run / chat /
+        schedule gate refuses it — a disabled assistant cannot start (INV-8).
+        Re-enabling returns the head to `draft` (the owner re-publishes to run again).
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.disabled` (INV-6). A cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantDisableRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/transfer-ownership:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: transferAssistantOwnership
+      summary: Reassign an assistant's accountable owner (admin only).
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8,
+        #217) — the admin rescue for an orphaned assistant. The new owner must be a
+        distinct member of the tenant (else **422**, INV-8). `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.ownership_transferred` (INV-6). A cross-tenant / missing id is
+        **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantOwnershipTransferRequest" }
+      responses:
+        "200":
+          description: The assistant with its new owner + governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+
+  # --- merged: /run-deliveries, /run-deliveries/{deliveryId}/read ---
   /run-deliveries:
     get:
       operationId: listRunDeliveries
@@ -2970,6 +3340,38 @@ components:
           minimum: 1
           description: Max simultaneous runs for the tenant. Clamped to the config ceiling.
 
+    # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
+    AutonomyPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so `max_autonomy` is reported
+        as the top of the scale (`act_auto`) and every assistant runs at its own
+        configured level. `levels` lists the choice set in ascending order.
+      required: [max_autonomy, is_default, levels]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
+        is_default:
+          type: boolean
+          description: True when no per-tenant cap is stored (no ceiling — the permissive default).
+        levels:
+          type: array
+          items: { $ref: "#/components/schemas/AutonomyLevel" }
+          description: The autonomy values in ascending order (suggest … act_auto).
+
+    AutonomyPolicyUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set the per-tenant assistant autonomy cap (issue #218). `max_autonomy` must be
+        a valid `AutonomyLevel` (an unknown value → 422, INV-8). The cap only ever
+        NARROWS — it lowers an assistant's effective autonomy, never raises it.
+      required: [max_autonomy]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
+
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:
       type: string
@@ -3497,7 +3899,7 @@ components:
         A saved, named, governed chat configuration (ADR-0011 §1) — the mutable
         head. Tenant- and owner-scoped (INV-1/INV-2).
       required:
-        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, created_at, updated_at]
+        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, effectiveAutonomy, owner, status, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, maxLength: 200 }
@@ -3516,6 +3918,13 @@ components:
           items: { type: string }
           description: Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands).
         autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        effectiveAutonomy:
+          allOf:
+            - { $ref: "#/components/schemas/AutonomyLevel" }
+          description: >
+            The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+            (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no
+            cap lowers it — visibility for the library/run detail.
         owner:
           type: string
           format: uuid
@@ -3650,6 +4059,92 @@ components:
           type: string
           description: Optional release note for the rollback version.
 
+    AssistantTestRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        A sample input for a read-only assistant test run (E6-5, issue #215).
+        Optional — omitting `input` runs the assistant against a stable default
+        request (the persona-augmented system prompt still carries the real task).
+      properties:
+        input:
+          type: string
+          maxLength: 8000
+          description: The sample user input the assistant is tested against.
+
+    AssistantTestToolCall:
+      type: object
+      additionalProperties: false
+      description: >
+        One tool call captured in a test run's debug trace (E6-5). `args` are the
+        model-supplied arguments; `result` is the governed runner's outcome (`ok`,
+        `summary`, `hitCount`, and an `error` code on failure/denial). A write-tier
+        tool's `result` reflects the simulate/deny outcome — no real write occurred.
+      required: [callId]
+      properties:
+        callId:
+          type: string
+          description: The tool-call id correlating the call with its result.
+        tool:
+          type: [string, "null"]
+          description: The tool name invoked.
+        args:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The model-supplied arguments for the call.
+        result:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The governed runner's result (ok/summary/hitCount/error).
+
+    AssistantTestTrace:
+      type: object
+      additionalProperties: false
+      description: >
+        The debug trace of a read-only assistant test run (E6-5, issue #215) — what
+        the builder debug view renders. Reuses the runtime's own trace vocabulary
+        (retrieval citations + tool-call/result envelopes). NO real side effect was
+        produced (write-tier tools simulate/deny).
+      required: [prompt, input, model, retrieval, toolCalls, outputs, errors, succeeded, durationMs]
+      properties:
+        prompt:
+          type: string
+          description: The effective system prompt (persona-augmented; grounding rules preserved).
+        input:
+          type: string
+          description: The sample input the run answered.
+        model:
+          type: string
+          description: The resolved model id the test run used.
+        retrieval:
+          type: array
+          description: >
+            The grounded citations the run produced — only permitted, retrieved
+            passages (INV-3). Each entry mirrors the citation envelope shape.
+          items:
+            type: object
+            additionalProperties: true
+        toolCalls:
+          type: array
+          description: Each tool call the run made, with its args + result.
+          items: { $ref: "#/components/schemas/AssistantTestToolCall" }
+        outputs:
+          type: string
+          description: The streamed answer text the run produced.
+        errors:
+          type: array
+          description: Any typed problem envelope(s) if the run failed (never a raw vendor string).
+          items:
+            type: object
+            additionalProperties: true
+        succeeded:
+          type: boolean
+          description: Whether the run completed with a terminal `done` and no error.
+        durationMs:
+          type: integer
+          minimum: 0
+          description: Wall-clock duration of the test run in milliseconds.
+
     AssistantList:
       type: object
       additionalProperties: false
@@ -3673,6 +4168,71 @@ components:
         next_cursor:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
+
+    AssistantDraftRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Ask the conversational builder to draft an assistant (E6-1, issue #213)
+        from a plain-language description. A blank/oversize description → 422.
+      required: [description]
+      properties:
+        description:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: Plain-language description of the assistant to draft.
+
+    AssistantDraftConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        The drafted, editable config the client pre-fills into the editor (E6-1) —
+        the subset of `AssistantVersionConfig` the editor owns. Nothing is created
+        until the user saves via `POST /assistants`.
+      required: [name, model, knowledgeScope, toolAllowlist, autonomyLevel]
+      properties:
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, "null"] }
+        instructions: { type: [string, "null"] }
+        model:
+          type: [string, "null"]
+          description: A model id from GET /models; null ⇒ the smart server default.
+        knowledgeScope: { $ref: "#/components/schemas/KnowledgeScope" }
+        toolAllowlist:
+          type: array
+          items: { type: string }
+          description: Registered tool names the draft keeps (unknown names are omitted).
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+
+    AssistantDraft:
+      type: object
+      additionalProperties: false
+      description: >
+        The builder's answer (E6-1, issue #213): a draft config the client loads
+        into the editor for review + save, plus clarifying questions and notes.
+      required: [draft]
+      properties:
+        draft: { $ref: "#/components/schemas/AssistantDraftConfig" }
+        clarifications:
+          type: array
+          items: { type: string }
+          description: >
+            Questions the builder asks for anything the description left ambiguous —
+            missing knowledge scope, owner/backup, or a risk acknowledgement (E6-3).
+        notes:
+          type: array
+          items: { type: string }
+          description: >
+            Transparency notes for any field omitted from the draft because it
+            referenced an unknown tool or a collection/source the caller cannot
+            access (deny-by-default; INV-2).
+        warnings:
+          type: array
+          items: { type: string }
+          description: >
+            Warnings for any drafted high-risk (write-tier / approval-gated) tool the
+            user should acknowledge before publishing (CC-A tiers).
 
     # --- merged schemas: CodeRunStatus, ResourceUsage, CodeRun ---
     CodeRunStatus:
@@ -4109,6 +4669,143 @@ components:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
 
+    RunReroute:
+      type: object
+      additionalProperties: false
+      description: >
+        Reroute an escalated run to another owner (E7-5, #239). `to_owner_id` becomes
+        the run's execution principal, so the re-driven run retrieves only what the new
+        owner may (INV-2). Must be a user in the caller's tenant and not the current
+        owner.
+      required: [to_owner_id]
+      properties:
+        to_owner_id:
+          type: string
+          format: uuid
+          description: The user to reassign the run to (its new execution principal).
+
+    # --- merged schemas: CertificationState, GovernedAssistant, GovernedAssistantList, AssistantCertifyRequest, AssistantFeatureRequest, AssistantDisableRequest, AssistantOwnershipTransferRequest, BulkOrphanResult ---
+    CertificationState:
+      type: string
+      description: >
+        Admin library-governance certification (E6-6, #217) — an orthogonal axis to
+        the lifecycle status. `none` = not reviewed; `certified` = an admin vouched
+        for it (trusted in the library); `deprecated` = an admin flagged it for
+        retirement (still runnable, the library warns). Admin-only mutation (INV-5).
+      enum: [none, certified, deprecated]
+
+    GovernedAssistant:
+      type: object
+      additionalProperties: false
+      description: >
+        One assistant in the admin library view (E6-6/E6-8, #217): identity + owner +
+        lifecycle status plus the governance axis (certification / featured / category /
+        disabled) and the `ownerOrphaned` projection (owner no longer a tenant member —
+        flag for reassignment). Admin-only; spans every owner in the tenant.
+      required:
+        [id, name, autonomyLevel, owner, status, certificationState, featured, ownerOrphaned, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        owner:
+          type: string
+          format: uuid
+          description: The accountable owner's user id.
+        backupOwner:
+          type: [string, "null"]
+          format: uuid
+        status: { $ref: "#/components/schemas/AssistantStatus" }
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+        featured:
+          type: boolean
+          description: Whether an admin has featured/pinned the assistant.
+        category:
+          type: [string, "null"]
+          description: A library grouping label (null ⇒ uncategorised).
+        disabledAt:
+          type: [string, "null"]
+          format: date-time
+          description: When an admin disabled the assistant (null ⇒ not disabled).
+        ownerOrphaned:
+          type: boolean
+          description: The owner is no longer a member of the tenant (flag for reassignment, E6-8).
+        version:
+          type: [integer, "null"]
+          description: The current published head version number (null while never published).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    GovernedAssistantList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/GovernedAssistant" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    AssistantCertifyRequest:
+      type: object
+      additionalProperties: false
+      required: [certificationState]
+      description: Set an assistant's certification verdict (certify / deprecate / clear).
+      properties:
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+
+    AssistantFeatureRequest:
+      type: object
+      additionalProperties: false
+      required: [featured]
+      description: Feature / unfeature an assistant in the library.
+      properties:
+        featured: { type: boolean }
+
+    AssistantDisableRequest:
+      type: object
+      additionalProperties: false
+      required: [disabled]
+      description: >
+        Disable / re-enable an assistant. Disabling blocks it from starting a chat /
+        schedule / run (INV-8); re-enabling returns the head to `draft` (the owner
+        must re-publish before it can run again).
+      properties:
+        disabled: { type: boolean }
+
+    AssistantOwnershipTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [newOwner]
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8). The
+        new owner must be a distinct member of the tenant (else 422). Rescues an
+        orphaned assistant (owner deprovisioned).
+      properties:
+        newOwner:
+          type: string
+          format: uuid
+          description: The new owner's user id (a distinct member of the tenant).
+
+    BulkOrphanResult:
+      type: object
+      additionalProperties: false
+      required: [affected, action]
+      description: The outcome of a bulk reassign/disable of orphaned assistants (E6-8).
+      properties:
+        affected:
+          type: array
+          items: { type: string, format: uuid }
+          description: The assistant ids affected by the sweep.
+        action:
+          type: string
+          description: The action applied to each affected assistant (e.g. "disabled").
+
+    # --- merged schemas: RunDeliveryKind, RunDeliveryStatus, RunDelivery, RunDeliveryList ---
     RunDeliveryKind:
       type: string
       description: >

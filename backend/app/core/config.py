@@ -621,6 +621,15 @@ class Settings(BaseSettings):
     # (daily/weekly) the schedule opted into is a product notion, this is just how
     # often the beat drains the pending batch. Non-positive would disable batching.
     run_digest_interval_seconds: int = Field(default=3600, alias="RUN_DIGEST_INTERVAL_SECONDS")
+    # Bounded retry-with-backoff for a **transient** run fault (model/db/storage
+    # briefly unavailable) before the run reaches a terminal (ADR-0015 §5, E7-5 #239).
+    # A transient failure is re-driven up to ``run_max_retries`` times with exponential
+    # backoff (``run_retry_backoff_seconds * 2**attempt``); on exhaustion the run
+    # reaches a queryable ``failed`` terminal, never a silent drop. A *permanent* /
+    # escalation-worthy failure (ambiguity / restricted data / tool failure) is never
+    # retried — it escalates to a human immediately. Mirrors ``ingestion_*``.
+    run_max_retries: int = Field(default=3, alias="RUN_MAX_RETRIES")
+    run_retry_backoff_seconds: int = Field(default=5, alias="RUN_RETRY_BACKOFF_SECONDS")
 
     @field_validator(
         "redbeat_lock_timeout_seconds",

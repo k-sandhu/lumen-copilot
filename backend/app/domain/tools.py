@@ -72,6 +72,11 @@ ERROR_NOT_PERMITTED = "tool_not_permitted"
 ERROR_NOT_FOUND = "tool_not_found"
 #: A ``requires_approval`` tool whose approval was denied / not granted (INV-7).
 ERROR_APPROVAL_DENIED = "approval_denied"
+#: A side-effecting (T1) tool the assistant's EFFECTIVE autonomy does not permit —
+#: a ``suggest``/``draft`` assistant cannot execute a write without stepping up to
+#: ``act_with_approval`` / ``act_auto`` (issue #218, ADR-0011 §3). Distinct from an
+#: approval denial: the *level* forbids the action, not a missing approval.
+ERROR_AUTONOMY_DENIED = "autonomy_denied"
 #: The tool handler raised — a safe, opaque message is surfaced (issue #207 §7).
 ERROR_TOOL_ERROR = "tool_error"
 #: The tool exceeded its per-call timeout (issue #207 §7).
@@ -168,6 +173,7 @@ class ToolHandlerResult:
 
 __all__ = [
     "ERROR_APPROVAL_DENIED",
+    "ERROR_AUTONOMY_DENIED",
     "ERROR_BAD_ARGS",
     "ERROR_NOT_FOUND",
     "ERROR_NOT_PERMITTED",

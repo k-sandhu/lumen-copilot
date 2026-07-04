@@ -8,6 +8,7 @@ import type { StatusTone } from '@/components/StatusBadge';
 import type {
   AssistantStatus,
   AutonomyLevel,
+  CertificationState,
   ChatModelInfo,
   KnowledgeMode,
   Member,
@@ -33,6 +34,29 @@ export function statusTone(status: AssistantStatus): StatusTone {
   }
 }
 
+/**
+ * Human labels for the admin library-governance certification (E6-6, #217). `none`
+ * has no badge (the library shows nothing for an un-reviewed assistant).
+ */
+export const CERTIFICATION_LABEL: Record<CertificationState, string> = {
+  none: '',
+  certified: 'Certified',
+  deprecated: 'Deprecated',
+};
+
+/**
+ * A certification badge descriptor for the library, or `null` for `none` (no badge).
+ * `certified` reads as trusted (ok); `deprecated` warns (danger) — the library
+ * signals a retiring assistant without hiding it.
+ */
+export function certificationBadge(
+  state: CertificationState,
+): { label: string; tone: StatusTone } | null {
+  if (state === 'certified') return { label: CERTIFICATION_LABEL.certified, tone: 'ok' };
+  if (state === 'deprecated') return { label: CERTIFICATION_LABEL.deprecated, tone: 'danger' };
+  return null;
+}
+
 /** Ordered autonomy levels with human labels + a one-line meaning (ADR-0011 §3). */
 export const AUTONOMY_OPTIONS: ReadonlyArray<{
   value: AutonomyLevel;
@@ -55,6 +79,21 @@ export const AUTONOMY_OPTIONS: ReadonlyArray<{
 
 export function autonomyLabel(level: AutonomyLevel): string {
   return AUTONOMY_OPTIONS.find((o) => o.value === level)?.label ?? level;
+}
+
+/**
+ * The autonomy to DISPLAY in the library / run detail and whether the tenant admin
+ * cap has lowered it (issue #218). `effectiveAutonomy` is the assistant's configured
+ * level min'd to the tenant cap; when it differs from the configured `autonomyLevel`,
+ * the cap is capping the assistant and the UI shows the effective level with a
+ * "capped" note so the user understands how far the agent may ACTUALLY act.
+ */
+export function effectiveAutonomyDisplay(assistant: {
+  autonomyLevel: AutonomyLevel;
+  effectiveAutonomy: AutonomyLevel;
+}): { label: string; capped: boolean } {
+  const capped = assistant.effectiveAutonomy !== assistant.autonomyLevel;
+  return { label: autonomyLabel(assistant.effectiveAutonomy), capped };
 }
 
 /** The knowledge-scope source classes, with labels (ADR-0011 §1/§2). */

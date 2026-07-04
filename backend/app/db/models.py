@@ -39,6 +39,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -871,6 +872,50 @@ class TenantSandboxPolicy(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class TenantAutonomyPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """A per-tenant admin autonomy cap (issue #218).
+
+    The persistence half of admin autonomy governance (ADR-0011 §3): one row is an
+    admin's ceiling on how far ANY assistant in the tenant may effectively act —
+    ``max_autonomy`` is the maximum :class:`~app.domain.entities.AutonomyLevel` an
+    assistant's EFFECTIVE autonomy is ``min``'d to. **Absence of a row means no
+    ceiling** — an assistant runs at its own configured level (the permissive
+    default, mirroring how ``tenant_tool_policy`` / ``tenant_sandbox_policy`` fall
+    back to their built-in defaults). Enforcement is two-sided: publishing/upgrading
+    an assistant above the cap is rejected/clamped, and the run-time tool gate uses
+    the clamped level to decide whether a T1 side-effecting tool may execute.
+
+    ``max_autonomy`` is one of the four enum string values (validated in the service
+    and constrained at the DB via a CHECK). The unique ``(tenant_id)`` constraint
+    makes the cap a per-tenant singleton; ``updated_by`` records the admin who last
+    set it (audit corroboration). Tenant-scoped like every table (INV-1); the
+    ``0023`` migration puts it under the same fail-closed RLS backstop as every other
+    tenant-scoped table.
+    """
+
+    __tablename__ = "tenant_autonomy_policy"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_tenant_autonomy_policy_tenant"),
+        CheckConstraint(
+            "max_autonomy in ('suggest', 'draft', 'act_with_approval', 'act_auto')",
+            name="ck_tenant_autonomy_policy_max_autonomy",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The autonomy ceiling — one of the AutonomyLevel enum values (validated in the
+    # service; CHECK-constrained above). An assistant's effective autonomy is min'd
+    # to this. Absence of a row means no ceiling (the permissive default).
+    max_autonomy: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The admin who last set this cap (INV-6 corroboration); SET NULL so a
+    # deprovisioned admin does not cascade-delete the tenant's live cap.
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 
@@ -956,6 +1001,12 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
             "status in ('draft', 'published', 'disabled')",
             name="ck_assistants_status",
         ),
+        # Library-governance certification domain (E6-6, #217) — CHECK-pinned so a
+        # bad value can never be stored, the same posture as the other enum columns.
+        CheckConstraint(
+            "certification_state in ('none', 'certified', 'deprecated')",
+            name="ck_assistants_certification_state",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -981,6 +1032,23 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
     tool_allowlist: Mapped[list[object]] = mapped_column(_JSON, nullable=False, default=list)
     autonomy_level: Mapped[str] = mapped_column(String(20), nullable=False, default="suggest")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+
+    # --- Library governance (E6-6/E6-8, #217) — an orthogonal admin axis --------
+    # Certification verdict (none|certified|deprecated); admin-only mutation.
+    certification_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none", server_default="none"
+    )
+    # Whether an admin has featured/pinned the assistant in the library.
+    featured: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # A free-text library grouping label (nullable ⇒ uncategorised).
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Set (in lockstep with status=disabled) when an admin disables the assistant so
+    # the "only a published assistant may start" gate blocks it; NULL ⇒ not disabled.
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     versions: Mapped[list[AssistantVersion]] = relationship(
         back_populates="assistant", cascade="all, delete-orphan"

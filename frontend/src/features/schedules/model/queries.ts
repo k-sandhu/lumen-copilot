@@ -22,6 +22,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
+  cancelRun,
   createSchedule,
   deleteSchedule,
   getRun,
@@ -32,17 +33,20 @@ import {
   listSchedules,
   markRunDeliveryRead,
   pauseSchedule,
+  rerouteRun,
+  resumeRun,
   resumeSchedule,
   runScheduleNow,
   updateSchedule,
 } from '@/api';
 import type {
-  AssistantList,
-  Run,
   RunDelivery,
   RunDeliveryList,
+  AssistantList,
+  Run,
   RunEnqueued,
   RunList,
+  RunReroute,
   Schedule,
   ScheduleCreate,
   ScheduleList,
@@ -66,11 +70,6 @@ export const runKeys = {
   all: ['runs'] as const,
   list: (q: RunPageQuery) => [...runKeys.all, 'list', q] as const,
   detail: (id: string) => [...runKeys.all, 'detail', id] as const,
-};
-
-export const deliveryKeys = {
-  all: ['run-deliveries'] as const,
-  list: (q: RunDeliveryPageQuery) => [...deliveryKeys.all, 'list', q] as const,
 };
 
 // --- Schedules --------------------------------------------------------------
@@ -196,7 +195,59 @@ export function useRun(id: string | null): UseQueryResult<Run> {
   });
 }
 
-// --- Run deliveries (the in-app inbox, #238) --------------------------------
+/**
+ * Escalation handoff (E7-5, #239) — resume / cancel / reroute an escalated run.
+ * The returned run (its new status: `queued` for resume/reroute, a `failed`+
+ * `cancelled` terminal for cancel) is written straight into the detail cache so the
+ * banner + actions update without a round-trip flash; the inbox is invalidated so
+ * the list catches up (a resumed/rerouted run re-appears queued; a cancelled one
+ * closes). A reroute moves ownership away, so the current owner will no longer see
+ * the run on refetch (INV-2).
+ */
+function applyRunResult(qc: ReturnType<typeof useQueryClient>, updated: Run): void {
+  qc.setQueryData(runKeys.detail(updated.id), updated);
+  void qc.invalidateQueries({ queryKey: runKeys.all });
+}
+
+export function useResumeRun() {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, string>({
+    mutationFn: (id) => resumeRun(id),
+    onSuccess: (updated) => applyRunResult(qc, updated),
+  });
+}
+
+export function useCancelRun() {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, string>({
+    mutationFn: (id) => cancelRun(id),
+    onSuccess: (updated) => applyRunResult(qc, updated),
+  });
+}
+
+export function useRerouteRun(id: string) {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, RunReroute>({
+    mutationFn: (body) => rerouteRun(id, body),
+    onSuccess: (updated) => applyRunResult(qc, updated),
+  });
+}
+
+// --- Reference lists --------------------------------------------------------
+
+/** The caller's assistants (the schedule form's assistant picker). */
+export function useAssistantsList(): UseQueryResult<AssistantList> {
+  return useQuery<AssistantList>({
+    queryKey: ['assistants', 'list', 'schedules-picker'],
+    queryFn: ({ signal }) => listAssistants({ limit: 100 }, signal),
+    staleTime: 30_000,
+  });
+}
+
+export const deliveryKeys = {
+  all: ['run-deliveries'] as const,
+  list: (q: RunDeliveryPageQuery) => [...deliveryKeys.all, 'list', q] as const,
+};
 
 /**
  * A page of the caller's run deliveries (the in-app inbox) for the given filters.
@@ -223,16 +274,5 @@ export function useMarkDeliveryRead() {
   return useMutation<RunDelivery, unknown, string>({
     mutationFn: (id) => markRunDeliveryRead(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: deliveryKeys.all }),
-  });
-}
-
-// --- Reference lists --------------------------------------------------------
-
-/** The caller's assistants (the schedule form's assistant picker). */
-export function useAssistantsList(): UseQueryResult<AssistantList> {
-  return useQuery<AssistantList>({
-    queryKey: ['assistants', 'list', 'schedules-picker'],
-    queryFn: ({ signal }) => listAssistants({ limit: 100 }, signal),
-    staleTime: 30_000,
   });
 }
