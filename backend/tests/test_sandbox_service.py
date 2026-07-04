@@ -34,6 +34,7 @@ from app.db.repositories import (
     AuditEventRepository,
     CodeRunRepository,
     TenantRepository,
+    TenantSandboxPolicyRepository,
     UserRepository,
 )
 from app.domain.entities import AuditEvent, CodeRunStatus, ResourceUsage, Role
@@ -133,6 +134,39 @@ async def _make_tenant_user(
     return tenant.id, user.id
 
 
+async def _enable_sandbox(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    enabled: bool = True,
+    allowed_packages: tuple[str, ...] = (),
+    egress_allowed: bool = False,
+    egress_allowlist: tuple[str, ...] = (),
+    max_runtime_s: int = 30,
+    max_memory_mb: int = 512,
+    daily_runtime_cap_s: int = 3600,
+    max_concurrency: int = 2,
+) -> None:
+    """Seed a per-tenant sandbox policy row (#233) so the deny-by-default gate admits.
+
+    Without a stored row code execution is DISABLED for the tenant (deny-by-default), so
+    the happy-path service tests must first enable it. Values default to the config
+    ceiling; override to prove a per-tenant setting flows through (egress/packages/quota).
+    """
+    await TenantSandboxPolicyRepository(session, tenant_id).upsert(
+        enabled=enabled,
+        allowed_packages=allowed_packages,
+        denied_packages=(),
+        egress_allowed=egress_allowed,
+        egress_allowlist=egress_allowlist,
+        max_runtime_s=max_runtime_s,
+        max_memory_mb=max_memory_mb,
+        daily_runtime_cap_s=daily_runtime_cap_s,
+        max_concurrency=max_concurrency,
+        updated_by=None,
+    )
+
+
 def _service(
     session: AsyncSession,
     store: _FakeStore,
@@ -165,6 +199,7 @@ async def test_run_captures_output_and_stores_produced_file_as_artifact(
     session: AsyncSession,
 ) -> None:
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant)
     store = _FakeStore()
     output = OutputFile(filename="result.csv", content_type="text/csv", data=b"a,b\n1,2\n")
     runner = _FakeRunner(result=_ok_result(stdout="done", output_files=(output,)))
@@ -198,8 +233,14 @@ async def test_run_captures_output_and_stores_produced_file_as_artifact(
 
 
 async def test_disabled_tenant_run_is_denied_before_runner(session: AsyncSession) -> None:
-    """The kill-switch: with the sandbox disabled, the run is denied and the runner untouched."""
+    """The kill-switch: with the deploy-wide sandbox off, an enabled tenant policy is overridden.
+
+    Even with a per-tenant policy that enables code execution, the deploy-wide
+    ``SANDBOX_ENABLED`` kill-switch off (AND-ed in the effective policy, #233) denies the
+    run before the runner — the kill-switch always wins.
+    """
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant)  # the tenant policy enables it...
     store = _FakeStore()
     runner = _FakeRunner(result=_ok_result())
     code_runs = CodeRunRepository(session, tenant)
@@ -207,6 +248,7 @@ async def test_disabled_tenant_run_is_denied_before_runner(session: AsyncSession
 
     service = _service(
         session, store, runner, tenant_id=tenant, owner_id=owner,
+        # ...but the deploy-wide kill-switch is off → still denied.
         settings_overrides={"SANDBOX_ENABLED": "false"},
     )
     status = await service.execute(session, run.id)
@@ -220,9 +262,51 @@ async def test_disabled_tenant_run_is_denied_before_runner(session: AsyncSession
     assert "code_run.started" not in actions
 
 
+async def test_no_tenant_policy_run_is_denied_by_default(session: AsyncSession) -> None:
+    """AC-3 (#233): with NO stored per-tenant policy, the run is denied (deny-by-default).
+
+    The deploy-wide kill-switch is ON, but the tenant has never had a policy set — code
+    execution stays DISABLED for the tenant until an admin enables it. The runner is
+    never called; the refusal is audited.
+    """
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    # Deliberately NO _enable_sandbox — the tenant has no policy row.
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="print(1)")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    status = await service.execute(session, run.id)
+
+    assert status is CodeRunStatus.DENIED
+    assert runner.calls == 0
+    actions = await _audit_actions(session, tenant)
+    assert "code_run.denied" in actions
+    assert "code_run.started" not in actions
+
+
+async def test_tenant_policy_disabled_run_is_denied(session: AsyncSession) -> None:
+    """AC-1/AC-3 (#233): an admin who set enabled=false denies the run (before the runner)."""
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant, enabled=False)  # admin explicitly OFF
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="print(1)")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    status = await service.execute(session, run.id)
+
+    assert status is CodeRunStatus.DENIED
+    assert runner.calls == 0
+
+
 async def test_concurrency_quota_denies_over_the_cap(session: AsyncSession) -> None:
     """AC-4: over the per-tenant concurrency cap, a run is denied (before the runner)."""
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    # Enabled, concurrency 1 (clamped to the config ceiling of 1 below).
+    await _enable_sandbox(session, tenant, max_concurrency=1)
     store = _FakeStore()
     runner = _FakeRunner(result=_ok_result())
     code_runs = CodeRunRepository(session, tenant)
@@ -246,6 +330,8 @@ async def test_concurrency_quota_denies_over_the_cap(session: AsyncSession) -> N
 async def test_daily_runtime_quota_denies_when_exhausted(session: AsyncSession) -> None:
     """AC-4: over the per-tenant daily-runtime cap, a run is denied (before the runner)."""
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    # Enabled, daily cap 5s (clamped to the config ceiling of 5s below).
+    await _enable_sandbox(session, tenant, daily_runtime_cap_s=5)
     store = _FakeStore()
     runner = _FakeRunner(result=_ok_result())
     code_runs = CodeRunRepository(session, tenant)
@@ -282,6 +368,7 @@ async def test_terminal_status_from_runner_is_persisted(
 ) -> None:
     """AC-2: a wall-clock overrun → timeout, an OOM → killed, a non-zero exit → failed."""
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant)
     store = _FakeStore()
     result = RunResult(
         status=runner_status, exit_code=137, stdout="", stderr="killed", duration_ms=30_000
@@ -303,6 +390,7 @@ async def test_terminal_status_from_runner_is_persisted(
 
 async def test_runner_crash_writes_failed_not_stuck_running(session: AsyncSession) -> None:
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant)
     store = _FakeStore()
     runner = _FakeRunner(raises=RuntimeError("runner exploded"))
     code_runs = CodeRunRepository(session, tenant)
@@ -384,6 +472,7 @@ async def test_each_run_gets_a_fresh_deny_by_default_spec(session: AsyncSession)
     ephemeral; the service never reuses a spec).
     """
     tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant)
     store = _FakeStore()
     runner = _FakeRunner(result=_ok_result())
     code_runs = CodeRunRepository(session, tenant)
@@ -399,3 +488,160 @@ async def test_each_run_gets_a_fresh_deny_by_default_spec(session: AsyncSession)
         assert spec.policy.egress.network_mode == "none"
         assert spec.policy.allow_package_install is False
         assert spec.inputs == ()  # no residue staged from a prior run
+
+
+# --- #233: the per-tenant policy flows into the run spec + gate ---------------
+
+
+def test_policy_service_metadata_ip_matches_the_sandbox_spec() -> None:
+    """The policy service's local METADATA_IP must not drift from the sandbox spec's (G4).
+
+    ``services/sandbox_policy_service`` duplicates the constant to avoid a services→
+    sandbox import cycle; this pins the two definitions equal so the "never
+    allowlistable" IP can never diverge between the governance write and the runner's
+    egress policy.
+    """
+    from app.sandbox.spec import METADATA_IP as SPEC_METADATA_IP
+    from app.services.sandbox_policy_service import METADATA_IP as SERVICE_METADATA_IP
+
+    assert SERVICE_METADATA_IP == SPEC_METADATA_IP
+
+
+async def test_tenant_egress_allowlist_flows_into_the_run_spec(session: AsyncSession) -> None:
+    """AC-1/AC-2 (#233): an admin egress allowlist opens the run's egress to those targets."""
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(
+        session, tenant, egress_allowed=True, egress_allowlist=("api.example.com:443",)
+    )
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="print(1)")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    await service.execute(session, run.id)
+
+    assert runner.calls == 1
+    spec = runner.specs[0]
+    assert spec.policy.egress.allowed is True
+    assert spec.policy.egress.allowlist == ("api.example.com:443",)
+    assert spec.policy.egress.network_mode == "restricted"
+
+
+async def test_metadata_ip_is_never_reachable_even_if_admin_lists_it(
+    session: AsyncSession,
+) -> None:
+    """AC-2 (#233, G4): the cloud-metadata IP is stripped from egress — never reachable.
+
+    Even if an admin lists the metadata IP in the egress allowlist, it is stripped both
+    when stored (the policy service) AND when resolved for a run (the reader), so the run
+    can never reach it. With only the metadata IP listed, egress collapses to none.
+    """
+    from app.sandbox.spec import METADATA_IP
+
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    # Bypass the service's own stripping to prove the reader ALSO strips (defence in
+    # depth): write the raw allowlist straight to the repository.
+    await TenantSandboxPolicyRepository(session, tenant).upsert(
+        enabled=True,
+        allowed_packages=(),
+        denied_packages=(),
+        egress_allowed=True,
+        egress_allowlist=(f"{METADATA_IP}:80",),
+        max_runtime_s=30,
+        max_memory_mb=512,
+        daily_runtime_cap_s=3600,
+        max_concurrency=2,
+        updated_by=None,
+    )
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="print(1)")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    await service.execute(session, run.id)
+
+    spec = runner.specs[0]
+    # The metadata IP was stripped → the allowlist is empty → egress collapses to none.
+    assert all(METADATA_IP not in t for t in spec.policy.egress.allowlist)
+    assert spec.policy.egress.allowlist == ()
+    assert spec.policy.egress.network_mode == "none"
+
+
+async def test_tenant_runtime_is_clamped_to_the_config_ceiling(session: AsyncSession) -> None:
+    """AC-2 (#233): a per-tenant runtime ABOVE the config ceiling is clamped down.
+
+    An admin sets max_runtime_s = 9999, but the deploy-wide ceiling
+    (``SANDBOX_WALL_CLOCK_SECONDS`` = 30) is the hard cap — the run spec carries the
+    clamped 30, never the widened 9999 (a per-tenant value can only narrow).
+    """
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    # The repo write is raw (no clamp); the reader clamps to the config ceiling.
+    await TenantSandboxPolicyRepository(session, tenant).upsert(
+        enabled=True,
+        allowed_packages=(),
+        denied_packages=(),
+        egress_allowed=False,
+        egress_allowlist=(),
+        max_runtime_s=9999,  # far above the ceiling
+        max_memory_mb=99_999,
+        daily_runtime_cap_s=99_999,
+        max_concurrency=999,
+        updated_by=None,
+    )
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="print(1)")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    await service.execute(session, run.id)
+
+    spec = runner.specs[0]
+    # Clamped to the config ceiling (30s wall-clock, 512 MiB) — never the widened value.
+    assert spec.limits.wall_clock_seconds == 30
+    assert spec.limits.memory_bytes == 512 * 1024 * 1024
+
+
+async def test_tenant_packages_enable_install_in_the_spec(session: AsyncSession) -> None:
+    """AC-1 (#233): an admin package allowlist enables package install for the run."""
+    tenant, owner = await _make_tenant_user(session, "Acme", "a@acme.test")
+    await _enable_sandbox(session, tenant, allowed_packages=("numpy",))
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+    code_runs = CodeRunRepository(session, tenant)
+    run = await code_runs.create(owner_id=owner, code="import numpy")
+
+    service = _service(session, store, runner, tenant_id=tenant, owner_id=owner)
+    await service.execute(session, run.id)
+
+    spec = runner.specs[0]
+    assert spec.policy.allow_package_install is True
+
+
+async def test_cross_tenant_policy_isolation(session: AsyncSession) -> None:
+    """INV-1 (#233): tenant B's disabled policy does not admit a run for tenant A and vice versa.
+
+    Tenant A enables the sandbox; tenant B never does. A run in tenant B is denied
+    (deny-by-default) even though tenant A's policy is enabled — a policy is never
+    consulted cross-tenant.
+    """
+    tenant_a, owner_a = await _make_tenant_user(session, "A", "a@x.test")
+    tenant_b, owner_b = await _make_tenant_user(session, "B", "b@x.test")
+    await _enable_sandbox(session, tenant_a)  # A enabled, B not
+
+    store = _FakeStore()
+    runner = _FakeRunner(result=_ok_result())
+
+    # Tenant B's run is denied — B has no policy (A's enabled policy is not visible).
+    run_b = await CodeRunRepository(session, tenant_b).create(owner_id=owner_b, code="print(1)")
+    service_b = _service(session, store, runner, tenant_id=tenant_b, owner_id=owner_b)
+    assert await service_b.execute(session, run_b.id) is CodeRunStatus.DENIED
+    assert runner.calls == 0
+
+    # Tenant A's run is admitted — its own enabled policy.
+    run_a = await CodeRunRepository(session, tenant_a).create(owner_id=owner_a, code="print(1)")
+    service_a = _service(session, store, runner, tenant_id=tenant_a, owner_id=owner_a)
+    assert await service_a.execute(session, run_a.id) is CodeRunStatus.SUCCEEDED
+    assert runner.calls == 1

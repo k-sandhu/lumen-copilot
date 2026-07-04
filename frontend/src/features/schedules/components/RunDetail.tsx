@@ -35,6 +35,7 @@ import {
   toTranscript,
   traceSummary,
 } from '../model/transcript';
+import { EscalationActions } from './EscalationActions';
 import { ErrorState, SkeletonRows } from './StateViews';
 
 export function RunDetail({ runId }: { runId: string }) {
@@ -142,6 +143,8 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
               ) : (
                 <p className="text-sm text-foreground-muted">No reason was recorded for this run.</p>
               )}
+              {/* The human handoff (E7-5, #239) — resume / cancel / reroute the escalated run. */}
+              {run.status === 'escalated' ? <EscalationActions run={run} /> : null}
             </section>
           ) : null}
 

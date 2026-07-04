@@ -35,6 +35,7 @@ from app.db.repositories import (
     ChatSessionRepository,
     CodeRunRepository,
     TenantRepository,
+    TenantSandboxPolicyRepository,
     UserRepository,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
@@ -163,6 +164,21 @@ async def world() -> AsyncIterator[_World]:
             tenant = await TenantRepository(session).create(name="Acme")
             user = await UserRepository(session, tenant.id).create(
                 email="alice@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            # Enable the sandbox for this tenant (#233): deny-by-default means no policy
+            # row would refuse EVERY run. The disabled-tenant negative overrides the
+            # deploy-wide kill-switch (SANDBOX_ENABLED=false) which the AND still denies.
+            await TenantSandboxPolicyRepository(session, tenant.id).upsert(
+                enabled=True,
+                allowed_packages=(),
+                denied_packages=(),
+                egress_allowed=False,
+                egress_allowlist=(),
+                max_runtime_s=30,
+                max_memory_mb=512,
+                daily_runtime_cap_s=3600,
+                max_concurrency=2,
+                updated_by=None,
             )
             await session.commit()
             yield _World(session=session, tenant_id=tenant.id, user_id=user.id)

@@ -98,13 +98,39 @@ class AuditAction(str, enum.Enum):
     # deny-by-default is preserved (the set only grows; no action is relaxed). An
     # assistant is a governed config; every lifecycle mutation is audited (INV-6):
     # create/update/delete the mutable head, publish (freeze an immutable version),
-    # and rollback (append a new version from a prior snapshot). Ownership transfer
-    # + autonomy caps get their own actions when #217/#218 land (ADR-0011 §3/§4).
+    # and rollback (append a new version from a prior snapshot). The per-tenant
+    # autonomy cap has its own action (``autonomy_cap.updated``, #218, below);
+    # ownership transfer gets its own when #217 lands (ADR-0011 §3/§4).
     ASSISTANT_CREATED = "assistant.created"
     ASSISTANT_UPDATED = "assistant.updated"
     ASSISTANT_DELETED = "assistant.deleted"
     ASSISTANT_PUBLISHED = "assistant.published"
     ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
+    # Admin library governance (E6-6/E6-8, issue #217). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Certifying / featuring / deprecating / disabling an assistant, and
+    # transferring its accountable ownership, are admin-only (INV-5) governance
+    # actions, each audited here (INV-6) so a library-governance decision is
+    # provable after the fact: who certified/disabled/reassigned which assistant.
+    ASSISTANT_CERTIFIED = "assistant.certified"
+    ASSISTANT_FEATURED = "assistant.featured"
+    ASSISTANT_DEPRECATED = "assistant.deprecated"
+    ASSISTANT_DISABLED = "assistant.disabled"
+    ASSISTANT_OWNERSHIP_TRANSFERRED = "assistant.ownership_transferred"
+    # Read-only preview/test/debug of a DRAFT assistant before publishing (E6-5,
+    # issue #215). A test run executes the draft config with write-tier tools forced
+    # into simulate/deny mode (no artifact, no code run, no external effect) and
+    # returns a debug trace. Auditing it (INV-6) keeps automation-adjacent activity
+    # provable — a test run is owner-gated and audited even though it mutates nothing.
+    ASSISTANT_TESTED = "assistant.tested"
+    # Conversational agent builder (E6-1, issue #213). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Drafting a config from a plain-language description creates NOTHING
+    # (nothing is persisted until the user saves via ``assistant.created``); it is
+    # still a consequential read of the caller's collections/sources + a model call,
+    # so the *intent* to draft is audited (INV-6) — who asked the builder to draft
+    # what, and how many clarifications/omissions it surfaced.
+    ASSISTANT_DRAFTED = "assistant.drafted"
     # Headless agent runs (ADR-0015 §4, issue #235). Additive to the §2.4 taxonomy
     # — deny-by-default is preserved (the set only grows; no action is relaxed).
     # Every run is bracketed by ``run.started``/``run.finished`` (INV-6) so the
@@ -114,6 +140,19 @@ class AuditAction(str, enum.Enum):
     # events the shared runtime already emits still fire inside a run.
     RUN_STARTED = "run.started"
     RUN_FINISHED = "run.finished"
+    # Run failure & escalation handling (ADR-0015 §6, E7-5, issue #239). Additive to
+    # the §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action
+    # is relaxed). When a run cannot decide *safely* (ambiguity / missing input /
+    # restricted data / an unrecoverable tool failure / an approval with no approver)
+    # it ends ``escalated`` and the receiving human resumes / cancels / reroutes it —
+    # each of those handoff actions is audited (INV-6) so an escalated run is never
+    # silently dropped, and the trail shows who acted on the escalation. The escalate
+    # event itself rides ``run.finished`` (the terminal is ``escalated``); these record
+    # the *human's* decision afterward.
+    RUN_ESCALATED = "run.escalated"
+    RUN_RESUMED = "run.resumed"
+    RUN_CANCELLED = "run.cancelled"
+    RUN_REROUTED = "run.rerouted"
     # Dynamic per-tenant scheduler (ADR-0015 §6, issue #236). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). A schedule is an owner-gated T1 config (spec 0004 §2.5 — reversible
@@ -128,6 +167,18 @@ class AuditAction(str, enum.Enum):
     SCHEDULE_PAUSED = "schedule.paused"
     SCHEDULE_RESUMED = "schedule.resumed"
     SCHEDULE_RUN_NOW = "schedule.run_now"
+    # Scheduled-run delivery (ADR-0015 §6, issue #238). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). A completed run's output is delivered to the owner's in-app inbox
+    # (``run.delivered``), rolled into a periodic in-app digest (``run.digest_sent``),
+    # or marked read by the owner (``run.delivery_read``). Delivery v1 is in-app
+    # only — external channels (email/Slack) are deferred T2-ish egress (INV-7) and
+    # would each be a new §6 boundary row when they land. Every delivery is audited
+    # (INV-6) so a run's output is never a silent side-channel: the trail shows what
+    # reached whom and when it was read.
+    RUN_DELIVERED = "run.delivered"
+    RUN_DELIVERY_READ = "run.delivery_read"
+    RUN_DIGEST_SENT = "run.digest_sent"
     # Sandbox code execution (ADR-0013 §4, issue #230). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Every code run is bracketed by ``code_run.started``/``code_run.finished``
@@ -139,6 +190,23 @@ class AuditAction(str, enum.Enum):
     CODE_RUN_STARTED = "code_run.started"
     CODE_RUN_FINISHED = "code_run.finished"
     CODE_RUN_DENIED = "code_run.denied"
+    # Admin per-tenant sandbox governance (issue #233). Additive to the §2.4 taxonomy
+    # — deny-by-default is preserved (the set only grows; no action is relaxed).
+    # Setting a tenant's sandbox policy (enable code exec + package/egress/runtime/quota
+    # caps) is a reversible, tenant-scoped **T1** governance write (spec 0004 §2.5 —
+    # "authorized owner; audited; no extra approval"): admin-gated (INV-5) and audited
+    # here (INV-6). This is the policy the sandbox admission path consults per run, so
+    # its provenance (who enabled/narrowed what) is provable after the fact.
+    SANDBOX_POLICY_UPDATED = "sandbox_policy.updated"
+    # Admin per-tenant autonomy cap (ADR-0011 §3, issue #218). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Setting the tenant's maximum assistant autonomy (the ceiling an
+    # assistant's EFFECTIVE autonomy is min'd to) is a reversible, tenant-scoped
+    # **T1** governance write (spec 0004 §2.5 — "authorized owner; audited; no extra
+    # approval"): admin-gated (INV-5) and audited here (INV-6). This is the cap the
+    # publish path and the run-time autonomy gate consult, so who tightened/relaxed
+    # how far an agent may act is provable after the fact.
+    AUTONOMY_CAP_UPDATED = "autonomy_cap.updated"
     # Per-tenant MCP server registration (ADR-0012 §5, issue #226). Additive to the
     # §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Registering a remote MCP server is an owner-gated T1 config write

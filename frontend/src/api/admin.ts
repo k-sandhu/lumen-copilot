@@ -17,9 +17,16 @@
  */
 import { request } from './client';
 import type {
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
+  CertificationState,
+  GovernedAssistant,
+  GovernedAssistantList,
   MemberList,
   ModelGovernance,
   RiskTierList,
+  SandboxPolicy,
+  SandboxPolicyUpdate,
   ToolPolicy,
   ToolPolicyUpdate,
 } from './types';
@@ -66,4 +73,114 @@ export function getToolPolicy(signal?: AbortSignal): Promise<ToolPolicy> {
  */
 export function updateToolPolicy(body: ToolPolicyUpdate): Promise<ToolPolicy> {
   return request<ToolPolicy>('/admin/tool-policy', { method: 'PATCH', json: body });
+}
+
+/** The per-tenant code-execution sandbox policy (admin only, effective/clamped, #233). */
+export function getSandboxPolicy(signal?: AbortSignal): Promise<SandboxPolicy> {
+  return request<SandboxPolicy>('/admin/sandbox-policy', { signal });
+}
+
+/**
+ * Set the per-tenant sandbox policy (admin only, audited, #233). The server clamps each
+ * cap DOWN to the deploy-wide config ceiling and strips the cloud-metadata IP from the
+ * egress allowlist (a per-tenant value can only narrow). A non-positive cap → 422
+ * (INV-8). Returns the resulting effective policy.
+ */
+export function updateSandboxPolicy(body: SandboxPolicyUpdate): Promise<SandboxPolicy> {
+  return request<SandboxPolicy>('/admin/sandbox-policy', { method: 'PATCH', json: body });
+}
+
+// --- Assistant library governance (E6-6/E6-8, #217) ------------------------
+
+/**
+ * Every assistant in the tenant with its governance state (admin only, #217). Spans
+ * every owner in the tenant; each item carries its certification / featured / disabled
+ * state and the `ownerOrphaned` flag (owner deprovisioned — flag for reassignment).
+ */
+export function listGovernedAssistants(
+  page: PageQuery = {},
+  signal?: AbortSignal,
+): Promise<GovernedAssistantList> {
+  return request<GovernedAssistantList>(`/admin/assistants${buildQuery({ ...page })}`, { signal });
+}
+
+/**
+ * Set an assistant's certification verdict — certify / deprecate / clear (admin only,
+ * audited). A cross-tenant / missing id → 404 (existence non-disclosure).
+ */
+export function certifyAssistant(
+  assistantId: string,
+  certificationState: CertificationState,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/certify`, {
+    method: 'POST',
+    json: { certificationState },
+  });
+}
+
+/** Feature / unfeature an assistant in the library (admin only, audited). */
+export function featureAssistant(
+  assistantId: string,
+  featured: boolean,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/feature`, {
+    method: 'POST',
+    json: { featured },
+  });
+}
+
+/**
+ * Disable / re-enable an assistant (admin only, audited). Disabling blocks it from
+ * starting a chat / schedule / run; re-enabling returns the head to `draft`.
+ */
+export function disableAssistant(
+  assistantId: string,
+  disabled: boolean,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/disable`, {
+    method: 'POST',
+    json: { disabled },
+  });
+}
+
+/**
+ * Reassign an assistant's accountable owner to another tenant member (admin only,
+ * audited). The new owner must be a distinct member of the tenant (else 422). Rescues
+ * an orphaned assistant.
+ */
+export function transferAssistantOwnership(
+  assistantId: string,
+  newOwner: string,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/transfer-ownership`, {
+    method: 'POST',
+    json: { newOwner },
+  });
+}
+
+/** The outcome of a bulk reassign/disable of orphaned assistants (E6-8, #217). */
+export interface BulkOrphanResult {
+  affected: string[];
+  action: string;
+}
+
+/**
+ * Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only,
+ * audited). Idempotent — an already-disabled orphan is skipped.
+ */
+export function disableOrphanedAssistants(): Promise<BulkOrphanResult> {
+  return request<BulkOrphanResult>('/admin/assistants/disable-orphans', { method: 'POST' });
+}
+
+export function getAutonomyPolicy(signal?: AbortSignal): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { signal });
+}
+
+/**
+ * Set the per-tenant assistant autonomy cap (admin only, audited, #218). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it. An
+ * unknown `max_autonomy` → 422 (INV-8). Returns the resulting cap.
+ */
+export function updateAutonomyPolicy(body: AutonomyPolicyUpdate): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { method: 'PATCH', json: body });
 }

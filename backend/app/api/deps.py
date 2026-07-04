@@ -84,6 +84,20 @@ def get_llm_gateway() -> LLMGateway:
     return LLMGateway(get_settings())
 
 
+def get_llm_gateway_dep() -> LLMGateway:
+    """LLM-gateway dependency (delegates to the cached singleton).
+
+    A thin injectable wrapper over :func:`get_llm_gateway` so a router obtains the
+    gateway adapter by injection (and tests can override it with a fake via
+    ``app.dependency_overrides``, keeping LLM-dependent API tests offline-safe). The
+    gateway remains the single LiteLLM caller (ADR-0004).
+    """
+    return get_llm_gateway()
+
+
+LLMGatewayDep = Annotated[LLMGateway, Depends(get_llm_gateway_dep)]
+
+
 @lru_cache(maxsize=1)
 def get_backplane() -> Backplane:
     """Process-wide realtime pub/sub backplane singleton (CC-6 #24).

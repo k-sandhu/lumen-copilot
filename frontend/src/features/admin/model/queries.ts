@@ -22,16 +22,24 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
+  getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
+  getSandboxPolicy,
   getToolPolicy,
   listMembers,
+  updateAutonomyPolicy,
+  updateSandboxPolicy,
   updateToolPolicy,
 } from '@/api';
 import type {
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
   MemberList,
   ModelGovernance,
   RiskTierList,
+  SandboxPolicy,
+  SandboxPolicyUpdate,
   ToolPolicy,
   ToolPolicyUpdate,
 } from '@/api';
@@ -40,6 +48,8 @@ export const membersQueryKey = ['admin', 'members'] as const;
 export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
+export const sandboxPolicyQueryKey = ['admin', 'sandbox-policy'] as const;
+export const autonomyPolicyQueryKey = ['admin', 'autonomy-policy'] as const;
 
 /** The tenant's members and their roles (admin only). */
 export function useMembers(): UseQueryResult<MemberList> {
@@ -91,6 +101,69 @@ export function useUpdateToolPolicy(): UseMutationResult<ToolPolicy, unknown, To
     onSuccess: (policy) => {
       qc.setQueryData(toolPolicyQueryKey, policy);
       void qc.invalidateQueries({ queryKey: toolPolicyQueryKey });
+    },
+  });
+}
+
+/** The per-tenant code-execution sandbox policy — effective/clamped (admin only, #233). */
+export function useSandboxPolicy(): UseQueryResult<SandboxPolicy> {
+  return useQuery<SandboxPolicy>({
+    queryKey: sandboxPolicyQueryKey,
+    queryFn: ({ signal }) => getSandboxPolicy(signal),
+    staleTime: 15_000,
+  });
+}
+
+/**
+ * Set the per-tenant sandbox policy (issue #233). On success we seed the cache with the
+ * returned effective (clamped) policy and invalidate so the panel re-reads. A 422
+ * (non-positive cap) / 403 propagates as an `ApiError` the panel surfaces — it is NOT
+ * swallowed here.
+ */
+export function useUpdateSandboxPolicy(): UseMutationResult<
+  SandboxPolicy,
+  unknown,
+  SandboxPolicyUpdate
+> {
+  const qc = useQueryClient();
+  return useMutation<SandboxPolicy, unknown, SandboxPolicyUpdate>({
+    mutationFn: (body) => updateSandboxPolicy(body),
+    onSuccess: (policy) => {
+      qc.setQueryData(sandboxPolicyQueryKey, policy);
+      void qc.invalidateQueries({ queryKey: sandboxPolicyQueryKey });
+    },
+  });
+}
+
+/** The per-tenant assistant autonomy cap (admin only, #218). */
+export function useAutonomyPolicy(): UseQueryResult<AutonomyPolicy> {
+  return useQuery<AutonomyPolicy>({
+    queryKey: autonomyPolicyQueryKey,
+    queryFn: ({ signal }) => getAutonomyPolicy(signal),
+    staleTime: 15_000,
+  });
+}
+
+/**
+ * Set the per-tenant autonomy cap (issue #218). On success we seed the cache with the
+ * returned cap and invalidate so the panel re-reads. Because a lower cap changes every
+ * assistant's EFFECTIVE autonomy, we also invalidate the assistants list so the library
+ * re-reads the clamped `effectiveAutonomy`. A 422 (unknown level) / 403 propagates as an
+ * `ApiError` the panel surfaces — it is NOT swallowed here.
+ */
+export function useUpdateAutonomyPolicy(): UseMutationResult<
+  AutonomyPolicy,
+  unknown,
+  AutonomyPolicyUpdate
+> {
+  const qc = useQueryClient();
+  return useMutation<AutonomyPolicy, unknown, AutonomyPolicyUpdate>({
+    mutationFn: (body) => updateAutonomyPolicy(body),
+    onSuccess: (policy) => {
+      qc.setQueryData(autonomyPolicyQueryKey, policy);
+      void qc.invalidateQueries({ queryKey: autonomyPolicyQueryKey });
+      // A cap change re-clamps every assistant's effective autonomy — refresh the library.
+      void qc.invalidateQueries({ queryKey: ['assistants'] });
     },
   });
 }

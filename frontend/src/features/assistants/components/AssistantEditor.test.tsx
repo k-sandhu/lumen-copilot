@@ -42,9 +42,12 @@ function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
     knowledgeScope: { collectionIds: [], sourceIds: [], modes: ['company'] },
     toolAllowlist: ['search_text'],
     autonomyLevel: 'suggest',
+    effectiveAutonomy: 'suggest',
     owner: '',
     backupOwner: null,
     status: 'draft',
+    certificationState: 'none',
+    featured: false,
     version: null,
     created_at: '2026-07-01T00:00:00Z',
     updated_at: '2026-07-01T00:00:00Z',
@@ -65,6 +68,9 @@ function mockRoutes(opts: {
   assistant?: Assistant | 'error-404' | 'error-500' | 'error-401';
   onPublish?: () => Response;
   onPatch?: () => Response;
+  /** Version-history items served by GET /versions; re-read each call so a publish
+   *  can grow the list (a function is invoked per request). */
+  versions?: () => unknown[];
 }) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = String(input);
@@ -72,6 +78,9 @@ function mockRoutes(opts: {
 
     if (url.includes('/assistants/a1/publish') && method === 'POST') {
       return Promise.resolve(opts.onPublish ? opts.onPublish() : json(makeAssistant(), 200));
+    }
+    if (url.includes('/assistants/a1/versions') && method === 'GET') {
+      return Promise.resolve(json({ items: opts.versions ? opts.versions() : [], next_cursor: null }));
     }
     if (url.match(/\/assistants\/a1$/) && method === 'PATCH') {
       return Promise.resolve(opts.onPatch ? opts.onPatch() : json(makeAssistant(), 200));
@@ -89,6 +98,27 @@ function mockRoutes(opts: {
     if (url.includes('/sources')) return Promise.resolve(json({ items: [], next_cursor: null }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
   });
+}
+
+function makeVersion(version: number) {
+  return {
+    id: `v-${version}`,
+    assistant_id: 'a1',
+    version,
+    config: {
+      name: 'Benefits helper',
+      description: null,
+      instructions: null,
+      model: null,
+      knowledgeScope: { collectionIds: [], sourceIds: [], modes: ['company'] },
+      toolAllowlist: ['search_text'],
+      autonomyLevel: 'suggest',
+    },
+    author: 'u1',
+    notes: `Release ${version}`,
+    diff_summary: null,
+    created_at: '2026-07-01T00:00:00Z',
+  };
 }
 
 function renderEditor(assistantId: string | null) {
@@ -191,5 +221,33 @@ describe('AssistantEditor — publish gating (AC-1, ADR-0011 §4)', () => {
     await user.click(publishBtn);
 
     expect(await screen.findByText(/backup owner is required/i)).toBeInTheDocument();
+  });
+});
+
+describe('AssistantEditor — publish surfaces the new version (#214, E6-7)', () => {
+  it('shows the version history and adds the newly-frozen version after publish', async () => {
+    // The history starts with v1; a successful publish appends v2, and the
+    // panel invalidation refetches so v2 appears.
+    const versions = [makeVersion(1)];
+    mockRoutes({
+      assistant: makeAssistant({ owner: 'u1', backupOwner: 'u2', version: 1 }),
+      versions: () => versions,
+      onPublish: () => {
+        versions.unshift(makeVersion(2));
+        return json(makeVersion(2), 200);
+      },
+    });
+    const user = userEvent.setup();
+    renderEditor('a1');
+
+    // The version-history panel renders the existing version.
+    expect(await screen.findByText('Version 1')).toBeInTheDocument();
+
+    const publishBtn = await screen.findByRole('button', { name: /publish/i });
+    await waitFor(() => expect(publishBtn).toBeEnabled());
+    await user.click(publishBtn);
+
+    // After publish the panel refetches and the new version appears.
+    expect(await screen.findByText('Version 2')).toBeInTheDocument();
   });
 });

@@ -19,30 +19,42 @@
  * plain reads cached generously; they never mutate here.
  */
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type UseInfiniteQueryResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
   createAssistant,
   deleteAssistant,
+  draftAssistant,
   getAssistant,
+  listAssistantVersions,
   listAssistants,
   listCollections,
   listMembers,
   listModels,
   listSources,
   publishAssistant,
+  rollbackAssistant,
+  testAssistant,
   updateAssistant,
 } from '@/api';
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraft,
+  AssistantDraftRequest,
   AssistantList,
   AssistantPublishRequest,
+  AssistantRollbackRequest,
+  AssistantTestRequest,
+  AssistantTestTrace,
   AssistantUpdate,
   AssistantVersion,
+  AssistantVersionList,
   CollectionList,
   MemberList,
   ModelList,
@@ -54,6 +66,7 @@ export const assistantKeys = {
   all: ['assistants'] as const,
   list: () => [...assistantKeys.all, 'list'] as const,
   detail: (id: string) => [...assistantKeys.all, 'detail', id] as const,
+  versions: (id: string) => [...assistantKeys.all, 'versions', id] as const,
 };
 
 /** The caller's assistants (owned + shared) — the library grid. */
@@ -83,6 +96,20 @@ export function useCreateAssistant() {
   });
 }
 
+/**
+ * Draft an assistant config from a plain-language description (E6-1, #213). This
+ * creates NOTHING on the server — it returns a suggested config + clarifications
+ * the "Describe your assistant" surface loads into the editor for review. So it does
+ * NOT invalidate the library (nothing was created); the actual create happens when
+ * the user saves the pre-filled editor. A 422 (blank/oversize description)
+ * propagates as an `ApiError` the caller renders inline — it is NOT swallowed here.
+ */
+export function useDraftAssistant() {
+  return useMutation<AssistantDraft, unknown, AssistantDraftRequest>({
+    mutationFn: (body) => draftAssistant(body),
+  });
+}
+
 /** Patch the working head. Refreshes both the detail and the library card. */
 export function useUpdateAssistant(id: string) {
   const qc = useQueryClient();
@@ -99,7 +126,8 @@ export function useUpdateAssistant(id: string) {
  * Publish a draft (draft → published). A 422 (missing owner + backup owner, or a
  * malformed body) propagates as an `ApiError` the editor renders inline — it is
  * NOT swallowed here. On success the head detail + library are refreshed so the
- * new `published` status + version surface.
+ * new `published` status + version surface, and the version history is
+ * invalidated so the freshly-frozen version appears in the panel (#214).
  */
 export function usePublishAssistant(id: string) {
   const qc = useQueryClient();
@@ -108,7 +136,61 @@ export function usePublishAssistant(id: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: assistantKeys.detail(id) });
       void qc.invalidateQueries({ queryKey: assistantKeys.list() });
+      void qc.invalidateQueries({ queryKey: assistantKeys.versions(id) });
     },
+  });
+}
+
+/**
+ * The assistant's immutable version history (#214, ADR-0011 §1) — newest first,
+ * cursor-paginated as an infinite query so the panel can "Load more". The history
+ * is append-only: publishing and rolling back each append a version. Disabled
+ * until an id exists (never fired for `/assistants/new`).
+ */
+export function useAssistantVersions(
+  id: string | null,
+): UseInfiniteQueryResult<{ pages: AssistantVersionList[] }, unknown> {
+  return useInfiniteQuery({
+    queryKey: assistantKeys.versions(id ?? '∅'),
+    queryFn: ({ pageParam, signal }) =>
+      listAssistantVersions(id as string, { cursor: pageParam }, signal),
+    enabled: id !== null,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: AssistantVersionList) => last.next_cursor ?? undefined,
+    staleTime: 5_000,
+  });
+}
+
+/**
+ * Roll the head back to a prior version (#214, ADR-0011 §1). Creates a NEW head
+ * version equal to the target — history is never mutated. A 422 (unknown/malformed
+ * `version`) propagates as an `ApiError` the panel renders inline. On success the
+ * head detail + library + version history are all refreshed so the new head
+ * version and updated `version` pointer surface.
+ */
+export function useRollbackAssistant(id: string) {
+  const qc = useQueryClient();
+  return useMutation<AssistantVersion, unknown, AssistantRollbackRequest>({
+    mutationFn: (body) => rollbackAssistant(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: assistantKeys.detail(id) });
+      void qc.invalidateQueries({ queryKey: assistantKeys.list() });
+      void qc.invalidateQueries({ queryKey: assistantKeys.versions(id) });
+    },
+  });
+}
+
+/**
+ * Run a read-only test/preview of a draft assistant (#215, E6-5). Returns the debug
+ * trace (prompt, retrieval, tool calls, outputs, timing) with NO real side effect —
+ * write-tier tools simulate/deny, nothing is persisted. A 404 (non-owned/cross-tenant)
+ * or 422 (malformed) propagates as a typed `ApiError` the panel renders inline; it is
+ * NOT swallowed. Nothing is invalidated — a preview mutates no server state, so the
+ * library/detail caches are untouched.
+ */
+export function useTestAssistant(id: string) {
+  return useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
+    mutationFn: (body) => testAssistant(id, body),
   });
 }
 

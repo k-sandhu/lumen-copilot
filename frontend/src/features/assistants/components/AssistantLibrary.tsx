@@ -87,13 +87,22 @@ export function AssistantLibrary() {
             own.
           </p>
         </div>
-        <Link
-          to="/assistants/new"
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <Icon name="plus" className="shrink-0" />
-          New assistant
-        </Link>
+        <div className="flex shrink-0 items-center gap-2">
+          <Link
+            to="/assistants/describe"
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <Icon name="sparkles" className="shrink-0" />
+            Describe your assistant
+          </Link>
+          <Link
+            to="/assistants/new"
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <Icon name="plus" className="shrink-0" />
+            New assistant
+          </Link>
+        </div>
       </header>
 
       {/* Search + status filter — only meaningful once there are assistants. */}
@@ -273,13 +282,22 @@ function EmptyState() {
           it with your team — no code required.
         </p>
       </div>
-      <Link
-        to="/assistants/new"
-        className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-      >
-        <Icon name="plus" className="shrink-0" />
-        New assistant
-      </Link>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Link
+          to="/assistants/describe"
+          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <Icon name="sparkles" className="shrink-0" />
+          Describe your assistant
+        </Link>
+        <Link
+          to="/assistants/new"
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <Icon name="plus" className="shrink-0" />
+          Start from a blank form
+        </Link>
+      </div>
     </div>
   );
 }

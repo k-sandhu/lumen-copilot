@@ -31,6 +31,7 @@ out-of-range value is a **422** (INV-8). No T2+ governance mutation exists.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -45,7 +46,7 @@ from app.api.deps import (
     extract_request_id,
     require_roles,
 )
-from app.domain.entities import Role
+from app.domain.entities import Assistant, AssistantStatus, AutonomyLevel, CertificationState, Role
 from app.services.admin_service import (
     AdminService,
     MemberPage,
@@ -53,11 +54,19 @@ from app.services.admin_service import (
     RiskTierView,
     TenantSettingsView,
 )
-from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
+from app.services.assistant_governance_service import (
+    AssistantGovernanceService,
+    BulkOrphanResult,
+    GovernedAssistantPage,
+)
 
 # The admin-only gate runs for every route on this router (INV-5). It depends on
 # ``current_user`` underneath, so an unauthenticated caller is a 401 (INV-4)
 # before the role check, and a wrong-role caller is a 403.
+from app.services.autonomy_policy_service import AutonomyPolicyService, AutonomyPolicyView
+from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
+from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
+
 router = APIRouter(
     prefix="/admin",
     tags=["admin"],
@@ -66,6 +75,8 @@ router = APIRouter(
 
 
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
+
+
 
 
 class MemberResponse(BaseModel):
@@ -190,6 +201,139 @@ class ToolPolicyUpdateRequest(BaseModel):
     requires_approval: bool
 
 
+class SandboxPolicyResponse(BaseModel):
+    """``#/components/schemas/SandboxPolicy`` — the effective per-tenant sandbox policy."""
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool
+    allowed_packages: list[str]
+    denied_packages: list[str]
+    egress_allowed: bool
+    egress_allowlist: list[str]
+    max_runtime_s: int
+    max_memory_mb: int
+    daily_runtime_cap_s: int
+    max_concurrency: int
+    is_default: bool
+    max_runtime_s_ceiling: int
+    max_memory_mb_ceiling: int
+    daily_runtime_cap_s_ceiling: int
+    max_concurrency_ceiling: int
+
+
+class SandboxPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/SandboxPolicyUpdate`` — set the per-tenant sandbox policy.
+
+    All fields required so the stored policy is explicit; the caps are positive at the
+    wire (a non-positive value → 422, INV-8). The service clamps each cap DOWN to the
+    deploy-wide config ceiling and strips the metadata IP from the egress allowlist (a
+    per-tenant value can only narrow, never widen).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool
+    allowed_packages: list[str]
+    denied_packages: list[str]
+    egress_allowed: bool
+    egress_allowlist: list[str]
+    max_runtime_s: int = Field(ge=1)
+    max_memory_mb: int = Field(ge=1)
+    daily_runtime_cap_s: int = Field(ge=1)
+    max_concurrency: int = Field(ge=1)
+
+
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
+
+
+class GovernedAssistantResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistant`` — one library assistant + governance.
+
+    The admin library view of an assistant: identity + owner + lifecycle status plus
+    the governance axis (certification / featured / category / disabled) and the
+    ``owner_orphaned`` projection (owner no longer a tenant member — flag for
+    reassignment, E6-8).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    name: str
+    description: str | None = None
+    model: str | None = None
+    autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+    owner: UUID
+    backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
+    status: AssistantStatus
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+    featured: bool
+    category: str | None = None
+    disabledAt: datetime | None = None  # noqa: N815 — contract camelCase
+    ownerOrphaned: bool  # noqa: N815 — contract camelCase
+    version: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GovernedAssistantListResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistantList`` — a cursor page of library assistants."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[GovernedAssistantResponse]
+    next_cursor: str | None = None
+
+
+class AssistantCertifyRequest(BaseModel):
+    """``#/components/schemas/AssistantCertifyRequest`` — set the certification verdict."""
+
+    model_config = {"extra": "forbid"}
+
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+
+
+class AssistantFeatureRequest(BaseModel):
+    """``#/components/schemas/AssistantFeatureRequest`` — feature/unfeature in the library."""
+
+    model_config = {"extra": "forbid"}
+
+    featured: bool
+
+
+class AssistantDisableRequest(BaseModel):
+    """``#/components/schemas/AssistantDisableRequest`` — disable/re-enable the assistant.
+
+    Disabling blocks it from starting a chat / schedule / run; re-enabling returns
+    the head to ``draft`` (the owner must re-publish before it can run again).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    disabled: bool
+
+
+class AssistantOwnershipTransferRequest(BaseModel):
+    """``#/components/schemas/AssistantOwnershipTransferRequest`` — reassign the owner.
+
+    The new owner must be a distinct member of the tenant (else 422). Used to rescue
+    an orphaned assistant (owner deprovisioned) by handing it to a live owner.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    newOwner: UUID  # noqa: N815 — contract camelCase
+
+
+class BulkOrphanResponse(BaseModel):
+    """``#/components/schemas/BulkOrphanResult`` — the outcome of a bulk orphan sweep."""
+
+    model_config = {"extra": "forbid"}
+
+    affected: list[UUID]
+    action: str
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
@@ -243,6 +387,57 @@ def _to_tool_policy(entries: list[ToolPolicyEntryView]) -> ToolPolicyResponse:
             for e in entries
         ]
     )
+
+
+def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
+    return SandboxPolicyResponse(
+        enabled=view.enabled,
+        allowed_packages=list(view.allowed_packages),
+        denied_packages=list(view.denied_packages),
+        egress_allowed=view.egress_allowed,
+        egress_allowlist=list(view.egress_allowlist),
+        max_runtime_s=view.max_runtime_s,
+        max_memory_mb=view.max_memory_mb,
+        daily_runtime_cap_s=view.daily_runtime_cap_s,
+        max_concurrency=view.max_concurrency,
+        is_default=view.is_default,
+        max_runtime_s_ceiling=view.max_runtime_s_ceiling,
+        max_memory_mb_ceiling=view.max_memory_mb_ceiling,
+        daily_runtime_cap_s_ceiling=view.daily_runtime_cap_s_ceiling,
+        max_concurrency_ceiling=view.max_concurrency_ceiling,
+    )
+
+
+def _to_governed_assistant(assistant: Assistant) -> GovernedAssistantResponse:
+    return GovernedAssistantResponse(
+        id=assistant.id,
+        name=assistant.name,
+        description=assistant.description,
+        model=assistant.model,
+        autonomyLevel=assistant.autonomy_level,
+        owner=assistant.owner_id,
+        backupOwner=assistant.backup_owner_id,
+        status=assistant.status,
+        certificationState=assistant.certification_state,
+        featured=assistant.featured,
+        category=assistant.category,
+        disabledAt=assistant.disabled_at,
+        ownerOrphaned=assistant.owner_orphaned,
+        version=assistant.current_version,
+        created_at=assistant.created_at,
+        updated_at=assistant.updated_at,
+    )
+
+
+def _to_governed_list(page: GovernedAssistantPage) -> GovernedAssistantListResponse:
+    return GovernedAssistantListResponse(
+        items=[_to_governed_assistant(a) for a in page.items],
+        next_cursor=page.next_cursor,
+    )
+
+
+def _to_bulk_orphan(result: BulkOrphanResult) -> BulkOrphanResponse:
+    return BulkOrphanResponse(affected=list(result.affected), action=result.action)
 
 
 # --- Routes -----------------------------------------------------------------
@@ -384,3 +579,307 @@ async def update_tool_policy(
     )
     await session.commit()
     return _to_tool_policy(entries)
+
+
+@router.get("/sandbox-policy", response_model=SandboxPolicyResponse)
+async def get_sandbox_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxPolicyResponse:
+    """The caller's tenant's effective code-execution sandbox policy (admin only; #233).
+
+    Whether code execution is enabled for the tenant, the package allow/deny lists, the
+    egress posture, and the runtime / memory / quota caps — every value already clamped
+    to the deploy-wide ``SANDBOX_*`` ceiling (a per-tenant policy can only narrow). No
+    stored policy ⇒ deny-by-default (code exec off, caps = config ceiling,
+    ``is_default=true``). Admin-only via the router gate (INV-5); tenant-scoped via
+    ``current_tenant`` (INV-1).
+    """
+    service = SandboxPolicyService(session, tenant_id=tenant_id, settings=settings)
+    return _to_sandbox_policy(await service.get_policy())
+
+
+@router.patch("/sandbox-policy", response_model=SandboxPolicyResponse)
+async def update_sandbox_policy(
+    body: SandboxPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxPolicyResponse:
+    """Set the per-tenant code-execution sandbox policy (admin only; T1, audited; #233).
+
+    Enable/disable code execution, the package allow/deny lists, the egress posture, and
+    the runtime / memory / quota caps. A reversible, tenant-scoped **T1** governance
+    write: admin-only via the router gate (INV-5); tenant-scoped via ``current_tenant``
+    (INV-1); the service audits ``sandbox_policy.updated`` (INV-6). The write can only
+    NARROW the config ceiling — a cap above the ceiling is clamped down, and the
+    metadata IP is stripped from the egress allowlist (never reachable, G4). A
+    non-positive cap is **422** at the wire model (INV-8). Returns the effective policy.
+    """
+    service = SandboxPolicyService(session, tenant_id=tenant_id, settings=settings)
+    view = await service.set_policy(
+        enabled=body.enabled,
+        allowed_packages=tuple(body.allowed_packages),
+        denied_packages=tuple(body.denied_packages),
+        egress_allowed=body.egress_allowed,
+        egress_allowlist=tuple(body.egress_allowlist),
+        max_runtime_s=body.max_runtime_s,
+        max_memory_mb=body.max_memory_mb,
+        daily_runtime_cap_s=body.daily_runtime_cap_s,
+        max_concurrency=body.max_concurrency,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_sandbox_policy(view)
+
+
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
+
+
+def _build_governance_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    request: Request,
+) -> AssistantGovernanceService:
+    """Assemble the per-request governance service from the identity + correlation seams."""
+    return AssistantGovernanceService(
+        session,
+        tenant_id=tenant_id,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+@router.get(
+    "/assistants",
+    response_model=GovernedAssistantListResponse,
+)
+async def list_governed_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GovernedAssistantListResponse:
+    """Every assistant in the tenant with its governance state (admin only; #217).
+
+    The admin library view (E6-6): all owners in the tenant, each item carrying its
+    certification / featured / disabled state and the ``owner_orphaned`` flag (owner
+    no longer a member) for reassignment (E6-8). Admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); a malformed cursor → 422.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    page = await service.list_all(cursor=cursor, limit=limit)
+    return _to_governed_list(page)
+
+
+@router.post(
+    "/assistants/{assistant_id}/certify",
+    response_model=GovernedAssistantResponse,
+)
+async def certify_assistant(
+    assistant_id: UUID,
+    body: AssistantCertifyRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Set an assistant's certification verdict (certify / deprecate / clear; admin only).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.certified`` /
+    ``assistant.deprecated`` (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.certify(assistant_id, state=body.certificationState)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/feature",
+    response_model=GovernedAssistantResponse,
+)
+async def feature_assistant(
+    assistant_id: UUID,
+    body: AssistantFeatureRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Feature / unfeature an assistant in the library (admin only; #217).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.featured``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_featured(assistant_id, featured=body.featured)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/disable",
+    response_model=GovernedAssistantResponse,
+)
+async def disable_assistant(
+    assistant_id: UUID,
+    body: AssistantDisableRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Disable / re-enable an assistant (admin only; #217, INV-8 enforcement).
+
+    Disabling flips ``status`` to ``disabled`` (and stamps ``disabled_at``) so the
+    existing run/chat/schedule gate refuses it — a disabled assistant cannot start.
+    Re-enabling returns the head to ``draft`` (the owner re-publishes to run again).
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.disabled``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_disabled(assistant_id, disabled=body.disabled)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/transfer-ownership",
+    response_model=GovernedAssistantResponse,
+)
+async def transfer_assistant_ownership(
+    assistant_id: UUID,
+    body: AssistantOwnershipTransferRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Reassign an assistant's accountable owner to another tenant member (admin only; #217).
+
+    The new owner must be a distinct member of the tenant (else 422, INV-8) — the
+    admin rescue for an orphaned assistant. Admin-only (INV-5); tenant-scoped
+    (INV-1); audited ``assistant.ownership_transferred`` (INV-6). Cross-tenant/
+    missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.transfer_ownership(assistant_id, new_owner_id=body.newOwner)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post("/assistants/disable-orphans", response_model=BulkOrphanResponse)
+async def disable_orphaned_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> BulkOrphanResponse:
+    """Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only; #217).
+
+    E6-8 bulk control: an abandoned assistant should not keep running unattended.
+    Admin-only (INV-5); tenant-scoped (INV-1); audits each ``assistant.disabled``
+    (INV-6). Idempotent — an already-disabled orphan is skipped.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    result = await service.bulk_disable_orphans()
+    await session.commit()
+    return _to_bulk_orphan(result)
+
+
+class AutonomyPolicyResponse(BaseModel):
+    """``#/components/schemas/AutonomyPolicy`` — the per-tenant assistant autonomy cap."""
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+    is_default: bool
+    levels: list[AutonomyLevel]
+
+
+class AutonomyPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/AutonomyPolicyUpdate`` — set the per-tenant autonomy cap.
+
+    ``max_autonomy`` is constrained to the ``AutonomyLevel`` enum at the wire (an
+    unknown value → 422, INV-8), so no invalid ceiling can reach the service.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+
+
+def _to_autonomy_policy(view: AutonomyPolicyView) -> AutonomyPolicyResponse:
+    return AutonomyPolicyResponse(
+        max_autonomy=view.max_autonomy,
+        is_default=view.is_default,
+        levels=list(view.levels),
+    )
+
+
+@router.get("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def get_autonomy_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """The caller's tenant's assistant autonomy cap (admin only; tenant-scoped; #218).
+
+    ``max_autonomy`` is the ceiling an assistant's EFFECTIVE autonomy is min'd to;
+    ``is_default`` is true when no cap is stored (no ceiling — an assistant runs at its
+    own configured level). Admin-only via the router gate (INV-5); tenant-scoped via
+    ``current_tenant`` (INV-1).
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    return _to_autonomy_policy(await service.get_policy())
+
+
+@router.patch("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def update_autonomy_policy(
+    body: AutonomyPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """Set the per-tenant assistant autonomy cap (admin only; T1, audited; #218).
+
+    A reversible, tenant-scoped **T1** governance write: admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the service audits
+    ``autonomy_cap.updated`` (INV-6). The cap only ever NARROWS — it lowers an
+    assistant's EFFECTIVE autonomy, never raises it. Publishing an assistant above the
+    new ceiling is rejected (422), and a running assistant above it is clamped at the
+    run-time tool gate. An unknown ``max_autonomy`` is **422** at the wire (INV-8).
+    Returns the resulting cap.
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    view = await service.set_policy(
+        max_autonomy=body.max_autonomy,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_autonomy_policy(view)
