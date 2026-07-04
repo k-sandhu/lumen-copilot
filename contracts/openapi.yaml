@@ -2379,6 +2379,131 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+
+  # --- merged: /admin/llm-providers, /admin/llm-providers/{providerId}, /admin/llm-providers/{providerId}/refresh ---
+  /admin/llm-providers:
+    get:
+      operationId: listLlmProviders
+      summary: The tenant's registered LLM providers + discovered models (admin only).
+      description: >
+        The caller's tenant's registered LLM providers, each with its discovered
+        models and discovery/health `status`. Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1). The stored API key
+        is **never** returned — only a masked `secret_hint`.
+      tags: [admin]
+      responses:
+        "200":
+          description: The tenant's registered LLM providers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProviderList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createLlmProvider
+      summary: Register an LLM provider and auto-discover its models (admin only).
+      description: >
+        Register an OpenAI-compatible LLM provider (name + base URL + optional API
+        key). The backend auto-discovers the provider's models via `GET
+        {base_url}/models` and stores a snapshot + `status`. `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1); audited (INV-6). The `api_key` is
+        write-only — stored envelope-encrypted via CC-C, never returned. An
+        unsupported `provider_type`, or an invalid / non-https / SSRF-blocked
+        `base_url`, is **422** (INV-8). A reachable provider returns `status: ready`
+        with `discovered_models`; a bad key/url returns `status: error` + `last_error`
+        (never a 500).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LlmProviderCreate" }
+      responses:
+        "201":
+          description: The registered provider (with discovered models + status).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/llm-providers/{providerId}:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    patch:
+      operationId: updateLlmProvider
+      summary: Update a registered LLM provider (admin only).
+      description: >
+        Update a registered LLM provider (rename, retarget `base_url`, toggle
+        `enabled`, or rotate/clear the `api_key`). Changing `base_url` re-runs the
+        https + SSRF validation (else **422**) and re-runs model discovery; rotating
+        the key likewise re-discovers. The key value is never returned — only the
+        updated masked `secret_hint`. `admin`-only (**403** otherwise, INV-5);
+        tenant-scoped (INV-1) — a cross-tenant id is **404** (never 403). Audited
+        (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LlmProviderUpdate" }
+      responses:
+        "200":
+          description: The updated provider.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteLlmProvider
+      summary: Remove a registered LLM provider (admin only).
+      description: >
+        Delete the LLM provider and its stored API key (in the CC-C vault).
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1) — a
+        cross-tenant id is **404**. Audited (INV-6).
+      tags: [admin]
+      responses:
+        "204": { description: Deleted (provider + its stored API key). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/llm-providers/{providerId}/refresh:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    post:
+      operationId: refreshLlmProvider
+      summary: Re-run model discovery for a provider (admin only).
+      description: >
+        Re-run model discovery for the provider via `GET {base_url}/models`, resolving
+        the API key in-process from the CC-C vault. On success `status: ready` with a
+        fresh `discovered_models`; on failure `status: error` + a safe `last_error`
+        (previous snapshot preserved). Both outcomes return **200** — the result is in
+        `status` / `last_error`, not the HTTP code. `admin`-only (**403** otherwise,
+        INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**. Audited (INV-6).
+      tags: [admin]
+      responses:
+        "200":
+          description: Discovery completed; the updated provider is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -4939,6 +5064,135 @@ components:
         next_cursor:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
+
+    # --- merged schemas: LlmProviderType, LlmProviderStatus, LlmProviderModel, LlmProvider, LlmProviderList, LlmProviderCreate, LlmProviderUpdate ---
+    LlmProviderType:
+      type: string
+      description: >
+        The API shape a registered LLM provider speaks. `openai_compatible` covers
+        OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `GET /v1/models`
+        + `POST /v1/chat/completions` shape. The enum is small but extensible (a new
+        provider family adds a value, never a schema migration).
+      enum: [openai_compatible]
+
+    LlmProviderStatus:
+      type: string
+      description: >
+        Model-discovery state from the last probe. `pending` before the first
+        discovery, `ready` after a successful `GET /models` snapshot, `error` when
+        the last discovery failed (see `last_error`).
+      enum: [pending, ready, error]
+
+    LlmProviderModel:
+      type: object
+      additionalProperties: false
+      description: One model discovered from the provider's `/models` catalog.
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: The provider's model id (e.g. `openai/gpt-4o`).
+        label:
+          type: [string, "null"]
+          description: A human-friendly label derived from the catalog entry (or the id).
+
+    LlmProvider:
+      type: object
+      additionalProperties: false
+      description: >
+        One registered per-tenant LLM provider, tenant- and owner-scoped (spec 0004
+        INV-1/INV-2). The response **never** includes the stored API-key value — only
+        a masked `secret_hint`. `discovered_models` is the last successful `GET
+        /models` snapshot. Foundation PR: this catalog is not yet wired into the chat
+        model picker or completion routing (a follow-up PR).
+      required: [id, name, provider_type, base_url, enabled, status, discovered_models, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; SSRF-checked on register and every discovery).
+        enabled:
+          type: boolean
+          description: Admin toggle — when false the provider is inactive (its models are not offered; follow-up PR).
+        status: { $ref: "#/components/schemas/LlmProviderStatus" }
+        last_discovery_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last successful model discovery finished (null before the first success).
+        last_error:
+          type: [string, "null"]
+          description: Safe failure reason when status is error (never contains the API key).
+        discovered_models:
+          type: array
+          items: { $ref: "#/components/schemas/LlmProviderModel" }
+          description: The models discovered on the last successful `GET /models` (empty until first discovery).
+        secret_hint:
+          type: [string, "null"]
+          description: >
+            A **masked** hint at the stored API key (e.g. `"****abcd"`), or null when
+            no key is stored. This is the ONLY key-derived value ever returned — the
+            actual key is write-only, envelope-encrypted in the CC-C vault, and never
+            serialized through any API.
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    LlmProviderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LlmProvider" }
+
+    LlmProviderCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Register an LLM provider. `provider_type` is constrained to the supported
+        values (`openai_compatible`); `base_url` must be https and pass the SSRF check
+        (else 422). The optional `api_key` is **write-only** — stored envelope-
+        encrypted via CC-C and never returned; the response carries only a masked
+        `secret_hint`. The backend auto-discovers the provider's models on create.
+      required: [name, provider_type, base_url]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; SSRF-checked).
+        api_key:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: The provider API key. Write-only — stored in the CC-C vault, never returned.
+
+    LlmProviderUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        Update a registered LLM provider. Any subset of fields; at least one. Rotating
+        `api_key` replaces the stored CC-C key (write-only, never returned); send
+        `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF
+        validation (else 422) and re-runs model discovery.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; re-validated + SSRF-checked).
+        enabled: { type: boolean, description: Admin toggle. }
+        api_key:
+          oneOf:
+            - { type: string, minLength: 1, writeOnly: true }
+            - type: "null"
+          description: Rotate the write-only API key, or null to clear it.
 
   responses:
     Problem:

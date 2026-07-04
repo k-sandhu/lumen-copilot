@@ -25,6 +25,7 @@ import { AdminTabs, type AdminTab } from './AdminTabs';
 import { adminTabIds } from './tabIds';
 import { MembersPanel } from './MembersPanel';
 import { ModelGovernancePanel } from './ModelGovernancePanel';
+import { ProvidersPanel } from './ProvidersPanel';
 import { RiskTierPanel } from './RiskTierPanel';
 import { ToolGovernancePanel } from './ToolGovernancePanel';
 import { SandboxGovernancePanel } from './SandboxGovernancePanel';
@@ -34,11 +35,12 @@ import { BrandingPanel } from './BrandingPanel';
 
 const TAB_PREFIX = 'admin';
 
-type TabId = 'members' | 'models' | 'approvals' | 'tools' | 'sandbox' | 'autonomy' | 'data' | 'branding';
+type TabId = 'members' | 'models' | 'providers' | 'approvals' | 'tools' | 'sandbox' | 'autonomy' | 'data' | 'branding';
 
 const TABS: AdminTab[] = [
   { id: 'members', label: 'Members & roles', icon: 'user' },
   { id: 'models', label: 'Model governance', icon: 'database' },
+  { id: 'providers', label: 'LLM providers', icon: 'plug' },
   { id: 'approvals', label: 'Approvals & risk', icon: 'shield-check' },
   { id: 'tools', label: 'Tool governance', icon: 'sliders' },
   { id: 'sandbox', label: 'Sandbox governance', icon: 'shield-check' },
@@ -50,6 +52,7 @@ const TABS: AdminTab[] = [
 const PANELS: Record<TabId, { label: string; render: () => ReactNode }> = {
   members: { label: 'Members', render: () => <MembersPanel /> },
   models: { label: 'Model governance', render: () => <ModelGovernancePanel /> },
+  providers: { label: 'LLM providers', render: () => <ProvidersPanel /> },
   approvals: { label: 'Risk tiers', render: () => <RiskTierPanel /> },
   tools: { label: 'Tool governance', render: () => <ToolGovernancePanel /> },
   sandbox: { label: 'Sandbox governance', render: () => <SandboxGovernancePanel /> },

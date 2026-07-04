@@ -19,6 +19,10 @@ import { ApiError, request, withRefreshRetry } from './client';
 import { API_BASE_URL } from './env';
 import { getAccessToken } from './token';
 import type {
+  LlmProvider,
+  LlmProviderList,
+  LlmProviderCreate,
+  LlmProviderUpdate,
   Problem,
   TenantBranding,
   AutonomyPolicy,
@@ -257,4 +261,43 @@ async function safeProblem(response: Response): Promise<Problem | undefined> {
     // Non-JSON / empty body — fall through.
   }
   return undefined;
+}
+
+export function listLlmProviders(signal?: AbortSignal): Promise<LlmProviderList> {
+  return request<LlmProviderList>('/admin/llm-providers', { signal });
+}
+
+/**
+ * Register an LLM provider and auto-discover its models (admin only). The server
+ * validates the provider type + https/SSRF of `base_url` (unsupported/blocked → 422)
+ * and stores any `api_key` write-only via CC-C. The returned provider is `ready` with
+ * `discovered_models` on a reachable provider, or `error` + `last_error` on a bad
+ * key/url (never a 500).
+ */
+export function createLlmProvider(body: LlmProviderCreate): Promise<LlmProvider> {
+  return request<LlmProvider>('/admin/llm-providers', { method: 'POST', json: body });
+}
+
+/**
+ * Update a registered LLM provider (rename, retarget `base_url`, toggle `enabled`, or
+ * rotate/clear the write-only `api_key` — send `api_key: null` to clear). At least one
+ * field. Changing `base_url` or rotating the key re-runs model discovery. A blocked
+ * URL → 422; a cross-tenant id → 404.
+ */
+export function updateLlmProvider(id: string, body: LlmProviderUpdate): Promise<LlmProvider> {
+  return request<LlmProvider>(`/admin/llm-providers/${id}`, { method: 'PATCH', json: body });
+}
+
+export function deleteLlmProvider(id: string): Promise<void> {
+  return request<void>(`/admin/llm-providers/${id}`, { method: 'DELETE' });
+}
+
+/**
+ * Re-run model discovery for a provider (admin only). Returns the UPDATED provider: a
+ * reachable provider → `status: ready` (+ a fresh `discovered_models`); an
+ * unreachable/erroring probe → `status: error` (+ a safe `last_error`). BOTH outcomes
+ * return 200 — the result is in `status`, not the HTTP code. A cross-tenant id → 404.
+ */
+export function refreshLlmProvider(id: string): Promise<LlmProvider> {
+  return request<LlmProvider>(`/admin/llm-providers/${id}/refresh`, { method: 'POST' });
 }

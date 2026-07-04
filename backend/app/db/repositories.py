@@ -56,6 +56,8 @@ from app.domain.entities import (
     GrantRole,
     KnowledgeMode,
     KnowledgeScope,
+    LlmProvider,
+    LlmProviderStatus,
     McpServer,
     McpServerStatus,
     Message,
@@ -325,6 +327,28 @@ def _to_mcp_server(row: models.McpServer) -> McpServer:
         last_error=row.last_error,
         discovered_tools=list(row.discovered_tools or []),
         secret_hint=row.secret_hint,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_llm_provider(row: models.LlmProvider) -> LlmProvider:
+    return LlmProvider(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        name=row.name,
+        provider_type=row.provider_type,
+        base_url=row.base_url,
+        api_key_secret_ref=(
+            str(row.api_key_secret_ref) if row.api_key_secret_ref is not None else None
+        ),
+        secret_hint=row.secret_hint,
+        enabled=row.enabled,
+        status=LlmProviderStatus(row.status),
+        last_discovery_at=row.last_discovery_at,
+        last_error=row.last_error,
+        discovered_models=list(row.discovered_models or []),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -2738,6 +2762,152 @@ class McpServerRepository(_TenantScopedRepository):
         is enforced one layer up; a foreign-tenant id matches nothing (INV-1).
         """
         row = await self._get_row(server_id)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+
+class LlmProviderRepository(_TenantScopedRepository):
+    """Registered per-tenant LLM providers within one tenant (foundation PR).
+
+    Mirrors :class:`McpServerRepository`. Tenant-scoped like every repository
+    (INV-1): a foreign-tenant ``provider_id`` resolves to ``None``/no rows, so the
+    existence-non-disclosure 404 is enforced one layer up off the ``None`` return.
+    Admin-gating is enforced by the ``/admin`` router; ownership is layered in
+    :class:`~app.services.llm_providers_service.LlmProviderService`. Rows never hold
+    the API key — only the CC-C ``api_key_secret_ref`` + a masked ``secret_hint``.
+    Writes are flushed not committed; the caller owns the transaction boundary
+    (audits atomically with the write).
+    """
+
+    async def create(
+        self,
+        *,
+        owner_id: UUID,
+        name: str,
+        provider_type: str,
+        base_url: str,
+        api_key_secret_ref: UUID | None,
+        secret_hint: str | None,
+        status: LlmProviderStatus = LlmProviderStatus.PENDING,
+    ) -> LlmProvider:
+        row = models.LlmProvider(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            name=name,
+            provider_type=provider_type,
+            base_url=base_url,
+            api_key_secret_ref=api_key_secret_ref,
+            secret_hint=secret_hint,
+            enabled=True,
+            status=status.value,
+            discovered_models=[],
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_llm_provider(row)
+
+    async def get(self, provider_id: UUID) -> LlmProvider | None:
+        row = await self._get_row(provider_id)
+        return _to_llm_provider(row) if row is not None else None
+
+    async def _get_row(self, provider_id: UUID) -> models.LlmProvider | None:
+        stmt = select(models.LlmProvider).where(
+            models.LlmProvider.tenant_id == self._tenant_id,
+            models.LlmProvider.id == provider_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_tenant(self) -> list[LlmProvider]:
+        """Every registered provider in this tenant (newest first, INV-1).
+
+        Tenant-scoped, not owner-scoped: an LLM provider is tenant-wide admin config
+        (any tenant admin manages any provider in the tenant), unlike an MCP server
+        which is per-owner. Ordered by ``(created_at, id)`` descending for a stable
+        newest-first list.
+        """
+        stmt = (
+            select(models.LlmProvider)
+            .where(models.LlmProvider.tenant_id == self._tenant_id)
+            .order_by(models.LlmProvider.created_at.desc(), models.LlmProvider.id.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_llm_provider(r) for r in rows]
+
+    async def update(
+        self,
+        provider_id: UUID,
+        *,
+        name: str | None = None,
+        base_url: str | None = None,
+        enabled: bool | None = None,
+        api_key_secret_ref: UUID | None = None,
+        secret_hint: str | None = None,
+        clear_api_key: bool = False,
+    ) -> LlmProvider | None:
+        """Apply a partial update to one provider (tenant-scoped), or ``None``.
+
+        Only the passed fields change. ``api_key_secret_ref``/``secret_hint`` are
+        applied together on a key rotation; ``clear_api_key=True`` nulls both (the
+        caller having already deleted the vault secret). Admin-gating is enforced by
+        the router; a foreign-tenant id matches nothing here (INV-1).
+        """
+        row = await self._get_row(provider_id)
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if base_url is not None:
+            row.base_url = base_url
+        if enabled is not None:
+            row.enabled = enabled
+        if clear_api_key:
+            row.api_key_secret_ref = None
+            row.secret_hint = None
+        elif api_key_secret_ref is not None:
+            row.api_key_secret_ref = api_key_secret_ref
+            row.secret_hint = secret_hint
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_llm_provider(row)
+
+    async def set_discovery(
+        self,
+        provider_id: UUID,
+        *,
+        status: LlmProviderStatus,
+        discovered_models: list[dict[str, object]],
+        last_error: str | None,
+        last_discovery_at: datetime | None,
+    ) -> LlmProvider | None:
+        """Persist a discovery outcome: status + discovery timestamp + model snapshot.
+
+        On a successful discovery the caller passes ``status=ready`` with the fresh
+        ``last_discovery_at`` + discovered models; on a failure ``status=error`` with
+        a safe ``last_error`` (the previous model snapshot is left in place by passing
+        it back). Tenant-scoped; ``None`` for a foreign id.
+        """
+        row = await self._get_row(provider_id)
+        if row is None:
+            return None
+        row.status = status.value
+        row.last_discovery_at = last_discovery_at
+        row.last_error = last_error
+        row.discovered_models = discovered_models
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_llm_provider(row)
+
+    async def delete(self, provider_id: UUID) -> bool:
+        """Delete a provider by id (tenant-scoped); ``True`` if one was removed.
+
+        Idempotent — ``False`` if no such provider exists in this tenant. A
+        foreign-tenant id matches nothing (INV-1).
+        """
+        row = await self._get_row(provider_id)
         if row is None:
             return False
         await self._session.delete(row)

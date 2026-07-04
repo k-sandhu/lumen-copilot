@@ -33,9 +33,18 @@ import {
   updateToolPolicy,
   clearTenantBranding,
   updateTenantBranding,
+  listLlmProviders,
+  createLlmProvider,
+  updateLlmProvider,
+  deleteLlmProvider,
+  refreshLlmProvider,
 } from '@/api';
 import { currentUserQueryKey } from '@/features/auth';
 import type {
+  LlmProviderUpdate,
+  LlmProviderCreate,
+  LlmProviderList,
+  LlmProvider,
   TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
@@ -200,6 +209,60 @@ export function useClearTenantBranding(): UseMutationResult<void, unknown, void>
     mutationFn: () => clearTenantBranding(),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: currentUserQueryKey });
+    },
+  });
+}
+
+export const llmProvidersQueryKey = ['admin', 'llm-providers'] as const;
+
+export function useLlmProviders(): UseQueryResult<LlmProviderList> {
+  return useQuery<LlmProviderList>({
+    queryKey: llmProvidersQueryKey,
+    queryFn: ({ signal }) => listLlmProviders(signal),
+    staleTime: 15_000,
+  });
+}
+
+export function useCreateLlmProvider(): UseMutationResult<LlmProvider, unknown, LlmProviderCreate> {
+  const qc = useQueryClient();
+  return useMutation<LlmProvider, unknown, LlmProviderCreate>({
+    mutationFn: (body) => createLlmProvider(body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+    },
+  });
+}
+
+export function useUpdateLlmProvider(): UseMutationResult<
+  LlmProvider,
+  unknown,
+  { id: string; body: LlmProviderUpdate }
+> {
+  const qc = useQueryClient();
+  return useMutation<LlmProvider, unknown, { id: string; body: LlmProviderUpdate }>({
+    mutationFn: ({ id, body }) => updateLlmProvider(id, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+    },
+  });
+}
+
+export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, string>({
+    mutationFn: (id) => deleteLlmProvider(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+    },
+  });
+}
+
+export function useRefreshLlmProvider(): UseMutationResult<LlmProvider, unknown, string> {
+  const qc = useQueryClient();
+  return useMutation<LlmProvider, unknown, string>({
+    mutationFn: (id) => refreshLlmProvider(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
     },
   });
 }

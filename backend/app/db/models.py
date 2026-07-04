@@ -777,6 +777,81 @@ class McpServer(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class LlmProvider(TenantScopedMixin, TimestampMixin, Base):
+    """A registered per-tenant LLM provider (foundation PR). Ownership-bearing.
+
+    The persistence half of per-tenant LLM provider registration: a tenant admin
+    registers an OpenAI-compatible provider (name + base URL + API key), the backend
+    discovers its models via ``GET {base_url}/models`` and stores a snapshot + health
+    status. Tenant- and owner-scoped, deny-by-default (INV-1/§2.2): only the
+    registering admin (or another tenant admin) sees/manages it, and a cross-tenant
+    id is invisible. Mirrors :class:`McpServer` throughout (per-tenant registration +
+    a CC-C secret ref + auto-discovery + health status).
+
+    **No column holds the API key** — it lives in the CC-C ``secrets`` vault (#209),
+    and this row keeps only ``api_key_secret_ref`` (the secret's id, SET NULL so
+    removing the secret does not orphan the provider) plus ``secret_hint`` (a masked
+    tail projected from the secret at register/rotate for the UI). ``provider_type`` /
+    ``status`` are ``CheckConstraint``-pinned enum domains (``openai_compatible`` only
+    for now; the enum is small but extensible). ``base_url`` is the OpenAI-compatible
+    API root (SSRF-checked in the service before a row is written, and again on every
+    discovery — the same ``resolve_safe_ip`` guard MCP uses). ``discovered_models`` is
+    the last ``GET /models`` snapshot as portable JSON (a list of
+    ``{"id": str, "label": str | null}``). Tenant-scoped like every table (INV-1);
+    the ``0023`` migration puts it under the RLS backstop.
+
+    This is the model-catalog foundation only: routing chat/embeddings through a
+    registered provider (and surfacing it in the chat model picker) is a follow-up PR.
+    """
+
+    __tablename__ = "llm_providers"
+    __table_args__ = (
+        Index("ix_llm_providers_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_llm_providers_tenant_enabled", "tenant_id", "enabled"),
+        CheckConstraint(
+            "provider_type in ('openai_compatible')",
+            name="ck_llm_providers_provider_type",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'ready', 'error')",
+            name="ck_llm_providers_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The admin who registered it (INV-2). CASCADE — a deprovisioned admin's
+    # providers go with them (live config, not a completed record).
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # → a CC-C secret (#209); NEVER the API key itself. SET NULL so deleting the
+    # vault secret does not cascade-delete the provider row.
+    api_key_secret_ref: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("secrets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A masked tail of the stored API key for the UI (e.g. ``****abcd``); never the
+    # value. NULL when no key is stored (an anonymous provider).
+    secret_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    last_discovery_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The last GET /models snapshot: a list of {"id": str, "label": str | null}.
+    discovered_models: Mapped[list[dict[str, object]]] = mapped_column(
+        _JSON, nullable=False, default=list
+    )
+
+
 class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):
     """A per-tenant admin override of one tool's governance (issue #223).
 

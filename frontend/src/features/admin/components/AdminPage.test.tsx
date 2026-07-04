@@ -178,7 +178,7 @@ describe('AdminPage', () => {
     // surfaces are the Tool governance + Sandbox governance + Branding tabs, not
     // mounted here.
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(8);
+    expect(tabs).toHaveLength(9);
     expect(screen.queryAllByRole('switch')).toHaveLength(0);
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });

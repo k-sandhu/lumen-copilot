@@ -75,6 +75,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "tenant_tool_policy",
     "tenant_sandbox_policy",
     "tenant_autonomy_policy",
+    "llm_providers",
     "run_deliveries",
 }
 
@@ -100,7 +101,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0027_tenant_logo"]
+    assert list(script.get_heads()) == ["0028_llm_providers"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -179,6 +180,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     tenant_logo = script.get_revision("0027_tenant_logo")
     assert tenant_logo is not None
     assert tenant_logo.down_revision == "0026_toolinv_msg_fk_deferrable"
+    llm_providers = script.get_revision("0028_llm_providers")
+    assert llm_providers is not None
+    assert llm_providers.down_revision == "0027_tenant_logo"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(

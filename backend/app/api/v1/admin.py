@@ -36,9 +36,10 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.api.deps import (
+    AuditSinkFactory,
     CurrentTenant,
     CurrentUser,
     DbSession,
@@ -47,8 +48,15 @@ from app.api.deps import (
     extract_request_id,
     require_roles,
 )
-from app.core.errors import ValidationError
-from app.domain.entities import Assistant, AssistantStatus, AutonomyLevel, CertificationState, Role
+from app.core.errors import NotFoundError, ValidationError
+from app.domain.entities import (
+    Assistant,
+    AssistantStatus,
+    AutonomyLevel,
+    CertificationState,
+    LlmProvider,
+    Role,
+)
 from app.services.admin_service import (
     AdminService,
     MemberPage,
@@ -66,6 +74,10 @@ from app.services.assistant_governance_service import (
 # ``current_user`` underneath, so an unauthenticated caller is a 401 (INV-4)
 # before the role check, and a wrong-role caller is a 403.
 from app.services.autonomy_policy_service import AutonomyPolicyService, AutonomyPolicyView
+from app.services.llm_providers_service import (
+    LlmProviderService,
+    build_llm_provider_service,
+)
 from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
 from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
 
@@ -965,3 +977,315 @@ async def clear_tenant_branding(
     )
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class LlmProviderModelResponse(BaseModel):
+    """``#/components/schemas/LlmProviderModel`` — one discovered model."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str
+    label: str | None = None
+
+
+class LlmProviderResponse(BaseModel):
+    """``#/components/schemas/LlmProvider`` — the wire projection of a provider.
+
+    Carries only the masked ``secret_hint`` — **never** the stored API-key value.
+    The ``api_key_secret_ref`` is a server-internal detail and is not exposed.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    name: str
+    provider_type: str
+    base_url: str
+    enabled: bool
+    status: str
+    last_discovery_at: datetime | None = None
+    last_error: str | None = None
+    discovered_models: list[LlmProviderModelResponse]
+    secret_hint: str | None = None
+    owner_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class LlmProviderListResponse(BaseModel):
+    """``#/components/schemas/LlmProviderList`` — the tenant's registered providers."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[LlmProviderResponse]
+
+
+class LlmProviderCreateRequest(BaseModel):
+    """``#/components/schemas/LlmProviderCreate`` — register a provider (write-only key).
+
+    The optional ``api_key`` is write-only: stored envelope-encrypted via CC-C and
+    never returned (the response carries only a masked ``secret_hint``).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str = Field(min_length=1, max_length=200)
+    provider_type: str
+    base_url: str
+    api_key: str | None = Field(default=None, min_length=1)
+
+
+class LlmProviderUpdateRequest(BaseModel):
+    """``#/components/schemas/LlmProviderUpdate`` — any subset of fields; at least one.
+
+    ``api_key`` is a tri-state on the wire: absent = leave the key unchanged, a
+    string = rotate it, ``null`` = clear it. Pydantic collapses "absent" and "explicit
+    null" to ``None``, so ``__pydantic_fields_set__`` distinguishes them (``api_key``
+    in the set + ``None`` ⇒ clear).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = None
+    enabled: bool | None = None
+    api_key: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> LlmProviderUpdateRequest:
+        if not self.__pydantic_fields_set__:
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
+    return LlmProviderResponse(
+        id=provider.id,
+        name=provider.name,
+        provider_type=provider.provider_type,
+        base_url=provider.base_url,
+        enabled=provider.enabled,
+        status=provider.status.value,
+        last_discovery_at=provider.last_discovery_at,
+        last_error=provider.last_error,
+        discovered_models=[
+            LlmProviderModelResponse(
+                id=str(m.get("id", "")),
+                label=(str(m["label"]) if m.get("label") is not None else None),
+            )
+            for m in provider.discovered_models
+        ],
+        secret_hint=provider.secret_hint,
+        owner_id=provider.owner_id,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
+
+
+def _build_llm_provider_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+    request: Request,
+) -> LlmProviderService:
+    """Assemble the per-request LLM-provider service (identity + settings + audit).
+
+    Delegates to ``build_llm_provider_service`` (a ``services/`` factory), which owns
+    the CC-C secrets service (the sole cipher importer — so no ``api/`` module ever
+    touches plaintext). The router stays a thin (de)serialise + one-service call.
+    """
+    return build_llm_provider_service(
+        session,
+        settings=settings,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        roles=principal.roles,
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+@router.get(
+    "/llm-providers",
+    response_model=LlmProviderListResponse,
+    response_model_exclude_none=True,
+)
+async def list_llm_providers(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> LlmProviderListResponse:
+    """The caller's tenant's registered LLM providers + discovered models + status.
+
+    Admin-only via the router gate (INV-5); tenant-scoped via ``current_tenant``
+    (INV-1). The stored API key is never returned — only a masked ``secret_hint``.
+    """
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    providers = await service.list_providers()
+    return LlmProviderListResponse(items=[_to_llm_provider(p) for p in providers])
+
+
+@router.post(
+    "/llm-providers",
+    response_model=LlmProviderResponse,
+    status_code=status.HTTP_201_CREATED,
+    response_model_exclude_none=True,
+)
+async def create_llm_provider(
+    body: LlmProviderCreateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> LlmProviderResponse:
+    """Register an LLM provider, auto-discover its models, and return it (admin only).
+
+    Validates the provider type + base URL (unsupported type / non-https / SSRF-blocked
+    → 422). The optional ``api_key`` is stored envelope-encrypted via CC-C and never
+    returned — the response carries only a masked ``secret_hint``. Discovery runs on
+    create: a reachable provider returns ``status: ready`` with its ``discovered_models``;
+    a bad key/url returns ``status: error`` + ``last_error`` (never a 500). Audited
+    (INV-6). Admin-only via the router gate (INV-5); tenant-scoped (INV-1).
+    """
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    provider = await service.create(
+        name=body.name,
+        provider_type=body.provider_type,
+        base_url=body.base_url,
+        api_key=body.api_key,
+    )
+    await session.commit()
+    return _to_llm_provider(provider)
+
+
+@router.patch(
+    "/llm-providers/{provider_id}",
+    response_model=LlmProviderResponse,
+    response_model_exclude_none=True,
+)
+async def update_llm_provider(
+    provider_id: UUID,
+    body: LlmProviderUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> LlmProviderResponse:
+    """Update a provider (rename, retarget, toggle, rotate/clear key); else 404 / 422.
+
+    ``api_key`` is tri-state: absent = unchanged, a string = rotate, ``null`` = clear.
+    Changing the ``base_url`` re-runs https + SSRF validation (else 422) and, like a
+    key rotation, re-runs model discovery. The key value is never returned — only the
+    updated masked ``secret_hint``. Audited (INV-6). Admin-only (INV-5); tenant-scoped
+    (INV-1) — a foreign-tenant id is 404 (never 403).
+    """
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    clear_api_key = "api_key" in body.__pydantic_fields_set__ and body.api_key is None
+    updated = await service.update(
+        provider_id,
+        name=body.name,
+        base_url=body.base_url,
+        enabled=body.enabled,
+        api_key=body.api_key,
+        clear_api_key=clear_api_key,
+    )
+    if updated is None:
+        raise NotFoundError("LLM provider not found.")
+    await session.commit()
+    return _to_llm_provider(updated)
+
+
+@router.delete("/llm-providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_llm_provider(
+    provider_id: UUID,
+    request: Request,
+    response: Response,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> Response:
+    """Delete a provider + its stored API key; else 404 (admin only; tenant-scoped)."""
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    deleted = await service.delete(provider_id)
+    if not deleted:
+        raise NotFoundError("LLM provider not found.")
+    await session.commit()
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
+@router.post(
+    "/llm-providers/{provider_id}/refresh",
+    response_model=LlmProviderResponse,
+    response_model_exclude_none=True,
+)
+async def refresh_llm_provider(
+    provider_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> LlmProviderResponse:
+    """Re-run model discovery for a provider on demand; persist the outcome. Else 404.
+
+    Both a healthy (``status: ready``) and an unreachable/erroring (``status: error``)
+    result return **200** — the outcome is in ``status`` / ``last_error``, never the
+    HTTP code. The API key is fetched in-process at discovery time and never returned.
+    Audited (INV-6). Admin-only (INV-5); tenant-scoped (INV-1).
+    """
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    provider = await service.refresh(provider_id)
+    if provider is None:
+        raise NotFoundError("LLM provider not found.")
+    await session.commit()
+    return _to_llm_provider(provider)
