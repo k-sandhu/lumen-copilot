@@ -68,8 +68,11 @@ class _Seeded:
         assistant_id: uuid.UUID,
         alice_run: uuid.UUID,
         alice_run_failed: uuid.UUID,
+        alice_run_escalated: uuid.UUID,
         bob_run: uuid.UUID,
+        bob_run_escalated: uuid.UUID,
         carol_run: uuid.UUID,
+        carol_run_escalated: uuid.UUID,
     ) -> None:
         self.tenant_a = tenant_a
         self.alice_id = alice_id
@@ -80,8 +83,11 @@ class _Seeded:
         self.assistant_id = assistant_id
         self.alice_run = alice_run
         self.alice_run_failed = alice_run_failed
+        self.alice_run_escalated = alice_run_escalated
         self.bob_run = bob_run
+        self.bob_run_escalated = bob_run_escalated
         self.carol_run = carol_run
+        self.carol_run_escalated = carol_run_escalated
 
 
 @pytest_asyncio.fixture
@@ -155,21 +161,52 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 alice_failed.id, status=RunStatus.FAILED, finished_at=alice_failed.created_at,
                 error=RunError(code="model_unavailable", message="The model was unavailable."),
             )
-            # Bob: a run in the same tenant, owned by a different user.
+            # Alice: an ESCALATED run awaiting a human decision (resume/cancel/reroute).
+            alice_escalated = await runs_a.create(
+                owner_id=alice.id, assistant_id=assistant.id,
+                assistant_version_id=version.id, trigger=RunTrigger.SCHEDULE,
+            )
+            await runs_a.mark_terminal(
+                alice_escalated.id, status=RunStatus.ESCALATED,
+                finished_at=alice_escalated.created_at,
+                error=RunError(code="restricted_data", message="A human must decide."),
+            )
+            # Bob: a run in the same tenant, owned by a different user; + an escalated one.
             bob_run = await runs_a.create(
                 owner_id=bob.id, assistant_id=assistant.id,
                 assistant_version_id=version.id, trigger=RunTrigger.MANUAL,
             )
-            # Carol: a run in another tenant.
-            carol_run = await RunRepository(seed, tb.id).create(
+            bob_escalated = await runs_a.create(
+                owner_id=bob.id, assistant_id=assistant.id,
+                assistant_version_id=version.id, trigger=RunTrigger.MANUAL,
+            )
+            await runs_a.mark_terminal(
+                bob_escalated.id, status=RunStatus.ESCALATED,
+                finished_at=bob_escalated.created_at,
+                error=RunError(code="ambiguous", message="A human must decide."),
+            )
+            # Carol: a run in another tenant; + an escalated one.
+            runs_b = RunRepository(seed, tb.id)
+            carol_run = await runs_b.create(
                 owner_id=carol.id, assistant_id=b_assistant.id,
                 assistant_version_id=None, trigger=RunTrigger.MANUAL,
+            )
+            carol_escalated = await runs_b.create(
+                owner_id=carol.id, assistant_id=b_assistant.id,
+                assistant_version_id=None, trigger=RunTrigger.MANUAL,
+            )
+            await runs_b.mark_terminal(
+                carol_escalated.id, status=RunStatus.ESCALATED,
+                finished_at=carol_escalated.created_at,
+                error=RunError(code="tool_failed", message="A human must decide."),
             )
             await seed.commit()
             factory.lumen_seeded = _Seeded(  # type: ignore[attr-defined]
                 tenant_a=ta.id, alice_id=alice.id, bob_id=bob.id, assistant_id=assistant.id,
                 alice_run=alice_run.id, alice_run_failed=alice_failed.id,
-                bob_run=bob_run.id, carol_run=carol_run.id,
+                alice_run_escalated=alice_escalated.id,
+                bob_run=bob_run.id, bob_run_escalated=bob_escalated.id,
+                carol_run=carol_run.id, carol_run_escalated=carol_escalated.id,
             )
         yield factory
     finally:
@@ -202,6 +239,8 @@ def app(
             return None
 
     monkeypatch.setattr(main_module, "get_object_store", lambda: _NoopStore())
+    # Stub the resume/reroute Celery re-enqueue so no broker is touched.
+    monkeypatch.setattr("app.api.v1.runs.enqueue_run", lambda run_id, tenant_id: None)
     yield application
     application.dependency_overrides.clear()
 
@@ -259,7 +298,11 @@ async def test_list_runs_filters_by_assistant(client: AsyncClient, seeded: _Seed
     )
     assert resp.status_code == 200
     ids = {item["id"] for item in resp.json()["items"]}
-    assert ids == {str(seeded.alice_run), str(seeded.alice_run_failed)}
+    assert ids == {
+        str(seeded.alice_run),
+        str(seeded.alice_run_failed),
+        str(seeded.alice_run_escalated),
+    }
 
 
 # --- GET /runs/{runId} (detail) ---------------------------------------------
@@ -324,3 +367,112 @@ async def test_runs_require_a_token(client: AsyncClient, seeded: _Seeded) -> Non
 async def test_runs_reject_a_bad_token(client: AsyncClient, seeded: _Seeded) -> None:
     resp = await client.get("/api/v1/runs", headers=_auth("not-a-real-token"))
     assert resp.status_code == 401
+
+
+# --- Escalation handoff: resume / cancel / reroute (E7-5, #239) -------------
+
+
+async def test_owner_resumes_escalated_run(client: AsyncClient, seeded: _Seeded) -> None:
+    """AC-2: the owner resumes an escalated run — 202 + the run back to ``queued``."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_escalated}/resume", headers=_auth(token)
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert "error" not in body  # the escalation reason is cleared
+
+
+async def test_owner_cancels_escalated_run(client: AsyncClient, seeded: _Seeded) -> None:
+    """AC-2: the owner cancels an escalated run — 200 + a permanent terminal + reason."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_escalated}/cancel", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "cancelled"
+
+
+async def test_owner_reroutes_escalated_run(client: AsyncClient, seeded: _Seeded) -> None:
+    """AC-2: the owner reroutes an escalated run to another owner — 202 + reassigned+queued."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_escalated}/reroute",
+        headers=_auth(token),
+        json={"to_owner_id": str(seeded.bob_id)},
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "queued"
+    # The run is now bob's — alice no longer sees it (INV-2 ownership moved).
+    assert (
+        await client.get(f"/api/v1/runs/{seeded.alice_run_escalated}", headers=_auth(token))
+    ).status_code == 404
+
+
+# --- Negatives: 409 not-escalated, 404 non-owner/cross-tenant, 422 bad target ---
+
+
+async def test_resume_non_escalated_run_is_409(client: AsyncClient, seeded: _Seeded) -> None:
+    """INV-8: resuming a run that is not escalated is an illegal transition → 409."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_failed}/resume", headers=_auth(token)
+    )
+    assert resp.status_code == 409, resp.text
+
+
+async def test_resume_other_owner_escalated_run_is_404(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-2: alice cannot act on bob's escalated run (404, existence non-disclosure)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.bob_run_escalated}/resume", headers=_auth(token)
+    )
+    assert resp.status_code == 404
+
+
+async def test_cancel_cross_tenant_escalated_run_is_404(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-1: alice cannot cancel carol's escalated run in another tenant (404)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.carol_run_escalated}/cancel", headers=_auth(token)
+    )
+    assert resp.status_code == 404
+
+
+async def test_reroute_to_current_owner_is_422(client: AsyncClient, seeded: _Seeded) -> None:
+    """INV-8: a no-op reroute (to the current owner) is malformed → 422."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_escalated}/reroute",
+        headers=_auth(token),
+        json={"to_owner_id": str(seeded.alice_id)},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_reroute_to_unknown_target_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+    """INV-1: rerouting to a user not in the tenant is 404 (existence non-disclosure)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        f"/api/v1/runs/{seeded.alice_run_escalated}/reroute",
+        headers=_auth(token),
+        json={"to_owner_id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404
+
+
+async def test_escalation_actions_require_a_token(client: AsyncClient, seeded: _Seeded) -> None:
+    """INV-4: no bearer token → 401 on every escalation action route."""
+    rid = seeded.alice_run_escalated
+    assert (await client.post(f"/api/v1/runs/{rid}/resume")).status_code == 401
+    assert (await client.post(f"/api/v1/runs/{rid}/cancel")).status_code == 401
+    assert (
+        await client.post(f"/api/v1/runs/{rid}/reroute", json={"to_owner_id": str(seeded.bob_id)})
+    ).status_code == 401

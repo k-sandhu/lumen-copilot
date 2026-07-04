@@ -56,6 +56,7 @@ export { listSources, createSource, syncSource, deleteSource } from './sources';
 export {
   listAssistants,
   createAssistant,
+  draftAssistant,
   getAssistant,
   updateAssistant,
   deleteAssistant,
@@ -76,7 +77,7 @@ export {
   runScheduleNow,
 } from './schedules';
 export type { SchedulePageQuery } from './schedules';
-export { listRuns, getRun } from './runs';
+export { listRuns, getRun, resumeRun, cancelRun, rerouteRun } from './runs';
 export type { RunPageQuery } from './runs';
 export { getCodeRun } from './codeRuns';
 export {

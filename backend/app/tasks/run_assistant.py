@@ -26,7 +26,7 @@ import structlog
 
 from app.core.config import get_settings
 from app.domain.entities import RunStatus
-from app.services.runs_service import execute_run
+from app.services.runs_service import TransientRunRetry, execute_run
 from app.tasks.celery_app import celery_app
 from app.tasks.runner import run_task
 
@@ -35,22 +35,42 @@ from app.tasks.runner import run_task
     name="lumen.run_assistant",
     bind=True,
     acks_late=True,
-    max_retries=0,
+    max_retries=None,  # the effective cap is settings.run_max_retries (ADR-0015 §5)
 )
 def run_assistant(self: object, run_id: str, tenant_id: str) -> dict[str, object]:
     """Celery entrypoint: execute one headless run (the sync wrapper).
 
     Drives :func:`execute_run` on a fresh event loop via
-    :func:`app.tasks.runner.run_task`. The core is crash-safe (it writes a terminal
-    status on any failure), so the task does not retry: a run's failure is a
-    **queryable terminal** (``status=failed`` with a typed error), not a redelivered
-    message (ADR-0015 §5 — the dead-letter is a row). Returns the terminal status.
+    :func:`app.tasks.runner.run_task`, threading the 0-based ``self.request.retries``
+    as the attempt count so the core's transient-retry budget is respected. The core
+    is crash-safe (it writes a terminal status on any failure), so most outcomes are a
+    **queryable terminal** (``status=failed``/``escalated`` with a typed error), not a
+    redelivered message (ADR-0015 §5 — the dead-letter is a row).
+
+    The one exception is a **transient** dependency fault with retry budget left: the
+    core leaves the run ``queued`` and raises :class:`TransientRunRetry`, which this
+    wrapper turns into ``self.retry`` with the core-computed exponential backoff
+    (AC-3 — retry before escalating, never a silent drop). Returns the terminal status.
     """
     log = structlog.get_logger(__name__)
     rid = UUID(run_id)
     tid = UUID(tenant_id)
+    request = getattr(self, "request", None)
+    attempt: int = getattr(request, "retries", 0) or 0
     try:
-        status = run_task(execute_run(rid, tid, settings=get_settings()))
+        status = run_task(execute_run(rid, tid, settings=get_settings(), attempt=attempt))
+    except TransientRunRetry as retry:
+        # The run was reset to ``queued`` by the core; reschedule after the backoff.
+        log.warning(
+            "run_assistant.retry",
+            run_id=run_id,
+            attempt=retry.attempt,
+            error_code=retry.error.code,
+            backoff_seconds=retry.backoff_seconds,
+        )
+        raise self.retry(  # type: ignore[attr-defined]
+            exc=retry, countdown=retry.backoff_seconds
+        ) from retry
     except Exception as exc:  # noqa: BLE001 — the message is acknowledged; the run row is terminal
         # ``execute_run`` writes a terminal itself; if the wrapper still sees an
         # exception (e.g. loop setup), log the type only and report failed rather

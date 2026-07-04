@@ -111,6 +111,14 @@ class AuditAction(str, enum.Enum):
     # returns a debug trace. Auditing it (INV-6) keeps automation-adjacent activity
     # provable — a test run is owner-gated and audited even though it mutates nothing.
     ASSISTANT_TESTED = "assistant.tested"
+    # Conversational agent builder (E6-1, issue #213). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Drafting a config from a plain-language description creates NOTHING
+    # (nothing is persisted until the user saves via ``assistant.created``); it is
+    # still a consequential read of the caller's collections/sources + a model call,
+    # so the *intent* to draft is audited (INV-6) — who asked the builder to draft
+    # what, and how many clarifications/omissions it surfaced.
+    ASSISTANT_DRAFTED = "assistant.drafted"
     # Headless agent runs (ADR-0015 §4, issue #235). Additive to the §2.4 taxonomy
     # — deny-by-default is preserved (the set only grows; no action is relaxed).
     # Every run is bracketed by ``run.started``/``run.finished`` (INV-6) so the
@@ -120,6 +128,19 @@ class AuditAction(str, enum.Enum):
     # events the shared runtime already emits still fire inside a run.
     RUN_STARTED = "run.started"
     RUN_FINISHED = "run.finished"
+    # Run failure & escalation handling (ADR-0015 §6, E7-5, issue #239). Additive to
+    # the §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action
+    # is relaxed). When a run cannot decide *safely* (ambiguity / missing input /
+    # restricted data / an unrecoverable tool failure / an approval with no approver)
+    # it ends ``escalated`` and the receiving human resumes / cancels / reroutes it —
+    # each of those handoff actions is audited (INV-6) so an escalated run is never
+    # silently dropped, and the trail shows who acted on the escalation. The escalate
+    # event itself rides ``run.finished`` (the terminal is ``escalated``); these record
+    # the *human's* decision afterward.
+    RUN_ESCALATED = "run.escalated"
+    RUN_RESUMED = "run.resumed"
+    RUN_CANCELLED = "run.cancelled"
+    RUN_REROUTED = "run.rerouted"
     # Dynamic per-tenant scheduler (ADR-0015 §6, issue #236). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). A schedule is an owner-gated T1 config (spec 0004 §2.5 — reversible
