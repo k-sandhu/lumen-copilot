@@ -7,9 +7,10 @@ Contract-first: shapes match ``contracts/openapi.yaml`` (``ChatModelInfo`` /
 business logic or model list hardcoded here.
 
 The endpoint is bearer-protected: it depends on ``current_user`` (#19), so a
-missing/invalid token is a 401 (INV-4) before any registry is read. The picker
-is tenant-agnostic curated config (the same models for every tenant), so no
-tenant scoping is needed beyond authentication.
+missing/invalid token is a 401 (INV-4) before any registry is read. The curated
+config registry is the same for every tenant, but a tenant's ENABLED per-tenant
+LLM providers surface their discovered models here too (PR 2a) — so the route is
+now tenant-scoped (``current_tenant`` + a DB session) to read those providers.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.api.deps import CurrentUser, SettingsDep
+from app.api.deps import CurrentTenant, CurrentUser, DbSession, SettingsDep
 from app.domain.models import ChatModel, ModelTier
 from app.services.models_service import ChatModelService
 
@@ -63,14 +64,20 @@ def _to_wire(model: ChatModel) -> ChatModelInfo:
 # --- Routes -----------------------------------------------------------------
 
 
-@router.get("/models", response_model=ModelList)
-async def list_models(_principal: CurrentUser, settings: SettingsDep) -> ModelList:
-    """The curated chat-model registry for the picker (AC-1).
+@router.get("/models", response_model=ModelList, response_model_exclude_none=True)
+async def list_models(
+    _principal: CurrentUser,
+    settings: SettingsDep,
+    session: DbSession,
+    tenant_id: CurrentTenant,
+) -> ModelList:
+    """The curated registry PLUS the tenant's enabled provider models (AC-1 / PR 2a).
 
-    Grouped by tier (frontier/fast/oss) in configured order with exactly one
-    ``is_default`` — guaranteed by the settings validator, not by the router.
-    Requires a valid bearer token (``current_user``); unauthenticated → 401
-    (INV-4 / AC-4).
+    Config models come first (grouped by tier in configured order with exactly one
+    ``is_default`` — guaranteed by the settings validator, not the router); then
+    each ENABLED per-tenant LLM provider's discovered models, mapped to namespaced
+    ids the chat picker can select and the send path routes on. Requires a valid
+    bearer token (``current_user``); unauthenticated → 401 (INV-4 / AC-4).
     """
-    service = ChatModelService(settings)
-    return ModelList(items=[_to_wire(m) for m in service.list_models()])
+    service = ChatModelService(settings, session=session, tenant_id=tenant_id)
+    return ModelList(items=[_to_wire(m) for m in await service.list_all_models()])

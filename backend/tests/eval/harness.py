@@ -169,7 +169,15 @@ class _GroundedGateway:
         self._refusal = refusal_text
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         # The question is the last user message; the tool results (if any) are the

@@ -199,6 +199,83 @@ async def test_chat_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatch
     assert result.model == "openrouter/anthropic/claude-3.5-sonnet"
 
 
+async def test_chat_api_key_and_base_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR 2a: an explicit api_key/api_base OVERRIDE the process defaults in the
+    # litellm call (the seam a per-tenant provider routes through). They are never
+    # stored on the gateway — passed per call.
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response("ok")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    await gw.chat(
+        [ChatMessage(role=Role.USER, content="hi")],
+        model="openai/gpt-4o",
+        api_key="sk-provider-key",
+        api_base="https://provider.example.com/v1",
+    )
+
+    assert captured["api_key"] == "sk-provider-key"  # overrides sk-test-key
+    assert captured["api_base"] == "https://provider.example.com/v1"
+    assert captured["model"] == "openai/gpt-4o"
+
+
+async def test_chat_without_override_uses_default_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PR 2a: omitting api_key/api_base is exactly today's behaviour — the default
+    # OPENROUTER_API_KEY, and no api_base on the chat (native) route.
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response("ok")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+
+    assert captured["api_key"] == "sk-test-key"
+    assert "api_base" not in captured
+
+
+async def test_stream_tools_api_key_and_base_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The chat runtime routes provider completions through stream_tools; assert the
+    # override reaches the litellm call there too.
+    from app.domain.llm import ToolSpec
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.update(kwargs)
+        return _FakeStream([None])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+    events = [
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="hi")],
+            tools=[spec],
+            model="openai/gpt-4o",
+            api_key="sk-provider-key",
+            api_base="https://provider.example.com/v1",
+        )
+    ]
+
+    assert events  # a terminal event was produced
+    assert captured["model"] == "openai/gpt-4o"
+    assert captured["api_key"] == "sk-provider-key"
+    assert captured["api_base"] == "https://provider.example.com/v1"
+
+
 async def test_chat_usage_absent_yields_zeroed_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_acompletion(**kwargs: Any) -> _Response:
         return _Response("no usage", usage=None)

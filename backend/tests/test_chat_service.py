@@ -22,13 +22,15 @@ from app.core.errors import ValidationError
 from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
+    LlmProviderRepository,
     MessageRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import MessageRole, Role
+from app.domain.entities import LlmProviderStatus, MessageRole, Role
 from app.realtime.backplane import InMemoryBackplane
 from app.services.chat_service import ChatService
+from app.services.provider_models import make_provider_model_id
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -121,6 +123,125 @@ async def test_create_session_unknown_model_is_422(
         svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
         with pytest.raises(ValidationError):
             await svc.create_session(title="x", model="totally/unknown-model")
+
+
+# --- per-tenant provider model allow-list (PR 2a) ---------------------------
+
+
+async def _seed_provider(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    models: list[dict[str, object]],
+    enabled: bool = True,
+) -> uuid.UUID:
+    """Seed one READY llm_providers row with a discovered-model snapshot."""
+    repo = LlmProviderRepository(session, tenant_id)
+    provider = await repo.create(
+        owner_id=owner_id,
+        name="Prov",
+        provider_type="openai_compatible",
+        base_url="https://prov.example.com/v1",
+        api_key_secret_ref=None,
+        secret_hint=None,
+    )
+    await repo.set_discovery(
+        provider.id,
+        status=LlmProviderStatus.READY,
+        discovered_models=models,
+        last_error=None,
+        last_discovery_at=None,
+    )
+    if not enabled:
+        await repo.update(provider.id, enabled=False)
+    return provider.id
+
+
+async def test_create_session_accepts_valid_provider_model(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        pid = await _seed_provider(
+            session,
+            tenant_id=world.tenant_a,
+            owner_id=world.alice,
+            models=[{"id": "openai/gpt-4o", "label": "GPT-4o"}],
+        )
+        await session.commit()
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        model_id = make_provider_model_id(pid, "openai/gpt-4o")
+        view = await svc.create_session(title="x", model=model_id)
+        await session.commit()
+    # The namespaced id is a valid model: the session persists it verbatim.
+    assert view.session.model == model_id
+
+
+async def test_create_session_disabled_provider_model_is_422(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        pid = await _seed_provider(
+            session,
+            tenant_id=world.tenant_a,
+            owner_id=world.alice,
+            models=[{"id": "openai/gpt-4o", "label": "GPT-4o"}],
+            enabled=False,
+        )
+        await session.commit()
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        with pytest.raises(ValidationError):
+            await svc.create_session(title="x", model=make_provider_model_id(pid, "openai/gpt-4o"))
+
+
+async def test_create_session_unknown_raw_model_is_422(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        pid = await _seed_provider(
+            session,
+            tenant_id=world.tenant_a,
+            owner_id=world.alice,
+            models=[{"id": "openai/gpt-4o", "label": "GPT-4o"}],
+        )
+        await session.commit()
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        # The provider is enabled but does not list this raw model → 422.
+        unknown = make_provider_model_id(pid, "openai/not-real")
+        with pytest.raises(ValidationError):
+            await svc.create_session(title="x", model=unknown)
+
+
+async def test_create_session_cross_tenant_provider_model_is_422(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        # A provider registered in tenant B, referenced by a tenant-A caller.
+        pid = await _seed_provider(
+            session,
+            tenant_id=world.tenant_b,
+            owner_id=world.carol,
+            models=[{"id": "openai/gpt-4o", "label": "GPT-4o"}],
+        )
+        await session.commit()
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        with pytest.raises(ValidationError):
+            await svc.create_session(title="x", model=make_provider_model_id(pid, "openai/gpt-4o"))
+
+
+async def test_create_session_malformed_provider_id_is_422(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        # A ``provider:`` prefix with a non-UUID id is unknown, not a crash.
+        with pytest.raises(ValidationError):
+            await svc.create_session(title="x", model="provider:not-a-uuid:openai/gpt-4o")
 
 
 # --- ownership / tenancy ----------------------------------------------------

@@ -85,6 +85,8 @@ class _ScriptedGateway:
         tools: object,
         model: object = None,
         tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         if tool_choice == "none":
@@ -103,7 +105,14 @@ class _ScriptedGateway:
 
 class _BoomGateway:
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator

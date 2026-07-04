@@ -44,6 +44,7 @@ from app.db.repositories import (
     ChatSessionRepository,
     CitationRepository,
     CitationView,
+    LlmProviderRepository,
     MessageRepository,
     UserPreferenceRepository,
 )
@@ -51,6 +52,7 @@ from app.domain.entities import AssistantStatus, ChatSession, Message, MessageRo
 from app.realtime.backplane import Backplane, StreamOwner
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.models_service import is_allowed_model
+from app.services.provider_models import is_allowed_provider_model, is_provider_model_id
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
@@ -162,6 +164,10 @@ class ChatService:
         self._prefs = UserPreferenceRepository(session, tenant_id)
         self._assistants = AssistantRepository(session, tenant_id)
         self._versions = AssistantVersionRepository(session, tenant_id)
+        # The tenant's LLM providers — the DB half of the model allow-list: a
+        # ``provider:`` model id is valid only if it resolves to an enabled provider
+        # in this tenant with the raw id in its discovered snapshot (PR 2a, INV-1).
+        self._providers = LlmProviderRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
@@ -176,15 +182,29 @@ class ChatService:
         # braces for the type-checker.
         return self._settings.chat_model_registry[0].id
 
-    def _resolve_model(self, requested: str | None) -> str:
+    async def _is_allowed(self, model_id: str) -> bool:
+        """Whether ``model_id`` is a config OR a valid tenant provider model (PR 2a).
+
+        A ``provider:`` id is checked against the tenant's enabled providers + their
+        discovered snapshot (unknown / disabled / cross-tenant → False); any other
+        id falls back to the pure config allow-list — so a built-in model still
+        validates without a DB hit.
+        """
+        if is_provider_model_id(model_id):
+            return await is_allowed_provider_model(model_id, self._providers)
+        return is_allowed_model(model_id, self._settings)
+
+    async def _resolve_model(self, requested: str | None) -> str:
         """Validate the requested model against the allow-list, or use the default.
 
         ``None`` ⇒ the configured server default. A non-empty unknown id is
         rejected (422, INV-8) before any session is created or message persisted.
+        A ``provider:`` id is validated against the tenant's enabled providers
+        (PR 2a) so a discovered provider model is selectable.
         """
         if requested is None:
             return self._default_model()
-        if not is_allowed_model(requested, self._settings):
+        if not await self._is_allowed(requested):
             raise ValidationError(f"Unknown model {requested!r}.", code="unknown_model")
         return requested
 
@@ -200,7 +220,7 @@ class ChatService:
         if (
             prefs is not None
             and prefs.default_model is not None
-            and is_allowed_model(prefs.default_model, self._settings)
+            and await self._is_allowed(prefs.default_model)
         ):
             return prefs.default_model
         return self._default_model()
@@ -236,7 +256,7 @@ class ChatService:
             resolved = (
                 await self._resolved_default_model()
                 if model is None
-                else self._resolve_model(model)
+                else await self._resolve_model(model)
             )
             session = await self._sessions.create(
                 owner_id=self._owner_id, model=resolved, title=title or ""
@@ -262,14 +282,14 @@ class ChatService:
         # Model precedence: an explicit request model wins; else the assistant's
         # frozen model default; else the caller's / server default (fail-closed).
         if model is not None:
-            resolved = self._resolve_model(model)
+            resolved = await self._resolve_model(model)
         else:
             frozen_model = head.config.get("model")
             resolved = (
                 frozen_model
                 if isinstance(frozen_model, str)
                 and frozen_model
-                and is_allowed_model(frozen_model, self._settings)
+                and await self._is_allowed(frozen_model)
                 else await self._resolved_default_model()
             )
         session = await self._sessions.create(
@@ -315,7 +335,7 @@ class ChatService:
         existing = await self._sessions.get(session_id)
         if existing is None or not self._owns(existing):
             return None
-        resolved_model = self._resolve_model(model) if model is not None else None
+        resolved_model = await self._resolve_model(model) if model is not None else None
         updated = await self._sessions.update(session_id, title=title, model=resolved_model)
         if updated is None:  # pragma: no cover — visibility already established
             return None
@@ -382,7 +402,7 @@ class ChatService:
             return None
         # Per-turn override validated against the allow-list; else the session's
         # default (itself a validated allow-list id at create/update time).
-        resolved_model = self._resolve_model(model) if model is not None else session.model
+        resolved_model = await self._resolve_model(model) if model is not None else session.model
         # If the session is pinned to an assistant version, assemble its run config
         # (ADR-0011 §2): instructions → system prompt, tool_allowlist → allowed set,
         # knowledge_scope → the narrowing retrieval filter. Load the exact pinned

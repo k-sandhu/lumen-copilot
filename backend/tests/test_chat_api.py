@@ -37,21 +37,26 @@ from starlette.websockets import WebSocketDisconnect
 import app.api.v1.chat as chat_module
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.repositories import (
+    AuditEventRepository,
     ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
+    LlmProviderRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import Role
+from app.domain.entities import LlmProviderStatus, Role, SecretKind
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.main import _drain_answer_tasks, create_app, lifespan
 from app.realtime.backplane import InMemoryBackplane, StreamOwner
+from app.services.audit import AuditSink
+from app.services.provider_models import make_provider_model_id
+from app.services.secrets_service import build_secrets_service
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -90,7 +95,14 @@ class _ScriptedGateway:
         self._chunk_id = passage_chunk_id
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
     ) -> AsyncIterator[StreamEvent]:
         # Turn shape is decided by whether the transcript already has a tool turn:
         # a real gateway streams; here we infer the turn from message count.
@@ -106,6 +118,32 @@ class _ScriptedGateway:
         else:
             yield StreamEvent(text="The 2024 standard deduction is $14,600.")
             yield StreamEvent(finish_reason="stop")
+
+
+class _CapturingGateway:
+    """A gateway that records the credential kwargs of each ``stream_tools`` call.
+
+    Answers in a single tool-free turn (so the runtime loop makes exactly one
+    gateway call) and captures ``(model, api_key, api_base)`` — the routing seam
+    PR 2a threads down. ``calls[0]`` is the first (and only) turn's kwargs.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls.append({"model": model, "api_key": api_key, "api_base": api_base})
+        yield StreamEvent(text="Routed answer.")
+        yield StreamEvent(finish_reason="stop")
 
 
 class _FakeRetrieval:
@@ -680,7 +718,14 @@ class _BlockingGateway:
         self.entered = asyncio.Event()
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.entered.set()
         await asyncio.Event().wait()  # blocks forever unless cancelled
@@ -815,6 +860,204 @@ def test_send_tracks_and_self_empties_answer_task(app: FastAPI, seeded: _Seeded)
                 break
             time.sleep(0.02)
         assert app.state.answer_tasks == set()
+
+
+# --- Provider chat routing (PR 2a) -----------------------------------------
+
+
+async def _seed_enabled_provider(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    base_url: str,
+    raw_model_id: str,
+    api_key: str,
+) -> uuid.UUID:
+    """Seed an ENABLED provider (a real vault secret for its key) + a discovered model.
+
+    Stores the API key via the real CC-C secrets vault (the dev cipher over SQLite),
+    attaches the ref to a READY llm_providers row with ``raw_model_id`` discovered.
+    Returns the provider id, so the test can build the namespaced model id and assert
+    the resolver decrypts the SAME key.
+    """
+    async with sessionmaker() as session:
+        audit = AuditSink(AuditEventRepository(session, tenant_id))
+        secrets = build_secrets_service(
+            session,
+            settings=get_settings(),
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            roles=(Role.ADMIN,),
+            audit=audit,
+            request_id="seed",
+            source_ip="127.0.0.1",
+        )
+        ref = await secrets.store_secret(
+            name="llm-provider-key:seed", kind=SecretKind.OTHER, plaintext=api_key
+        )
+        repo = LlmProviderRepository(session, tenant_id)
+        provider = await repo.create(
+            owner_id=owner_id,
+            name="Acme OpenAI",
+            provider_type="openai_compatible",
+            base_url=base_url,
+            api_key_secret_ref=ref.id,
+            secret_hint=ref.hint,
+        )
+        await repo.set_discovery(
+            provider.id,
+            status=LlmProviderStatus.READY,
+            discovered_models=[{"id": raw_model_id, "label": "GPT-4o"}],
+            last_error=None,
+            last_discovery_at=None,
+        )
+        await session.commit()
+        return provider.id
+
+
+async def _drain_answer_task(app: FastAPI) -> None:
+    """Await the in-flight answer producer(s) so the gateway has been called."""
+    tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+    if tasks:
+        await asyncio.gather(*list(tasks), return_exceptions=True)
+
+
+async def test_send_with_provider_model_routes_through_provider(
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A ``provider:{id}:{raw}`` model id must reach the gateway with the RAW model id
+    # + the provider's base_url as api_base + its DECRYPTED key as api_key (the real
+    # resolver loads the provider + reads the CC-C vault). Never the namespaced id.
+    base_url = "https://provider-a.example.com/v1"
+    raw_model = "openai/gpt-4o"
+    api_key = "sk-provider-secret-value-abcdef"
+    pid = await _seed_enabled_provider(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_id=seeded.alice_id,
+        base_url=base_url,
+        raw_model_id=raw_model,
+        api_key=api_key,
+    )
+    gateway = _CapturingGateway()
+    monkeypatch.setattr(chat_module, "get_llm_gateway", lambda: gateway)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        token = await _login(client, seeded.alice_email)
+        model_id = make_provider_model_id(pid, raw_model)
+        sid = (
+            await client.post(
+                "/api/v1/chat/sessions",
+                headers=_auth(token),
+                json={"title": "s", "model": model_id},
+            )
+        ).json()["id"]
+        sent = await client.post(
+            f"/api/v1/chat/sessions/{sid}/messages", headers=_auth(token), json={"content": "hi"}
+        )
+        assert sent.status_code == 202, sent.text
+        await _drain_answer_task(app)
+
+    assert gateway.calls, "the gateway was never called"
+    first = gateway.calls[0]
+    assert first["model"] == raw_model  # RAW id, not the namespaced public id
+    assert first["api_key"] == api_key  # the decrypted provider key
+    assert first["api_base"] == base_url
+
+
+async def test_send_with_config_model_uses_default_credentials(
+    app: FastAPI,
+    seeded: _Seeded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A plain config model id routes unchanged: the gateway gets the config id and NO
+    # api_key/api_base override (None ⇒ the gateway's default OpenRouter credentials).
+    gateway = _CapturingGateway()
+    monkeypatch.setattr(chat_module, "get_llm_gateway", lambda: gateway)
+    config_model = next(m.id for m in get_settings().chat_model_registry if m.is_default)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        token = await _login(client, seeded.alice_email)
+        sid = (
+            await client.post(
+                "/api/v1/chat/sessions",
+                headers=_auth(token),
+                json={"title": "s", "model": config_model},
+            )
+        ).json()["id"]
+        sent = await client.post(
+            f"/api/v1/chat/sessions/{sid}/messages", headers=_auth(token), json={"content": "hi"}
+        )
+        assert sent.status_code == 202, sent.text
+        await _drain_answer_task(app)
+
+    assert gateway.calls, "the gateway was never called"
+    first = gateway.calls[0]
+    assert first["model"] == config_model
+    assert first["api_key"] is None
+    assert first["api_base"] is None
+
+
+async def test_send_with_disabled_provider_model_is_422(
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    # A session cannot even be created with a DISABLED provider's model id → 422
+    # at the send/create path (INV-8), before any answer runs.
+    pid = await _seed_enabled_provider(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_id=seeded.alice_id,
+        base_url="https://provider-a.example.com/v1",
+        raw_model_id="openai/gpt-4o",
+        api_key="sk-x",
+    )
+    async with sessionmaker() as session:
+        await LlmProviderRepository(session, seeded.tenant_a).update(pid, enabled=False)
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        token = await _login(client, seeded.alice_email)
+        resp = await client.post(
+            "/api/v1/chat/sessions",
+            headers=_auth(token),
+            json={"model": make_provider_model_id(pid, "openai/gpt-4o")},
+        )
+        assert resp.status_code == 422
+
+
+async def test_send_with_cross_tenant_provider_model_is_422(
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    # Carol's (tenant B) provider id used by alice (tenant A) → unknown model → 422
+    # (INV-1: alice's tenant-scoped repository never sees it).
+    pid = await _seed_enabled_provider(
+        sessionmaker,
+        tenant_id=seeded.tenant_b,
+        owner_id=seeded.carol_id,
+        base_url="https://provider-b.example.com/v1",
+        raw_model_id="openai/gpt-4o",
+        api_key="sk-y",
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        token = await _login(client, seeded.alice_email)
+        resp = await client.post(
+            "/api/v1/chat/sessions",
+            headers=_auth(token),
+            json={"model": make_provider_model_id(pid, "openai/gpt-4o")},
+        )
+        assert resp.status_code == 422
 
 
 # Minimal valid base env so Settings constructs; the test overrides one field.

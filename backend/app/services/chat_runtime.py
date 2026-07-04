@@ -66,6 +66,7 @@ from app.services.assistant_runtime import AssistantRunConfig
 from app.services.audit import AuditSink
 from app.services.autonomy_policy_service import AutonomyPolicyReader
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
+from app.services.provider_models import ModelRoute, ModelRouteResolver
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
@@ -180,6 +181,7 @@ class ChatRuntime:
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
         mcp_tools_factory: McpToolsFactory | None = None,
+        model_route_resolver: ModelRouteResolver | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -210,6 +212,14 @@ class ChatRuntime:
         # ``mcp:*`` call is an ordinary ``tool_not_found``. The API wires the live
         # resolver (per-tenant, per-owner, SSRF-guarded via mcp_servers_service).
         self._mcp_tools_factory = mcp_tools_factory
+        # The PR-2a per-tenant model-route resolver. Called ONCE per answer (below)
+        # to resolve the chosen model id to its gateway route: for a ``provider:`` id
+        # it loads the tenant's provider, decrypts the key ONCE, and returns the raw
+        # model id + that provider's api_key/base_url; for a config id it is a plain
+        # passthrough. ``None`` (the default / offline case) ⇒ the model id is routed
+        # as-is with default credentials (a config-only runtime). The API wires the
+        # live resolver (per-tenant, holding the CC-C secrets vault).
+        self._model_route_resolver = model_route_resolver
 
     async def run(
         self,
@@ -352,6 +362,13 @@ class ChatRuntime:
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
+        # Resolve the chosen model's gateway route ONCE for the whole answer (PR 2a):
+        # for a per-tenant ``provider:`` id this loads the provider + decrypts its key
+        # a single time and yields the raw model id + api_key/base_url; for a config
+        # id it is a plain passthrough with default credentials. The SAME resolved
+        # route (and decrypted key) is reused across every gateway call of the turn
+        # loop below — the key is never re-decrypted per call, nor logged.
+        route = await self._resolve_model_route(session, model)
         # The per-run allow-list (issue #207 §2): for ad-hoc chat this is the
         # default read-only retrieval tools; a session started from an assistant
         # (E1) narrows/selects it from the registry (ADR-0011 §2). The governed
@@ -484,7 +501,7 @@ class ChatRuntime:
         budget_exhausted = True
         for _turn in range(max_tool_turns):
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
-                messages=messages, model=model, usage=usage, tools=advertised
+                messages=messages, route=route, usage=usage, tools=advertised
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
@@ -533,7 +550,7 @@ class ChatRuntime:
             # narration from the exhausted tool turns was never emitted, so the
             # live stream and the stored message agree.
             _, finish_reason, turn_text = await self._stream_one_turn(
-                messages=messages, model=model, usage=usage, tools=advertised, tool_choice="none"
+                messages=messages, route=route, usage=usage, tools=advertised, tool_choice="none"
             )
             await self._publish_text(state, turn_text)
             answer_chunks = turn_text
@@ -679,11 +696,28 @@ class ChatRuntime:
             assistant_config.autonomy
         )
 
+    async def _resolve_model_route(self, session: AsyncSession, model: str) -> ModelRoute:
+        """Resolve the chosen model id to its gateway route ONCE per answer (PR 2a).
+
+        For a per-tenant ``provider:`` id the injected resolver loads the provider
+        (must be in the tenant + enabled) and decrypts its key a single time,
+        returning the raw model id + that provider's api_key/base_url; for a config
+        id it is a plain passthrough (default credentials). ``None`` resolver (the
+        offline / config-only case) ⇒ the id is routed as-is with default
+        credentials — so an offline runtime keeps working unchanged. The send path
+        has already validated a ``provider:`` id against the tenant (422 otherwise),
+        so by here it is known-good; a resolver returning the plain model for an
+        unexpected id degrades safely to default credentials rather than crashing.
+        """
+        if self._model_route_resolver is None:
+            return ModelRoute(model=model)
+        return await self._model_route_resolver(session, model)
+
     async def _stream_one_turn(
         self,
         *,
         messages: list[ChatMessage],
-        model: str,
+        route: ModelRoute,
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
@@ -697,12 +731,22 @@ class ChatRuntime:
         #148). ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue
         #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
         forces a tool-free turn — the final synthesis once the budget is spent.
+
+        ``route`` carries the answer's resolved gateway route (PR 2a): the raw model
+        id + (for a per-tenant provider) the api_key/base_url override. The SAME
+        route is passed on every turn of the loop, so a provider's decrypted key is
+        reused, never re-decrypted per turn.
         """
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
         async for ev in self._gateway.stream_tools(
-            messages, tools=list(tools), model=model, tool_choice=tool_choice
+            messages,
+            tools=list(tools),
+            model=route.model,
+            tool_choice=tool_choice,
+            api_key=route.api_key,
+            api_base=route.api_base,
         ):
             if ev.text:
                 text_chunks.append(ev.text)
@@ -1017,4 +1061,11 @@ _RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-__all__ = ["ChatRuntime", "McpToolsFactory", "SandboxContext", "SandboxFactory"]
+__all__ = [
+    "ChatRuntime",
+    "McpToolsFactory",
+    "ModelRoute",
+    "ModelRouteResolver",
+    "SandboxContext",
+    "SandboxFactory",
+]
