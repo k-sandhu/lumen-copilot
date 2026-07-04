@@ -45,6 +45,8 @@ function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
     owner: '',
     backupOwner: null,
     status: 'draft',
+    certificationState: 'none',
+    featured: false,
     version: null,
     created_at: '2026-07-01T00:00:00Z',
     updated_at: '2026-07-01T00:00:00Z',

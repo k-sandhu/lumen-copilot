@@ -105,6 +105,17 @@ class AuditAction(str, enum.Enum):
     ASSISTANT_DELETED = "assistant.deleted"
     ASSISTANT_PUBLISHED = "assistant.published"
     ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
+    # Admin library governance (E6-6/E6-8, issue #217). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Certifying / featuring / deprecating / disabling an assistant, and
+    # transferring its accountable ownership, are admin-only (INV-5) governance
+    # actions, each audited here (INV-6) so a library-governance decision is
+    # provable after the fact: who certified/disabled/reassigned which assistant.
+    ASSISTANT_CERTIFIED = "assistant.certified"
+    ASSISTANT_FEATURED = "assistant.featured"
+    ASSISTANT_DEPRECATED = "assistant.deprecated"
+    ASSISTANT_DISABLED = "assistant.disabled"
+    ASSISTANT_OWNERSHIP_TRANSFERRED = "assistant.ownership_transferred"
     # Read-only preview/test/debug of a DRAFT assistant before publishing (E6-5,
     # issue #215). A test run executes the draft config with write-tier tools forced
     # into simulate/deny mode (no artifact, no code run, no external effect) and

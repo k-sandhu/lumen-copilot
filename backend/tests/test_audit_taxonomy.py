@@ -84,6 +84,14 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Admin library governance (E6-6/E6-8 / issue #217) — additive; certifying/
+        # featuring/deprecating/disabling an assistant + transferring its ownership are
+        # admin-only governance actions, each audited (INV-5/INV-6).
+        "assistant.certified",
+        "assistant.featured",
+        "assistant.deprecated",
+        "assistant.disabled",
+        "assistant.ownership_transferred",
         # Read-only test/preview/debug of a draft assistant (E6-5 / issue #215) —
         # additive; a test run is owner-gated and audited even though it mutates
         # nothing (write-tier tools forced into simulate/deny mode).
