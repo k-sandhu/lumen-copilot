@@ -4,7 +4,7 @@
  * so components stay presentational and these map exactly once (frontend/AGENTS.md).
  */
 import type { StatusTone } from '@/ui';
-import type { RunStatus, RunTrigger } from '@/api';
+import type { RunDeliveryStatus, RunStatus, RunTrigger } from '@/api';
 
 /** Human label for each terminal/active run status. */
 export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
@@ -41,6 +41,26 @@ export function lastStatusTone(status: RunStatus | null | undefined): StatusTone
 export const TRIGGER_LABEL: Record<RunTrigger, string> = {
   schedule: 'Scheduled',
   manual: 'Manual',
+};
+
+/** Human label for each in-app run-delivery status (#238). */
+export const DELIVERY_STATUS_LABEL: Record<RunDeliveryStatus, string> = {
+  pending: 'Queued for digest',
+  delivered: 'New',
+  read: 'Read',
+  failed: 'Delivery failed',
+};
+
+/**
+ * The trust-signal dot tone for a delivery status. A `failed` delivery is a DANGER
+ * (visible + retryable, never a silent drop — AC-3); `delivered` reads as a fresh,
+ * unread item; `read` and `pending` are muted.
+ */
+export const DELIVERY_STATUS_TONE: Record<RunDeliveryStatus, StatusTone> = {
+  pending: 'muted',
+  delivered: 'ok',
+  read: 'muted',
+  failed: 'danger',
 };
 
 /** Whether a run is in a terminal state (drives the "watch live" affordance). */

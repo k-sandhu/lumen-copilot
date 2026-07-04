@@ -66,6 +66,9 @@ from app.domain.entities import (
     ResourceUsage,
     Role,
     Run,
+    RunDelivery,
+    RunDeliveryKind,
+    RunDeliveryStatus,
     RunError,
     RunStatus,
     RunStep,
@@ -514,6 +517,21 @@ def _to_run_step(row: models.RunStep) -> RunStep:
         kind=RunStepKind(row.kind),
         payload=dict(row.payload or {}),
         created_at=row.created_at,
+    )
+
+
+def _to_run_delivery(row: models.RunDelivery) -> RunDelivery:
+    return RunDelivery(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        recipient_id=row.recipient_id,
+        run_id=row.run_id,
+        schedule_id=row.schedule_id,
+        kind=RunDeliveryKind(row.kind),
+        status=RunDeliveryStatus(row.status),
+        summary=row.summary,
+        created_at=row.created_at,
+        read_at=row.read_at,
     )
 
 
@@ -3587,6 +3605,201 @@ class RunStepRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_run_step(r) for r in rows]
+
+
+class RunDeliveryRepository(_TenantScopedRepository):
+    """In-app run-delivery records (``run_deliveries``) within one tenant (#238, ADR-0015 §6).
+
+    Tenant-scoped like every repository (INV-1): a foreign-tenant ``delivery_id``
+    resolves to ``None`` (the existence-non-disclosure 404 is enforced one layer up in
+    ``services.run_delivery_service`` off the ``None`` return). Recipient visibility
+    (deny-by-default, spec 0004 §2.2) is layered in the service. Persists via the
+    session but does not commit — the caller owns the transaction boundary.
+
+    Exposes ``create`` (produce one delivery on run completion), the recipient inbox
+    read (``list_for_recipient_page``), ``mark_read`` (the owner opened it), and the
+    pending-digest sweep (``list_pending_for_recipients`` / ``mark_delivered``) the
+    digest beat drives.
+    """
+
+    async def create(
+        self,
+        *,
+        recipient_id: UUID,
+        run_id: UUID,
+        schedule_id: UUID | None,
+        kind: RunDeliveryKind,
+        status: RunDeliveryStatus,
+        summary: str | None,
+    ) -> RunDelivery:
+        """Create one in-app delivery of a completed run (ADR-0015 §6 — run inbox)."""
+        row = models.RunDelivery(
+            id=uuid4(),
+            tenant_id=self._tenant_id,
+            recipient_id=recipient_id,
+            run_id=run_id,
+            schedule_id=schedule_id,
+            kind=kind.value,
+            status=status.value,
+            summary=summary,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_run_delivery(row)
+
+    async def get(self, delivery_id: UUID) -> RunDelivery | None:
+        row = await self._get_row(delivery_id)
+        return _to_run_delivery(row) if row is not None else None
+
+    async def _get_row(self, delivery_id: UUID) -> models.RunDelivery | None:
+        stmt = select(models.RunDelivery).where(
+            models.RunDelivery.tenant_id == self._tenant_id,
+            models.RunDelivery.id == delivery_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def exists_for_run(self, run_id: UUID, *, kind: RunDeliveryKind) -> bool:
+        """Whether a delivery of ``kind`` already exists for ``run_id`` (idempotency guard).
+
+        The run task may redeliver (an at-least-once Celery message), so producing an
+        inbox delivery is guarded on this so a re-run never double-notifies. Tenant-scoped.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.RunDelivery)
+            .where(
+                models.RunDelivery.tenant_id == self._tenant_id,
+                models.RunDelivery.run_id == run_id,
+                models.RunDelivery.kind == kind.value,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) > 0
+
+    async def mark_read(self, delivery_id: UUID, *, read_at: datetime) -> RunDelivery | None:
+        """Mark a delivery ``read`` and stamp ``read_at`` (idempotent), tenant-scoped.
+
+        Re-marking an already-read delivery leaves ``read_at`` unchanged (the first
+        open stands). Returns the updated entity, or ``None`` if no row matches.
+        """
+        row = await self._get_row(delivery_id)
+        if row is None:
+            return None
+        if row.status != RunDeliveryStatus.READ.value:
+            row.status = RunDeliveryStatus.READ.value
+            row.read_at = read_at
+            await self._session.flush()
+        return _to_run_delivery(row)
+
+    async def mark_delivered(self, delivery_id: UUID) -> RunDelivery | None:
+        """Transition a ``pending`` digest delivery to ``delivered`` (the digest fired)."""
+        row = await self._get_row(delivery_id)
+        if row is None:
+            return None
+        row.status = RunDeliveryStatus.DELIVERED.value
+        await self._session.flush()
+        return _to_run_delivery(row)
+
+    async def list_for_recipient_page(
+        self,
+        recipient_id: UUID,
+        *,
+        limit: int,
+        after_id: UUID | None = None,
+        status: RunDeliveryStatus | None = None,
+        unread_only: bool = False,
+    ) -> list[RunDelivery]:
+        """A keyset page of a recipient's deliveries (newest first) — the run inbox.
+
+        Recipient- *and* tenant-scoped (spec 0004 §2.2 + INV-1): a caller only ever
+        sees their own deliveries. Optional ``status`` filter, and ``unread_only``
+        excludes ``read`` deliveries (the unread inbox badge). Ordered by
+        ``(created_at, id)`` descending; the id-only cursor resolves the boundary
+        ``created_at`` by a correlated scalar subquery (exact on Postgres + the
+        offline SQLite), mirroring the runs keyset.
+        """
+        conditions = [
+            models.RunDelivery.tenant_id == self._tenant_id,
+            models.RunDelivery.recipient_id == recipient_id,
+        ]
+        if status is not None:
+            conditions.append(models.RunDelivery.status == status.value)
+        if unread_only:
+            conditions.append(models.RunDelivery.status != RunDeliveryStatus.READ.value)
+        if after_id is not None:
+            boundary_created_at = (
+                select(models.RunDelivery.created_at)
+                .where(
+                    models.RunDelivery.tenant_id == self._tenant_id,
+                    models.RunDelivery.id == after_id,
+                )
+                .scalar_subquery()
+            )
+            conditions.append(
+                or_(
+                    models.RunDelivery.created_at < boundary_created_at,
+                    and_(
+                        models.RunDelivery.created_at == boundary_created_at,
+                        models.RunDelivery.id < after_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(models.RunDelivery)
+            .where(*conditions)
+            .order_by(models.RunDelivery.created_at.desc(), models.RunDelivery.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_run_delivery(r) for r in rows]
+
+    async def list_pending_digest(self, *, limit: int) -> list[RunDelivery]:
+        """Every ``pending`` digest delivery in this tenant (oldest first) — the digest batch.
+
+        The digest beat sweeps these per tenant to roll a day's low-urgency runs into
+        one in-app notification (ADR-0015 §6). Tenant-scoped (INV-1); the caller runs
+        it under ``tenant_session_scope`` per tenant. Bounded so a sweep never scans
+        unboundedly (the beat re-runs to drain a backlog).
+        """
+        stmt = (
+            select(models.RunDelivery)
+            .where(
+                models.RunDelivery.tenant_id == self._tenant_id,
+                models.RunDelivery.status == RunDeliveryStatus.PENDING.value,
+                models.RunDelivery.kind == RunDeliveryKind.DIGEST.value,
+            )
+            .order_by(models.RunDelivery.created_at.asc(), models.RunDelivery.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_run_delivery(r) for r in rows]
+
+
+class RunDeliveryReconcileRepository:
+    """Cross-tenant read of tenants with pending digest deliveries — the digest beat ONLY.
+
+    **Not** tenant-scoped (it is the one delivery read that spans tenants), mirroring
+    :class:`ScheduleReconcileRepository`: the periodic digest beat must find which
+    tenants have ``pending`` digest deliveries so it can sweep each *as* that tenant
+    (``tenant_session_scope``). It runs under a **bypass**-scoped session
+    (``bind_bypass``) — a deliberate, system-only path, never a request path
+    (requests are always tenant-scoped, INV-1). Read-only.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def tenants_with_pending_digest(self) -> list[UUID]:
+        """Distinct tenant ids that have at least one ``pending`` digest delivery."""
+        stmt = (
+            select(models.RunDelivery.tenant_id)
+            .where(
+                models.RunDelivery.status == RunDeliveryStatus.PENDING.value,
+                models.RunDelivery.kind == RunDeliveryKind.DIGEST.value,
+            )
+            .distinct()
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
 
 
 class CodeRunRepository(_TenantScopedRepository):

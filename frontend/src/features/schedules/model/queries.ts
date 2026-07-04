@@ -28,8 +28,10 @@ import {
   getRun,
   getSchedule,
   listAssistants,
+  listRunDeliveries,
   listRuns,
   listSchedules,
+  markRunDeliveryRead,
   pauseSchedule,
   rerouteRun,
   resumeRun,
@@ -38,6 +40,8 @@ import {
   updateSchedule,
 } from '@/api';
 import type {
+  RunDelivery,
+  RunDeliveryList,
   AssistantList,
   Run,
   RunEnqueued,
@@ -50,6 +54,7 @@ import type {
 } from '@/api';
 import type { SchedulePageQuery } from '@/api';
 import type { RunPageQuery } from '@/api';
+import type { RunDeliveryPageQuery } from '@/api';
 
 /** Default page size for the run inbox + schedule list. */
 export const PAGE_LIMIT = 20;
@@ -236,5 +241,38 @@ export function useAssistantsList(): UseQueryResult<AssistantList> {
     queryKey: ['assistants', 'list', 'schedules-picker'],
     queryFn: ({ signal }) => listAssistants({ limit: 100 }, signal),
     staleTime: 30_000,
+  });
+}
+
+export const deliveryKeys = {
+  all: ['run-deliveries'] as const,
+  list: (q: RunDeliveryPageQuery) => [...deliveryKeys.all, 'list', q] as const,
+};
+
+/**
+ * A page of the caller's run deliveries (the in-app inbox) for the given filters.
+ * A short stale time + refetch-on-focus keeps a completed run's delivery appearing
+ * without a manual reload.
+ */
+export function useRunDeliveries(
+  query: RunDeliveryPageQuery,
+): UseQueryResult<RunDeliveryList> {
+  return useQuery<RunDeliveryList>({
+    queryKey: deliveryKeys.list(query),
+    queryFn: ({ signal }) => listRunDeliveries({ ...query, limit: PAGE_LIMIT }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 5_000,
+  });
+}
+
+/**
+ * Mark one delivery read (idempotent). Invalidates the inbox so the unread badge +
+ * the read state update. A 404 (non-owned / cross-tenant) surfaces as a typed error.
+ */
+export function useMarkDeliveryRead() {
+  const qc = useQueryClient();
+  return useMutation<RunDelivery, unknown, string>({
+    mutationFn: (id) => markRunDeliveryRead(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: deliveryKeys.all }),
   });
 }

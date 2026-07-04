@@ -324,7 +324,11 @@ def configure_beat(settings: Settings | None = None) -> None:
 
     Sets the RedBeat scheduler class, the key prefix, and the leader-lock timeout on
     the celery conf so ``celery -A app.tasks.celery_app beat --scheduler
-    redbeat.RedBeatScheduler`` reads them. Idempotent.
+    redbeat.RedBeatScheduler`` reads them, plus the **static** periodic entries the
+    Beat always fires regardless of any user schedule — currently the run-digest sweep
+    (#238), which rolls pending low-urgency deliveries into an in-app digest every
+    ``RUN_DIGEST_INTERVAL_SECONDS`` (RedBeat merges ``beat_schedule`` entries with the
+    dynamic per-tenant ones). Idempotent.
     """
     settings = settings or get_settings()
     celery_app.conf.update(
@@ -332,6 +336,12 @@ def configure_beat(settings: Settings | None = None) -> None:
         redbeat_key_prefix=settings.redbeat_key_prefix,
         redbeat_lock_timeout=settings.redbeat_lock_timeout_seconds,
         beat_scheduler="redbeat.RedBeatScheduler",
+        beat_schedule={
+            "run-digest-sweep": {
+                "task": "lumen.build_run_digests",
+                "schedule": float(settings.run_digest_interval_seconds),
+            },
+        },
     )
 
 
