@@ -100,7 +100,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0025_run_deliveries"]
+    assert list(script.get_heads()) == ["0026_toolinv_msg_fk_deferrable"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -173,6 +173,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     run_deliveries = script.get_revision("0025_run_deliveries")
     assert run_deliveries is not None
     assert run_deliveries.down_revision == "0024_autonomy_policy"
+    toolinv_fk = script.get_revision("0026_toolinv_msg_fk_deferrable")
+    assert toolinv_fk is not None
+    assert toolinv_fk.down_revision == "0025_run_deliveries"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
