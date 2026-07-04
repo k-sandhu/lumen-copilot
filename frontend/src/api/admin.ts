@@ -9,8 +9,6 @@
  *   GET   /admin/risk-tiers                      → RiskTierList
  *   GET   /admin/tool-policy                      → ToolPolicy
  *   PATCH /admin/tool-policy      {tool_name,…}   → ToolPolicy
- *   PUT    /admin/branding        (multipart file) → TenantBranding
- *   DELETE /admin/branding                         → 204
  *
  * The tool-policy PATCH (issue #223) is the one governance WRITE here — a
  * tenant-scoped T1 action, audited server-side; an unknown tool name → 422 (INV-8).
@@ -21,38 +19,21 @@ import { ApiError, request, withRefreshRetry } from './client';
 import { API_BASE_URL } from './env';
 import { getAccessToken } from './token';
 import type {
+  Problem,
+  TenantBranding,
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
+  CertificationState,
+  GovernedAssistant,
+  GovernedAssistantList,
   MemberList,
   ModelGovernance,
-  Problem,
   RiskTierList,
   SandboxPolicy,
   SandboxPolicyUpdate,
-  TenantBranding,
   ToolPolicy,
   ToolPolicyUpdate,
 } from './types';
-
-function joinApi(path: string): string {
-  const b = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
-  const p = path.startsWith('/') ? path : `/${path}`;
-  return `${b}${p}`;
-}
-
-function isProblem(value: unknown): value is Problem {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return typeof v.title === 'string' && typeof v.status === 'number';
-}
-
-async function safeProblem(response: Response): Promise<Problem | undefined> {
-  try {
-    const data: unknown = await response.json();
-    if (isProblem(data)) return data;
-  } catch {
-    // Non-JSON / empty body — fall through.
-  }
-  return undefined;
-}
 
 export interface PageQuery {
   cursor?: string;
@@ -113,6 +94,101 @@ export function updateSandboxPolicy(body: SandboxPolicyUpdate): Promise<SandboxP
   return request<SandboxPolicy>('/admin/sandbox-policy', { method: 'PATCH', json: body });
 }
 
+// --- Assistant library governance (E6-6/E6-8, #217) ------------------------
+
+/**
+ * Every assistant in the tenant with its governance state (admin only, #217). Spans
+ * every owner in the tenant; each item carries its certification / featured / disabled
+ * state and the `ownerOrphaned` flag (owner deprovisioned — flag for reassignment).
+ */
+export function listGovernedAssistants(
+  page: PageQuery = {},
+  signal?: AbortSignal,
+): Promise<GovernedAssistantList> {
+  return request<GovernedAssistantList>(`/admin/assistants${buildQuery({ ...page })}`, { signal });
+}
+
+/**
+ * Set an assistant's certification verdict — certify / deprecate / clear (admin only,
+ * audited). A cross-tenant / missing id → 404 (existence non-disclosure).
+ */
+export function certifyAssistant(
+  assistantId: string,
+  certificationState: CertificationState,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/certify`, {
+    method: 'POST',
+    json: { certificationState },
+  });
+}
+
+/** Feature / unfeature an assistant in the library (admin only, audited). */
+export function featureAssistant(
+  assistantId: string,
+  featured: boolean,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/feature`, {
+    method: 'POST',
+    json: { featured },
+  });
+}
+
+/**
+ * Disable / re-enable an assistant (admin only, audited). Disabling blocks it from
+ * starting a chat / schedule / run; re-enabling returns the head to `draft`.
+ */
+export function disableAssistant(
+  assistantId: string,
+  disabled: boolean,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/disable`, {
+    method: 'POST',
+    json: { disabled },
+  });
+}
+
+/**
+ * Reassign an assistant's accountable owner to another tenant member (admin only,
+ * audited). The new owner must be a distinct member of the tenant (else 422). Rescues
+ * an orphaned assistant.
+ */
+export function transferAssistantOwnership(
+  assistantId: string,
+  newOwner: string,
+): Promise<GovernedAssistant> {
+  return request<GovernedAssistant>(`/admin/assistants/${assistantId}/transfer-ownership`, {
+    method: 'POST',
+    json: { newOwner },
+  });
+}
+
+/** The outcome of a bulk reassign/disable of orphaned assistants (E6-8, #217). */
+export interface BulkOrphanResult {
+  affected: string[];
+  action: string;
+}
+
+/**
+ * Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only,
+ * audited). Idempotent — an already-disabled orphan is skipped.
+ */
+export function disableOrphanedAssistants(): Promise<BulkOrphanResult> {
+  return request<BulkOrphanResult>('/admin/assistants/disable-orphans', { method: 'POST' });
+}
+
+export function getAutonomyPolicy(signal?: AbortSignal): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { signal });
+}
+
+/**
+ * Set the per-tenant assistant autonomy cap (admin only, audited, #218). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it. An
+ * unknown `max_autonomy` → 422 (INV-8). Returns the resulting cap.
+ */
+export function updateAutonomyPolicy(body: AutonomyPolicyUpdate): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { method: 'PATCH', json: body });
+}
+
 /**
  * Upload the tenant's application logo via `PUT /admin/branding` (multipart, admin
  * only, audited). Uses `fetch` + `FormData` (no JSON body): the browser sets the
@@ -159,4 +235,26 @@ export function updateTenantBranding(file: File): Promise<TenantBranding> {
  */
 export function clearTenantBranding(): Promise<void> {
   return request<void>('/admin/branding', { method: 'DELETE' });
+}
+
+function joinApi(path: string): string {
+  const b = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${b}${p}`;
+}
+
+function isProblem(value: unknown): value is Problem {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.title === 'string' && typeof v.status === 'number';
+}
+
+async function safeProblem(response: Response): Promise<Problem | undefined> {
+  try {
+    const data: unknown = await response.json();
+    if (isProblem(data)) return data;
+  } catch {
+    // Non-JSON / empty body — fall through.
+  }
+  return undefined;
 }

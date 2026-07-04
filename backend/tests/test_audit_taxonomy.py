@@ -87,10 +87,33 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Admin library governance (E6-6/E6-8 / issue #217) — additive; certifying/
+        # featuring/deprecating/disabling an assistant + transferring its ownership are
+        # admin-only governance actions, each audited (INV-5/INV-6).
+        "assistant.certified",
+        "assistant.featured",
+        "assistant.deprecated",
+        "assistant.disabled",
+        "assistant.ownership_transferred",
+        # Read-only test/preview/debug of a draft assistant (E6-5 / issue #215) —
+        # additive; a test run is owner-gated and audited even though it mutates
+        # nothing (write-tier tools forced into simulate/deny mode).
+        "assistant.tested",
+        # Conversational agent builder (E6-1 / issue #213) — additive; drafting a
+        # config from a description is audited (INV-6) even though nothing is
+        # persisted until the user saves via assistant.created.
+        "assistant.drafted",
         # Headless agent runs (ADR-0015 / issue #235) — additive; every run is
         # bracketed by run.started/run.finished (INV-6), actor = the run owner.
         "run.started",
         "run.finished",
+        # Run failure & escalation handling (ADR-0015 §6 / E7-5 / issue #239) —
+        # additive; an escalated run's human handoff (resume/cancel/reroute) is
+        # audited so it is never silently dropped, and the escalate itself is trailed.
+        "run.escalated",
+        "run.resumed",
+        "run.cancelled",
+        "run.rerouted",
         # Dynamic per-tenant scheduler (ADR-0015 §6 / issue #236) — additive; every
         # schedule lifecycle mutation + control is audited (INV-6): create/update/
         # delete, pause/resume, and run-now (the owner's control over the schedule; a
@@ -101,6 +124,13 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "schedule.paused",
         "schedule.resumed",
         "schedule.run_now",
+        # Scheduled-run delivery (ADR-0015 §6 / issue #238) — additive; a completed
+        # run's output is delivered to the owner's in-app inbox (run.delivered),
+        # rolled into a periodic in-app digest (run.digest_sent), or marked read by
+        # the owner (run.delivery_read). In-app only — no external egress (INV-7).
+        "run.delivered",
+        "run.delivery_read",
+        "run.digest_sent",
         # Sandbox code execution (ADR-0013 §4 / issue #230) — additive; every run is
         # bracketed by code_run.started/code_run.finished (INV-6) and a run refused
         # before execution is audited code_run.denied (never a silent drop).
@@ -112,6 +142,11 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # is a T1 governance write audited (INV-6). This is the policy the sandbox
         # admission path consults per run.
         "sandbox_policy.updated",
+        # Admin per-tenant autonomy cap (ADR-0011 §3 / issue #218) — additive; setting
+        # the tenant's maximum assistant autonomy (the ceiling an assistant's EFFECTIVE
+        # autonomy is min'd to) is a T1 governance write audited (INV-6). This is the cap
+        # the publish path and the run-time autonomy gate consult.
+        "autonomy_cap.updated",
         # Per-tenant MCP server registration (ADR-0012 §5 / issue #226) — additive;
         # register/update/delete of a remote MCP server (a T1 config write) and the
         # on-demand health/discovery probe are each audited (INV-6). The stored

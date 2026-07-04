@@ -39,6 +39,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -873,6 +874,50 @@ class TenantSandboxPolicy(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class TenantAutonomyPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """A per-tenant admin autonomy cap (issue #218).
+
+    The persistence half of admin autonomy governance (ADR-0011 §3): one row is an
+    admin's ceiling on how far ANY assistant in the tenant may effectively act —
+    ``max_autonomy`` is the maximum :class:`~app.domain.entities.AutonomyLevel` an
+    assistant's EFFECTIVE autonomy is ``min``'d to. **Absence of a row means no
+    ceiling** — an assistant runs at its own configured level (the permissive
+    default, mirroring how ``tenant_tool_policy`` / ``tenant_sandbox_policy`` fall
+    back to their built-in defaults). Enforcement is two-sided: publishing/upgrading
+    an assistant above the cap is rejected/clamped, and the run-time tool gate uses
+    the clamped level to decide whether a T1 side-effecting tool may execute.
+
+    ``max_autonomy`` is one of the four enum string values (validated in the service
+    and constrained at the DB via a CHECK). The unique ``(tenant_id)`` constraint
+    makes the cap a per-tenant singleton; ``updated_by`` records the admin who last
+    set it (audit corroboration). Tenant-scoped like every table (INV-1); the
+    ``0023`` migration puts it under the same fail-closed RLS backstop as every other
+    tenant-scoped table.
+    """
+
+    __tablename__ = "tenant_autonomy_policy"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_tenant_autonomy_policy_tenant"),
+        CheckConstraint(
+            "max_autonomy in ('suggest', 'draft', 'act_with_approval', 'act_auto')",
+            name="ck_tenant_autonomy_policy_max_autonomy",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The autonomy ceiling — one of the AutonomyLevel enum values (validated in the
+    # service; CHECK-constrained above). An assistant's effective autonomy is min'd
+    # to this. Absence of a row means no ceiling (the permissive default).
+    max_autonomy: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The admin who last set this cap (INV-6 corroboration); SET NULL so a
+    # deprovisioned admin does not cascade-delete the tenant's live cap.
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 
@@ -909,9 +954,15 @@ class ToolInvocation(TenantScopedMixin, Base):
         nullable=True,
     )
     # The assistant message the call contributed to (nullable, same rationale).
+    # DEFERRABLE INITIALLY DEFERRED: the chat runtime records a tool_invocations
+    # row *during* the tool loop keyed to the pre-minted assistant message id,
+    # but that message row is only INSERTed by `_persist` at the end of the SAME
+    # transaction. The reference is a legitimate intra-transaction forward ref, so
+    # the FK is validated at COMMIT (message present) rather than at flush (would
+    # spuriously fail with an IntegrityError and abort every tool-using answer).
     message_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("messages.id", ondelete="SET NULL"),
+        ForeignKey("messages.id", ondelete="SET NULL", deferrable=True, initially="DEFERRED"),
         nullable=True,
     )
     # Reserved for a future multi-step agent-run grouping (E14); no FK yet.
@@ -958,6 +1009,12 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
             "status in ('draft', 'published', 'disabled')",
             name="ck_assistants_status",
         ),
+        # Library-governance certification domain (E6-6, #217) — CHECK-pinned so a
+        # bad value can never be stored, the same posture as the other enum columns.
+        CheckConstraint(
+            "certification_state in ('none', 'certified', 'deprecated')",
+            name="ck_assistants_certification_state",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -983,6 +1040,23 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
     tool_allowlist: Mapped[list[object]] = mapped_column(_JSON, nullable=False, default=list)
     autonomy_level: Mapped[str] = mapped_column(String(20), nullable=False, default="suggest")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+
+    # --- Library governance (E6-6/E6-8, #217) — an orthogonal admin axis --------
+    # Certification verdict (none|certified|deprecated); admin-only mutation.
+    certification_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none", server_default="none"
+    )
+    # Whether an admin has featured/pinned the assistant in the library.
+    featured: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # A free-text library grouping label (nullable ⇒ uncategorised).
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Set (in lockstep with status=disabled) when an admin disables the assistant so
+    # the "only a published assistant may start" gate blocks it; NULL ⇒ not disabled.
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     versions: Mapped[list[AssistantVersion]] = relationship(
         back_populates="assistant", cascade="all, delete-orphan"
@@ -1241,6 +1315,73 @@ class Schedule(TenantScopedMixin, TimestampMixin, Base):
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class RunDelivery(TenantScopedMixin, Base):
+    """One in-app delivery of a completed run's output — a ``run_deliveries`` row (#238).
+
+    The persistence of the run inbox (ADR-0015 §6): when a run reaches a terminal, a
+    delivery lands here so the owner sees its ``summary`` + a link to the full cited
+    transcript without opening the app. Tenant- and owner-scoped (INV-1/§2.2):
+    ``recipient_id`` is the owner the run ran *as*, so a delivery in another tenant /
+    addressed to another user is a 404 (existence non-disclosure, enforced one layer
+    up in the service off the tenant-scoped repository's ``None``). ``run_id``
+    (CASCADE — a delivery is meaningless without its run) links back to
+    ``GET /runs/{id}``; the nullable ``schedule_id`` (SET NULL) records the schedule
+    that fired it (null for a manual run). ``kind`` distinguishes an immediate inbox
+    delivery from a digest-batched one; ``status`` walks the
+    :class:`~app.domain.entities.RunDeliveryStatus` machine; both enum domains are
+    ``CheckConstraint``-pinned so a bad value can never be stored. ``read_at`` stamps
+    when the owner opened it. Tenant-scoped like every table (INV-1); the ``0023``
+    migration puts it under the RLS backstop.
+
+    No ``TimestampMixin``/``updated_at``: a delivery's lifecycle is ``created_at`` +
+    ``read_at`` + ``status``, not a generic updated stamp.
+    """
+
+    __tablename__ = "run_deliveries"
+    __table_args__ = (
+        # The owner inbox reads (newest first) + the pending-digest sweep; each
+        # tenant-leading so the equality filter uses one index (INV-1).
+        Index("ix_run_deliveries_tenant_recipient", "tenant_id", "recipient_id"),
+        Index("ix_run_deliveries_tenant_status", "tenant_id", "status"),
+        Index("ix_run_deliveries_run_id", "run_id"),
+        CheckConstraint("kind in ('inbox', 'digest')", name="ck_run_deliveries_kind"),
+        CheckConstraint(
+            "status in ('pending', 'delivered', 'read', 'failed')",
+            name="ck_run_deliveries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The owner the run ran as — the delivery recipient (INV-2/§2.2). SET NULL on
+    # user delete so a delivery record survives deprovisioning, never cascade-deleted.
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False,
+        index=True,
+    )
+    # CASCADE: a delivery is meaningless without its run.
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The schedule that fired the run (null for a manual run). SET NULL so the
+    # delivery outlives the schedule that produced it (like ``runs.schedule_id``).
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("schedules.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="inbox")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="delivered")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CodeRun(TenantScopedMixin, Base):

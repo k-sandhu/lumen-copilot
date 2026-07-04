@@ -648,6 +648,28 @@ export interface SandboxPolicyUpdate {
   max_concurrency: number;
 }
 
+/**
+ * The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+ * is the ceiling an assistant's EFFECTIVE autonomy is min'd to. `is_default` is true
+ * when no cap is stored — no ceiling, so `max_autonomy` is reported as `act_auto` and
+ * every assistant runs at its own configured level. `levels` lists the choice set in
+ * ascending order (suggest … act_auto).
+ */
+export interface AutonomyPolicy {
+  max_autonomy: AutonomyLevel;
+  is_default: boolean;
+  levels: AutonomyLevel[];
+}
+
+/**
+ * PATCH /admin/autonomy-policy body — set the per-tenant autonomy cap (issue #218).
+ * `max_autonomy` must be a valid AutonomyLevel (an unknown value → 422). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it.
+ */
+export interface AutonomyPolicyUpdate {
+  max_autonomy: AutonomyLevel;
+}
+
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
 
 /**
@@ -726,6 +748,13 @@ export type AutonomyLevel = 'suggest' | 'draft' | 'act_with_approval' | 'act_aut
 /** Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions. */
 export type AssistantStatus = 'draft' | 'published' | 'disabled';
 
+/**
+ * Admin library-governance certification (E6-6, #217) — an orthogonal axis to the
+ * lifecycle status. `none` = not reviewed; `certified` = an admin vouched for it;
+ * `deprecated` = an admin flagged it for retirement (still runnable, library warns).
+ */
+export type CertificationState = 'none' | 'certified' | 'deprecated';
+
 /** A retrieval source class the assistant's scope may draw from. */
 export type KnowledgeMode = 'company' | 'uploaded' | 'web' | 'model';
 
@@ -760,15 +789,60 @@ export interface Assistant {
   /** Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands). */
   toolAllowlist: string[];
   autonomyLevel: AutonomyLevel;
+  /**
+   * The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+   * (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no cap
+   * lowers it — visibility for the library/run detail.
+   */
+  effectiveAutonomy: AutonomyLevel;
   /** The accountable owner's user id. */
   owner: string;
   /** The backup owner's user id; required before publish (ADR-0011 §4). */
   backupOwner?: string | null;
   status: AssistantStatus;
+  /** Admin library-governance certification verdict (E6-6, #217; read-only here). */
+  certificationState: CertificationState;
+  /** Whether an admin has featured/pinned the assistant in the library (E6-6, #217). */
+  featured: boolean;
   /** The current published head version number (null while never published). */
   version?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The admin library view of an assistant (E6-6/E6-8, #217): identity + owner +
+ * lifecycle status plus the governance axis and the `ownerOrphaned` projection
+ * (owner no longer a tenant member — flag for reassignment). Admin-only; spans
+ * every owner in the tenant.
+ */
+export interface GovernedAssistant {
+  id: string;
+  name: string;
+  description?: string | null;
+  model?: string | null;
+  autonomyLevel: AutonomyLevel;
+  /** The accountable owner's user id. */
+  owner: string;
+  backupOwner?: string | null;
+  status: AssistantStatus;
+  certificationState: CertificationState;
+  featured: boolean;
+  /** A library grouping label (null ⇒ uncategorised). */
+  category?: string | null;
+  /** When an admin disabled the assistant (null ⇒ not disabled). */
+  disabledAt?: string | null;
+  /** The owner is no longer a member of the tenant (flag for reassignment, E6-8). */
+  ownerOrphaned: boolean;
+  version?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A cursor page of the admin library view (GET /admin/assistants). */
+export interface GovernedAssistantList {
+  items: GovernedAssistant[];
+  next_cursor?: string | null;
 }
 
 /**
@@ -854,6 +928,80 @@ export interface AssistantList {
 export interface AssistantVersionList {
   items: AssistantVersion[];
   next_cursor?: string | null;
+}
+
+/** A sample input for a read-only assistant test run (E6-5, #215). Optional. */
+export interface AssistantTestRequest {
+  input?: string;
+}
+
+/**
+ * One tool call captured in a test run's debug trace (E6-5). `args` are the
+ * model-supplied arguments; `result` is the governed runner's outcome. A write-tier
+ * tool's `result` reflects the simulate/deny outcome — no real write occurred.
+ */
+export interface AssistantTestToolCall {
+  callId: string;
+  tool?: string | null;
+  args?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+}
+
+/**
+ * The debug trace of a read-only assistant test run (E6-5, #215) — what the builder
+ * debug view renders. NO real side effect was produced (write-tier tools
+ * simulate/deny). Reuses the runtime's own trace vocabulary.
+ */
+export interface AssistantTestTrace {
+  prompt: string;
+  input: string;
+  model: string;
+  retrieval: Array<Record<string, unknown>>;
+  toolCalls: AssistantTestToolCall[];
+  outputs: string;
+  errors: Array<Record<string, unknown>>;
+  succeeded: boolean;
+  durationMs: number;
+}
+
+/**
+ * POST /assistants/draft body (E6-1, #213) — the plain-language ask for the
+ * conversational agent builder. A blank/oversize description → 422.
+ */
+export interface AssistantDraftRequest {
+  description: string;
+}
+
+/**
+ * The drafted, editable config the client pre-fills into the editor (E6-1) — the
+ * subset of `AssistantVersionConfig` the editor owns. Nothing is created until the
+ * user saves via POST /assistants.
+ */
+export interface AssistantDraftConfig {
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  /** A model id from GET /models; null ⇒ the smart server default. */
+  model: string | null;
+  knowledgeScope: KnowledgeScope;
+  /** Registered tool names the draft keeps (unknown names are omitted). */
+  toolAllowlist: string[];
+  autonomyLevel: AutonomyLevel;
+}
+
+/**
+ * 200 from POST /assistants/draft — the builder's answer (E6-1): a draft config the
+ * client loads into the editor for review + save, plus clarifying questions, notes,
+ * and warnings.
+ */
+export interface AssistantDraft {
+  draft: AssistantDraftConfig;
+  /** Questions for anything the description left ambiguous (scope/owner/risk, E6-3). */
+  clarifications?: string[];
+  /** Notes for any tool/scope omitted from the draft (deny-by-default, INV-2). */
+  notes?: string[];
+  /** Warnings for any drafted high-risk (write-tier/approval-gated) tool (CC-A). */
+  warnings?: string[];
 }
 
 // --- Schedules & runs (contracts/openapi.yaml §schedules, §runs; ADR-0015) ---
@@ -1068,6 +1216,17 @@ export interface Run {
 export interface RunList {
   items: Run[];
   next_cursor?: string | null;
+}
+
+/**
+ * Body for POST /runs/{id}/reroute (E7-5, #239) — reassign an escalated run to
+ * another owner. `to_owner_id` becomes the run's execution principal, so the
+ * re-driven run retrieves only what the new owner may (INV-2). Must be a user in
+ * the caller's tenant and not the current owner.
+ */
+export interface RunReroute {
+  /** The user to reassign the run to (its new execution principal). */
+  to_owner_id: string;
 }
 
 // --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------
@@ -1524,5 +1683,40 @@ export interface McpTool {
 /** 200 from GET /mcp-servers/{id}/tools — a cursor page of discovered tools. */
 export interface McpToolList {
   items: McpTool[];
+  next_cursor?: string | null;
+}
+
+/**
+ * How a completed run's output reached the owner (ADR-0015 §6). `inbox` = an
+ * immediate in-app delivery on completion; `digest` = a run rolled into a periodic
+ * in-app digest batch.
+ */
+export type RunDeliveryKind = 'inbox' | 'digest';
+
+/**
+ * The lifecycle of one in-app run delivery (ADR-0015 §6). `pending` = awaiting its
+ * digest batch; `delivered` = visible in the inbox (unread); `read` = the owner
+ * opened it; `failed` = could not be produced (visible + retryable, never a silent
+ * drop).
+ */
+export type RunDeliveryStatus = 'pending' | 'delivered' | 'read' | 'failed';
+
+export interface RunDelivery {
+  id: string;
+  /** The completed run this delivery is for — a link to its full cited transcript. */
+  run_id: string;
+  /** The schedule that fired the run, or null for a manual run. */
+  schedule_id?: string | null;
+  kind: RunDeliveryKind;
+  status: RunDeliveryStatus;
+  /** The inbox line — the run's short summary. */
+  summary?: string | null;
+  created_at: string;
+  /** When the owner opened the delivery, or null while unread. */
+  read_at?: string | null;
+}
+
+export interface RunDeliveryList {
+  items: RunDelivery[];
   next_cursor?: string | null;
 }

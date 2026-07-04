@@ -35,11 +35,11 @@ from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+
+import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
 from app.storage.validation import validate_upload
-
-import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
 _PASSWORD = "devpassword"
 
@@ -50,44 +50,15 @@ _ADMIN_PATHS = (
     "/api/v1/admin/settings",
     "/api/v1/admin/tool-policy",
     "/api/v1/admin/sandbox-policy",
+    "/api/v1/admin/autonomy-policy",
 )
 
 
-class FakeObjectStore:
-    """In-memory stand-in for the #22 ``ObjectStore`` (no MinIO needed).
 
-    Implements just the surface the branding + /auth/me paths use: ``put_logo``
-    (validates against the **logo** allowlist/limit via the real ``validate_upload``,
-    so 413/415 negatives are exercised end-to-end) and the generic ``presign_get``
-    (tenant-prefix seam enforced by the real ``assert_key_owned_by``). Records puts
-    so a test can assert the object was stored.
-    """
-
-    def __init__(self) -> None:
-        from app.core.config import get_settings
-
-        self._settings = get_settings()
-        self.objects: dict[str, bytes] = {}
-
-    async def put_logo(
-        self, tenant_id: str, data: bytes, content_type: str, filename: str
-    ) -> StoredObject:
-        validate_upload(
-            size_bytes=len(data),
-            content_type=content_type,
-            allowed_content_types=self._settings.logo_allowed_content_types,
-            max_bytes=self._settings.max_logo_bytes,
-        )
-        key = build_key(tenant_id, data, filename)
-        self.objects[key] = data
-        return StoredObject(
-            key=key, sha256=key.split("/")[1], size_bytes=len(data), content_type=content_type
-        )
-
-    async def presign_get(self, tenant_id: str, key: str) -> str:
-        assert_key_owned_by(key, tenant_id)
-        return f"https://storage.test/{key}?sig=fake"
-
+_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6360000002000154a24f1e0000000049454e44ae426082"
+)
 
 class _Seeded:
     """Identifiers for the seeded fixture graph (two tenants, several roles)."""
@@ -165,12 +136,6 @@ def seeded(sessionmaker: async_sessionmaker[AsyncSession]) -> _Seeded:
 
 
 @pytest.fixture
-def store() -> FakeObjectStore:
-    """The in-memory object store the branding + /auth/me paths use (offline)."""
-    return FakeObjectStore()
-
-
-@pytest.fixture
 def app(
     sessionmaker: async_sessionmaker[AsyncSession], store: FakeObjectStore
 ) -> Iterator[FastAPI]:
@@ -186,13 +151,11 @@ def app(
     yield application
     application.dependency_overrides.clear()
 
-
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
-
 
 async def _login(client: AsyncClient, email: str) -> str:
     resp = await client.post("/api/v1/auth/login", json={"email": email, "password": _PASSWORD})
@@ -897,19 +860,173 @@ async def test_patch_sandbox_policy_emits_audit_event(
     assert ev.resource_id == str(seeded.tenant_a)
 
 
-# --- PUT/DELETE /admin/branding (per-tenant application logo) -----------------
-#
-# A tenant admin uploads a logo; it stores + persists a key on the tenant row;
-# the presigned URL surfaces on both the PUT 200 and GET /auth/me. A non-admin is
-# 403; an over-size or non-image file is rejected; DELETE clears it back to the
-# default (null on /auth/me). All admin-gated (INV-5), tenant-scoped (INV-1),
-# audited (INV-6). The object store is the offline FakeObjectStore.
+# --- GET/PATCH /admin/autonomy-policy (per-tenant autonomy cap, #218) ----------
 
-# A minimal 1x1 PNG (real magic bytes + IHDR) so the image allowlist accepts it.
-_PNG_1X1 = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
-    "890000000a49444154789c6360000002000154a24f1e0000000049454e44ae426082"
-)
+_AUTONOMY_KEYS = {"max_autonomy", "is_default", "levels"}
+
+
+async def test_get_autonomy_policy_default_is_no_ceiling(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-3 (#218): a fresh tenant has NO cap → is_default true, ceiling = act_auto."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == _AUTONOMY_KEYS
+    # No stored cap ⇒ no ceiling: reported as the top of the scale, is_default true.
+    assert body["is_default"] is True
+    assert body["max_autonomy"] == "act_auto"
+    assert body["levels"] == ["suggest", "draft", "act_with_approval", "act_auto"]
+
+
+async def test_patch_autonomy_policy_sets_and_reads_back(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-2 (#218): an admin sets the cap; it reads back and is no longer default."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["max_autonomy"] == "draft"
+    assert body["is_default"] is False
+    # The cap persists and reads back via GET (round-trip).
+    got = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token))
+    assert got.json()["max_autonomy"] == "draft"
+    assert got.json()["is_default"] is False
+
+
+async def test_patch_autonomy_policy_unknown_level_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#218, INV-8): an unknown autonomy value is rejected 422 — no free-text ceiling."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "godmode"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_autonomy_policy_unknown_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#218, INV-8): an extra field is rejected 422 (extra=forbid)."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft", "not_a_field": True},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_patch_autonomy_policy_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    """AC-N (#218, INV-5): the governance write is admin-only — member/security are 403."""
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_patch_autonomy_policy_unauthenticated_is_401(client: AsyncClient) -> None:
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy", json={"max_autonomy": "draft"}
+    )
+    assert resp.status_code == 401
+
+
+async def test_autonomy_policy_is_tenant_scoped(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-1 (#218): admin A sets a cap; admin B's tenant stays at the no-ceiling default."""
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token_a),
+        json={"max_autonomy": "suggest"},
+    )
+    token_b = await _login(client, seeded.admin_b_email)
+    got_b = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token_b))
+    # Tenant B still sees the no-ceiling default, never A's cap.
+    assert got_b.json()["is_default"] is True
+    assert got_b.json()["max_autonomy"] == "act_auto"
+
+
+async def test_patch_autonomy_policy_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """AC-N (#218, INV-6): the write emits exactly one autonomy_cap.updated event."""
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "act_with_approval"},
+    )
+    assert resp.status_code == 200, resp.text
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    cap_events = [e for e in events if e.action == "autonomy_cap.updated"]
+    assert len(cap_events) == 1
+    ev = cap_events[0]
+    assert ev.metadata["max_autonomy"] == "act_with_approval"
+    assert ev.resource_type == "tenant"
+    assert ev.resource_id == str(seeded.tenant_a)
+
+
+class FakeObjectStore:
+    """In-memory stand-in for the #22 ``ObjectStore`` (no MinIO needed).
+
+    Implements just the surface the branding + /auth/me paths use: ``put_logo``
+    (validates against the **logo** allowlist/limit via the real ``validate_upload``,
+    so 413/415 negatives are exercised end-to-end) and the generic ``presign_get``
+    (tenant-prefix seam enforced by the real ``assert_key_owned_by``). Records puts
+    so a test can assert the object was stored.
+    """
+
+    def __init__(self) -> None:
+        from app.core.config import get_settings
+
+        self._settings = get_settings()
+        self.objects: dict[str, bytes] = {}
+
+    async def put_logo(
+        self, tenant_id: str, data: bytes, content_type: str, filename: str
+    ) -> StoredObject:
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.logo_allowed_content_types,
+            max_bytes=self._settings.max_logo_bytes,
+        )
+        key = build_key(tenant_id, data, filename)
+        self.objects[key] = data
+        return StoredObject(
+            key=key, sha256=key.split("/")[1], size_bytes=len(data), content_type=content_type
+        )
+
+    async def presign_get(self, tenant_id: str, key: str) -> str:
+        assert_key_owned_by(key, tenant_id)
+        return f"https://storage.test/{key}?sig=fake"
+
+
+@pytest.fixture
+def store() -> FakeObjectStore:
+    """The in-memory object store the branding + /auth/me paths use (offline)."""
+    return FakeObjectStore()
 
 
 def _logo_file(

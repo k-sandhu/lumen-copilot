@@ -22,33 +22,38 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
-  clearTenantBranding,
+  getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
   getSandboxPolicy,
   getToolPolicy,
   listMembers,
+  updateAutonomyPolicy,
   updateSandboxPolicy,
-  updateTenantBranding,
   updateToolPolicy,
+  clearTenantBranding,
+  updateTenantBranding,
 } from '@/api';
+import { currentUserQueryKey } from '@/features/auth';
 import type {
+  TenantBranding,
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
   MemberList,
   ModelGovernance,
   RiskTierList,
   SandboxPolicy,
   SandboxPolicyUpdate,
-  TenantBranding,
   ToolPolicy,
   ToolPolicyUpdate,
 } from '@/api';
-import { currentUserQueryKey } from '@/features/auth';
 
 export const membersQueryKey = ['admin', 'members'] as const;
 export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
 export const sandboxPolicyQueryKey = ['admin', 'sandbox-policy'] as const;
+export const autonomyPolicyQueryKey = ['admin', 'autonomy-policy'] as const;
 
 /** The tenant's members and their roles (admin only). */
 export function useMembers(): UseQueryResult<MemberList> {
@@ -130,6 +135,39 @@ export function useUpdateSandboxPolicy(): UseMutationResult<
     onSuccess: (policy) => {
       qc.setQueryData(sandboxPolicyQueryKey, policy);
       void qc.invalidateQueries({ queryKey: sandboxPolicyQueryKey });
+    },
+  });
+}
+
+/** The per-tenant assistant autonomy cap (admin only, #218). */
+export function useAutonomyPolicy(): UseQueryResult<AutonomyPolicy> {
+  return useQuery<AutonomyPolicy>({
+    queryKey: autonomyPolicyQueryKey,
+    queryFn: ({ signal }) => getAutonomyPolicy(signal),
+    staleTime: 15_000,
+  });
+}
+
+/**
+ * Set the per-tenant autonomy cap (issue #218). On success we seed the cache with the
+ * returned cap and invalidate so the panel re-reads. Because a lower cap changes every
+ * assistant's EFFECTIVE autonomy, we also invalidate the assistants list so the library
+ * re-reads the clamped `effectiveAutonomy`. A 422 (unknown level) / 403 propagates as an
+ * `ApiError` the panel surfaces — it is NOT swallowed here.
+ */
+export function useUpdateAutonomyPolicy(): UseMutationResult<
+  AutonomyPolicy,
+  unknown,
+  AutonomyPolicyUpdate
+> {
+  const qc = useQueryClient();
+  return useMutation<AutonomyPolicy, unknown, AutonomyPolicyUpdate>({
+    mutationFn: (body) => updateAutonomyPolicy(body),
+    onSuccess: (policy) => {
+      qc.setQueryData(autonomyPolicyQueryKey, policy);
+      void qc.invalidateQueries({ queryKey: autonomyPolicyQueryKey });
+      // A cap change re-clamps every assistant's effective autonomy — refresh the library.
+      void qc.invalidateQueries({ queryKey: ['assistants'] });
     },
   });
 }

@@ -21,8 +21,8 @@ drops the column, restoring the pre-feature shape. It is a plain ``add_column`` 
 it renders offline; the live apply runs against a disposable throwaway database
 (never the app DB — the #70 lesson).
 
-Revision ID: 0023_tenant_logo
-Revises: 0022_sandbox_policy
+Revision ID: 0027_tenant_logo
+Revises: 0026_toolinv_msg_fk_deferrable
 Create Date: 2026-07-03 01:00:00+00:00
 """
 
@@ -34,8 +34,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0023_tenant_logo"
-down_revision: str | None = "0022_sandbox_policy"
+revision: str = "0027_tenant_logo"
+down_revision: str | None = "0026_toolinv_msg_fk_deferrable"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

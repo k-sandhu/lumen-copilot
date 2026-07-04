@@ -27,7 +27,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('DocumentPreviewBody', () => {
-  it('renders browser-renderable types in a sandboxed iframe on the blob URL', async () => {
+  it('renders a PDF in an UNsandboxed iframe so Chrome’s native viewer can load', async () => {
     const revoke = vi.fn();
     fetchDocumentContent.mockResolvedValue({
       url: 'blob:pdf-1',
@@ -41,11 +41,47 @@ describe('DocumentPreviewBody', () => {
 
     const frame = await screen.findByTitle(/preview of msa\.pdf/i);
     expect(frame).toHaveAttribute('src', 'blob:pdf-1');
-    expect(frame).toHaveAttribute('sandbox', '');
+    // A fully-restrictive sandbox="" blocks Chrome's out-of-process PDF viewer,
+    // so a PDF frame must carry NO sandbox attribute at all.
+    expect(frame).not.toHaveAttribute('sandbox');
     expect(fetchDocumentText).not.toHaveBeenCalled();
 
     view.unmount();
     expect(revoke).toHaveBeenCalledTimes(1); // no object-URL leaks
+  });
+
+  it('renders markdown as server-extracted text — not a blob iframe', async () => {
+    // A blob iframe renders text/* blank under a restrictive sandbox, so text
+    // types go through GET /documents/{id}/text just like office types.
+    fetchDocumentText.mockResolvedValue({ text: '# PRD\n\nBody', chunk_count: 2, truncated: false });
+
+    render(<DocumentPreviewBody documentId="doc-md" filename="notes.md" mimeType="text/markdown" />);
+
+    expect(await screen.findByText(/# PRD/)).toBeInTheDocument();
+    expect(screen.getByText(/extracted text preview/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/preview of notes\.md/i)).not.toBeInTheDocument(); // no iframe
+    expect(fetchDocumentContent).not.toHaveBeenCalled();
+  });
+
+  it('renders plain text via /text once the blob type says text (chat citation, no mime)', async () => {
+    const revoke = vi.fn();
+    fetchDocumentContent.mockResolvedValue({ url: 'blob:txt-1', type: 'text/plain', revoke });
+    fetchDocumentText.mockResolvedValue({ text: 'runbook body', chunk_count: 1, truncated: false });
+
+    render(<DocumentPreviewBody documentId="doc-txt" filename="runbook.txt" />);
+
+    expect(await screen.findByText('runbook body')).toBeInTheDocument();
+    expect(revoke).toHaveBeenCalledTimes(1); // bytes released; text served via /text
+  });
+
+  it('renders a PDF chat citation (no mime, blob type pdf) in the unsandboxed iframe', async () => {
+    fetchDocumentContent.mockResolvedValue({ url: 'blob:pdf-x', type: 'application/pdf', revoke: vi.fn() });
+
+    render(<DocumentPreviewBody documentId="doc-x" filename="Q4 strategy.pdf" />);
+
+    const frame = await screen.findByTitle(/preview of q4 strategy\.pdf/i);
+    expect(frame).not.toHaveAttribute('sandbox');
+    expect(fetchDocumentText).not.toHaveBeenCalled();
   });
 
   it('renders extracted text for a known office type without fetching bytes', async () => {
