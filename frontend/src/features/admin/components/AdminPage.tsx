@@ -28,11 +28,12 @@ import { ModelGovernancePanel } from './ModelGovernancePanel';
 import { RiskTierPanel } from './RiskTierPanel';
 import { ToolGovernancePanel } from './ToolGovernancePanel';
 import { SandboxGovernancePanel } from './SandboxGovernancePanel';
+import { AutonomyGovernancePanel } from './AutonomyGovernancePanel';
 import { DataMinimizationPanel } from './DataMinimizationPanel';
 
 const TAB_PREFIX = 'admin';
 
-type TabId = 'members' | 'models' | 'approvals' | 'tools' | 'sandbox' | 'data';
+type TabId = 'members' | 'models' | 'approvals' | 'tools' | 'sandbox' | 'autonomy' | 'data';
 
 const TABS: AdminTab[] = [
   { id: 'members', label: 'Members & roles', icon: 'user' },
@@ -40,6 +41,7 @@ const TABS: AdminTab[] = [
   { id: 'approvals', label: 'Approvals & risk', icon: 'shield-check' },
   { id: 'tools', label: 'Tool governance', icon: 'sliders' },
   { id: 'sandbox', label: 'Sandbox governance', icon: 'shield-check' },
+  { id: 'autonomy', label: 'Autonomy', icon: 'shield-check' },
   { id: 'data', label: 'Data minimization', icon: 'lock' },
 ];
 
@@ -49,6 +51,7 @@ const PANELS: Record<TabId, { label: string; render: () => ReactNode }> = {
   approvals: { label: 'Risk tiers', render: () => <RiskTierPanel /> },
   tools: { label: 'Tool governance', render: () => <ToolGovernancePanel /> },
   sandbox: { label: 'Sandbox governance', render: () => <SandboxGovernancePanel /> },
+  autonomy: { label: 'Autonomy cap', render: () => <AutonomyGovernancePanel /> },
   data: { label: 'Data minimization', render: () => <DataMinimizationPanel /> },
 };
 

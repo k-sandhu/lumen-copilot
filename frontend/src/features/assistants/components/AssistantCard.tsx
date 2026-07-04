@@ -15,6 +15,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { Icon } from '@/ui';
 import type { Assistant, ChatModelInfo, Member } from '@/api';
 import {
+  effectiveAutonomyDisplay,
   certificationBadge,
   modelLabel,
   ownerLabel,
@@ -49,6 +50,7 @@ export function AssistantCard({
 }: AssistantCardProps) {
   const owner = ownerLabel(assistant.owner, members);
   const model = modelLabel(assistant.model, models);
+  const autonomy = effectiveAutonomyDisplay(assistant);
   const tools = assistant.toolAllowlist;
   const shownTools = tools.slice(0, MAX_TOOL_BADGES);
   const overflow = tools.length - shownTools.length;
@@ -112,6 +114,25 @@ export function AssistantCard({
           <dt className="sr-only">Model</dt>
           <dd className="truncate" title={model}>
             {model}
+          </dd>
+        </div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Icon name="shield-check" className="shrink-0" />
+          <dt className="sr-only">Autonomy</dt>
+          <dd
+            className="truncate"
+            title={
+              autonomy.capped
+                ? `Autonomy ${autonomy.label} (capped by the tenant admin ceiling)`
+                : `Autonomy ${autonomy.label}`
+            }
+          >
+            {autonomy.label}
+            {autonomy.capped ? (
+              <span className="ml-1 rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-warn">
+                capped
+              </span>
+            ) : null}
           </dd>
         </div>
       </dl>

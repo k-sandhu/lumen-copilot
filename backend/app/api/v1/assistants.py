@@ -104,6 +104,10 @@ class AssistantResponse(BaseModel):
     knowledgeScope: KnowledgeScopeModel  # noqa: N815 — contract camelCase
     toolAllowlist: list[str]  # noqa: N815 — contract camelCase
     autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+    # The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+    # (min(autonomyLevel, tenant cap), issue #218) — visibility for the library/run
+    # detail. Equals autonomyLevel when no cap lowers it.
+    effectiveAutonomy: AutonomyLevel  # noqa: N815 — contract camelCase
     owner: UUID
     backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
     status: AssistantStatus
@@ -261,6 +265,9 @@ def _to_response(assistant: Assistant) -> AssistantResponse:
         knowledgeScope=KnowledgeScopeModel.from_domain(assistant.knowledge_scope),
         toolAllowlist=list(assistant.tool_allowlist),
         autonomyLevel=assistant.autonomy_level,
+        # Fallback to the configured level if the projection was not filled (defensive;
+        # every service read fills it via ``_with_current_version``).
+        effectiveAutonomy=assistant.effective_autonomy or assistant.autonomy_level,
         owner=assistant.owner_id,
         backupOwner=assistant.backup_owner_id,
         status=assistant.status,

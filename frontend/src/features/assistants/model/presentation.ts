@@ -81,6 +81,21 @@ export function autonomyLabel(level: AutonomyLevel): string {
   return AUTONOMY_OPTIONS.find((o) => o.value === level)?.label ?? level;
 }
 
+/**
+ * The autonomy to DISPLAY in the library / run detail and whether the tenant admin
+ * cap has lowered it (issue #218). `effectiveAutonomy` is the assistant's configured
+ * level min'd to the tenant cap; when it differs from the configured `autonomyLevel`,
+ * the cap is capping the assistant and the UI shows the effective level with a
+ * "capped" note so the user understands how far the agent may ACTUALLY act.
+ */
+export function effectiveAutonomyDisplay(assistant: {
+  autonomyLevel: AutonomyLevel;
+  effectiveAutonomy: AutonomyLevel;
+}): { label: string; capped: boolean } {
+  const capped = assistant.effectiveAutonomy !== assistant.autonomyLevel;
+  return { label: autonomyLabel(assistant.effectiveAutonomy), capped };
+}
+
 /** The knowledge-scope source classes, with labels (ADR-0011 §1/§2). */
 export const KNOWLEDGE_MODE_OPTIONS: ReadonlyArray<{
   value: KnowledgeMode;

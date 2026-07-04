@@ -68,6 +68,7 @@ from app.domain.entities import (
     Role,
 )
 from app.services.audit import AuditSink
+from app.services.autonomy_policy_service import AutonomyPolicyReader
 from app.services.tools.mcp_bridge import (
     is_mcp_tool_name,
     namespaced_tool_name,
@@ -181,6 +182,9 @@ class AssistantsService:
         self._sources = SourceRepository(session, tenant_id)
         self._grants = GrantRepository(session, tenant_id)
         self._mcp_servers = McpServerRepository(session, tenant_id)
+        # The per-tenant autonomy cap (issue #218) the publish path enforces — an
+        # assistant may not be published above the tenant ceiling. Tenant-scoped (INV-1).
+        self._autonomy_cap = AutonomyPolicyReader(session, tenant_id=tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
@@ -209,10 +213,16 @@ class AssistantsService:
         return assistant
 
     async def _with_current_version(self, assistant: Assistant) -> Assistant:
-        """Fill the ``current_version`` projection (the published head number)."""
+        """Fill the ``current_version`` + ``effective_autonomy`` projections (visibility).
+
+        ``current_version`` is the published head number (``None`` while never
+        published). ``effective_autonomy`` is the assistant's autonomy after the tenant
+        admin cap (``min(configured, cap)``, issue #218) — surfaced so the library/run
+        detail can show how far the assistant may *actually* act. The cap is resolved
+        once per read; absence of a cap ⇒ the configured level (no ceiling).
+        """
         head = await self._versions.get_head(assistant.id)
-        if head is None:
-            return assistant
+        effective_autonomy = await self._autonomy_cap.clamp(assistant.autonomy_level)
         return Assistant(
             id=assistant.id,
             tenant_id=assistant.tenant_id,
@@ -232,7 +242,8 @@ class AssistantsService:
             disabled_at=assistant.disabled_at,
             created_at=assistant.created_at,
             updated_at=assistant.updated_at,
-            current_version=head.version,
+            current_version=head.version if head is not None else None,
+            effective_autonomy=effective_autonomy,
             owner_orphaned=assistant.owner_orphaned,
         )
 
@@ -344,6 +355,24 @@ class AssistantsService:
                 code="backup_owner_same_as_owner",
             )
 
+    async def _enforce_autonomy_cap(self, autonomy_level: AutonomyLevel) -> None:
+        """Reject publishing an assistant above the tenant autonomy cap (422; issue #218).
+
+        The EFFECTIVE autonomy is ``min(assistant, tenant cap)``; publishing an
+        assistant whose configured level EXCEEDS the cap is rejected as **422** (INV-8
+        — an illegal transition) so a caller cannot ship an over-autonomous assistant.
+        Absence of a cap ⇒ no ceiling (the permissive default), so this is a no-op then.
+        Tenant-scoped (INV-1).
+        """
+        cap = await self._autonomy_cap.effective_cap()
+        if autonomy_level.rank > cap.rank:
+            raise ValidationError(
+                f"The assistant's autonomy ({autonomy_level.value!r}) exceeds the "
+                f"tenant cap ({cap.value!r}). Lower the assistant's autonomy or ask an "
+                "admin to raise the cap before publishing.",
+                code="autonomy_above_cap",
+            )
+
     # --- audit --------------------------------------------------------------
 
     async def _emit_audit(
@@ -408,7 +437,9 @@ class AssistantsService:
             assistant_id=assistant.id,
             metadata={"name": assistant.name, "status": assistant.status.value},
         )
-        return assistant
+        # Fill the projections (current_version / effective_autonomy) so a freshly
+        # created assistant carries the same shape as a read (issue #218 visibility).
+        return await self._with_current_version(assistant)
 
     async def get(self, assistant_id: UUID) -> Assistant:
         """Fetch one assistant the caller may see, or 404 (INV-1/INV-2)."""
@@ -532,6 +563,12 @@ class AssistantsService:
                 "The backup owner must be different from the owner.",
                 code="backup_owner_same_as_owner",
             )
+        # Enforce the tenant autonomy cap (issue #218, AC-2): an assistant may not be
+        # published ABOVE the tenant ceiling. This is a hard reject (422 / INV-8) so the
+        # owner cannot ship an assistant whose configured autonomy exceeds what the
+        # admin permits — they must lower the assistant's autonomy (or an admin must
+        # raise the cap) first. Tenant-scoped (INV-1). Absence of a cap ⇒ no ceiling.
+        await self._enforce_autonomy_cap(assistant.autonomy_level)
         # Re-validate the frozen config's allow-list + scope so a published version
         # is never internally inconsistent (a tool removed from the registry since
         # the draft was saved would block publish, not ship a dangling reference).

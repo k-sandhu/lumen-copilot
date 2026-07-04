@@ -98,8 +98,9 @@ class AuditAction(str, enum.Enum):
     # deny-by-default is preserved (the set only grows; no action is relaxed). An
     # assistant is a governed config; every lifecycle mutation is audited (INV-6):
     # create/update/delete the mutable head, publish (freeze an immutable version),
-    # and rollback (append a new version from a prior snapshot). Ownership transfer
-    # + autonomy caps get their own actions when #217/#218 land (ADR-0011 §3/§4).
+    # and rollback (append a new version from a prior snapshot). The per-tenant
+    # autonomy cap has its own action (``autonomy_cap.updated``, #218, below);
+    # ownership transfer gets its own when #217 lands (ADR-0011 §3/§4).
     ASSISTANT_CREATED = "assistant.created"
     ASSISTANT_UPDATED = "assistant.updated"
     ASSISTANT_DELETED = "assistant.deleted"
@@ -185,6 +186,15 @@ class AuditAction(str, enum.Enum):
     # here (INV-6). This is the policy the sandbox admission path consults per run, so
     # its provenance (who enabled/narrowed what) is provable after the fact.
     SANDBOX_POLICY_UPDATED = "sandbox_policy.updated"
+    # Admin per-tenant autonomy cap (ADR-0011 §3, issue #218). Additive to the §2.4
+    # taxonomy — deny-by-default is preserved (the set only grows; no action is
+    # relaxed). Setting the tenant's maximum assistant autonomy (the ceiling an
+    # assistant's EFFECTIVE autonomy is min'd to) is a reversible, tenant-scoped
+    # **T1** governance write (spec 0004 §2.5 — "authorized owner; audited; no extra
+    # approval"): admin-gated (INV-5) and audited here (INV-6). This is the cap the
+    # publish path and the run-time autonomy gate consult, so who tightened/relaxed
+    # how far an agent may act is provable after the fact.
+    AUTONOMY_CAP_UPDATED = "autonomy_cap.updated"
     # Per-tenant MCP server registration (ADR-0012 §5, issue #226). Additive to the
     # §2.4 taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Registering a remote MCP server is an owner-gated T1 config write

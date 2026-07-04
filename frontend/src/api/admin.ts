@@ -17,6 +17,8 @@
  */
 import { request } from './client';
 import type {
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
   CertificationState,
   GovernedAssistant,
   GovernedAssistantList,
@@ -168,4 +170,17 @@ export interface BulkOrphanResult {
  */
 export function disableOrphanedAssistants(): Promise<BulkOrphanResult> {
   return request<BulkOrphanResult>('/admin/assistants/disable-orphans', { method: 'POST' });
+}
+
+export function getAutonomyPolicy(signal?: AbortSignal): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { signal });
+}
+
+/**
+ * Set the per-tenant assistant autonomy cap (admin only, audited, #218). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it. An
+ * unknown `max_autonomy` → 422 (INV-8). Returns the resulting cap.
+ */
+export function updateAutonomyPolicy(body: AutonomyPolicyUpdate): Promise<AutonomyPolicy> {
+  return request<AutonomyPolicy>('/admin/autonomy-policy', { method: 'PATCH', json: body });
 }

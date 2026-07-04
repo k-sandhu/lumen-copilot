@@ -927,6 +927,54 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/autonomy-policy:
+    get:
+      operationId: getAutonomyPolicy
+      summary: The per-tenant assistant autonomy cap (admin only).
+      description: >
+        The caller's tenant's autonomy cap (issue #218, ADR-0011 §3): `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so every assistant runs at its
+        own configured level (permissive default). Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1).
+      tags: [admin]
+      responses:
+        "200":
+          description: The per-tenant assistant autonomy cap.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateAutonomyPolicy
+      summary: Set the per-tenant assistant autonomy cap (admin only).
+      description: >
+        Set the caller's tenant's autonomy cap (issue #218): `max_autonomy` is the
+        maximum `AutonomyLevel` any assistant may effectively run at. A tenant-scoped
+        **T1** governance write (spec 0004 §2.5 — "authorized owner; audited; no extra
+        approval"): `admin`-only (**403** otherwise, INV-5), audited as
+        `autonomy_cap.updated` (INV-6). The cap only ever NARROWS — it lowers an
+        assistant's effective autonomy, never raises it. Publishing an assistant above
+        the ceiling is rejected **422**, and a running assistant above it is clamped at
+        the run-time tool gate. An unknown `max_autonomy` is **422** (INV-8). Returns
+        the resulting cap.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomyPolicyUpdate" }
+      responses:
+        "200":
+          description: The updated per-tenant assistant autonomy cap.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
     get:
@@ -3229,6 +3277,38 @@ components:
           minimum: 1
           description: Max simultaneous runs for the tenant. Clamped to the config ceiling.
 
+    # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
+    AutonomyPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so `max_autonomy` is reported
+        as the top of the scale (`act_auto`) and every assistant runs at its own
+        configured level. `levels` lists the choice set in ascending order.
+      required: [max_autonomy, is_default, levels]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
+        is_default:
+          type: boolean
+          description: True when no per-tenant cap is stored (no ceiling — the permissive default).
+        levels:
+          type: array
+          items: { $ref: "#/components/schemas/AutonomyLevel" }
+          description: The autonomy values in ascending order (suggest … act_auto).
+
+    AutonomyPolicyUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set the per-tenant assistant autonomy cap (issue #218). `max_autonomy` must be
+        a valid `AutonomyLevel` (an unknown value → 422, INV-8). The cap only ever
+        NARROWS — it lowers an assistant's effective autonomy, never raises it.
+      required: [max_autonomy]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
+
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:
       type: string
@@ -3756,7 +3836,7 @@ components:
         A saved, named, governed chat configuration (ADR-0011 §1) — the mutable
         head. Tenant- and owner-scoped (INV-1/INV-2).
       required:
-        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, created_at, updated_at]
+        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, effectiveAutonomy, owner, status, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, maxLength: 200 }
@@ -3775,6 +3855,13 @@ components:
           items: { type: string }
           description: Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands).
         autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        effectiveAutonomy:
+          allOf:
+            - { $ref: "#/components/schemas/AutonomyLevel" }
+          description: >
+            The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+            (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no
+            cap lowers it — visibility for the library/run detail.
         owner:
           type: string
           format: uuid

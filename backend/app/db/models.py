@@ -872,6 +872,50 @@ class TenantSandboxPolicy(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class TenantAutonomyPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """A per-tenant admin autonomy cap (issue #218).
+
+    The persistence half of admin autonomy governance (ADR-0011 §3): one row is an
+    admin's ceiling on how far ANY assistant in the tenant may effectively act —
+    ``max_autonomy`` is the maximum :class:`~app.domain.entities.AutonomyLevel` an
+    assistant's EFFECTIVE autonomy is ``min``'d to. **Absence of a row means no
+    ceiling** — an assistant runs at its own configured level (the permissive
+    default, mirroring how ``tenant_tool_policy`` / ``tenant_sandbox_policy`` fall
+    back to their built-in defaults). Enforcement is two-sided: publishing/upgrading
+    an assistant above the cap is rejected/clamped, and the run-time tool gate uses
+    the clamped level to decide whether a T1 side-effecting tool may execute.
+
+    ``max_autonomy`` is one of the four enum string values (validated in the service
+    and constrained at the DB via a CHECK). The unique ``(tenant_id)`` constraint
+    makes the cap a per-tenant singleton; ``updated_by`` records the admin who last
+    set it (audit corroboration). Tenant-scoped like every table (INV-1); the
+    ``0023`` migration puts it under the same fail-closed RLS backstop as every other
+    tenant-scoped table.
+    """
+
+    __tablename__ = "tenant_autonomy_policy"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_tenant_autonomy_policy_tenant"),
+        CheckConstraint(
+            "max_autonomy in ('suggest', 'draft', 'act_with_approval', 'act_auto')",
+            name="ck_tenant_autonomy_policy_max_autonomy",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # The autonomy ceiling — one of the AutonomyLevel enum values (validated in the
+    # service; CHECK-constrained above). An assistant's effective autonomy is min'd
+    # to this. Absence of a row means no ceiling (the permissive default).
+    max_autonomy: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The admin who last set this cap (INV-6 corroboration); SET NULL so a
+    # deprovisioned admin does not cascade-delete the tenant's live cap.
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class ToolInvocation(TenantScopedMixin, Base):
     """One governed tool-call record (CC-7 / issue #207 §4) — the tool trace/audit row.
 

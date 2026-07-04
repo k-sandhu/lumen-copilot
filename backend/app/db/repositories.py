@@ -79,6 +79,7 @@ from app.domain.entities import (
     Source,
     SourceStatus,
     Tenant,
+    TenantAutonomyPolicy,
     TenantSandboxPolicy,
     TenantToolPolicy,
     ToolInvocation,
@@ -351,6 +352,17 @@ def _to_tenant_sandbox_policy(row: models.TenantSandboxPolicy) -> TenantSandboxP
         max_memory_mb=row.max_memory_mb,
         daily_runtime_cap_s=row.daily_runtime_cap_s,
         max_concurrency=row.max_concurrency,
+        updated_by=row.updated_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_tenant_autonomy_policy(row: models.TenantAutonomyPolicy) -> TenantAutonomyPolicy:
+    return TenantAutonomyPolicy(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        max_autonomy=AutonomyLevel(row.max_autonomy),
         updated_by=row.updated_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -2847,6 +2859,61 @@ class TenantSandboxPolicyRepository(_TenantScopedRepository):
         await self._session.flush()
         await self._session.refresh(row)
         return _to_tenant_sandbox_policy(row)
+
+
+class TenantAutonomyPolicyRepository(_TenantScopedRepository):
+    """The per-tenant assistant autonomy cap within one tenant (issue #218).
+
+    Tenant-scoped like every repository (INV-1): every query filters on ``tenant_id``,
+    so one tenant can never read or write another's cap. A row's absence is meaningful
+    — it means "no ceiling" (an assistant runs at its own configured level), so this
+    exposes a plain ``get`` returning ``None`` rather than fabricating a default.
+    Writes are flushed not committed; the caller owns the transaction boundary (so the
+    audit event commits atomically with the write).
+    """
+
+    async def get(self) -> TenantAutonomyPolicy | None:
+        """The tenant's autonomy cap, or ``None`` if none is stored (no ceiling).
+
+        ``None`` is not an error — it means there is no per-tenant ceiling (the
+        permissive default). Tenant-scoped (INV-1).
+        """
+        row = await self._get_row()
+        return _to_tenant_autonomy_policy(row) if row is not None else None
+
+    async def _get_row(self) -> models.TenantAutonomyPolicy | None:
+        stmt = select(models.TenantAutonomyPolicy).where(
+            models.TenantAutonomyPolicy.tenant_id == self._tenant_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def upsert(
+        self,
+        *,
+        max_autonomy: AutonomyLevel,
+        updated_by: UUID | None,
+    ) -> TenantAutonomyPolicy:
+        """Create or update the tenant's autonomy cap (a per-tenant singleton upsert).
+
+        The ``(tenant_id)`` unique constraint makes this a singleton per tenant: an
+        existing row is updated in place, otherwise a new one is inserted. Tenant-scoped
+        (INV-1) — the write is always keyed to this repository's tenant, never request
+        input. Flushed, not committed.
+        """
+        row = await self._get_row()
+        if row is None:
+            row = models.TenantAutonomyPolicy(
+                tenant_id=self._tenant_id,
+                max_autonomy=max_autonomy.value,
+                updated_by=updated_by,
+            )
+            self._session.add(row)
+        else:
+            row.max_autonomy = max_autonomy.value
+            row.updated_by = updated_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant_autonomy_policy(row)
 
 
 class AuditEventRepository(_TenantScopedRepository):

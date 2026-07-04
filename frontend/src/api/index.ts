@@ -49,6 +49,8 @@ export {
   updateToolPolicy,
   getSandboxPolicy,
   updateSandboxPolicy,
+  getAutonomyPolicy,
+  updateAutonomyPolicy,
   listGovernedAssistants,
   certifyAssistant,
   featureAssistant,

@@ -24,6 +24,7 @@ function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
     knowledgeScope: { collectionIds: ['c1'], sourceIds: [], modes: ['company'] },
     toolAllowlist: ['search_text'],
     autonomyLevel: 'suggest',
+    effectiveAutonomy: 'suggest',
     owner: 'u1',
     backupOwner: 'u2',
     status: 'draft',

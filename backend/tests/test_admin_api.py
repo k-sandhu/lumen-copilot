@@ -47,6 +47,7 @@ _ADMIN_PATHS = (
     "/api/v1/admin/settings",
     "/api/v1/admin/tool-policy",
     "/api/v1/admin/sandbox-policy",
+    "/api/v1/admin/autonomy-policy",
 )
 
 
@@ -845,5 +846,132 @@ async def test_patch_sandbox_policy_emits_audit_event(
     ev = policy_events[0]
     assert ev.metadata["enabled"] is True
     assert ev.metadata["egress_allowed"] is True
+    assert ev.resource_type == "tenant"
+    assert ev.resource_id == str(seeded.tenant_a)
+
+
+# --- GET/PATCH /admin/autonomy-policy (per-tenant autonomy cap, #218) ----------
+
+_AUTONOMY_KEYS = {"max_autonomy", "is_default", "levels"}
+
+
+async def test_get_autonomy_policy_default_is_no_ceiling(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-3 (#218): a fresh tenant has NO cap → is_default true, ceiling = act_auto."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == _AUTONOMY_KEYS
+    # No stored cap ⇒ no ceiling: reported as the top of the scale, is_default true.
+    assert body["is_default"] is True
+    assert body["max_autonomy"] == "act_auto"
+    assert body["levels"] == ["suggest", "draft", "act_with_approval", "act_auto"]
+
+
+async def test_patch_autonomy_policy_sets_and_reads_back(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC-2 (#218): an admin sets the cap; it reads back and is no longer default."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["max_autonomy"] == "draft"
+    assert body["is_default"] is False
+    # The cap persists and reads back via GET (round-trip).
+    got = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token))
+    assert got.json()["max_autonomy"] == "draft"
+    assert got.json()["is_default"] is False
+
+
+async def test_patch_autonomy_policy_unknown_level_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#218, INV-8): an unknown autonomy value is rejected 422 — no free-text ceiling."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "godmode"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_patch_autonomy_policy_unknown_field_is_422(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """AC (#218, INV-8): an extra field is rejected 422 (extra=forbid)."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft", "not_a_field": True},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("email_attr", ["member_a_email", "security_a_email"])
+async def test_patch_autonomy_policy_forbidden_for_non_admin(
+    client: AsyncClient, seeded: _Seeded, email_attr: str
+) -> None:
+    """AC-N (#218, INV-5): the governance write is admin-only — member/security are 403."""
+    token = await _login(client, getattr(seeded, email_attr))
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "draft"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_patch_autonomy_policy_unauthenticated_is_401(client: AsyncClient) -> None:
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy", json={"max_autonomy": "draft"}
+    )
+    assert resp.status_code == 401
+
+
+async def test_autonomy_policy_is_tenant_scoped(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-1 (#218): admin A sets a cap; admin B's tenant stays at the no-ceiling default."""
+    token_a = await _login(client, seeded.admin_a_email)
+    await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token_a),
+        json={"max_autonomy": "suggest"},
+    )
+    token_b = await _login(client, seeded.admin_b_email)
+    got_b = await client.get("/api/v1/admin/autonomy-policy", headers=_auth(token_b))
+    # Tenant B still sees the no-ceiling default, never A's cap.
+    assert got_b.json()["is_default"] is True
+    assert got_b.json()["max_autonomy"] == "act_auto"
+
+
+async def test_patch_autonomy_policy_emits_audit_event(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """AC-N (#218, INV-6): the write emits exactly one autonomy_cap.updated event."""
+    from app.db.repositories import AuditEventRepository
+
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/autonomy-policy",
+        headers=_auth(token),
+        json={"max_autonomy": "act_with_approval"},
+    )
+    assert resp.status_code == 200, resp.text
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    cap_events = [e for e in events if e.action == "autonomy_cap.updated"]
+    assert len(cap_events) == 1
+    ev = cap_events[0]
+    assert ev.metadata["max_autonomy"] == "act_with_approval"
     assert ev.resource_type == "tenant"
     assert ev.resource_id == str(seeded.tenant_a)

@@ -55,7 +55,7 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import GroundedCitation
-from app.domain.entities import AuditOutcome, MessageRole
+from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway
@@ -64,6 +64,7 @@ from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
 from app.services.assistant_runtime import AssistantRunConfig
 from app.services.audit import AuditSink
+from app.services.autonomy_policy_service import AutonomyPolicyReader
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
@@ -386,6 +387,16 @@ class ChatRuntime:
             if assistant_config is not None
             else GROUNDED_SYSTEM_PROMPT
         )
+        # The run's EFFECTIVE autonomy (issue #218): for an assistant session, the
+        # assistant's configured level min'd to the tenant admin cap; for ad-hoc chat
+        # (no assistant) there is no assistant to gate, and the default set is all-T0,
+        # so ACT_AUTO leaves ad-hoc behaviour unchanged. The runner gates side-effecting
+        # T1 tools by this level (suggest/draft ⇒ refused, act_with_approval ⇒ routed
+        # through the approval seam, act_auto ⇒ executed automatically). The cap is
+        # tenant-scoped (INV-1) — keyed off the running principal's tenant.
+        effective_autonomy = await self._resolve_effective_autonomy(
+            session, tenant_id, assistant_config
+        )
         runner = ToolRunner(
             allowed=allowed,
             invocations=ToolInvocationRepository(session, tenant_id),
@@ -403,6 +414,7 @@ class ChatRuntime:
             # principal's tenant, never request input (INV-1).
             gate=PolicyApprovalGate(session, tenant_id=tenant_id),
             extra_tools=mcp_tools,
+            autonomy=effective_autonomy,
         )
         # The tool schemas advertised to the model — exactly the allow-list (native
         # + the resolved MCP tools it names), so the model is only *offered* tools it
@@ -645,6 +657,27 @@ class ChatRuntime:
         tenant = await TenantRepository(session).get(tenant_id)
         override = tenant.max_tool_turns if tenant is not None else None
         return max(1, override if override is not None else self._default_max_tool_turns)
+
+    async def _resolve_effective_autonomy(
+        self,
+        session: AsyncSession,
+        tenant_id: UUID,
+        assistant_config: AssistantRunConfig | None,
+    ) -> AutonomyLevel:
+        """The EFFECTIVE autonomy for this answer — the assistant's level min'd to the cap.
+
+        Ad-hoc chat (no assistant) has no assistant to gate and offers only T0 tools,
+        so it runs at ``ACT_AUTO`` (the autonomy gate is inert there). An assistant
+        session runs at ``min(assistant.autonomy, tenant cap)`` (issue #218) — the
+        tenant admin cap can only LOWER an assistant's configured level. Tenant-scoped
+        (INV-1): the cap is keyed off the running principal's tenant, never request
+        input.
+        """
+        if assistant_config is None:
+            return AutonomyLevel.ACT_AUTO
+        return await AutonomyPolicyReader(session, tenant_id=tenant_id).clamp(
+            assistant_config.autonomy
+        )
 
     async def _stream_one_turn(
         self,
