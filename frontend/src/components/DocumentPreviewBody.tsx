@@ -4,21 +4,25 @@
  * identically everywhere.
  *
  * Rendering strategy by type:
- * - Browser-renderable types (pdf / plain text / markdown / images) — fetch the
- *   original bytes through the api/ boundary (`fetchDocumentContent`: bearer
- *   attached, the contract's 302→presigned redirect followed) and render the
- *   resulting `blob:` URL in a sandboxed iframe. The blob carries the stored
- *   content-type, so the browser picks its native viewer.
- * - OOXML office types (docx / pptx / xlsx) — a browser has NO native viewer
- *   (an iframe would show nothing or force a download), so render the server's
- *   extracted text instead (`GET /documents/{id}/text`, #244), labeled as an
- *   extracted-text preview, with a truncation notice when the server capped it.
+ * - PDF — the browser's one dependable native viewer. Fetch the original bytes
+ *   through the api/ boundary (`fetchDocumentContent`: bearer attached, the
+ *   contract's 302→presigned redirect followed) and render the resulting `blob:`
+ *   URL in an iframe. The iframe is left UNsandboxed: a fully-restrictive
+ *   sandbox="" blocks Chrome's out-of-process PDF viewer (broken-plugin
+ *   placeholder). Safe — the upload allowlist admits no active-content types
+ *   (no HTML/SVG/scripts), so a PDF frame carries no script vector.
+ * - Everything else (office docx/pptx/xlsx AND plain text / markdown) — render
+ *   the server's reassembled text (`GET /documents/{id}/text`, #244), labeled as
+ *   an extracted-text preview, with a truncation notice when the server capped
+ *   it. A blob iframe shows office types as nothing/a download and renders
+ *   text/* blank under any restrictive sandbox, so the text endpoint is the
+ *   reliable, consistently-styled path for all of them.
  * - Every type keeps a "Download original" affordance so the raw bytes are
  *   always one click away (fetched on demand; never auto-downloaded).
  *
- * The office set is decided by the document's `mime_type` when the caller has
- * it (documents feature) and by the fetched blob's content-type when it does
- * not (chat citations — the chat wire carries no mime type).
+ * The type is decided by the document's `mime_type` when the caller has it
+ * (documents feature) and by the fetched blob's content-type when it does not
+ * (chat citations — the chat wire carries no mime type).
  *
  * INV-2: a 404 (not permitted / cross-tenant) renders as "no longer available"
  * with no retry — the UI never suggests access might appear. Other failures
@@ -27,12 +31,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, fetchDocumentContent, fetchDocumentText } from '@/api';
 
-/** OOXML MIME types a browser cannot render natively (upload allowlist ∩ no-viewer). */
+/** OOXML office MIME types a browser cannot render natively. */
 const OFFICE_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
+
+/**
+ * Types previewed as server-extracted text (via `GET /documents/{id}/text`, #244)
+ * rather than in an iframe: the office set PLUS plain text / markdown. A blob
+ * iframe shows office types as nothing/a download, and — under any restrictive
+ * sandbox — renders text/* blank in Chrome. Routing all of them through the
+ * reassembled-text endpoint is reliable and consistently styled. Only PDF (the
+ * browser's one dependable native viewer) stays an iframe.
+ */
+const TEXT_PREVIEW_MIME_TYPES = new Set([...OFFICE_MIME_TYPES, 'text/plain', 'text/markdown']);
 
 export interface DocumentPreviewBodyProps {
   documentId: string;
@@ -48,6 +62,7 @@ export interface DocumentPreviewBodyProps {
 
 type PreviewState =
   | { kind: 'loading' }
+  // Only PDFs use the iframe now (text types render via /text); it stays unsandboxed.
   | { kind: 'frame'; url: string }
   | { kind: 'text'; text: string; truncated: boolean }
   | { kind: 'gone' } // 404 — INV-2: not permitted / deleted; no retry
@@ -65,18 +80,24 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
     setState({ kind: 'loading' });
 
     const toState = async (): Promise<PreviewState> => {
-      // Known office type: go straight to extracted text (no bytes needed).
-      if (mimeType !== undefined && OFFICE_MIME_TYPES.has(mimeType)) {
+      // Known text-extractable type (office / plain text / markdown): render the
+      // server's reassembled text — no bytes needed, reliable and styled.
+      if (mimeType !== undefined && TEXT_PREVIEW_MIME_TYPES.has(mimeType)) {
         const text = await fetchDocumentText(documentId, abort.signal);
         return { kind: 'text', text: text.text, truncated: text.truncated };
       }
-      // Otherwise load the bytes; the blob's content-type settles unknown types.
+      // Otherwise load the bytes; the blob's content-type settles unknown types
+      // (chat citations carry no declared mime type).
       const content = await fetchDocumentContent(documentId, abort.signal);
-      if (OFFICE_MIME_TYPES.has(content.type)) {
-        content.revoke(); // office bytes are not rendered — release immediately
+      if (TEXT_PREVIEW_MIME_TYPES.has(content.type)) {
+        content.revoke(); // text is served via /text — release the bytes now
         const text = await fetchDocumentText(documentId, abort.signal);
         return { kind: 'text', text: text.text, truncated: text.truncated };
       }
+      // Only PDFs reach here (the sole type with a dependable browser viewer).
+      // The blob iframe is left UNsandboxed — a restrictive sandbox="" blocks
+      // Chrome's out-of-process PDF viewer (broken-plugin placeholder). Safe:
+      // the upload allowlist admits no active content (no HTML/SVG/scripts).
       revoke = content.revoke;
       return { kind: 'frame', url: content.url };
     };
@@ -95,13 +116,13 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
           setState({ kind: 'gone' });
           return;
         }
-        // A text-extraction failure on an office doc still leaves the original
-        // bytes downloadable — degrade to that rather than a dead end.
-        const officeKnown = mimeType !== undefined && OFFICE_MIME_TYPES.has(mimeType);
+        // A text-extraction failure still leaves the original bytes downloadable
+        // — degrade to that rather than a dead end (office + text/markdown).
+        const textTypeKnown = mimeType !== undefined && TEXT_PREVIEW_MIME_TYPES.has(mimeType);
         setState({
           kind: 'error',
           message: error instanceof ApiError ? error.displayMessage : 'Could not load the document.',
-          downloadOnly: officeKnown,
+          downloadOnly: textTypeKnown,
         });
       });
 
@@ -203,11 +224,14 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
 
   return (
     <div className="flex h-full flex-col">
+      {/* PDF-only frame, intentionally UNsandboxed: a restrictive sandbox=""
+          blocks Chrome's out-of-process PDF viewer (broken-plugin placeholder).
+          Safe — the upload allowlist admits no active content (no HTML/SVG/
+          scripts); every other type renders via the /text path, not here. */}
       <iframe
         title={`Preview of ${filename}`}
         src={state.url}
         className="min-h-0 w-full flex-1 border-0 bg-white"
-        sandbox=""
       />
       <div className="flex shrink-0 justify-end border-t border-border px-3 py-1.5">
         <button
