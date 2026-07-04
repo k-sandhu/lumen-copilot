@@ -105,6 +105,12 @@ class AuditAction(str, enum.Enum):
     ASSISTANT_DELETED = "assistant.deleted"
     ASSISTANT_PUBLISHED = "assistant.published"
     ASSISTANT_ROLLED_BACK = "assistant.rolled_back"
+    # Read-only preview/test/debug of a DRAFT assistant before publishing (E6-5,
+    # issue #215). A test run executes the draft config with write-tier tools forced
+    # into simulate/deny mode (no artifact, no code run, no external effect) and
+    # returns a debug trace. Auditing it (INV-6) keeps automation-adjacent activity
+    # provable — a test run is owner-gated and audited even though it mutates nothing.
+    ASSISTANT_TESTED = "assistant.tested"
     # Conversational agent builder (E6-1, issue #213). Additive to the §2.4
     # taxonomy — deny-by-default is preserved (the set only grows; no action is
     # relaxed). Drafting a config from a plain-language description creates NOTHING

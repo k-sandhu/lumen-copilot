@@ -84,6 +84,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Read-only test/preview/debug of a draft assistant (E6-5 / issue #215) —
+        # additive; a test run is owner-gated and audited even though it mutates
+        # nothing (write-tier tools forced into simulate/deny mode).
+        "assistant.tested",
         # Conversational agent builder (E6-1 / issue #213) — additive; drafting a
         # config from a description is audited (INV-6) even though nothing is
         # persisted until the user saves via assistant.created.

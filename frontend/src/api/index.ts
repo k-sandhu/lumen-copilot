@@ -63,6 +63,7 @@ export {
   publishAssistant,
   listAssistantVersions,
   rollbackAssistant,
+  testAssistant,
 } from './assistants';
 export type { AssistantPageQuery, AssistantVersionPageQuery } from './assistants';
 export {
