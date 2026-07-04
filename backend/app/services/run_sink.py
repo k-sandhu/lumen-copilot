@@ -230,6 +230,126 @@ class _RunOutcome:
     error: RunError | None
 
 
+@dataclass
+class DebugTraceSink:
+    """A :class:`Backplane` that captures a test run's stream for the debug view (#215).
+
+    The read-only test/preview harness (E6-5) runs the shared chat runtime against a
+    draft assistant config with **no socket** — exactly the headless shape — but its
+    goal is inspection, not persistence: it captures every published envelope in
+    memory and projects the **debug trace** the builder UI renders (the prompt,
+    retrieval calls + hits, each tool call with args/results, the streamed outputs,
+    approvals/denials, errors, and per-step timing). Nothing is written to
+    ``run_steps`` (a test run creates no ``Run``); the sink is a pure in-memory
+    collaborator, so a test run leaves no durable side effect of its own.
+
+    Like :class:`RunTranscriptSink` it only implements the producer half of the
+    ``Backplane`` Protocol (``publish``); the ``bind_owner``/``get_owner``/``subscribe``
+    consumer half is never reached (a test run is synchronous — the caller awaits the
+    whole run, then reads :meth:`trace`).
+    """
+
+    stream_id: str
+    _envelopes: list[dict[str, Any]] = field(default_factory=list)
+
+    async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
+        """Capture one published envelope (the producer-side Protocol method)."""
+        self._envelopes.append(envelope)
+
+    async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
+        """No-op: a test run is synchronous and un-watched (no live owner binding)."""
+
+    async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
+        return None
+
+    def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
+        raise NotImplementedError("DebugTraceSink is producer-only; a test run is synchronous.")
+
+    @property
+    def envelopes(self) -> list[dict[str, Any]]:
+        """The captured envelopes in publish order (for assertions / projection)."""
+        return list(self._envelopes)
+
+    def tool_calls(self) -> list[dict[str, Any]]:
+        """Project the tool activity: each call paired with its result (args/results/ok).
+
+        Reads the ``event:tool_call`` / ``event:tool_result`` envelopes the runtime
+        emits and folds them by ``callId`` into one row per call — the shape the
+        debug view's ToolActivity panel renders (tool, args, result summary, ok,
+        error, hitCount). A call with no matching result (a crash mid-call) still
+        appears, with ``result=None`` — the trace never silently drops a call.
+        """
+        calls: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for env in self._envelopes:
+            if env.get("type") != "event":
+                continue
+            data = env.get("data")
+            if not isinstance(data, dict):
+                continue
+            call_id = data.get("callId")
+            if not isinstance(call_id, str):
+                continue
+            if env.get("name") == "tool_call":
+                calls[call_id] = {
+                    "callId": call_id,
+                    "tool": data.get("tool"),
+                    "args": data.get("args"),
+                    "result": None,
+                }
+                order.append(call_id)
+            elif env.get("name") == "tool_result":
+                row = calls.setdefault(call_id, {"callId": call_id, "result": None})
+                if call_id not in order:
+                    order.append(call_id)
+                row["tool"] = row.get("tool") or data.get("tool")
+                row["result"] = {
+                    "ok": data.get("ok"),
+                    "summary": data.get("summary"),
+                    "hitCount": data.get("hitCount"),
+                    **({"error": data["error"]} if "error" in data else {}),
+                }
+        return [calls[c] for c in order]
+
+    def retrieval(self) -> list[dict[str, Any]]:
+        """The citation events — the permitted passages the run grounded on (INV-3).
+
+        The retrieval half of the debug view: each ``event:citation`` the runtime
+        emitted (document, snippet, char span, score). A citation is built ONLY from a
+        passage the permission-filtered retrieval actually returned, so this is an
+        honest record of what the test run could ground on (never fabricated).
+        """
+        out: list[dict[str, Any]] = []
+        for env in self._envelopes:
+            if env.get("type") == "event" and env.get("name") == "citation":
+                data = env.get("data")
+                if isinstance(data, dict):
+                    out.append(dict(data))
+        return out
+
+    def outputs(self) -> str:
+        """The streamed answer text (the ``delta`` envelopes concatenated)."""
+        return "".join(
+            str(e.get("data", {}).get("text", ""))
+            for e in self._envelopes
+            if e.get("type") == "delta" and isinstance(e.get("data"), dict)
+        )
+
+    def errors(self) -> list[dict[str, Any]]:
+        """The terminal ``error`` problem envelope(s), if the run failed (typed only)."""
+        out: list[dict[str, Any]] = []
+        for env in self._envelopes:
+            if env.get("type") == "error":
+                problem = env.get("problem")
+                if isinstance(problem, dict):
+                    out.append(dict(problem))
+        return out
+
+    def finished_ok(self) -> bool:
+        """Whether the run ended with a ``done`` terminal (no ``error`` terminal)."""
+        return any(is_terminal(e) and e.get("type") == "done" for e in self._envelopes)
+
+
 class TeeSink:
     """Fan-out :class:`Backplane` over several sinks — the dual-publish for a watched run.
 
@@ -262,4 +382,4 @@ class TeeSink:
         return self._sinks[0].subscribe(stream_id)
 
 
-__all__ = ["RunTranscriptSink", "TeeSink"]
+__all__ = ["DebugTraceSink", "RunTranscriptSink", "TeeSink"]

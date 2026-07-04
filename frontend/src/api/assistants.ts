@@ -28,10 +28,14 @@ import { request } from './client';
 import type {
   Assistant,
   AssistantCreate,
+  AssistantDraft,
+  AssistantDraftRequest,
   AssistantList,
   AssistantPublishRequest,
   AssistantRollbackRequest,
   AssistantStatus,
+  AssistantTestRequest,
+  AssistantTestTrace,
   AssistantUpdate,
   AssistantVersion,
   AssistantVersionList,
@@ -73,6 +77,17 @@ export function listAssistants(
  */
 export function createAssistant(body: AssistantCreate): Promise<Assistant> {
   return request<Assistant>('/assistants', { method: 'POST', json: body });
+}
+
+/**
+ * Draft an assistant config from a plain-language description (E6-1, #213). Creates
+ * NOTHING — returns a draft config the editor pre-fills for review + save, plus
+ * clarifying questions (missing scope/owner/risk), notes for any omitted tool/scope
+ * (deny-by-default, INV-2), and warnings for any drafted high-risk tool. A blank /
+ * oversize `description` → 422 (INV-8), surfaced inline.
+ */
+export function draftAssistant(body: AssistantDraftRequest): Promise<AssistantDraft> {
+  return request<AssistantDraft>('/assistants/draft', { method: 'POST', json: body });
 }
 
 /** Get an assistant by id (404 if not yours / cross-tenant — INV-1/INV-2). */
@@ -132,4 +147,19 @@ export function rollbackAssistant(
   body: AssistantRollbackRequest,
 ): Promise<AssistantVersion> {
   return request<AssistantVersion>(`/assistants/${id}/rollback`, { method: 'POST', json: body });
+}
+
+/**
+ * Preview/test/debug a draft assistant with NO real side effect (E6-5, #215).
+ * Runs the assistant's working (draft) config against a sample input with write-tier
+ * tools forced into simulate/deny mode (`write_file` simulated — no artifact;
+ * `run_python` denied — no code run), and returns the debug trace (prompt, retrieval,
+ * tool calls with args/results, outputs, errors, timing). A non-owned / cross-tenant
+ * id → 404 (existence non-disclosure, INV-1/INV-2); a malformed body → 422.
+ */
+export function testAssistant(
+  id: string,
+  body: AssistantTestRequest = {},
+): Promise<AssistantTestTrace> {
+  return request<AssistantTestTrace>(`/assistants/${id}/test`, { method: 'POST', json: body });
 }

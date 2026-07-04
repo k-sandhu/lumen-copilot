@@ -4,11 +4,12 @@
  * publish-gating rule (owner + distinct backup owner required, ADR-0011 §4).
  */
 import { describe, it, expect } from 'vitest';
-import type { Assistant } from '@/api';
+import type { Assistant, AssistantDraftConfig } from '@/api';
 import {
   canPublish,
   emptyForm,
   formFromAssistant,
+  formFromDraft,
   toCreateBody,
   toUpdateBody,
 } from './form';
@@ -44,6 +45,50 @@ describe('formFromAssistant / round-trip', () => {
     expect(form.owner).toBe('u1');
     expect(form.backupOwner).toBe('u2');
     expect(form.knowledgeScope.modes).toEqual(['company']);
+  });
+});
+
+describe('formFromDraft (E6-1, #213)', () => {
+  const draft: AssistantDraftConfig = {
+    name: 'Benefits helper',
+    description: 'Answers HR benefits questions',
+    instructions: 'You are a friendly benefits assistant.',
+    model: 'anthropic/claude',
+    knowledgeScope: { collectionIds: ['c1'], sourceIds: ['s1'], modes: ['company'] },
+    toolAllowlist: ['search_documents'],
+    autonomyLevel: 'draft',
+  };
+
+  it('pre-fills the NEW-mode form from a builder draft', () => {
+    const form = formFromDraft(draft);
+    expect(form.name).toBe('Benefits helper');
+    expect(form.instructions).toBe('You are a friendly benefits assistant.');
+    expect(form.model).toBe('anthropic/claude');
+    expect(form.toolAllowlist).toEqual(['search_documents']);
+    expect(form.knowledgeScope).toEqual({
+      collectionIds: ['c1'],
+      sourceIds: ['s1'],
+      modes: ['company'],
+    });
+    expect(form.autonomyLevel).toBe('draft');
+  });
+
+  it('leaves owner/backup empty — they are server-assigned on save, not drafted', () => {
+    const form = formFromDraft(draft);
+    expect(form.owner).toBe('');
+    expect(form.backupOwner).toBe('');
+  });
+
+  it('coalesces null description/instructions/model to empty strings (controlled inputs)', () => {
+    const form = formFromDraft({
+      ...draft,
+      description: null,
+      instructions: null,
+      model: null,
+    });
+    expect(form.description).toBe('');
+    expect(form.instructions).toBe('');
+    expect(form.model).toBe('');
   });
 });
 

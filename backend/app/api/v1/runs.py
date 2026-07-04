@@ -25,13 +25,26 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request, status
 from pydantic import BaseModel
 
-from app.api.deps import CurrentTenant, CurrentUser, DbSession
+from app.api.deps import (
+    AuditSinkFactory,
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    extract_request_id,
+)
 from app.db.repositories import CitationView
 from app.domain.entities import Run, RunStatus, RunStep, RunTrigger
-from app.services.runs_service import RunDetail, RunPage, RunsReadService
+from app.services.runs_service import (
+    RunControlResult,
+    RunDetail,
+    RunPage,
+    RunsControlService,
+    RunsReadService,
+)
+from app.tasks.run_assistant import enqueue_run
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -104,6 +117,14 @@ class RunListResponse(BaseModel):
 
     items: list[RunResponse]
     next_cursor: str | None = None
+
+
+class RunRerouteRequest(BaseModel):
+    """``#/components/schemas/RunReroute`` — reassign an escalated run to another owner."""
+
+    model_config = {"extra": "forbid"}
+
+    to_owner_id: UUID
 
 
 # --- Serialisation helpers --------------------------------------------------
@@ -184,6 +205,30 @@ def _build_service(
     return RunsReadService(session, tenant_id=tenant_id, owner_id=principal.user_id)
 
 
+def _build_control_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+    request: Request,
+) -> RunsControlService:
+    """Assemble the escalation-handoff service from the identity + audit seams (#239)."""
+    return RunsControlService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+def _control_to_response(result: RunControlResult) -> RunResponse:
+    """Project the post-action run to the wire (no transcript — the list-item shape)."""
+    return _run_to_response(result.run)
+
+
 # --- Routes -----------------------------------------------------------------
 
 
@@ -221,3 +266,94 @@ async def get_run(
     service = _build_service(session=session, principal=principal, tenant_id=tenant_id)
     detail = await service.get(run_id)
     return _detail_to_response(detail)
+
+
+# --- Escalation handoff: resume / cancel / reroute (E7-5, #239) -------------
+# Owner-scoped human actions on an escalated run. Each: validate in → one service
+# call → shape out; the router commits and (for resume/reroute) enqueues the run task
+# after-commit (the run-now pattern) so a broker outage never rolls back the requeue.
+
+
+@router.post(
+    "/{run_id}/resume",
+    response_model=RunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model_exclude_none=True,
+)
+async def resume_run(
+    run_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+) -> RunResponse:
+    """Resume an escalated run (re-enqueue). Not escalated → 409; not visible → 404."""
+    service = _build_control_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    result = await service.resume(run_id)
+    await session.commit()
+    if result.requeued:
+        enqueue_run(result.run.id, tenant_id)
+    return _control_to_response(result)
+
+
+@router.post(
+    "/{run_id}/cancel",
+    response_model=RunResponse,
+    response_model_exclude_none=True,
+)
+async def cancel_run(
+    run_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+) -> RunResponse:
+    """Cancel an escalated run (close it). Not escalated → 409; not visible → 404."""
+    service = _build_control_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    result = await service.cancel(run_id)
+    await session.commit()
+    return _control_to_response(result)
+
+
+@router.post(
+    "/{run_id}/reroute",
+    response_model=RunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model_exclude_none=True,
+)
+async def reroute_run(
+    run_id: UUID,
+    body: RunRerouteRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+) -> RunResponse:
+    """Reroute an escalated run to another owner + re-enqueue. Bad target → 404/422."""
+    service = _build_control_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    result = await service.reroute(run_id, to_owner_id=body.to_owner_id)
+    await session.commit()
+    if result.requeued:
+        enqueue_run(result.run.id, tenant_id)
+    return _control_to_response(result)

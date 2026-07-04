@@ -885,6 +885,80 @@ export interface AssistantVersionList {
   next_cursor?: string | null;
 }
 
+/** A sample input for a read-only assistant test run (E6-5, #215). Optional. */
+export interface AssistantTestRequest {
+  input?: string;
+}
+
+/**
+ * One tool call captured in a test run's debug trace (E6-5). `args` are the
+ * model-supplied arguments; `result` is the governed runner's outcome. A write-tier
+ * tool's `result` reflects the simulate/deny outcome — no real write occurred.
+ */
+export interface AssistantTestToolCall {
+  callId: string;
+  tool?: string | null;
+  args?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+}
+
+/**
+ * The debug trace of a read-only assistant test run (E6-5, #215) — what the builder
+ * debug view renders. NO real side effect was produced (write-tier tools
+ * simulate/deny). Reuses the runtime's own trace vocabulary.
+ */
+export interface AssistantTestTrace {
+  prompt: string;
+  input: string;
+  model: string;
+  retrieval: Array<Record<string, unknown>>;
+  toolCalls: AssistantTestToolCall[];
+  outputs: string;
+  errors: Array<Record<string, unknown>>;
+  succeeded: boolean;
+  durationMs: number;
+}
+
+/**
+ * POST /assistants/draft body (E6-1, #213) — the plain-language ask for the
+ * conversational agent builder. A blank/oversize description → 422.
+ */
+export interface AssistantDraftRequest {
+  description: string;
+}
+
+/**
+ * The drafted, editable config the client pre-fills into the editor (E6-1) — the
+ * subset of `AssistantVersionConfig` the editor owns. Nothing is created until the
+ * user saves via POST /assistants.
+ */
+export interface AssistantDraftConfig {
+  name: string;
+  description?: string | null;
+  instructions?: string | null;
+  /** A model id from GET /models; null ⇒ the smart server default. */
+  model: string | null;
+  knowledgeScope: KnowledgeScope;
+  /** Registered tool names the draft keeps (unknown names are omitted). */
+  toolAllowlist: string[];
+  autonomyLevel: AutonomyLevel;
+}
+
+/**
+ * 200 from POST /assistants/draft — the builder's answer (E6-1): a draft config the
+ * client loads into the editor for review + save, plus clarifying questions, notes,
+ * and warnings.
+ */
+export interface AssistantDraft {
+  draft: AssistantDraftConfig;
+  /** Questions for anything the description left ambiguous (scope/owner/risk, E6-3). */
+  clarifications?: string[];
+  /** Notes for any tool/scope omitted from the draft (deny-by-default, INV-2). */
+  notes?: string[];
+  /** Warnings for any drafted high-risk (write-tier/approval-gated) tool (CC-A). */
+  warnings?: string[];
+}
+
 // --- Schedules & runs (contracts/openapi.yaml §schedules, §runs; ADR-0015) ---
 // Hand-authored mirror of the FROZEN contract (frontend/AGENTS.md: `api/types.ts`
 // is the documented stopgap; the generated `schema.ts` is gitignored). Kept in
@@ -1097,6 +1171,17 @@ export interface Run {
 export interface RunList {
   items: Run[];
   next_cursor?: string | null;
+}
+
+/**
+ * Body for POST /runs/{id}/reroute (E7-5, #239) — reassign an escalated run to
+ * another owner. `to_owner_id` becomes the run's execution principal, so the
+ * re-driven run retrieves only what the new owner may (INV-2). Must be a user in
+ * the caller's tenant and not the current owner.
+ */
+export interface RunReroute {
+  /** The user to reassign the run to (its new execution principal). */
+  to_owner_id: string;
 }
 
 // --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------

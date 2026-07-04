@@ -3345,6 +3345,41 @@ class RunRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_run(row)
 
+    async def mark_queued(self, run_id: UUID) -> Run | None:
+        """Reset a run to ``queued`` for a re-drive (transient retry / human resume/reroute).
+
+        Tenant-scoped. Clears the prior terminal so a re-delivered run task claims it
+        again (``execute_run`` only runs a ``queued`` run). Clears ``finished_at`` +
+        ``error`` (this attempt is superseded); ``started_at`` is stamped fresh on the
+        next ``mark_running``. Used by the transient-retry fold and by the escalation
+        resume/reroute handoff (#239) so an escalated run is re-driven, not stuck.
+        """
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.status = RunStatus.QUEUED.value
+        row.started_at = None
+        row.finished_at = None
+        row.error = None
+        await self._session.flush()
+        return _to_run(row)
+
+    async def reassign_owner(self, run_id: UUID, *, owner_id: UUID) -> Run | None:
+        """Reassign a run to a different owner (the escalation *reroute* handoff, #239).
+
+        Tenant-scoped (INV-1 — the new owner must be in the same tenant; the service
+        enforces that). The run's ``owner_id`` is its execution **principal**: after a
+        reroute the run retrieves only what the *new* owner could retrieve (INV-2), so
+        a reroute never widens access. The caller pairs this with :meth:`mark_queued`
+        to re-drive the run as the new owner.
+        """
+        row = await self._get_row(run_id)
+        if row is None:
+            return None
+        row.owner_id = owner_id
+        await self._session.flush()
+        return _to_run(row)
+
     async def mark_terminal(
         self,
         run_id: UUID,

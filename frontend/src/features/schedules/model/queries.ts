@@ -22,6 +22,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
+  cancelRun,
   createSchedule,
   deleteSchedule,
   getRun,
@@ -30,6 +31,8 @@ import {
   listRuns,
   listSchedules,
   pauseSchedule,
+  rerouteRun,
+  resumeRun,
   resumeSchedule,
   runScheduleNow,
   updateSchedule,
@@ -39,6 +42,7 @@ import type {
   Run,
   RunEnqueued,
   RunList,
+  RunReroute,
   Schedule,
   ScheduleCreate,
   ScheduleList,
@@ -183,6 +187,44 @@ export function useRun(id: string | null): UseQueryResult<Run> {
       const status = query.state.data?.status;
       return status === 'queued' || status === 'running' ? 4_000 : false;
     },
+  });
+}
+
+/**
+ * Escalation handoff (E7-5, #239) — resume / cancel / reroute an escalated run.
+ * The returned run (its new status: `queued` for resume/reroute, a `failed`+
+ * `cancelled` terminal for cancel) is written straight into the detail cache so the
+ * banner + actions update without a round-trip flash; the inbox is invalidated so
+ * the list catches up (a resumed/rerouted run re-appears queued; a cancelled one
+ * closes). A reroute moves ownership away, so the current owner will no longer see
+ * the run on refetch (INV-2).
+ */
+function applyRunResult(qc: ReturnType<typeof useQueryClient>, updated: Run): void {
+  qc.setQueryData(runKeys.detail(updated.id), updated);
+  void qc.invalidateQueries({ queryKey: runKeys.all });
+}
+
+export function useResumeRun() {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, string>({
+    mutationFn: (id) => resumeRun(id),
+    onSuccess: (updated) => applyRunResult(qc, updated),
+  });
+}
+
+export function useCancelRun() {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, string>({
+    mutationFn: (id) => cancelRun(id),
+    onSuccess: (updated) => applyRunResult(qc, updated),
+  });
+}
+
+export function useRerouteRun(id: string) {
+  const qc = useQueryClient();
+  return useMutation<Run, unknown, RunReroute>({
+    mutationFn: (body) => rerouteRun(id, body),
+    onSuccess: (updated) => applyRunResult(qc, updated),
   });
 }
 
