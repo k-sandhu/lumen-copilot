@@ -112,6 +112,8 @@ class Tenant(TimestampMixin, Base):
     # Per-tenant override of the agent's tool-use-turn budget; NULL ⇒ the system
     # default (``Settings.chat_max_tool_turns``). Admin-configurable (issue #148).
     max_tool_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Per-tenant application logo (object-store key); NULL ⇒ the default brand mark.
+    logo_key: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
 
 class User(TenantScopedMixin, TimestampMixin, Base):

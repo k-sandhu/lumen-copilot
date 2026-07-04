@@ -25,8 +25,12 @@ Use-cases:
   fixed product policy, not per-tenant data).
 * :meth:`AdminService.get_tenant_settings` / :meth:`AdminService.update_tenant_settings`
   — read and write the per-tenant admin settings (issue #148): the chat tool-turn
-  budget override (``Tenant.max_tool_turns``); ``None`` ⇒ the system default. The
-  update is the one write surface here and the one audited admin action.
+  budget override (``Tenant.max_tool_turns``); ``None`` ⇒ the system default.
+* :meth:`AdminService.set_tenant_logo` / :meth:`AdminService.clear_tenant_logo`
+  — set or clear the per-tenant application logo (admin branding): store the image
+  via the object store, persist its key on the tenant row (``Tenant.logo_key``;
+  ``None`` ⇒ the default brand mark), and return a presigned GET URL. Reversible,
+  tenant-scoped **T1** actions, audited like the settings write.
 
 Tenant binding (spec 0004 §2.3): the tenant id is the one resolved from the
 caller's token (``current_tenant``), passed in by the router — never request
@@ -63,7 +67,12 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import (
+    NotFoundError,
+    PayloadTooLargeError,
+    UnsupportedMediaTypeError,
+    ValidationError,
+)
 from app.db import models
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor
@@ -71,6 +80,7 @@ from app.domain.entities import AuditOutcome, Role, User
 from app.domain.models import ModelTier
 from app.services.audit import AuditSink
 from app.services.models_service import ChatModelService
+from app.storage import ObjectStore
 
 # Pagination bounds mirror the contract's Limit parameter (min 1, max 100).
 _MIN_LIMIT = 1
@@ -235,6 +245,22 @@ def _clamp_limit(limit: int | None) -> int:
     if limit is None:
         return _DEFAULT_LIMIT
     return max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
+
+
+def _map_logo_validation_error(exc: ValidationError) -> Exception:
+    """Re-map a storage logo-validation error to the contract's HTTP status.
+
+    ``ObjectStore.put_logo`` reuses the single ``validate_upload`` allowlist +
+    size-cap rule owner, which raises a generic ``ValidationError`` (422) with a
+    stable ``code``. The branding contract pins distinct statuses for the upload
+    negatives, so map by code here: ``upload_too_large`` → 413,
+    ``content_type_not_allowed`` → 415; an empty/other rejection stays 422 (INV-8).
+    """
+    if exc.code == "upload_too_large":
+        return PayloadTooLargeError(exc.detail, code=exc.code)
+    if exc.code == "content_type_not_allowed":
+        return UnsupportedMediaTypeError(exc.detail, code=exc.code)
+    return exc
 
 
 class _TenantMemberQuery:
@@ -424,6 +450,108 @@ class AdminService:
             metadata={"max_tool_turns": max_tool_turns},
         )
         return self._settings_view(updated.max_tool_turns)
+
+    # --- Per-tenant application logo (admin branding) -----------------------
+
+    async def set_tenant_logo(
+        self,
+        *,
+        object_store: ObjectStore,
+        logo_bytes: bytes,
+        logo_content_type: str,
+        logo_filename: str,
+        actor_id: UUID,
+        request_id: str,
+        source_ip: str,
+    ) -> str:
+        """Store the tenant's application logo and return a presigned GET URL.
+
+        A reversible, tenant-scoped **T1** action (spec 0004 §2.5): admin-gated one
+        layer up (INV-5), audited here (INV-6). The bytes are validated against the
+        image-only logo allowlist/limit and stored via ``object_store.put_logo``
+        (the only object-store caller); the resulting key is persisted on the
+        tenant row so every user of the tenant sees the mark. An over-size logo maps
+        to **413** and a non-image to **415** (the branding contract's negatives).
+        Returns a short-TTL presigned GET URL the shell renders immediately.
+        """
+        try:
+            stored = await object_store.put_logo(
+                tenant_id=str(self._tenant_id),
+                data=logo_bytes,
+                content_type=logo_content_type,
+                filename=logo_filename,
+            )
+        except ValidationError as exc:
+            raise _map_logo_validation_error(exc) from exc
+
+        updated = await TenantRepository(self._session).set_logo_key(
+            self._tenant_id, logo_key=stored.key
+        )
+        if updated is None:
+            # Unreachable in practice (the caller's own tenant, resolved from the
+            # token, exists); guard so a vanished tenant is a clean 404, not a 500.
+            raise NotFoundError("Tenant not found.")
+
+        await self._emit_branding_audit(
+            actor_id=actor_id,
+            request_id=request_id,
+            source_ip=source_ip,
+            has_logo=True,
+        )
+        return await object_store.presign_get(str(self._tenant_id), stored.key)
+
+    async def clear_tenant_logo(
+        self,
+        *,
+        actor_id: UUID,
+        request_id: str,
+        source_ip: str,
+    ) -> None:
+        """Clear the tenant's application logo so the default brand mark applies again.
+
+        The reverse of :meth:`set_tenant_logo` (T1, admin-gated, audited): sets the
+        tenant's ``logo_key`` to ``None``. Idempotent — clearing an already-unset
+        logo is a no-op mutation that still records the audited action. The stored
+        object is left in place (content-addressed, unreferenced); no bytes are read.
+        """
+        updated = await TenantRepository(self._session).set_logo_key(
+            self._tenant_id, logo_key=None
+        )
+        if updated is None:
+            raise NotFoundError("Tenant not found.")
+        await self._emit_branding_audit(
+            actor_id=actor_id,
+            request_id=request_id,
+            source_ip=source_ip,
+            has_logo=False,
+        )
+
+    async def _emit_branding_audit(
+        self,
+        *,
+        actor_id: UUID,
+        request_id: str,
+        source_ip: str,
+        has_logo: bool,
+    ) -> None:
+        """Emit the branding-update audit event (INV-6 / mission filter #4).
+
+        Mirrors ``update_tenant_settings``'s audit: the action ran and is attributed
+        to the admin who made it; ``has_logo`` on the metadata records whether a logo
+        was set or cleared (the object key itself is not audited — it is derivable and
+        not a security-relevant value).
+        """
+        audit = AuditSink(AuditEventRepository(self._session, self._tenant_id))
+        await audit.emit(
+            action=AuditAction.TENANT_BRANDING_UPDATED,
+            actor=AuditActor.user(actor_id),
+            resource_type="tenant",
+            resource_id=str(self._tenant_id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=request_id,
+            source_ip=source_ip,
+            metadata={"has_logo": has_logo},
+        )
 
     def _settings_view(self, override: int | None) -> TenantSettingsView:
         """Project a stored override into the effective settings view (issue #148)."""

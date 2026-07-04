@@ -63,6 +63,12 @@ export interface CurrentUser {
   tenant_name: string;
   roles: UserRole[];
   created_at: string;
+  /**
+   * The tenant's application logo as a short-TTL presigned GET URL, or null/absent
+   * when none is set (the shell renders the default brand mark). A per-tenant
+   * setting an admin uploads — the same for every user of the tenant.
+   */
+  logo_url?: string | null;
 }
 
 // --- Collections (contracts/openapi.yaml §collections) ---
@@ -548,6 +554,17 @@ export interface RiskTier {
 /** 200 from GET /admin/risk-tiers — the risk-tier reference (T0–T3). */
 export interface RiskTierList {
   items: RiskTier[];
+}
+
+// --- Admin branding: per-tenant application logo (contracts §admin) ---
+
+/**
+ * 200 from PUT /admin/branding — the tenant's logo after upload. `logo_url` is a
+ * short-TTL presigned GET URL, or null when none is set (default brand mark). The
+ * current state is also readable via GET /auth/me (`logo_url`).
+ */
+export interface TenantBranding {
+  logo_url: string | null;
 }
 
 // --- Admin tool-governance policy (contracts §admin, #223) ---

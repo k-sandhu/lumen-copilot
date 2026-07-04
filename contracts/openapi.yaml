@@ -823,6 +823,59 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/branding:
+    put:
+      operationId: updateTenantBranding
+      summary: Upload the tenant's application logo (admin only).
+      description: >
+        Set the per-tenant application logo shown in the app shell for every user
+        of the tenant (admin branding). Stores the image (MinIO) and persists its
+        key on the tenant row; the shell reads the resulting presigned URL from
+        `GET /auth/me` (`logo_url`). A reversible, tenant-scoped **T1** action (spec
+        0004 §2.5 — "authorized owner; audited; no extra approval"): `admin`-only
+        (**403** otherwise, INV-5), audited as `tenant.branding_updated` (INV-6).
+        Allowed content-types are `image/png`, `image/jpeg`, `image/svg+xml` and the
+        size cap is `MAX_LOGO_BYTES` (default 1 MiB), enforced server-side: an
+        over-size logo is **413**, a non-image content-type **415**, and a
+        missing/blank filename **422** (INV-8). Returns the new logo URL.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: The tenant's logo URL after upload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantBranding" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: clearTenantBranding
+      summary: Clear the tenant's application logo (admin only).
+      description: >
+        Revert the app shell to the default brand mark for every user of the tenant
+        (the reverse of `PUT /admin/branding`): sets the tenant's logo key to null.
+        A reversible, tenant-scoped **T1** action: `admin`-only (**403** otherwise,
+        INV-5), audited as `tenant.branding_updated` (INV-6). Idempotent — clearing
+        an already-unset logo succeeds with **204**.
+      tags: [admin]
+      responses:
+        "204": { description: The logo was cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /admin/tool-policy:
     get:
       operationId: getToolPolicy
@@ -2469,6 +2522,13 @@ components:
           type: array
           items: { type: string, enum: [member, admin, security] }
         created_at: { type: string, format: date-time }
+        logo_url:
+          type: [string, "null"]
+          description: >
+            The tenant's application logo as a short-TTL presigned GET URL, or
+            null when none is set (the shell renders the default brand mark). A
+            per-tenant setting an admin uploads via PUT /admin/branding — the same
+            for every user of the tenant.
 
     # --- Collections --------------------------------------------------------
     CollectionCreate:
@@ -3116,6 +3176,21 @@ components:
             An integer in 1–50 sets the per-tenant override; `null` clears it so
             the system default applies again (the system default is configured
             server-side, `CHAT_MAX_TOOL_TURNS`).
+
+    # --- Per-tenant application logo (admin branding) -----------------------
+    TenantBranding:
+      type: object
+      additionalProperties: false
+      description: >
+        The tenant's application logo (admin branding). `logo_url` is a short-TTL
+        presigned GET URL for the tenant's uploaded logo, or null when none is set
+        (the shell renders the default brand mark). The current state is also
+        readable via `GET /auth/me` (`logo_url`), so no separate GET is needed.
+      required: [logo_url]
+      properties:
+        logo_url:
+          type: [string, "null"]
+          description: Presigned GET URL for the tenant's logo, or null for the default mark.
 
     # --- Tool governance policy (per-tenant enable + approval, #223) ---------
     ToolPolicyEntry:

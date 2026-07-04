@@ -49,6 +49,8 @@ export {
   updateToolPolicy,
   getSandboxPolicy,
   updateSandboxPolicy,
+  updateTenantBranding,
+  clearTenantBranding,
   getAutonomyPolicy,
   updateAutonomyPolicy,
   listGovernedAssistants,

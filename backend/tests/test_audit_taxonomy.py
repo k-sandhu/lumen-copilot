@@ -58,6 +58,9 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # /admin write, a reversible T1 action audited like every consequential
         # action (mission filter #4 "auditable").
         "tenant.settings_updated",
+        # Admin per-tenant application logo (branding) — additive; an admin sets or
+        # clears the tenant's shell logo, a reversible T1 action audited (INV-6).
+        "tenant.branding_updated",
         # Per-tenant secrets vault (issue #209) — additive; store/access/delete of
         # an encrypted credential. ``secret.accessed`` records who/what read it,
         # never the value (mission filter #4 "auditable").

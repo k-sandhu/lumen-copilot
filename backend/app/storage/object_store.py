@@ -21,6 +21,9 @@ Exposes:
 * :meth:`delete` — tenant-checked removal of an object.
 * :meth:`presign_put` / :meth:`presign_get` — short-TTL presigned URLs so large
   files transfer directly to/from storage, not through the API process.
+* :meth:`put_logo` — store a per-tenant application logo (admin branding):
+  the standard upload key shape, validated against the image-only logo
+  allowlist/limit; retrieval reuses the generic :meth:`presign_get`.
 * :meth:`ensure_bucket` — create ``S3_BUCKET`` if missing; called at startup so
   the bucket exists from day one.
 * :meth:`ping` — a cheap reachability check used by the readiness probe.
@@ -263,6 +266,52 @@ class ObjectStore:
                 ExpiresIn=self._settings.s3_presign_ttl_seconds,
             )
         return url
+
+    # --- Per-tenant application logo (admin branding) ------------------------
+    #
+    # A logo shares the standard upload key shape ({tenant_id}/{sha}/{name}) so
+    # the generic ``presign_get`` / ``assert_key_owned_by`` seam applies unchanged
+    # — only the allowlist/limit differ (image-only, small cap). No dedicated
+    # namespace prefix is needed: the object is tenant-scoped and content-addressed
+    # like any upload; the tenant's *current* logo is the key persisted on the
+    # ``tenants`` row (a superseded logo just becomes unreferenced, like a re-upload).
+
+    async def put_logo(
+        self,
+        tenant_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+    ) -> StoredObject:
+        """Validate, content-address, and store a tenant logo; return its descriptor.
+
+        The declared ``content_type`` and byte length are validated against the
+        **logo** allowlist/limit (``LOGO_ALLOWED_CONTENT_TYPES`` / ``MAX_LOGO_BYTES``)
+        **before** any write; a rejection is a typed ``ValidationError`` (→ 4xx). The
+        key is ``{tenant_id}/{sha256(data)}/{safe_filename}`` (the standard upload
+        shape), so retrieval reuses the generic :meth:`presign_get` and identical
+        bytes dedupe. Only the allowlist/limit differ from :meth:`put`.
+        """
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.logo_allowed_content_types,
+            max_bytes=self._settings.max_logo_bytes,
+        )
+        key = build_key(tenant_id, data, filename)
+        async with self._client() as client:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+        return StoredObject(
+            key=key,
+            sha256=sha256_hex(data),
+            size_bytes=len(data),
+            content_type=content_type,
+        )
 
     # --- Agent/run-produced artifacts (issue #208) ---------------------------
     #

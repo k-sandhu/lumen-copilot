@@ -257,6 +257,31 @@ class Settings(BaseSettings):
             return frozenset(item.strip() for item in value.split(",") if item.strip())
         return value
 
+    # --- Per-tenant application logo (admin branding) -----------------------
+    # A tenant ADMIN uploads a brand mark that replaces the default "Lumen /
+    # Copilot" wordmark in the app shell for every user of that tenant. Stored via
+    # the same ObjectStore as uploads/artifacts (its own small cap + a tight
+    # image-only allowlist), the object key persisted on the ``tenants`` row. A
+    # logo is chrome, not a document, so it gets a much smaller cap. The declared
+    # type is checked against this set before storing (a client-declared type is a
+    # usability/allowlist check, not a security guarantee — sniffing is fenced OUT,
+    # OD-4). Hard upper bound on a single logo (bytes). Default 1 MiB.
+    max_logo_bytes: int = Field(default=1 * 1024 * 1024, alias="MAX_LOGO_BYTES")
+    # Allowlisted logo content-types: the raster + vector marks a browser renders
+    # inline. Comma-separated override via LOGO_ALLOWED_CONTENT_TYPES.
+    logo_allowed_content_types: frozenset[str] = Field(
+        default=frozenset({"image/png", "image/jpeg", "image/svg+xml"}),
+        alias="LOGO_ALLOWED_CONTENT_TYPES",
+    )
+
+    @field_validator("logo_allowed_content_types", mode="before")
+    @classmethod
+    def _split_logo_content_types(cls, value: object) -> object:
+        """Accept a comma-separated env string as the logo content-type allowlist."""
+        if isinstance(value, str):
+            return frozenset(item.strip() for item in value.split(",") if item.strip())
+        return value
+
     @field_validator("artifact_retention_days")
     @classmethod
     def _artifact_retention_days_positive(cls, value: int | None) -> int | None:

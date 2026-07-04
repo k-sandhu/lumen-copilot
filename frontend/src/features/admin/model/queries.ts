@@ -31,8 +31,12 @@ import {
   updateAutonomyPolicy,
   updateSandboxPolicy,
   updateToolPolicy,
+  clearTenantBranding,
+  updateTenantBranding,
 } from '@/api';
+import { currentUserQueryKey } from '@/features/auth';
 import type {
+  TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
   MemberList,
@@ -164,6 +168,38 @@ export function useUpdateAutonomyPolicy(): UseMutationResult<
       void qc.invalidateQueries({ queryKey: autonomyPolicyQueryKey });
       // A cap change re-clamps every assistant's effective autonomy — refresh the library.
       void qc.invalidateQueries({ queryKey: ['assistants'] });
+    },
+  });
+}
+
+/**
+ * Upload the tenant's application logo (admin branding). The current logo state is
+ * carried on `GET /auth/me` (`logo_url`) — the source both the shell brand cell and
+ * the branding panel read — so on success we invalidate that query, refreshing the
+ * shell + panel in one step. A 413/415/403 propagates as an `ApiError` the panel
+ * surfaces; it is NOT swallowed here.
+ */
+export function useUpdateTenantBranding(): UseMutationResult<TenantBranding, unknown, File> {
+  const qc = useQueryClient();
+  return useMutation<TenantBranding, unknown, File>({
+    mutationFn: (file) => updateTenantBranding(file),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: currentUserQueryKey });
+    },
+  });
+}
+
+/**
+ * Clear the tenant's application logo (admin branding) so the shell reverts to the
+ * default brand mark. Invalidates `GET /auth/me` on success so the shell + panel
+ * re-read. A 403 propagates as an `ApiError` the panel surfaces.
+ */
+export function useClearTenantBranding(): UseMutationResult<void, unknown, void> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, void>({
+    mutationFn: () => clearTenantBranding(),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: currentUserQueryKey });
     },
   });
 }
