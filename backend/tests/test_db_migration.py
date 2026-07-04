@@ -74,7 +74,9 @@ _ALL_TABLES = _MVP_TABLES | {
     "mcp_servers",
     "tenant_tool_policy",
     "tenant_sandbox_policy",
+    "tenant_autonomy_policy",
     "llm_providers",
+    "run_deliveries",
 }
 
 
@@ -99,7 +101,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0023_llm_providers"]
+    assert list(script.get_heads()) == ["0028_llm_providers"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -163,9 +165,24 @@ def test_migration_chain_is_linear_single_head() -> None:
     sandbox_policy = script.get_revision("0022_sandbox_policy")
     assert sandbox_policy is not None
     assert sandbox_policy.down_revision == "0021_tenant_tool_policy"
-    llm_providers = script.get_revision("0023_llm_providers")
+    assistant_governance = script.get_revision("0023_assistant_governance")
+    assert assistant_governance is not None
+    assert assistant_governance.down_revision == "0022_sandbox_policy"
+    autonomy_policy = script.get_revision("0024_autonomy_policy")
+    assert autonomy_policy is not None
+    assert autonomy_policy.down_revision == "0023_assistant_governance"
+    run_deliveries = script.get_revision("0025_run_deliveries")
+    assert run_deliveries is not None
+    assert run_deliveries.down_revision == "0024_autonomy_policy"
+    toolinv_fk = script.get_revision("0026_toolinv_msg_fk_deferrable")
+    assert toolinv_fk is not None
+    assert toolinv_fk.down_revision == "0025_run_deliveries"
+    tenant_logo = script.get_revision("0027_tenant_logo")
+    assert tenant_logo is not None
+    assert tenant_logo.down_revision == "0026_toolinv_msg_fk_deferrable"
+    llm_providers = script.get_revision("0028_llm_providers")
     assert llm_providers is not None
-    assert llm_providers.down_revision == "0022_sandbox_policy"
+    assert llm_providers.down_revision == "0027_tenant_logo"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -1080,3 +1097,50 @@ async def test_live_upgrade_then_downgrade_round_trip() -> None:
                 await conn.execute(text(f'DROP DATABASE IF EXISTS "{tmp_db}" WITH (FORCE)'))
         finally:
             await admin.dispose()
+
+
+def test_offline_tenant_autonomy_policy_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0023 creates the ``tenant_autonomy_policy`` table + RLS; down() reverses (#218).
+
+    AC (issue #218, spec 0004 §2.1/§2.5): the upgrade renders the ``tenant_autonomy_policy``
+    table with its ``max_autonomy`` column, the ``updated_by`` FK → ``users`` (SET NULL
+    — a deprovisioned admin does not cascade-delete the tenant's live cap), the
+    per-tenant UNIQUE (a per-tenant singleton), the enum CHECK (no free-text ceiling),
+    the tenant-leading index, and the same fail-closed RLS policy the 0007 backstop uses
+    (``tenant_autonomy_policy`` is tenant-scoped, INV-1). The downgrade drops the policy,
+    disables RLS, drops the index, and drops the table. Offline DDL render (Postgres
+    dialect) — structural reversibility without a DB (#70 lesson); the behavioural proof
+    is the autonomy policy service + runner autonomy tests.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0023_assistant_governance:0024_autonomy_policy", sql=True)
+    up = capsys.readouterr().out.lower()
+    # The tenant-scoped cap table + its FKs.
+    assert "create table tenant_autonomy_policy" in up
+    assert "references tenants" in up  # tenant-scoped (INV-1)
+    assert "references users" in up  # updated_by FK (the admin, SET NULL)
+    assert "max_autonomy" in up
+    # The per-tenant singleton UNIQUE + the enum CHECK (no free-text ceiling).
+    assert "uq_tenant_autonomy_policy_tenant" in up
+    assert "ck_tenant_autonomy_policy_max_autonomy" in up
+    # Tenant-leading index (the INV-1 predicate column).
+    assert (
+        "create index ix_tenant_autonomy_policy_tenant_id on tenant_autonomy_policy (tenant_id)"
+        in up
+    )
+    # The RLS backstop — same fail-closed GUC policy as 0007.
+    assert "alter table tenant_autonomy_policy enable row level security" in up
+    assert "alter table tenant_autonomy_policy force row level security" in up
+    assert "create policy rls_tenant_autonomy_policy on tenant_autonomy_policy" in up
+    assert "current_setting('app.tenant_id', true)" in up
+
+    command.downgrade(cfg, "0024_autonomy_policy:0023_assistant_governance", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_tenant_autonomy_policy on tenant_autonomy_policy" in down
+    assert "alter table tenant_autonomy_policy disable row level security" in down
+    assert "drop index ix_tenant_autonomy_policy_tenant_id" in down
+    assert "drop table tenant_autonomy_policy" in down

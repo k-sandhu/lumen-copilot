@@ -38,16 +38,19 @@ from app.api.deps import (
     DbSession,
     LLMGatewayDep,
     extract_request_id,
+    get_llm_gateway,
 )
 from app.domain.entities import (
     Assistant,
     AssistantStatus,
     AssistantVersion,
     AutonomyLevel,
+    CertificationState,
     KnowledgeMode,
     KnowledgeScope,
 )
 from app.services.assistant_draft_service import AssistantDraftService, DraftResult
+from app.services.assistant_test_service import AssistantTestService, AssistantTestTrace
 from app.services.assistants_service import (
     UNSET,
     AssistantPage,
@@ -59,6 +62,8 @@ router = APIRouter(prefix="/assistants", tags=["assistants"])
 
 
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
+
+
 
 
 class KnowledgeScopeModel(BaseModel):
@@ -99,9 +104,19 @@ class AssistantResponse(BaseModel):
     knowledgeScope: KnowledgeScopeModel  # noqa: N815 — contract camelCase
     toolAllowlist: list[str]  # noqa: N815 — contract camelCase
     autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+    # The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+    # (min(autonomyLevel, tenant cap), issue #218) — visibility for the library/run
+    # detail. Equals autonomyLevel when no cap lowers it.
+    effectiveAutonomy: AutonomyLevel  # noqa: N815 — contract camelCase
     owner: UUID
     backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
     status: AssistantStatus
+    # Library governance (E6-6, #217) — an admin-managed axis, read-only here (the
+    # owner sees the certification/featured state; only an admin can mutate it via
+    # /admin/assistants*). Present on list responses so a certified/deprecated/
+    # disabled state is visible in the owner's library too.
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+    featured: bool
     version: int | None = None
     created_at: datetime
     updated_at: datetime
@@ -250,9 +265,14 @@ def _to_response(assistant: Assistant) -> AssistantResponse:
         knowledgeScope=KnowledgeScopeModel.from_domain(assistant.knowledge_scope),
         toolAllowlist=list(assistant.tool_allowlist),
         autonomyLevel=assistant.autonomy_level,
+        # Fallback to the configured level if the projection was not filled (defensive;
+        # every service read fills it via ``_with_current_version``).
+        effectiveAutonomy=assistant.effective_autonomy or assistant.autonomy_level,
         owner=assistant.owner_id,
         backupOwner=assistant.backup_owner_id,
         status=assistant.status,
+        certificationState=assistant.certification_state,
+        featured=assistant.featured,
         version=assistant.current_version,
         created_at=assistant.created_at,
         updated_at=assistant.updated_at,
@@ -598,3 +618,113 @@ async def rollback_assistant(
     version = await service.rollback(assistant_id, version=body.version, notes=body.notes)
     await session.commit()
     return _to_version_response(version)
+
+
+class AssistantTestRequest(BaseModel):
+    """``#/components/schemas/AssistantTestRequest`` — a sample input for a test run."""
+
+    model_config = {"extra": "forbid"}
+
+    input: str | None = Field(default=None, max_length=8000)
+
+
+class AssistantTestToolCall(BaseModel):
+    """``#/components/schemas/AssistantTestToolCall`` — one tool call in the trace."""
+
+    model_config = {"extra": "forbid"}
+
+    callId: str  # noqa: N815 — contract camelCase
+    tool: str | None = None
+    args: dict[str, object] | None = None
+    result: dict[str, object] | None = None
+
+
+class AssistantTestTraceResponse(BaseModel):
+    """``#/components/schemas/AssistantTestTrace`` — the debug trace of a read-only test run.
+
+    The full trace the builder debug view renders (E6-5): the effective system
+    ``prompt``, the sample ``input``, the resolved ``model``, the ``retrieval``
+    grounding, each ``toolCalls`` entry (args + result — a T1 write is simulated,
+    ``run_python`` is denied), the streamed ``outputs``, any typed ``errors``, whether
+    the run ``succeeded``, and the wall-clock ``durationMs``. NO real side effect was
+    produced.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    prompt: str
+    input: str
+    model: str
+    retrieval: list[dict[str, object]]
+    toolCalls: list[AssistantTestToolCall]  # noqa: N815 — contract camelCase
+    outputs: str
+    errors: list[dict[str, object]]
+    succeeded: bool
+    durationMs: int  # noqa: N815 — contract camelCase
+
+
+def _to_test_trace_response(trace: AssistantTestTrace) -> AssistantTestTraceResponse:
+    return AssistantTestTraceResponse(
+        prompt=trace.prompt,
+        input=trace.input,
+        model=trace.model,
+        retrieval=trace.retrieval,
+        toolCalls=[
+            AssistantTestToolCall(
+                callId=str(c.get("callId", "")),
+                tool=_opt_str(c.get("tool")),
+                args=c.get("args") if isinstance(c.get("args"), dict) else None,
+                result=c.get("result") if isinstance(c.get("result"), dict) else None,
+            )
+            for c in trace.tool_calls
+        ],
+        outputs=trace.outputs,
+        errors=trace.errors,
+        succeeded=trace.succeeded,
+        durationMs=trace.duration_ms,
+    )
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+@router.post(
+    "/{assistant_id}/test",
+    response_model=AssistantTestTraceResponse,
+    response_model_exclude_none=True,
+)
+async def test_assistant(
+    assistant_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+    body: AssistantTestRequest | None = None,
+) -> AssistantTestTraceResponse:
+    """Preview/test/debug a draft assistant with NO real side effect (E6-5, issue #215).
+
+    Runs the assistant's working (draft) config against a sample input with write-tier
+    tools forced into simulate/deny mode (a T1 ``write_file`` is simulated — no
+    artifact; ``run_python`` is denied — no code run), and returns the debug trace
+    (prompt, retrieval, tool calls with args/results, outputs, errors, timing).
+    Owner-scoped (owner-or-admin): a non-owned / cross-tenant id → 404 (existence
+    non-disclosure, INV-1/INV-2). Audited ``assistant.tested`` (INV-6); nothing else
+    is persisted.
+    """
+    service = AssistantTestService(
+        session,
+        principal=principal,
+        gateway=get_llm_gateway(),
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    trace = await service.run_test(
+        assistant_id, input_text=body.input if body is not None else None
+    )
+    # Commit the request session to persist ONLY the assistant.tested audit event (the
+    # runtime's own transcript writes were rolled back inside the service).
+    await session.commit()
+    return _to_test_trace_response(trace)

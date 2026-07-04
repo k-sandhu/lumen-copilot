@@ -35,7 +35,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.deps import (
@@ -43,12 +43,20 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    ObjectStoreDep,
     SettingsDep,
     extract_request_id,
     require_roles,
 )
-from app.core.errors import NotFoundError
-from app.domain.entities import LlmProvider, Role
+from app.core.errors import NotFoundError, ValidationError
+from app.domain.entities import (
+    Assistant,
+    AssistantStatus,
+    AutonomyLevel,
+    CertificationState,
+    LlmProvider,
+    Role,
+)
 from app.services.admin_service import (
     AdminService,
     MemberPage,
@@ -56,6 +64,16 @@ from app.services.admin_service import (
     RiskTierView,
     TenantSettingsView,
 )
+from app.services.assistant_governance_service import (
+    AssistantGovernanceService,
+    BulkOrphanResult,
+    GovernedAssistantPage,
+)
+
+# The admin-only gate runs for every route on this router (INV-5). It depends on
+# ``current_user`` underneath, so an unauthenticated caller is a 401 (INV-4)
+# before the role check, and a wrong-role caller is a 403.
+from app.services.autonomy_policy_service import AutonomyPolicyService, AutonomyPolicyView
 from app.services.llm_providers_service import (
     LlmProviderService,
     build_llm_provider_service,
@@ -63,9 +81,6 @@ from app.services.llm_providers_service import (
 from app.services.sandbox_policy_service import SandboxPolicyService, SandboxPolicyView
 from app.services.tool_policy_service import ToolPolicyEntryView, ToolPolicyService
 
-# The admin-only gate runs for every route on this router (INV-5). It depends on
-# ``current_user`` underneath, so an unauthenticated caller is a 401 (INV-4)
-# before the role check, and a wrong-role caller is a 403.
 router = APIRouter(
     prefix="/admin",
     tags=["admin"],
@@ -74,6 +89,8 @@ router = APIRouter(
 
 
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
+
+
 
 
 class MemberResponse(BaseModel):
@@ -241,83 +258,94 @@ class SandboxPolicyUpdateRequest(BaseModel):
     max_concurrency: int = Field(ge=1)
 
 
-class LlmProviderModelResponse(BaseModel):
-    """``#/components/schemas/LlmProviderModel`` — one discovered model."""
-
-    model_config = {"extra": "forbid"}
-
-    id: str
-    label: str | None = None
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
 
 
-class LlmProviderResponse(BaseModel):
-    """``#/components/schemas/LlmProvider`` — the wire projection of a provider.
+class GovernedAssistantResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistant`` — one library assistant + governance.
 
-    Carries only the masked ``secret_hint`` — **never** the stored API-key value.
-    The ``api_key_secret_ref`` is a server-internal detail and is not exposed.
+    The admin library view of an assistant: identity + owner + lifecycle status plus
+    the governance axis (certification / featured / category / disabled) and the
+    ``owner_orphaned`` projection (owner no longer a tenant member — flag for
+    reassignment, E6-8).
     """
 
     model_config = {"extra": "forbid"}
 
     id: UUID
     name: str
-    provider_type: str
-    base_url: str
-    enabled: bool
-    status: str
-    last_discovery_at: datetime | None = None
-    last_error: str | None = None
-    discovered_models: list[LlmProviderModelResponse]
-    secret_hint: str | None = None
-    owner_id: UUID
+    description: str | None = None
+    model: str | None = None
+    autonomyLevel: AutonomyLevel  # noqa: N815 — contract camelCase
+    owner: UUID
+    backupOwner: UUID | None = None  # noqa: N815 — contract camelCase
+    status: AssistantStatus
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+    featured: bool
+    category: str | None = None
+    disabledAt: datetime | None = None  # noqa: N815 — contract camelCase
+    ownerOrphaned: bool  # noqa: N815 — contract camelCase
+    version: int | None = None
     created_at: datetime
     updated_at: datetime
 
 
-class LlmProviderListResponse(BaseModel):
-    """``#/components/schemas/LlmProviderList`` — the tenant's registered providers."""
+class GovernedAssistantListResponse(BaseModel):
+    """``#/components/schemas/GovernedAssistantList`` — a cursor page of library assistants."""
 
     model_config = {"extra": "forbid"}
 
-    items: list[LlmProviderResponse]
+    items: list[GovernedAssistantResponse]
+    next_cursor: str | None = None
 
 
-class LlmProviderCreateRequest(BaseModel):
-    """``#/components/schemas/LlmProviderCreate`` — register a provider (write-only key).
+class AssistantCertifyRequest(BaseModel):
+    """``#/components/schemas/AssistantCertifyRequest`` — set the certification verdict."""
 
-    The optional ``api_key`` is write-only: stored envelope-encrypted via CC-C and
-    never returned (the response carries only a masked ``secret_hint``).
+    model_config = {"extra": "forbid"}
+
+    certificationState: CertificationState  # noqa: N815 — contract camelCase
+
+
+class AssistantFeatureRequest(BaseModel):
+    """``#/components/schemas/AssistantFeatureRequest`` — feature/unfeature in the library."""
+
+    model_config = {"extra": "forbid"}
+
+    featured: bool
+
+
+class AssistantDisableRequest(BaseModel):
+    """``#/components/schemas/AssistantDisableRequest`` — disable/re-enable the assistant.
+
+    Disabling blocks it from starting a chat / schedule / run; re-enabling returns
+    the head to ``draft`` (the owner must re-publish before it can run again).
     """
 
     model_config = {"extra": "forbid"}
 
-    name: str = Field(min_length=1, max_length=200)
-    provider_type: str
-    base_url: str
-    api_key: str | None = Field(default=None, min_length=1)
+    disabled: bool
 
 
-class LlmProviderUpdateRequest(BaseModel):
-    """``#/components/schemas/LlmProviderUpdate`` — any subset of fields; at least one.
+class AssistantOwnershipTransferRequest(BaseModel):
+    """``#/components/schemas/AssistantOwnershipTransferRequest`` — reassign the owner.
 
-    ``api_key`` is a tri-state on the wire: absent = leave the key unchanged, a
-    string = rotate it, ``null`` = clear it. Pydantic collapses "absent" and "explicit
-    null" to ``None``, so ``__pydantic_fields_set__`` distinguishes them (``api_key``
-    in the set + ``None`` ⇒ clear).
+    The new owner must be a distinct member of the tenant (else 422). Used to rescue
+    an orphaned assistant (owner deprovisioned) by handing it to a live owner.
     """
 
     model_config = {"extra": "forbid"}
 
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    base_url: str | None = None
-    enabled: bool | None = None
-    api_key: str | None = Field(default=None, min_length=1)
+    newOwner: UUID  # noqa: N815 — contract camelCase
 
-    @model_validator(mode="after")
-    def _at_least_one(self) -> LlmProviderUpdateRequest:
-        if not self.__pydantic_fields_set__:
-            raise ValueError("at least one field must be provided")
-        return self
+
+class BulkOrphanResponse(BaseModel):
+    """``#/components/schemas/BulkOrphanResult`` — the outcome of a bulk orphan sweep."""
+
+    model_config = {"extra": "forbid"}
+
+    affected: list[UUID]
+    action: str
 
 
 # --- Serialisation helpers --------------------------------------------------
@@ -394,55 +422,36 @@ def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
     )
 
 
-def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
-    return LlmProviderResponse(
-        id=provider.id,
-        name=provider.name,
-        provider_type=provider.provider_type,
-        base_url=provider.base_url,
-        enabled=provider.enabled,
-        status=provider.status.value,
-        last_discovery_at=provider.last_discovery_at,
-        last_error=provider.last_error,
-        discovered_models=[
-            LlmProviderModelResponse(
-                id=str(m.get("id", "")),
-                label=(str(m["label"]) if m.get("label") is not None else None),
-            )
-            for m in provider.discovered_models
-        ],
-        secret_hint=provider.secret_hint,
-        owner_id=provider.owner_id,
-        created_at=provider.created_at,
-        updated_at=provider.updated_at,
+def _to_governed_assistant(assistant: Assistant) -> GovernedAssistantResponse:
+    return GovernedAssistantResponse(
+        id=assistant.id,
+        name=assistant.name,
+        description=assistant.description,
+        model=assistant.model,
+        autonomyLevel=assistant.autonomy_level,
+        owner=assistant.owner_id,
+        backupOwner=assistant.backup_owner_id,
+        status=assistant.status,
+        certificationState=assistant.certification_state,
+        featured=assistant.featured,
+        category=assistant.category,
+        disabledAt=assistant.disabled_at,
+        ownerOrphaned=assistant.owner_orphaned,
+        version=assistant.current_version,
+        created_at=assistant.created_at,
+        updated_at=assistant.updated_at,
     )
 
 
-def _build_llm_provider_service(
-    *,
-    session: DbSession,
-    principal: CurrentUser,
-    tenant_id: CurrentTenant,
-    settings: SettingsDep,
-    make_audit_sink: AuditSinkFactory,
-    request: Request,
-) -> LlmProviderService:
-    """Assemble the per-request LLM-provider service (identity + settings + audit).
-
-    Delegates to ``build_llm_provider_service`` (a ``services/`` factory), which owns
-    the CC-C secrets service (the sole cipher importer — so no ``api/`` module ever
-    touches plaintext). The router stays a thin (de)serialise + one-service call.
-    """
-    return build_llm_provider_service(
-        session,
-        settings=settings,
-        tenant_id=tenant_id,
-        owner_id=principal.user_id,
-        roles=principal.roles,
-        audit=make_audit_sink(tenant_id),
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
+def _to_governed_list(page: GovernedAssistantPage) -> GovernedAssistantListResponse:
+    return GovernedAssistantListResponse(
+        items=[_to_governed_assistant(a) for a in page.items],
+        next_cursor=page.next_cursor,
     )
+
+
+def _to_bulk_orphan(result: BulkOrphanResult) -> BulkOrphanResponse:
+    return BulkOrphanResponse(affected=list(result.affected), action=result.action)
 
 
 # --- Routes -----------------------------------------------------------------
@@ -643,15 +652,461 @@ async def update_sandbox_policy(
     return _to_sandbox_policy(view)
 
 
-# --- LLM providers (per-tenant registration + model auto-discovery) ---------
-#
-# The foundation PR: a tenant ADMIN registers OpenAI-compatible LLM providers, the
-# backend auto-discovers each provider's models via GET {base_url}/models, and the
-# admin UI lists providers with their discovered models + discovery/health status.
-# Admin-gated via the router (INV-5), tenant-scoped via ``current_tenant`` (INV-1).
-# The stored API key is write-only (CC-C #209): no route returns it, only a masked
-# ``secret_hint``. Surfacing providers in the chat model picker + routing chat/
-# embeddings through them is a SEPARATE follow-up PR — nothing here does that.
+# --- Assistant library governance (E6-6/E6-8, issue #217) -------------------
+
+
+def _build_governance_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    request: Request,
+) -> AssistantGovernanceService:
+    """Assemble the per-request governance service from the identity + correlation seams."""
+    return AssistantGovernanceService(
+        session,
+        tenant_id=tenant_id,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+@router.get(
+    "/assistants",
+    response_model=GovernedAssistantListResponse,
+)
+async def list_governed_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GovernedAssistantListResponse:
+    """Every assistant in the tenant with its governance state (admin only; #217).
+
+    The admin library view (E6-6): all owners in the tenant, each item carrying its
+    certification / featured / disabled state and the ``owner_orphaned`` flag (owner
+    no longer a member) for reassignment (E6-8). Admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); a malformed cursor → 422.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    page = await service.list_all(cursor=cursor, limit=limit)
+    return _to_governed_list(page)
+
+
+@router.post(
+    "/assistants/{assistant_id}/certify",
+    response_model=GovernedAssistantResponse,
+)
+async def certify_assistant(
+    assistant_id: UUID,
+    body: AssistantCertifyRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Set an assistant's certification verdict (certify / deprecate / clear; admin only).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.certified`` /
+    ``assistant.deprecated`` (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.certify(assistant_id, state=body.certificationState)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/feature",
+    response_model=GovernedAssistantResponse,
+)
+async def feature_assistant(
+    assistant_id: UUID,
+    body: AssistantFeatureRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Feature / unfeature an assistant in the library (admin only; #217).
+
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.featured``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_featured(assistant_id, featured=body.featured)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/disable",
+    response_model=GovernedAssistantResponse,
+)
+async def disable_assistant(
+    assistant_id: UUID,
+    body: AssistantDisableRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Disable / re-enable an assistant (admin only; #217, INV-8 enforcement).
+
+    Disabling flips ``status`` to ``disabled`` (and stamps ``disabled_at``) so the
+    existing run/chat/schedule gate refuses it — a disabled assistant cannot start.
+    Re-enabling returns the head to ``draft`` (the owner re-publishes to run again).
+    Admin-only (INV-5); tenant-scoped (INV-1); audited ``assistant.disabled``
+    (INV-6). Cross-tenant/missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.set_disabled(assistant_id, disabled=body.disabled)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post(
+    "/assistants/{assistant_id}/transfer-ownership",
+    response_model=GovernedAssistantResponse,
+)
+async def transfer_assistant_ownership(
+    assistant_id: UUID,
+    body: AssistantOwnershipTransferRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> GovernedAssistantResponse:
+    """Reassign an assistant's accountable owner to another tenant member (admin only; #217).
+
+    The new owner must be a distinct member of the tenant (else 422, INV-8) — the
+    admin rescue for an orphaned assistant. Admin-only (INV-5); tenant-scoped
+    (INV-1); audited ``assistant.ownership_transferred`` (INV-6). Cross-tenant/
+    missing id → 404.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    assistant = await service.transfer_ownership(assistant_id, new_owner_id=body.newOwner)
+    await session.commit()
+    return _to_governed_assistant(assistant)
+
+
+@router.post("/assistants/disable-orphans", response_model=BulkOrphanResponse)
+async def disable_orphaned_assistants(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> BulkOrphanResponse:
+    """Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only; #217).
+
+    E6-8 bulk control: an abandoned assistant should not keep running unattended.
+    Admin-only (INV-5); tenant-scoped (INV-1); audits each ``assistant.disabled``
+    (INV-6). Idempotent — an already-disabled orphan is skipped.
+    """
+    service = _build_governance_service(
+        session=session, principal=principal, tenant_id=tenant_id, request=request
+    )
+    result = await service.bulk_disable_orphans()
+    await session.commit()
+    return _to_bulk_orphan(result)
+
+
+class AutonomyPolicyResponse(BaseModel):
+    """``#/components/schemas/AutonomyPolicy`` — the per-tenant assistant autonomy cap."""
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+    is_default: bool
+    levels: list[AutonomyLevel]
+
+
+class AutonomyPolicyUpdateRequest(BaseModel):
+    """``#/components/schemas/AutonomyPolicyUpdate`` — set the per-tenant autonomy cap.
+
+    ``max_autonomy`` is constrained to the ``AutonomyLevel`` enum at the wire (an
+    unknown value → 422, INV-8), so no invalid ceiling can reach the service.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_autonomy: AutonomyLevel
+
+
+def _to_autonomy_policy(view: AutonomyPolicyView) -> AutonomyPolicyResponse:
+    return AutonomyPolicyResponse(
+        max_autonomy=view.max_autonomy,
+        is_default=view.is_default,
+        levels=list(view.levels),
+    )
+
+
+@router.get("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def get_autonomy_policy(
+    session: DbSession,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """The caller's tenant's assistant autonomy cap (admin only; tenant-scoped; #218).
+
+    ``max_autonomy`` is the ceiling an assistant's EFFECTIVE autonomy is min'd to;
+    ``is_default`` is true when no cap is stored (no ceiling — an assistant runs at its
+    own configured level). Admin-only via the router gate (INV-5); tenant-scoped via
+    ``current_tenant`` (INV-1).
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    return _to_autonomy_policy(await service.get_policy())
+
+
+@router.patch("/autonomy-policy", response_model=AutonomyPolicyResponse)
+async def update_autonomy_policy(
+    body: AutonomyPolicyUpdateRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+) -> AutonomyPolicyResponse:
+    """Set the per-tenant assistant autonomy cap (admin only; T1, audited; #218).
+
+    A reversible, tenant-scoped **T1** governance write: admin-only via the router gate
+    (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the service audits
+    ``autonomy_cap.updated`` (INV-6). The cap only ever NARROWS — it lowers an
+    assistant's EFFECTIVE autonomy, never raises it. Publishing an assistant above the
+    new ceiling is rejected (422), and a running assistant above it is clamped at the
+    run-time tool gate. An unknown ``max_autonomy`` is **422** at the wire (INV-8).
+    Returns the resulting cap.
+    """
+    service = AutonomyPolicyService(session, tenant_id=tenant_id)
+    view = await service.set_policy(
+        max_autonomy=body.max_autonomy,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _to_autonomy_policy(view)
+
+
+class TenantBrandingResponse(BaseModel):
+    """``#/components/schemas/TenantBranding`` — the tenant's application logo URL.
+
+    ``logo_url`` is a short-TTL presigned GET URL for the tenant's uploaded logo,
+    or ``null`` when none is set (the shell then renders the default brand mark).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    logo_url: str | None = None
+
+
+@router.put("/branding", response_model=TenantBrandingResponse)
+async def update_tenant_branding(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    object_store: ObjectStoreDep,
+    file: Annotated[UploadFile, File()],
+) -> TenantBrandingResponse:
+    """Upload the tenant's application logo (admin only; T1, audited).
+
+    An admin sets the per-tenant brand mark shown in the app shell for every user
+    of the tenant. Stores the image (MinIO, #22) and persists its key on the tenant
+    row; the shell reads the resulting presigned URL from ``GET /auth/me`` (and the
+    admin panel from this 200). Admin-only via the router gate (INV-5); tenant-scoped
+    via ``current_tenant`` (INV-1); the service audits the change (INV-6). Over-size →
+    **413**, a non-image content-type → **415**, a missing/blank filename → **422**.
+    """
+    data = await file.read()
+    # The declared content-type drives the allowlist check; default to the generic
+    # octet-stream so a client that omits it is rejected by the allowlist (415)
+    # rather than silently accepted.
+    content_type = file.content_type or "application/octet-stream"
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise ValidationError("upload is missing a filename", code="missing_filename")
+
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    logo_url = await service.set_tenant_logo(
+        object_store=object_store,
+        logo_bytes=data,
+        logo_content_type=content_type,
+        logo_filename=filename,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return TenantBrandingResponse(logo_url=logo_url)
+
+
+@router.delete("/branding", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_tenant_branding(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> Response:
+    """Clear the tenant's application logo (admin only; T1, audited).
+
+    Reverts the shell to the default brand mark for every user of the tenant. The
+    reverse of ``PUT /branding``: sets the tenant's ``logo_key`` to null. Admin-only
+    via the router gate (INV-5); tenant-scoped via ``current_tenant`` (INV-1); the
+    service audits the change (INV-6). Idempotent — clearing an already-unset logo
+    succeeds with **204**.
+    """
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    await service.clear_tenant_logo(
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class LlmProviderModelResponse(BaseModel):
+    """``#/components/schemas/LlmProviderModel`` — one discovered model."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str
+    label: str | None = None
+
+
+class LlmProviderResponse(BaseModel):
+    """``#/components/schemas/LlmProvider`` — the wire projection of a provider.
+
+    Carries only the masked ``secret_hint`` — **never** the stored API-key value.
+    The ``api_key_secret_ref`` is a server-internal detail and is not exposed.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    name: str
+    provider_type: str
+    base_url: str
+    enabled: bool
+    status: str
+    last_discovery_at: datetime | None = None
+    last_error: str | None = None
+    discovered_models: list[LlmProviderModelResponse]
+    secret_hint: str | None = None
+    owner_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class LlmProviderListResponse(BaseModel):
+    """``#/components/schemas/LlmProviderList`` — the tenant's registered providers."""
+
+    model_config = {"extra": "forbid"}
+
+    items: list[LlmProviderResponse]
+
+
+class LlmProviderCreateRequest(BaseModel):
+    """``#/components/schemas/LlmProviderCreate`` — register a provider (write-only key).
+
+    The optional ``api_key`` is write-only: stored envelope-encrypted via CC-C and
+    never returned (the response carries only a masked ``secret_hint``).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str = Field(min_length=1, max_length=200)
+    provider_type: str
+    base_url: str
+    api_key: str | None = Field(default=None, min_length=1)
+
+
+class LlmProviderUpdateRequest(BaseModel):
+    """``#/components/schemas/LlmProviderUpdate`` — any subset of fields; at least one.
+
+    ``api_key`` is a tri-state on the wire: absent = leave the key unchanged, a
+    string = rotate it, ``null`` = clear it. Pydantic collapses "absent" and "explicit
+    null" to ``None``, so ``__pydantic_fields_set__`` distinguishes them (``api_key``
+    in the set + ``None`` ⇒ clear).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = None
+    enabled: bool | None = None
+    api_key: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> LlmProviderUpdateRequest:
+        if not self.__pydantic_fields_set__:
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
+    return LlmProviderResponse(
+        id=provider.id,
+        name=provider.name,
+        provider_type=provider.provider_type,
+        base_url=provider.base_url,
+        enabled=provider.enabled,
+        status=provider.status.value,
+        last_discovery_at=provider.last_discovery_at,
+        last_error=provider.last_error,
+        discovered_models=[
+            LlmProviderModelResponse(
+                id=str(m.get("id", "")),
+                label=(str(m["label"]) if m.get("label") is not None else None),
+            )
+            for m in provider.discovered_models
+        ],
+        secret_hint=provider.secret_hint,
+        owner_id=provider.owner_id,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
+
+
+def _build_llm_provider_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+    request: Request,
+) -> LlmProviderService:
+    """Assemble the per-request LLM-provider service (identity + settings + audit).
+
+    Delegates to ``build_llm_provider_service`` (a ``services/`` factory), which owns
+    the CC-C secrets service (the sole cipher importer — so no ``api/`` module ever
+    touches plaintext). The router stays a thin (de)serialise + one-service call.
+    """
+    return build_llm_provider_service(
+        session,
+        settings=settings,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        roles=principal.roles,
+        audit=make_audit_sink(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
 
 
 @router.get(

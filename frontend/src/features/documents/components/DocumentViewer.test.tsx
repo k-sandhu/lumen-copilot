@@ -40,7 +40,8 @@ describe('DocumentViewer', () => {
     renderWithQuery(<DocumentViewer doc={doc} onClose={() => {}} />);
 
     const frame = await screen.findByTitle(/preview of msa.pdf/i);
-    expect(frame).toHaveAttribute('sandbox', '');
+    // PDF frames are intentionally unsandboxed — sandbox="" blocks Chrome's PDF viewer.
+    expect(frame).not.toHaveAttribute('sandbox');
     expect(frame.getAttribute('src')).toMatch(/^blob:/);
   });
 

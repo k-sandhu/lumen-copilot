@@ -8,5 +8,5 @@ export { LoginScreen } from './components/LoginScreen';
 export { CurrentUserMenu } from './components/CurrentUserMenu';
 export { useAuthStore } from './model/authStore';
 export type { AuthStatus } from './model/authStore';
-export { useCurrentUser, useLogin, useLogout } from './model/queries';
+export { useCurrentUser, useLogin, useLogout, currentUserQueryKey } from './model/queries';
 export { useBootstrapSession } from './model/useBootstrapSession';

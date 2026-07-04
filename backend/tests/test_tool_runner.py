@@ -37,10 +37,11 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Role
+from app.domain.entities import AuditOutcome, AutonomyLevel, Role
 from app.domain.llm import ToolCall
 from app.domain.tools import (
     ERROR_APPROVAL_DENIED,
+    ERROR_AUTONOMY_DENIED,
     ERROR_NOT_FOUND,
     ERROR_NOT_PERMITTED,
     ERROR_TOOL_ERROR,
@@ -105,6 +106,7 @@ def _make_runner(
     *,
     allowed: frozenset[str],
     gate: Any | None = None,
+    autonomy: AutonomyLevel = AutonomyLevel.ACT_AUTO,
 ) -> tuple[ToolRunner, AuditEventRepository, ToolInvocationRepository]:
     audit_repo = AuditEventRepository(w.session, w.tenant_id)
     inv_repo = ToolInvocationRepository(w.session, w.tenant_id)
@@ -117,6 +119,7 @@ def _make_runner(
         source_ip="127.0.0.1",
         session_id=None,
         gate=gate,
+        autonomy=autonomy,
     )
     return r, audit_repo, inv_repo
 
@@ -171,6 +174,29 @@ def _gated_tool(name: str = "send_email") -> ToolDefinition:
         handler=handler,
         risk_tier=RiskTier.T2,
         requires_approval=True,
+        read_only=False,
+    )
+
+
+def _t1_tool(name: str = "write_note") -> ToolDefinition:
+    """A T1 side-effecting tool (write-a-file-class) — the tier autonomy gates (#218).
+
+    Not read-only, T1, no approval required at the registry level (T1 does not
+    ``requires_approval`` — that is a T2+ property). Whether it may run is decided by
+    the run's EFFECTIVE autonomy: suggest/draft deny it, act_with_approval routes it
+    through the approval seam, act_auto executes it.
+    """
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+        return ToolHandlerResult(content="wrote it", summary="wrote")
+
+    return ToolDefinition(
+        name=name,
+        description="d",
+        json_schema={"type": "object"},
+        handler=handler,
+        risk_tier=RiskTier.T1,
+        requires_approval=False,
         read_only=False,
     )
 
@@ -306,6 +332,127 @@ async def test_t0_tool_bypasses_the_gate(
     )
     assert result.ok is True
     assert consulted == []  # the gate was bypassed for the T0 tool
+
+
+# --- #218: autonomy gates side-effecting (T1) tools by the effective level ---
+
+
+@pytest.mark.parametrize("autonomy", [AutonomyLevel.SUGGEST, AutonomyLevel.DRAFT])
+async def test_t1_tool_denied_below_act_autonomy(
+    world: _World, monkeypatch: pytest.MonkeyPatch, autonomy: AutonomyLevel
+) -> None:
+    """AC-1 / AC-N (#218, INV-7-style): a suggest/draft assistant CANNOT run a T1 write.
+
+    The negative: a draft-level assistant may only suggest/draft — a file-write is
+    refused (``autonomy_denied``) BEFORE the handler runs, and the denial is audited.
+    """
+    consulted: list[str] = []
+
+    class _RecordingGate:
+        async def request(self, request: ApprovalRequest) -> bool:
+            consulted.append(request.tool_name)
+            return True  # even a permissive gate must not rescue a below-level T1 tool
+
+    _patch_tool(monkeypatch, _t1_tool("write_note"))
+    r, audit_repo, _ = _make_runner(
+        world, allowed=frozenset({"write_note"}), gate=_RecordingGate(), autonomy=autonomy
+    )
+    result = await r.run(
+        call=ToolCall(id="c1", name="write_note", arguments={"text": "x"}),
+        context=_context(world),
+    )
+    # The side effect is refused by the autonomy level itself, not the approval gate.
+    assert result.ok is False
+    assert result.error == ERROR_AUTONOMY_DENIED
+    assert consulted == []  # the handler + the gate were never reached
+    # Audited + traced denied (INV-6) — a refusal is never a silent drop.
+    events = await audit_repo.list_recent(limit=10)
+    assert {e.outcome for e in events} == {AuditOutcome.DENIED}
+    invocations = await _all_invocations(world)
+    assert len(invocations) == 1
+    assert invocations[0].ok is False and invocations[0].error == ERROR_AUTONOMY_DENIED
+
+
+async def test_t1_tool_runs_at_act_auto(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (#218): at ``act_auto`` a T1 write executes automatically (no gate)."""
+    consulted: list[str] = []
+
+    class _RecordingGate:
+        async def request(self, request: ApprovalRequest) -> bool:
+            consulted.append(request.tool_name)
+            return False
+
+    _patch_tool(monkeypatch, _t1_tool("write_note"))
+    r, _, _ = _make_runner(
+        world,
+        allowed=frozenset({"write_note"}),
+        gate=_RecordingGate(),
+        autonomy=AutonomyLevel.ACT_AUTO,
+    )
+    result = await r.run(
+        call=ToolCall(id="c1", name="write_note", arguments={}), context=_context(world)
+    )
+    assert result.ok is True and result.content == "wrote it"
+    # act_auto executes automatically — the approval gate is NOT consulted for a T1 tool.
+    assert consulted == []
+
+
+async def test_t1_tool_routes_through_approval_at_act_with_approval(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (#218, INV-7): at ``act_with_approval`` a T1 write is gated by approval.
+
+    Denied when the gate refuses; executed only when the gate approves — the same seam
+    a T2+ tool uses, now reached for a T1 tool at this autonomy level.
+    """
+    # (a) an unapproving gate → the T1 write is denied (approval_denied).
+    class _DenyAll:
+        async def request(self, request: ApprovalRequest) -> bool:
+            return False
+
+    _patch_tool(monkeypatch, _t1_tool("write_note"))
+    r, _, _ = _make_runner(
+        world,
+        allowed=frozenset({"write_note"}),
+        gate=_DenyAll(),
+        autonomy=AutonomyLevel.ACT_WITH_APPROVAL,
+    )
+    denied = await r.run(
+        call=ToolCall(id="c1", name="write_note", arguments={}), context=_context(world)
+    )
+    assert denied.ok is False and denied.error == ERROR_APPROVAL_DENIED
+
+    # (b) an approving gate → the T1 write executes.
+    class _ApproveAll:
+        async def request(self, request: ApprovalRequest) -> bool:
+            return True
+
+    r2, _, _ = _make_runner(
+        world,
+        allowed=frozenset({"write_note"}),
+        gate=_ApproveAll(),
+        autonomy=AutonomyLevel.ACT_WITH_APPROVAL,
+    )
+    approved = await r2.run(
+        call=ToolCall(id="c2", name="write_note", arguments={}), context=_context(world)
+    )
+    assert approved.ok is True and approved.content == "wrote it"
+
+
+async def test_t0_tool_never_autonomy_gated(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#218: a read-only T0 tool runs even at the lowest autonomy (only T1 is gated)."""
+    _patch_tool(monkeypatch, _ok_tool("probe"))  # T0 read-only
+    r, _, _ = _make_runner(
+        world, allowed=frozenset({"probe"}), autonomy=AutonomyLevel.SUGGEST
+    )
+    result = await r.run(
+        call=ToolCall(id="c1", name="probe", arguments={}), context=_context(world)
+    )
+    assert result.ok is True and result.content == "ok"
 
 
 # --- AC-5: a raising / slow tool yields ok=False, never a crash -------------

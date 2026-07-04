@@ -7,16 +7,24 @@ governance contract, in this fixed order:
 1. **Resolve** the tool in the registry — an unknown name → ``tool_not_found``.
 2. **Allow-list** (issue #207 §2 / AC-2): a tool not in the per-run allowed set →
    ``tool_not_permitted``. Enforced here, once — no bypass.
-3. **Approval seam** (issue #207 §3 / AC-3 / INV-7): a ``requires_approval`` tool
-   is routed to the :class:`~app.services.tools.types.ApprovalGate` and blocks
-   until approved; a denial → ``approval_denied`` and the handler never runs.
-   T0/T1 tools skip the gate.
-4. **Bounded execute** (issue #207 §7 / AC-5): the handler runs under a per-tool
+3. **Autonomy gate** (issue #218 / ADR-0011 §3): a side-effecting **T1** tool is
+   gated by the assistant's EFFECTIVE autonomy (already ``min``'d to the tenant cap
+   by the run assembler). At ``suggest``/``draft`` a T1 write is refused
+   (``autonomy_denied``) — the assistant may only suggest/draft, not act; at
+   ``act_with_approval`` a T1 write is routed through the approval seam (step 4) like
+   a higher tier; at ``act_auto`` it executes automatically (still audited). T0
+   read-only tools are never autonomy-gated. Ad-hoc chat (no assistant) defaults to
+   ``act_auto`` and its default set is all-T0, so this step is inert there.
+4. **Approval seam** (issue #207 §3 / AC-3 / INV-7): a ``requires_approval`` tool
+   (T2+) — and a T1 tool at ``act_with_approval`` (step 3) — is routed to the
+   :class:`~app.services.tools.types.ApprovalGate` and blocks until approved; a
+   denial → ``approval_denied`` and the handler never runs.
+5. **Bounded execute** (issue #207 §7 / AC-5): the handler runs under a per-tool
    timeout; a raised or timed-out handler → an ``ok=False`` result with a safe
    message — never a crashed stream.
-5. **Uniform result** (issue #207 §4): whatever happened, produce one
+6. **Uniform result** (issue #207 §4): whatever happened, produce one
    :class:`~app.domain.tools.ToolResult`.
-6. **Audit + trace** (issue #207 §4/§5 / AC-4 / INV-6): emit ``tool.invoked``
+7. **Audit + trace** (issue #207 §4/§5 / AC-4 / INV-6): emit ``tool.invoked``
    (intent) and ``tool.result`` (outcome) through the one audit sink, and write a
    ``tool_invocations`` row — for **every** invocation, including a governance
    denial or a failure, so the trace has no silent gap.
@@ -29,6 +37,7 @@ returns a domain :class:`ToolResult` and leaks no adapter/vendor type upward.
 from __future__ import annotations
 
 import asyncio
+import enum
 import hashlib
 import json
 import time
@@ -38,14 +47,16 @@ from uuid import UUID
 from app.core.logging import get_logger
 from app.db.repositories import ToolInvocationRepository
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome
+from app.domain.entities import AuditOutcome, AutonomyLevel
 from app.domain.llm import ToolCall
 from app.domain.tools import (
     ERROR_APPROVAL_DENIED,
+    ERROR_AUTONOMY_DENIED,
     ERROR_NOT_FOUND,
     ERROR_NOT_PERMITTED,
     ERROR_TOOL_ERROR,
     ERROR_TOOL_TIMEOUT,
+    RiskTier,
     ToolHandlerResult,
     ToolResult,
 )
@@ -60,6 +71,30 @@ from app.services.tools.types import (
 )
 
 log = get_logger(__name__)
+
+
+class _AutonomyDecision(enum.Enum):
+    """How the run's effective autonomy resolves a side-effecting (T1) tool (#218).
+
+    ``ALLOW`` = execute automatically (``act_auto``); ``APPROVE`` = route through the
+    approval seam (``act_with_approval``); ``DENY`` = refuse — the assistant's level
+    (``suggest``/``draft``) may not take a side effect at all.
+    """
+
+    ALLOW = "allow"
+    APPROVE = "approve"
+    DENY = "deny"
+
+
+def _requires_autonomy_approval(definition: ToolDefinition) -> bool:
+    """True for a side-effecting **T1** tool — the one autonomy gates at run time (#218).
+
+    A T0 read-only tool is never autonomy-gated; a T2+ tool is already governed by the
+    approval seam (``requires_approval``) regardless of autonomy, and T2+ stays out of
+    MVP scope. So the autonomy gate concerns exactly the reversible-internal-write tier
+    (``T1``, not ``requires_approval``): write_file, run_python's file effects.
+    """
+    return definition.risk_tier is RiskTier.T1 and not definition.requires_approval
 
 
 def hash_args(arguments: dict[str, object]) -> str:
@@ -98,6 +133,13 @@ class ToolRunner:
     ``extra_tools`` first, then the static registry; the allow-list / approval /
     audit path (below) is then **identical** for a dynamic MCP tool and a native one
     — MCP adds no second pipeline (ADR-0012 §6).
+
+    ``autonomy`` is the run's EFFECTIVE :class:`~app.domain.entities.AutonomyLevel`
+    (issue #218) — the assistant's configured level already ``min``'d to the tenant
+    admin cap by the run assembler. It gates side-effecting **T1** tools (below);
+    read-only T0 tools are never affected. It defaults to ``ACT_AUTO`` so ad-hoc chat
+    (no assistant) is unchanged — the ad-hoc default set is all-T0, so the gate is
+    inert there.
     """
 
     def __init__(
@@ -112,6 +154,7 @@ class ToolRunner:
         session_id: UUID | None = None,
         gate: ApprovalGate | None = None,
         extra_tools: Mapping[str, ToolDefinition] | None = None,
+        autonomy: AutonomyLevel = AutonomyLevel.ACT_AUTO,
     ) -> None:
         self._allowed = allowed
         self._invocations = invocations
@@ -122,6 +165,7 @@ class ToolRunner:
         self._session_id = session_id
         self._gate: ApprovalGate = gate or DenyAllApprovalGate()
         self._extra_tools: Mapping[str, ToolDefinition] = extra_tools or {}
+        self._autonomy = autonomy
 
     async def run(
         self, *, call: ToolCall, context: ToolContext, message_id: UUID | None = None
@@ -178,10 +222,47 @@ class ToolRunner:
                 outcome=AuditOutcome.DENIED,
             )
 
-        # (3) Approval seam (AC-3 / INV-7). Only ``requires_approval`` (⇒ T2+) tools
-        # are gated; T0/T1 bypass it entirely. A denial refuses the call BEFORE the
-        # handler runs — no consequential action executes without approval.
-        if definition.requires_approval:
+        # (3) Autonomy gate (issue #218 / ADR-0011 §3). A side-effecting **T1** tool
+        # (write_file, run_python's file effects) is gated by the run's EFFECTIVE
+        # autonomy — the assistant's level already min'd to the tenant admin cap.
+        #   * suggest / draft (below act_with_approval): a T1 write is REFUSED here —
+        #     the assistant may only suggest/draft, not execute a side effect
+        #     (autonomy_denied), the handler never runs.
+        #   * act_with_approval: fall through and route the T1 tool through the approval
+        #     seam below (like a higher tier), so it executes only if approved.
+        #   * act_auto: fall through and execute automatically (still audited).
+        # T0 read-only tools are never autonomy-gated. This is deny-by-default: a
+        # side-effecting tool needs an explicit autonomy level to run.
+        if _requires_autonomy_approval(definition):
+            decision = self._autonomy_decision(definition.risk_tier)
+            if decision is _AutonomyDecision.DENY:
+                return await self._finalise(
+                    call=call,
+                    args_hash=args_hash,
+                    message_id=message_id,
+                    result=ToolResult.failure(
+                        call_id=call.id,
+                        name=call.name,
+                        error=ERROR_AUTONOMY_DENIED,
+                        content=(
+                            f"Tool {call.name!r} takes an action this assistant's autonomy "
+                            f"level ({self._autonomy.value!r}) does not permit. Raise the "
+                            "assistant's autonomy to act on it."
+                        ),
+                        summary="autonomy denied",
+                        duration_ms=_elapsed_ms(started),
+                    ),
+                    outcome=AuditOutcome.DENIED,
+                )
+            requires_gate = decision is _AutonomyDecision.APPROVE
+        else:
+            requires_gate = False
+
+        # (4) Approval seam (AC-3 / INV-7). ``requires_approval`` (⇒ T2+) tools always
+        # gate here; a T1 tool at ``act_with_approval`` also gates (``requires_gate``).
+        # A denial refuses the call BEFORE the handler runs — no consequential action
+        # executes without approval.
+        if definition.requires_approval or requires_gate:
             approved = await self._gate.request(
                 ApprovalRequest(
                     call_id=call.id,
@@ -210,7 +291,7 @@ class ToolRunner:
                     outcome=AuditOutcome.DENIED,
                 )
 
-        # (4) Bounded execute (AC-5). A raised/timed-out handler becomes an
+        # (5) Bounded execute (AC-5). A raised/timed-out handler becomes an
         # ok=False result — the stream never crashes.
         result = await self._execute(definition, call, context, started)
         outcome = AuditOutcome.ALLOWED if result.ok else AuditOutcome.ERROR
@@ -221,6 +302,22 @@ class ToolRunner:
             result=result,
             outcome=outcome,
         )
+
+    def _autonomy_decision(self, risk_tier: RiskTier) -> _AutonomyDecision:
+        """Resolve a side-effecting (T1) tool against the run's effective autonomy (#218).
+
+        ``act_auto`` ⇒ ALLOW (execute automatically); ``act_with_approval`` ⇒ APPROVE
+        (route through the approval seam); ``suggest``/``draft`` ⇒ DENY (the assistant
+        may only suggest/draft, not act). Only called for a T1 tool (the caller checks
+        :func:`_requires_autonomy_approval`); ``risk_tier`` is threaded through for the
+        approval request the caller builds.
+        """
+        if self._autonomy is AutonomyLevel.ACT_AUTO:
+            return _AutonomyDecision.ALLOW
+        if self._autonomy is AutonomyLevel.ACT_WITH_APPROVAL:
+            return _AutonomyDecision.APPROVE
+        # suggest / draft — below the act tiers: a side effect is not permitted.
+        return _AutonomyDecision.DENY
 
     def _resolve(self, name: str) -> ToolDefinition | None:
         """Resolve ``name`` to a :class:`ToolDefinition`, or ``None`` (deny by default).

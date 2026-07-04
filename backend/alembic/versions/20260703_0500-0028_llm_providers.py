@@ -39,8 +39,8 @@ the indexes, and drops the table, restoring the pre-foundation state. Offline DD
 render asserts the shape; the live apply runs against a disposable throwaway
 database (the #70 lesson).
 
-Revision ID: 0023_llm_providers
-Revises: 0022_sandbox_policy
+Revision ID: 0028_llm_providers
+Revises: 0027_tenant_logo
 Create Date: 2026-07-02 10:00:00+00:00
 """
 
@@ -53,8 +53,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0023_llm_providers"
-down_revision: str | None = "0022_sandbox_policy"
+revision: str = "0028_llm_providers"
+down_revision: str | None = "0027_tenant_logo"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

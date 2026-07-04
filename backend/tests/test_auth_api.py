@@ -113,12 +113,22 @@ async def test_me_returns_current_user_after_login(client: AsyncClient) -> None:
     resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"id", "email", "tenant_id", "tenant_name", "roles", "created_at"}
+    assert set(body) == {
+        "id",
+        "email",
+        "tenant_id",
+        "tenant_name",
+        "roles",
+        "created_at",
+        "logo_url",
+    }
     assert body["email"] == _DEV_EMAIL
     # The human-readable tenant name (the tenants.name column) rides alongside the
     # raw id so the UI never has to surface the UUID (#247).
     assert body["tenant_name"] == "Acme"
     assert body["roles"] == ["member"]
+    # A fresh tenant has no logo → null (the shell renders the default brand mark).
+    assert body["logo_url"] is None
 
 
 async def test_refresh_rotates_and_old_token_is_rejected(app: FastAPI, client: AsyncClient) -> None:

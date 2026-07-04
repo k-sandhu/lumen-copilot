@@ -14,7 +14,14 @@ import { Card } from '@/components/Card';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Icon } from '@/ui';
 import type { Assistant, ChatModelInfo, Member } from '@/api';
-import { modelLabel, ownerLabel, STATUS_LABEL, statusTone } from '../model/presentation';
+import {
+  effectiveAutonomyDisplay,
+  certificationBadge,
+  modelLabel,
+  ownerLabel,
+  STATUS_LABEL,
+  statusTone,
+} from '../model/presentation';
 
 /** Cap tool badges so a long allow-list never blows out the card. */
 const MAX_TOOL_BADGES = 4;
@@ -43,9 +50,11 @@ export function AssistantCard({
 }: AssistantCardProps) {
   const owner = ownerLabel(assistant.owner, members);
   const model = modelLabel(assistant.model, models);
+  const autonomy = effectiveAutonomyDisplay(assistant);
   const tools = assistant.toolAllowlist;
   const shownTools = tools.slice(0, MAX_TOOL_BADGES);
   const overflow = tools.length - shownTools.length;
+  const certification = certificationBadge(assistant.certificationState);
 
   return (
     <Card
@@ -65,9 +74,23 @@ export function AssistantCard({
             {assistant.name}
           </h3>
         </div>
-        <StatusBadge tone={statusTone(assistant.status)}>
-          {STATUS_LABEL[assistant.status]}
-        </StatusBadge>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          {assistant.featured ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+              title="Featured in the library by an admin"
+            >
+              <Icon name="sparkles" className="shrink-0" aria-hidden="true" />
+              Featured
+            </span>
+          ) : null}
+          {certification ? (
+            <StatusBadge tone={certification.tone}>{certification.label}</StatusBadge>
+          ) : null}
+          <StatusBadge tone={statusTone(assistant.status)}>
+            {STATUS_LABEL[assistant.status]}
+          </StatusBadge>
+        </div>
       </div>
 
       {assistant.description ? (
@@ -91,6 +114,25 @@ export function AssistantCard({
           <dt className="sr-only">Model</dt>
           <dd className="truncate" title={model}>
             {model}
+          </dd>
+        </div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Icon name="shield-check" className="shrink-0" />
+          <dt className="sr-only">Autonomy</dt>
+          <dd
+            className="truncate"
+            title={
+              autonomy.capped
+                ? `Autonomy ${autonomy.label} (capped by the tenant admin ceiling)`
+                : `Autonomy ${autonomy.label}`
+            }
+          >
+            {autonomy.label}
+            {autonomy.capped ? (
+              <span className="ml-1 rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-warn">
+                capped
+              </span>
+            ) : null}
           </dd>
         </div>
       </dl>

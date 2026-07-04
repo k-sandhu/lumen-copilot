@@ -87,6 +87,19 @@
   height: 18px;
   color: #fff;
 }
+/* A per-tenant application logo (admin branding) fills the mark cell, contained so
+   any aspect ratio fits without distortion. The gradient/shadow chrome is dropped
+   so a transparent PNG/SVG sits on the shell surface, not on the accent block. */
+.lc-brand__logo:has(.lc-brand__logo-img) {
+  background: none;
+  box-shadow: none;
+}
+.lc-brand__logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
 .lc-brand__text {
   min-width: 0;
   line-height: 1.05;

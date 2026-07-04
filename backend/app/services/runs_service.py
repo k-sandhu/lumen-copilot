@@ -73,6 +73,7 @@ from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
 from app.services.mcp_servers_service import build_mcp_servers_service
 from app.services.models_service import is_allowed_model
+from app.services.run_delivery_service import deliver_run
 from app.services.run_sink import RunTranscriptSink
 from app.services.tools.types import ToolDefinition
 
@@ -375,6 +376,8 @@ async def execute_run(
                     audit,
                     failed,
                     RunError(code="internal_error", message="The run failed unexpectedly."),
+                    session=session,
+                    tenant_id=tenant_id,
                     request_id=request_id,
                     source_ip=source_ip,
                 )
@@ -416,7 +419,7 @@ async def execute_run(
         if current is None:  # pragma: no cover — the run row cannot vanish mid-flight
             return terminal_status
         await sink.persist(runs=runs, steps=steps, run_id=run.id)
-        await runs.mark_terminal(
+        finished = await runs.mark_terminal(
             run.id,
             status=terminal_status,
             finished_at=datetime.now(UTC),
@@ -438,9 +441,8 @@ async def execute_run(
             },
         )
         if terminal_status is RunStatus.ESCALATED:
-            # Notify the owner + trail the escalation. #238's in-app delivery is not
-            # merged, so the notification is the audited status itself: the run lands
-            # ``escalated`` in the owner's inbox with the blocking reason, and a
+            # Notify the owner + trail the escalation. The run lands ``escalated`` in
+            # the owner's inbox (delivered below, #238) with the blocking reason, and a
             # ``run.escalated`` event records that a human is now needed (INV-6).
             await _audit_run(
                 audit,
@@ -456,6 +458,17 @@ async def execute_run(
                     **({"error_code": outcome.error.code} if outcome.error is not None else {}),
                 },
             )
+        # Deliver the completed run to the owner's in-app inbox / digest (#238) —
+        # in the SAME txn so the delivery commits atomically with the terminal. A
+        # delivery is never a silent drop (a produce failure writes a ``failed`` row).
+        await deliver_run(
+            session,
+            tenant_id=tenant_id,
+            run=finished if finished is not None else current,
+            audit=audit,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
     return terminal_status
 
 
@@ -465,11 +478,18 @@ async def _fail_run(
     run: Run,
     error: RunError,
     *,
+    session: AsyncSession | None = None,
+    tenant_id: UUID | None = None,
     request_id: str = "run-task",
     source_ip: str = "system",
 ) -> None:
-    """Write a run's ``failed`` terminal + audit ``run.finished`` (the crash-safe path)."""
-    await runs.mark_terminal(
+    """Write a run's ``failed`` terminal + audit ``run.finished`` (the crash-safe path).
+
+    A failed run still reaches the owner: when the caller passes the ``session`` +
+    ``tenant_id``, the failure is delivered to the owner's inbox (#238, AC-3 — a
+    failed run is visible + retryable via the run detail, never a silent drop).
+    """
+    failed = await runs.mark_terminal(
         run.id,
         status=RunStatus.FAILED,
         finished_at=datetime.now(UTC),
@@ -483,6 +503,15 @@ async def _fail_run(
         source_ip=source_ip,
         metadata={"status": RunStatus.FAILED.value, "error_code": error.code},
     )
+    if session is not None and tenant_id is not None:
+        await deliver_run(
+            session,
+            tenant_id=tenant_id,
+            run=failed if failed is not None else run,
+            audit=audit,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
 
 
 async def _audit_run(

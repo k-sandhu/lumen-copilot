@@ -57,7 +57,7 @@ method or wire shape here exposes the stored API-key value, only the masked
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -76,7 +76,8 @@ from app.domain.entities import (
     Role,
     SecretKind,
 )
-from app.net.egress import EgressBlockedError, pin_url_to_ip, resolve_safe_ip
+from app.llm.provider_catalog import discover_models
+from app.net.egress import EgressBlockedError, resolve_safe_ip
 from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
 
@@ -249,42 +250,20 @@ class LlmProviderService:
     async def _discover_models(
         self, *, base_url: str, api_key: str | None
     ) -> list[dict[str, object]]:
-        """Fetch + map the provider's model catalog from ``GET {base_url}/models``.
+        """Discover the provider's model catalog via the ``llm/`` boundary (ADR-0004).
 
-        OpenAI-compatible: the response is ``{"data": [{"id": "..."}, ...]}``. Runs
-        the full SSRF guard (resolve-all, reject-any + IP-pin, TOCTOU defence) exactly
-        as the web fetcher / MCP adapter do, sends the API key as a bearer token when
-        present, and maps each entry to ``{"id": str, "label": str | None}`` with a
-        derived human label. Raises on any transport / status / shape failure — the
-        caller records that as ``status=error`` (never a 500).
+        The OpenAI-compatible ``GET {base_url}/models`` HTTP call — with the SSRF guard
+        and bearer auth — lives in :mod:`app.llm.provider_catalog`; this service only
+        orchestrates (resolve the key, delegate, persist). Raises on any failure so the
+        caller records ``status=error`` (never a 500).
         """
-        url = _models_url(base_url)
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        safe_ip = resolve_safe_ip(host)  # resolve-all, reject-any (raises on block)
-        pinned = pin_url_to_ip(url, safe_ip)
-        headers: dict[str, str] = {"User-Agent": self._user_agent, "Accept": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        owns_client = self._discovery_client is None
-        client = self._discovery_client or httpx.AsyncClient(
-            timeout=self._discovery_timeout_seconds, follow_redirects=False
+        return await discover_models(
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=self._discovery_timeout_seconds,
+            user_agent=self._user_agent,
+            http_client=self._discovery_client,
         )
-        try:
-            response = await client.get(
-                pinned,
-                headers={**headers, "Host": parts.netloc},
-                extensions={"sni_hostname": host},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if owns_client:
-                await client.aclose()
-
-        return _map_models(payload)
-
     async def _run_discovery(self, provider: LlmProvider) -> LlmProvider:
         """Discover + persist a provider's models; record ready/error, never raise.
 
@@ -538,47 +517,6 @@ class LlmProviderService:
 def _utc_now() -> datetime:
     """Current UTC timestamp (isolated so tests read one clock)."""
     return datetime.now(UTC)
-
-
-def _models_url(base_url: str) -> str:
-    """Build the ``{base_url}/models`` discovery URL, tolerant of a trailing slash.
-
-    An OpenAI-compatible base URL is typically ``https://host/v1``; discovery hits
-    ``{base}/models``. A trailing slash on the base is normalised so we never emit a
-    ``//models`` path.
-    """
-    parts = urlsplit(base_url)
-    path = parts.path.rstrip("/")
-    return urlunsplit((parts.scheme, parts.netloc, f"{path}/models", "", ""))
-
-
-def _map_models(payload: object) -> list[dict[str, object]]:
-    """Map an OpenAI ``/models`` response to the ``discovered_models`` snapshot.
-
-    Expects ``{"data": [{"id": "..."}, ...]}`` (the OpenAI shape). Each entry maps to
-    ``{"id": str, "label": str | None}`` with a derived human label (an entry's
-    ``name`` if present, else its ``id``). A missing/non-list ``data`` or an entry
-    with no ``id`` is a shape error → raised (the caller records ``status=error``).
-    """
-    if not isinstance(payload, dict):
-        raise ValueError("provider /models response was not a JSON object")
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise ValueError("provider /models response had no 'data' list")
-
-    models: list[dict[str, object]] = []
-    for entry in data[:_MAX_MODELS]:
-        if not isinstance(entry, dict):
-            continue
-        model_id = entry.get("id")
-        if not isinstance(model_id, str) or not model_id:
-            continue
-        raw_label = entry.get("name")
-        label = raw_label if isinstance(raw_label, str) and raw_label else model_id
-        models.append({"id": model_id, "label": label})
-    if not models:
-        raise ValueError("provider /models response listed no usable models")
-    return models
 
 
 def _safe_error(exc: Exception) -> str:

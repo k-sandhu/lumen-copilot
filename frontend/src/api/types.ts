@@ -63,6 +63,12 @@ export interface CurrentUser {
   tenant_name: string;
   roles: UserRole[];
   created_at: string;
+  /**
+   * The tenant's application logo as a short-TTL presigned GET URL, or null/absent
+   * when none is set (the shell renders the default brand mark). A per-tenant
+   * setting an admin uploads — the same for every user of the tenant.
+   */
+  logo_url?: string | null;
 }
 
 // --- Collections (contracts/openapi.yaml §collections) ---
@@ -550,6 +556,17 @@ export interface RiskTierList {
   items: RiskTier[];
 }
 
+// --- Admin branding: per-tenant application logo (contracts §admin) ---
+
+/**
+ * 200 from PUT /admin/branding — the tenant's logo after upload. `logo_url` is a
+ * short-TTL presigned GET URL, or null when none is set (default brand mark). The
+ * current state is also readable via GET /auth/me (`logo_url`).
+ */
+export interface TenantBranding {
+  logo_url: string | null;
+}
+
 // --- Admin tool-governance policy (contracts §admin, #223) ---
 
 /**
@@ -631,80 +648,26 @@ export interface SandboxPolicyUpdate {
   max_concurrency: number;
 }
 
-// --- Admin LLM providers (contracts §admin — per-tenant registration + discovery) ---
-
 /**
- * The API shape a registered LLM provider speaks. `openai_compatible` covers
- * OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `/v1/models` +
- * `/v1/chat/completions` shape. The enum is small but extensible.
+ * The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+ * is the ceiling an assistant's EFFECTIVE autonomy is min'd to. `is_default` is true
+ * when no cap is stored — no ceiling, so `max_autonomy` is reported as `act_auto` and
+ * every assistant runs at its own configured level. `levels` lists the choice set in
+ * ascending order (suggest … act_auto).
  */
-export type LlmProviderType = 'openai_compatible';
-
-/**
- * Model-discovery state from the last probe. `pending` before the first discovery,
- * `ready` after a successful `GET /models` snapshot, `error` when the last discovery
- * failed (see `last_error`).
- */
-export type LlmProviderStatus = 'pending' | 'ready' | 'error';
-
-/** One model discovered from the provider's `/models` catalog. */
-export interface LlmProviderModel {
-  id: string;
-  label: string | null;
+export interface AutonomyPolicy {
+  max_autonomy: AutonomyLevel;
+  is_default: boolean;
+  levels: AutonomyLevel[];
 }
 
 /**
- * 200/201 item from the /admin/llm-providers surface — one registered per-tenant LLM
- * provider (foundation PR). The response NEVER includes the stored API key — only a
- * masked `secret_hint`. `discovered_models` is the last successful `GET /models`
- * snapshot. This catalog is not yet wired into the chat model picker or completion
- * routing (a follow-up PR).
+ * PATCH /admin/autonomy-policy body — set the per-tenant autonomy cap (issue #218).
+ * `max_autonomy` must be a valid AutonomyLevel (an unknown value → 422). The cap only
+ * ever NARROWS — it lowers an assistant's effective autonomy, never raises it.
  */
-export interface LlmProvider {
-  id: string;
-  name: string;
-  provider_type: LlmProviderType;
-  base_url: string;
-  enabled: boolean;
-  status: LlmProviderStatus;
-  last_discovery_at: string | null;
-  last_error: string | null;
-  discovered_models: LlmProviderModel[];
-  secret_hint: string | null;
-  owner_id: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** 200 from GET /admin/llm-providers — the tenant's registered providers. */
-export interface LlmProviderList {
-  items: LlmProvider[];
-}
-
-/**
- * POST /admin/llm-providers body — register a provider. `provider_type` is
- * constrained to the supported values; `base_url` must be https and pass the SSRF
- * check (else 422). The optional `api_key` is write-only — stored in the CC-C vault,
- * never returned. The backend auto-discovers the provider's models on create.
- */
-export interface LlmProviderCreate {
-  name: string;
-  provider_type: LlmProviderType;
-  base_url: string;
-  api_key?: string;
-}
-
-/**
- * PATCH /admin/llm-providers/{id} body — update a provider (any subset, at least one).
- * Rotating `api_key` replaces the stored key (write-only, never returned); send
- * `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF validation
- * (else 422) and re-runs model discovery.
- */
-export interface LlmProviderUpdate {
-  name?: string;
-  base_url?: string;
-  enabled?: boolean;
-  api_key?: string | null;
+export interface AutonomyPolicyUpdate {
+  max_autonomy: AutonomyLevel;
 }
 
 // --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
@@ -785,6 +748,13 @@ export type AutonomyLevel = 'suggest' | 'draft' | 'act_with_approval' | 'act_aut
 /** Lifecycle status (ADR-0011 §1). A disabled assistant cannot start new sessions. */
 export type AssistantStatus = 'draft' | 'published' | 'disabled';
 
+/**
+ * Admin library-governance certification (E6-6, #217) — an orthogonal axis to the
+ * lifecycle status. `none` = not reviewed; `certified` = an admin vouched for it;
+ * `deprecated` = an admin flagged it for retirement (still runnable, library warns).
+ */
+export type CertificationState = 'none' | 'certified' | 'deprecated';
+
 /** A retrieval source class the assistant's scope may draw from. */
 export type KnowledgeMode = 'company' | 'uploaded' | 'web' | 'model';
 
@@ -819,15 +789,60 @@ export interface Assistant {
   /** Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands). */
   toolAllowlist: string[];
   autonomyLevel: AutonomyLevel;
+  /**
+   * The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+   * (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no cap
+   * lowers it — visibility for the library/run detail.
+   */
+  effectiveAutonomy: AutonomyLevel;
   /** The accountable owner's user id. */
   owner: string;
   /** The backup owner's user id; required before publish (ADR-0011 §4). */
   backupOwner?: string | null;
   status: AssistantStatus;
+  /** Admin library-governance certification verdict (E6-6, #217; read-only here). */
+  certificationState: CertificationState;
+  /** Whether an admin has featured/pinned the assistant in the library (E6-6, #217). */
+  featured: boolean;
   /** The current published head version number (null while never published). */
   version?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The admin library view of an assistant (E6-6/E6-8, #217): identity + owner +
+ * lifecycle status plus the governance axis and the `ownerOrphaned` projection
+ * (owner no longer a tenant member — flag for reassignment). Admin-only; spans
+ * every owner in the tenant.
+ */
+export interface GovernedAssistant {
+  id: string;
+  name: string;
+  description?: string | null;
+  model?: string | null;
+  autonomyLevel: AutonomyLevel;
+  /** The accountable owner's user id. */
+  owner: string;
+  backupOwner?: string | null;
+  status: AssistantStatus;
+  certificationState: CertificationState;
+  featured: boolean;
+  /** A library grouping label (null ⇒ uncategorised). */
+  category?: string | null;
+  /** When an admin disabled the assistant (null ⇒ not disabled). */
+  disabledAt?: string | null;
+  /** The owner is no longer a member of the tenant (flag for reassignment, E6-8). */
+  ownerOrphaned: boolean;
+  version?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A cursor page of the admin library view (GET /admin/assistants). */
+export interface GovernedAssistantList {
+  items: GovernedAssistant[];
+  next_cursor?: string | null;
 }
 
 /**
@@ -913,6 +928,40 @@ export interface AssistantList {
 export interface AssistantVersionList {
   items: AssistantVersion[];
   next_cursor?: string | null;
+}
+
+/** A sample input for a read-only assistant test run (E6-5, #215). Optional. */
+export interface AssistantTestRequest {
+  input?: string;
+}
+
+/**
+ * One tool call captured in a test run's debug trace (E6-5). `args` are the
+ * model-supplied arguments; `result` is the governed runner's outcome. A write-tier
+ * tool's `result` reflects the simulate/deny outcome — no real write occurred.
+ */
+export interface AssistantTestToolCall {
+  callId: string;
+  tool?: string | null;
+  args?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+}
+
+/**
+ * The debug trace of a read-only assistant test run (E6-5, #215) — what the builder
+ * debug view renders. NO real side effect was produced (write-tier tools
+ * simulate/deny). Reuses the runtime's own trace vocabulary.
+ */
+export interface AssistantTestTrace {
+  prompt: string;
+  input: string;
+  model: string;
+  retrieval: Array<Record<string, unknown>>;
+  toolCalls: AssistantTestToolCall[];
+  outputs: string;
+  errors: Array<Record<string, unknown>>;
+  succeeded: boolean;
+  durationMs: number;
 }
 
 /**
@@ -1635,4 +1684,111 @@ export interface McpTool {
 export interface McpToolList {
   items: McpTool[];
   next_cursor?: string | null;
+}
+
+/**
+ * How a completed run's output reached the owner (ADR-0015 §6). `inbox` = an
+ * immediate in-app delivery on completion; `digest` = a run rolled into a periodic
+ * in-app digest batch.
+ */
+export type RunDeliveryKind = 'inbox' | 'digest';
+
+/**
+ * The lifecycle of one in-app run delivery (ADR-0015 §6). `pending` = awaiting its
+ * digest batch; `delivered` = visible in the inbox (unread); `read` = the owner
+ * opened it; `failed` = could not be produced (visible + retryable, never a silent
+ * drop).
+ */
+export type RunDeliveryStatus = 'pending' | 'delivered' | 'read' | 'failed';
+
+export interface RunDelivery {
+  id: string;
+  /** The completed run this delivery is for — a link to its full cited transcript. */
+  run_id: string;
+  /** The schedule that fired the run, or null for a manual run. */
+  schedule_id?: string | null;
+  kind: RunDeliveryKind;
+  status: RunDeliveryStatus;
+  /** The inbox line — the run's short summary. */
+  summary?: string | null;
+  created_at: string;
+  /** When the owner opened the delivery, or null while unread. */
+  read_at?: string | null;
+}
+
+export interface RunDeliveryList {
+  items: RunDelivery[];
+  next_cursor?: string | null;
+}
+
+/**
+ * The API shape a registered LLM provider speaks. `openai_compatible` covers
+ * OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `/v1/models` +
+ * `/v1/chat/completions` shape. The enum is small but extensible.
+ */
+export type LlmProviderType = 'openai_compatible';
+
+/**
+ * Model-discovery state from the last probe. `pending` before the first discovery,
+ * `ready` after a successful `GET /models` snapshot, `error` when the last discovery
+ * failed (see `last_error`).
+ */
+export type LlmProviderStatus = 'pending' | 'ready' | 'error';
+
+export interface LlmProviderModel {
+  id: string;
+  label: string | null;
+}
+
+/**
+ * 200/201 item from the /admin/llm-providers surface — one registered per-tenant LLM
+ * provider (foundation PR). The response NEVER includes the stored API key — only a
+ * masked `secret_hint`. `discovered_models` is the last successful `GET /models`
+ * snapshot. This catalog is not yet wired into the chat model picker or completion
+ * routing (a follow-up PR).
+ */
+export interface LlmProvider {
+  id: string;
+  name: string;
+  provider_type: LlmProviderType;
+  base_url: string;
+  enabled: boolean;
+  status: LlmProviderStatus;
+  last_discovery_at: string | null;
+  last_error: string | null;
+  discovered_models: LlmProviderModel[];
+  secret_hint: string | null;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LlmProviderList {
+  items: LlmProvider[];
+}
+
+/**
+ * POST /admin/llm-providers body — register a provider. `provider_type` is
+ * constrained to the supported values; `base_url` must be https and pass the SSRF
+ * check (else 422). The optional `api_key` is write-only — stored in the CC-C vault,
+ * never returned. The backend auto-discovers the provider's models on create.
+ */
+export interface LlmProviderCreate {
+  name: string;
+  provider_type: LlmProviderType;
+  base_url: string;
+  api_key?: string;
+}
+
+/**
+ * PATCH /admin/llm-providers/{id} body — update a provider (any subset, at least one).
+ * Rotating `api_key` replaces the stored key (write-only, never returned); send
+ * `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF validation
+ * (else 422) and re-runs model discovery.
+ */
+export interface LlmProviderUpdate {
+  name?: string;
+  base_url?: string;
+  enabled?: boolean;
+  api_key?: string | null;
 }

@@ -54,7 +54,18 @@ export {
   updateLlmProvider,
   deleteLlmProvider,
   refreshLlmProvider,
+  updateTenantBranding,
+  clearTenantBranding,
+  getAutonomyPolicy,
+  updateAutonomyPolicy,
+  listGovernedAssistants,
+  certifyAssistant,
+  featureAssistant,
+  disableAssistant,
+  transferAssistantOwnership,
+  disableOrphanedAssistants,
 } from './admin';
+export type { BulkOrphanResult } from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
 // public one is already re-exported above, so we expose only the functions here.
 export { listSources, createSource, syncSource, deleteSource } from './sources';
@@ -68,6 +79,7 @@ export {
   publishAssistant,
   listAssistantVersions,
   rollbackAssistant,
+  testAssistant,
 } from './assistants';
 export type { AssistantPageQuery, AssistantVersionPageQuery } from './assistants';
 export {
@@ -83,6 +95,8 @@ export {
 export type { SchedulePageQuery } from './schedules';
 export { listRuns, getRun, resumeRun, cancelRun, rerouteRun } from './runs';
 export type { RunPageQuery } from './runs';
+export { listRunDeliveries, markRunDeliveryRead } from './runDeliveries';
+export type { RunDeliveryPageQuery } from './runDeliveries';
 export { getCodeRun } from './codeRuns';
 export {
   listArtifacts,

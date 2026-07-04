@@ -34,6 +34,8 @@ import type {
   AssistantPublishRequest,
   AssistantRollbackRequest,
   AssistantStatus,
+  AssistantTestRequest,
+  AssistantTestTrace,
   AssistantUpdate,
   AssistantVersion,
   AssistantVersionList,
@@ -145,4 +147,19 @@ export function rollbackAssistant(
   body: AssistantRollbackRequest,
 ): Promise<AssistantVersion> {
   return request<AssistantVersion>(`/assistants/${id}/rollback`, { method: 'POST', json: body });
+}
+
+/**
+ * Preview/test/debug a draft assistant with NO real side effect (E6-5, #215).
+ * Runs the assistant's working (draft) config against a sample input with write-tier
+ * tools forced into simulate/deny mode (`write_file` simulated — no artifact;
+ * `run_python` denied — no code run), and returns the debug trace (prompt, retrieval,
+ * tool calls with args/results, outputs, errors, timing). A non-owned / cross-tenant
+ * id → 404 (existence non-disclosure, INV-1/INV-2); a malformed body → 422.
+ */
+export function testAssistant(
+  id: string,
+  body: AssistantTestRequest = {},
+): Promise<AssistantTestTrace> {
+  return request<AssistantTestTrace>(`/assistants/${id}/test`, { method: 'POST', json: body });
 }

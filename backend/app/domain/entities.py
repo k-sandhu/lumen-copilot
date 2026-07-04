@@ -198,12 +198,46 @@ class AutonomyLevel(str, enum.Enum):
     Capped by the risk tier of the assistant's allowed tools; at MVP the whole
     product is T0/T1, so autonomy governs only app-local tools through the CC-A
     approval seam. ``SUGGEST`` is the default for a new assistant.
+
+    The four values are **totally ordered** by how far the assistant may act
+    (``SUGGEST`` < ``DRAFT`` < ``ACT_WITH_APPROVAL`` < ``ACT_AUTO``) so an admin's
+    per-tenant cap can be a ``min`` (issue #218): an assistant's EFFECTIVE autonomy
+    is ``min(assistant.autonomy_level, tenant cap)``, and a T1 side-effecting tool
+    is gated by that effective level at run time.
     """
 
     SUGGEST = "suggest"
     DRAFT = "draft"
     ACT_WITH_APPROVAL = "act_with_approval"
     ACT_AUTO = "act_auto"
+
+    @property
+    def rank(self) -> int:
+        """The numeric autonomy rank (0–3) — higher means the assistant may act further.
+
+        ``SUGGEST`` = 0 … ``ACT_AUTO`` = 3. Lets a cap be expressed as a ``min`` and a
+        run-time gate as a ``>=`` comparison without a lookup table (issue #218).
+        """
+        return _AUTONOMY_ORDER.index(self)
+
+    def clamped_to(self, cap: AutonomyLevel) -> AutonomyLevel:
+        """This level, lowered to ``cap`` if it exceeds it (the tenant-cap ``min``).
+
+        The EFFECTIVE autonomy of an assistant is ``min(assistant, tenant cap)``: an
+        assistant configured above the tenant ceiling runs at the ceiling, never above
+        it (issue #218). Returns ``self`` when already at or below the cap.
+        """
+        return self if self.rank <= cap.rank else cap
+
+
+# The autonomy values in ascending order (SUGGEST lowest, ACT_AUTO highest). The
+# single source for ``AutonomyLevel.rank`` so the ordering is defined once.
+_AUTONOMY_ORDER: tuple[AutonomyLevel, ...] = (
+    AutonomyLevel.SUGGEST,
+    AutonomyLevel.DRAFT,
+    AutonomyLevel.ACT_WITH_APPROVAL,
+    AutonomyLevel.ACT_AUTO,
+)
 
 
 class AssistantStatus(str, enum.Enum):
@@ -217,6 +251,22 @@ class AssistantStatus(str, enum.Enum):
     DRAFT = "draft"
     PUBLISHED = "published"
     DISABLED = "disabled"
+
+
+class CertificationState(str, enum.Enum):
+    """Admin library-governance certification (E6-6, issue #217, contract ``CertificationState``).
+
+    An **orthogonal** governance axis to the lifecycle ``status`` (a certified
+    assistant is still ``published``/``disabled`` on its own axis). ``NONE`` = not
+    reviewed; ``CERTIFIED`` = an admin vouched for it (trusted in the library);
+    ``DEPRECATED`` = an admin flagged it for retirement (still runnable, but the
+    library warns). Only an admin transitions this (deny-by-default, INV-5); the
+    default for a fresh assistant is ``NONE``.
+    """
+
+    NONE = "none"
+    CERTIFIED = "certified"
+    DEPRECATED = "deprecated"
 
 
 class KnowledgeMode(str, enum.Enum):
@@ -395,6 +445,19 @@ class Assistant:
     only their own (or granted) assistants; a cross-tenant/non-owned id is 404.
     ``current_version`` is the published head version number (``None`` while never
     published) — a projection the service fills, not a stored column.
+    ``effective_autonomy`` is the assistant's autonomy after the tenant admin cap is
+    applied (``min(autonomy_level, tenant cap)``, issue #218) — also a projection the
+    service fills (``None`` until filled), so the library/run detail can show how far
+    the assistant may *actually* act versus its configured level.
+
+    **Library governance (E6-6/E6-8, issue #217 — an orthogonal admin axis).**
+    ``certification_state`` (an admin's certify/deprecate verdict),
+    ``featured`` (an admin's library pin), ``category`` (a library grouping label),
+    and ``disabled_at`` (when an admin disabled it — set in lockstep with
+    ``status=disabled`` so the existing run/chat/schedule "only a published
+    assistant may start" gate blocks a disabled assistant, INV-8). ``owner_orphaned``
+    is a **projection** (not stored): whether the owner is no longer a member of the
+    tenant, so the library can flag an abandoned assistant for admin reassignment.
     """
 
     id: UUID
@@ -409,9 +472,15 @@ class Assistant:
     tool_allowlist: tuple[str, ...]
     autonomy_level: AutonomyLevel
     status: AssistantStatus
+    certification_state: CertificationState
+    featured: bool
+    category: str | None
+    disabled_at: datetime | None
     created_at: datetime
     updated_at: datetime
     current_version: int | None = None
+    effective_autonomy: AutonomyLevel | None = None
+    owner_orphaned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,6 +567,10 @@ class Tenant:
     # set it caps how many tool-calling turns the answer runtime may take before
     # it forces a final synthesis (1–50). A tenant admin configures it.
     max_tool_turns: int | None = None
+    # Per-tenant application logo (object-store key); ``None`` ⇒ the default brand
+    # mark. A tenant admin uploads it (admin branding); the shell renders it via a
+    # presigned GET URL delivered on ``GET /auth/me``.
+    logo_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,6 +783,29 @@ class TenantSandboxPolicy:
     max_memory_mb: int
     daily_runtime_cap_s: int
     max_concurrency: int
+    updated_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TenantAutonomyPolicy:
+    """An admin's per-tenant autonomy cap (issue #218).
+
+    One row of the ``tenant_autonomy_policy`` table: the maximum
+    :class:`AutonomyLevel` any assistant in the tenant may effectively run at
+    (``max_autonomy``). Tenant-scoped (INV-1); ``updated_by`` is the admin who last
+    set it (may be ``None`` if that user was later deprovisioned — the cap outlives
+    them). Absence of a row (not represented here) means **no ceiling** — an
+    assistant runs at its own configured level (the permissive default, mirroring
+    how the tool/sandbox policies fall back to their built-in defaults). An
+    assistant's EFFECTIVE autonomy is ``min(assistant.autonomy_level, max_autonomy)``,
+    enforced at publish time and at run time.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    max_autonomy: AutonomyLevel
     updated_by: UUID | None
     created_at: datetime
     updated_at: datetime
@@ -1030,6 +1126,78 @@ class RunStep:
     kind: RunStepKind
     payload: dict[str, object]
     created_at: datetime
+
+
+class RunDeliveryKind(str, enum.Enum):
+    """How a completed run's output reached the owner (ADR-0015 §6, issue #238).
+
+    ``INBOX`` = an immediate in-app inbox delivery on run completion (the T0/T1-safe
+    default); ``DIGEST`` = a run rolled into a periodic in-app digest batch (a
+    low-urgency run the schedule opted into a daily/weekly roll-up, so it does not
+    ping the owner per fire). External channels (email/Slack) are deferred T2-ish
+    egress (INV-7) — no kind here, by design.
+    """
+
+    INBOX = "inbox"
+    DIGEST = "digest"
+
+
+class RunDeliveryStatus(str, enum.Enum):
+    """The lifecycle of one in-app run delivery (ADR-0015 §6, issue #238).
+
+    ``PENDING`` = created, not yet surfaced to the owner (a run awaiting its digest
+    batch); ``DELIVERED`` = visible in the owner's inbox (unread); ``READ`` = the
+    owner opened it; ``FAILED`` = the delivery could not be produced (visible +
+    retryable, never a silent drop — AC-3). A delivery walks
+    ``PENDING`` → ``DELIVERED`` → ``READ`` (or ``FAILED`` on the produce path).
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    READ = "read"
+    FAILED = "failed"
+
+
+# The terminal-for-reading statuses — a delivery the owner has already seen.
+_READ_RUN_DELIVERY_STATUSES: frozenset[RunDeliveryStatus] = frozenset(
+    {RunDeliveryStatus.READ}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RunDelivery:
+    """One in-app delivery of a completed run's output — a ``run_deliveries`` row (#238).
+
+    The persistence of "a completed scheduled run appears in the recipient's in-app
+    inbox with a summary + a link to the run" (AC-1). Tenant- and owner-scoped
+    (INV-1/§2.2): ``recipient_id`` is the owner the run ran *as* — a delivery in
+    another tenant or addressed to another user is a 404 (existence non-disclosure).
+    ``run_id`` links back to the full cited transcript (``GET /runs/{id}``);
+    ``summary`` is the inbox line (the run's ``summary``); ``kind`` distinguishes an
+    immediate inbox delivery from a digest-batched one; ``status`` walks the
+    :class:`RunDeliveryStatus` machine. ``read_at`` stamps when the owner opened it.
+
+    A **failed** delivery is a queryable row (``status=failed``), never a silent
+    drop (AC-3) — the run itself still carries its terminal outcome, but the delivery
+    surface records that its inbox notification could not be produced so it can be
+    retried.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    recipient_id: UUID
+    run_id: UUID
+    schedule_id: UUID | None
+    kind: RunDeliveryKind
+    status: RunDeliveryStatus
+    summary: str | None
+    created_at: datetime
+    read_at: datetime | None = None
+
+    @property
+    def is_read(self) -> bool:
+        """True once the owner has opened this delivery (never reverts)."""
+        return self.status in _READ_RUN_DELIVERY_STATUSES
 
 
 @dataclass(frozen=True, slots=True)

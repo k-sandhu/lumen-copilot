@@ -60,8 +60,9 @@ Feature (`features/documents`):
   surfaces the metadata grid, the parse → chunk → embed → ready **ingestion trace**
   (kit `StatusDot`), and — when opened on a citation — the cited passage (kit
   `SourceInspector`), then resolves `GET /documents/{id}/content` (following a 302)
-  and renders the file in a sandboxed iframe (AC-3). A non-ready document explains
-  it has no preview yet and skips the content fetch.
+  and previews it: PDFs render in an (unsandboxed) iframe via the browser's native
+  viewer, while office and text/markdown render as server-extracted text (AC-3). A
+  non-ready document explains it has no preview yet and skips the content fetch.
 - `components/DocumentsPanel.tsx` — the feature root; the `/documents` route
   ([`routes/DocumentsRoute.tsx`](../../routes/DocumentsRoute.tsx)) wraps it in the
   auth guard + app chrome, reachable from the chat shell's Pages overlay.

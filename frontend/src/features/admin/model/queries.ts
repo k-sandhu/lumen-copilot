@@ -22,24 +22,32 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
-  createLlmProvider,
-  deleteLlmProvider,
+  getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
   getSandboxPolicy,
   getToolPolicy,
-  listLlmProviders,
   listMembers,
-  refreshLlmProvider,
-  updateLlmProvider,
+  updateAutonomyPolicy,
   updateSandboxPolicy,
   updateToolPolicy,
+  clearTenantBranding,
+  updateTenantBranding,
+  listLlmProviders,
+  createLlmProvider,
+  updateLlmProvider,
+  deleteLlmProvider,
+  refreshLlmProvider,
 } from '@/api';
+import { currentUserQueryKey } from '@/features/auth';
 import type {
-  LlmProvider,
+  LlmProviderUpdate,
   LlmProviderCreate,
   LlmProviderList,
-  LlmProviderUpdate,
+  LlmProvider,
+  TenantBranding,
+  AutonomyPolicy,
+  AutonomyPolicyUpdate,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -54,7 +62,7 @@ export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
 export const sandboxPolicyQueryKey = ['admin', 'sandbox-policy'] as const;
-export const llmProvidersQueryKey = ['admin', 'llm-providers'] as const;
+export const autonomyPolicyQueryKey = ['admin', 'autonomy-policy'] as const;
 
 /** The tenant's members and their roles (admin only). */
 export function useMembers(): UseQueryResult<MemberList> {
@@ -140,15 +148,73 @@ export function useUpdateSandboxPolicy(): UseMutationResult<
   });
 }
 
-// --- LLM providers (per-tenant registration + model auto-discovery) ---
-//
-// Foundation PR: a tenant admin registers OpenAI-compatible providers and the backend
-// auto-discovers each provider's models. Every mutation invalidates the providers
-// query so the panel re-reads the authoritative server state (create/refresh return
-// the discovered snapshot; delete has no body). A 422 (bad type/url) / 403 propagates
-// as an `ApiError` the panel surfaces — it is NOT swallowed here.
+/** The per-tenant assistant autonomy cap (admin only, #218). */
+export function useAutonomyPolicy(): UseQueryResult<AutonomyPolicy> {
+  return useQuery<AutonomyPolicy>({
+    queryKey: autonomyPolicyQueryKey,
+    queryFn: ({ signal }) => getAutonomyPolicy(signal),
+    staleTime: 15_000,
+  });
+}
 
-/** The tenant's registered LLM providers, each with discovered models + status (admin only). */
+/**
+ * Set the per-tenant autonomy cap (issue #218). On success we seed the cache with the
+ * returned cap and invalidate so the panel re-reads. Because a lower cap changes every
+ * assistant's EFFECTIVE autonomy, we also invalidate the assistants list so the library
+ * re-reads the clamped `effectiveAutonomy`. A 422 (unknown level) / 403 propagates as an
+ * `ApiError` the panel surfaces — it is NOT swallowed here.
+ */
+export function useUpdateAutonomyPolicy(): UseMutationResult<
+  AutonomyPolicy,
+  unknown,
+  AutonomyPolicyUpdate
+> {
+  const qc = useQueryClient();
+  return useMutation<AutonomyPolicy, unknown, AutonomyPolicyUpdate>({
+    mutationFn: (body) => updateAutonomyPolicy(body),
+    onSuccess: (policy) => {
+      qc.setQueryData(autonomyPolicyQueryKey, policy);
+      void qc.invalidateQueries({ queryKey: autonomyPolicyQueryKey });
+      // A cap change re-clamps every assistant's effective autonomy — refresh the library.
+      void qc.invalidateQueries({ queryKey: ['assistants'] });
+    },
+  });
+}
+
+/**
+ * Upload the tenant's application logo (admin branding). The current logo state is
+ * carried on `GET /auth/me` (`logo_url`) — the source both the shell brand cell and
+ * the branding panel read — so on success we invalidate that query, refreshing the
+ * shell + panel in one step. A 413/415/403 propagates as an `ApiError` the panel
+ * surfaces; it is NOT swallowed here.
+ */
+export function useUpdateTenantBranding(): UseMutationResult<TenantBranding, unknown, File> {
+  const qc = useQueryClient();
+  return useMutation<TenantBranding, unknown, File>({
+    mutationFn: (file) => updateTenantBranding(file),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: currentUserQueryKey });
+    },
+  });
+}
+
+/**
+ * Clear the tenant's application logo (admin branding) so the shell reverts to the
+ * default brand mark. Invalidates `GET /auth/me` on success so the shell + panel
+ * re-read. A 403 propagates as an `ApiError` the panel surfaces.
+ */
+export function useClearTenantBranding(): UseMutationResult<void, unknown, void> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, void>({
+    mutationFn: () => clearTenantBranding(),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: currentUserQueryKey });
+    },
+  });
+}
+
+export const llmProvidersQueryKey = ['admin', 'llm-providers'] as const;
+
 export function useLlmProviders(): UseQueryResult<LlmProviderList> {
   return useQuery<LlmProviderList>({
     queryKey: llmProvidersQueryKey,
@@ -157,7 +223,6 @@ export function useLlmProviders(): UseQueryResult<LlmProviderList> {
   });
 }
 
-/** Register a provider and auto-discover its models; invalidate the list on success. */
 export function useCreateLlmProvider(): UseMutationResult<LlmProvider, unknown, LlmProviderCreate> {
   const qc = useQueryClient();
   return useMutation<LlmProvider, unknown, LlmProviderCreate>({
@@ -168,7 +233,6 @@ export function useCreateLlmProvider(): UseMutationResult<LlmProvider, unknown, 
   });
 }
 
-/** Update a provider (rename/retarget/toggle/rotate-key); invalidate the list on success. */
 export function useUpdateLlmProvider(): UseMutationResult<
   LlmProvider,
   unknown,
@@ -183,7 +247,6 @@ export function useUpdateLlmProvider(): UseMutationResult<
   });
 }
 
-/** Delete a provider + its stored key; invalidate the list on success. */
 export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string> {
   const qc = useQueryClient();
   return useMutation<void, unknown, string>({
@@ -194,7 +257,6 @@ export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string>
   });
 }
 
-/** Re-run model discovery for a provider; invalidate the list on success. */
 export function useRefreshLlmProvider(): UseMutationResult<LlmProvider, unknown, string> {
   const qc = useQueryClient();
   return useMutation<LlmProvider, unknown, string>({

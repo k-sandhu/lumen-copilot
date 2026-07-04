@@ -257,6 +257,31 @@ class Settings(BaseSettings):
             return frozenset(item.strip() for item in value.split(",") if item.strip())
         return value
 
+    # --- Per-tenant application logo (admin branding) -----------------------
+    # A tenant ADMIN uploads a brand mark that replaces the default "Lumen /
+    # Copilot" wordmark in the app shell for every user of that tenant. Stored via
+    # the same ObjectStore as uploads/artifacts (its own small cap + a tight
+    # image-only allowlist), the object key persisted on the ``tenants`` row. A
+    # logo is chrome, not a document, so it gets a much smaller cap. The declared
+    # type is checked against this set before storing (a client-declared type is a
+    # usability/allowlist check, not a security guarantee — sniffing is fenced OUT,
+    # OD-4). Hard upper bound on a single logo (bytes). Default 1 MiB.
+    max_logo_bytes: int = Field(default=1 * 1024 * 1024, alias="MAX_LOGO_BYTES")
+    # Allowlisted logo content-types: the raster + vector marks a browser renders
+    # inline. Comma-separated override via LOGO_ALLOWED_CONTENT_TYPES.
+    logo_allowed_content_types: frozenset[str] = Field(
+        default=frozenset({"image/png", "image/jpeg", "image/svg+xml"}),
+        alias="LOGO_ALLOWED_CONTENT_TYPES",
+    )
+
+    @field_validator("logo_allowed_content_types", mode="before")
+    @classmethod
+    def _split_logo_content_types(cls, value: object) -> object:
+        """Accept a comma-separated env string as the logo content-type allowlist."""
+        if isinstance(value, str):
+            return frozenset(item.strip() for item in value.split(",") if item.strip())
+        return value
+
     @field_validator("artifact_retention_days")
     @classmethod
     def _artifact_retention_days_positive(cls, value: int | None) -> int | None:
@@ -613,6 +638,14 @@ class Settings(BaseSettings):
     # monopolize the worker pool. A fire that would exceed it is deferred, not
     # dropped. 0 would disable the cap → rejected (fail fast).
     run_max_in_flight_per_tenant: int = Field(default=20, alias="RUN_MAX_IN_FLIGHT_PER_TENANT")
+    # How often the digest beat rolls pending low-urgency run deliveries into an
+    # in-app digest (ADR-0015 §6, issue #238). A completed run whose schedule opted
+    # into a digest lands as a ``pending`` delivery; the periodic sweep marks the
+    # batch ``delivered`` so the owner is notified once per window, not per fire. The
+    # default is hourly (3600s) — the sweep is idempotent and cheap; the *cadence*
+    # (daily/weekly) the schedule opted into is a product notion, this is just how
+    # often the beat drains the pending batch. Non-positive would disable batching.
+    run_digest_interval_seconds: int = Field(default=3600, alias="RUN_DIGEST_INTERVAL_SECONDS")
     # Bounded retry-with-backoff for a **transient** run fault (model/db/storage
     # briefly unavailable) before the run reaches a terminal (ADR-0015 §5, E7-5 #239).
     # A transient failure is re-driven up to ``run_max_retries`` times with exponential
@@ -629,6 +662,7 @@ class Settings(BaseSettings):
         "run_rate_window_seconds",
         "run_rate_backoff_seconds",
         "run_max_in_flight_per_tenant",
+        "run_digest_interval_seconds",
     )
     @classmethod
     def _scheduler_counts_positive(cls, value: int) -> int:
@@ -642,7 +676,7 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError(
                 "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
-                "must be positive (ADR-0015 §5/§7)"
+                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
             )
         return value
 

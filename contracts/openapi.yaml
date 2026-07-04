@@ -823,6 +823,59 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /admin/branding:
+    put:
+      operationId: updateTenantBranding
+      summary: Upload the tenant's application logo (admin only).
+      description: >
+        Set the per-tenant application logo shown in the app shell for every user
+        of the tenant (admin branding). Stores the image (MinIO) and persists its
+        key on the tenant row; the shell reads the resulting presigned URL from
+        `GET /auth/me` (`logo_url`). A reversible, tenant-scoped **T1** action (spec
+        0004 §2.5 — "authorized owner; audited; no extra approval"): `admin`-only
+        (**403** otherwise, INV-5), audited as `tenant.branding_updated` (INV-6).
+        Allowed content-types are `image/png`, `image/jpeg`, `image/svg+xml` and the
+        size cap is `MAX_LOGO_BYTES` (default 1 MiB), enforced server-side: an
+        over-size logo is **413**, a non-image content-type **415**, and a
+        missing/blank filename **422** (INV-8). Returns the new logo URL.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: The tenant's logo URL after upload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantBranding" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: clearTenantBranding
+      summary: Clear the tenant's application logo (admin only).
+      description: >
+        Revert the app shell to the default brand mark for every user of the tenant
+        (the reverse of `PUT /admin/branding`): sets the tenant's logo key to null.
+        A reversible, tenant-scoped **T1** action: `admin`-only (**403** otherwise,
+        INV-5), audited as `tenant.branding_updated` (INV-6). Idempotent — clearing
+        an already-unset logo succeeds with **204**.
+      tags: [admin]
+      responses:
+        "204": { description: The logo was cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /admin/tool-policy:
     get:
       operationId: getToolPolicy
@@ -927,132 +980,53 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
-  # --- LLM providers (per-tenant registration + model auto-discovery) ---------
-  # Foundation PR: a tenant admin registers OpenAI-compatible providers; the backend
-  # auto-discovers each provider's models. Surfacing providers in the chat model
-  # picker + routing chat/embeddings through them is a SEPARATE follow-up PR.
-  /admin/llm-providers:
+  /admin/autonomy-policy:
     get:
-      operationId: listLlmProviders
-      summary: The tenant's registered LLM providers + discovered models (admin only).
+      operationId: getAutonomyPolicy
+      summary: The per-tenant assistant autonomy cap (admin only).
       description: >
-        The caller's tenant's registered LLM providers, each with its discovered
-        models and discovery/health `status`. Restricted to the `admin` role; any
-        other role receives **403** (INV-5). Tenant-scoped (INV-1). The stored API key
-        is **never** returned — only a masked `secret_hint`.
+        The caller's tenant's autonomy cap (issue #218, ADR-0011 §3): `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so every assistant runs at its
+        own configured level (permissive default). Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1).
       tags: [admin]
       responses:
         "200":
-          description: The tenant's registered LLM providers.
+          description: The per-tenant assistant autonomy cap.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/LlmProviderList" }
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-    post:
-      operationId: createLlmProvider
-      summary: Register an LLM provider and auto-discover its models (admin only).
-      description: >
-        Register an OpenAI-compatible LLM provider (name + base URL + optional API
-        key). The backend auto-discovers the provider's models via `GET
-        {base_url}/models` and stores a snapshot + `status`. `admin`-only (**403**
-        otherwise, INV-5); tenant-scoped (INV-1); audited (INV-6). The `api_key` is
-        write-only — stored envelope-encrypted via CC-C, never returned. An
-        unsupported `provider_type`, or an invalid / non-https / SSRF-blocked
-        `base_url`, is **422** (INV-8). A reachable provider returns `status: ready`
-        with `discovered_models`; a bad key/url returns `status: error` + `last_error`
-        (never a 500).
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/LlmProviderCreate" }
-      responses:
-        "201":
-          description: The registered provider (with discovered models + status).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/LlmProvider" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "422": { $ref: "#/components/responses/ValidationError" }
-
-  /admin/llm-providers/{providerId}:
-    parameters:
-      - name: providerId
-        in: path
-        required: true
-        schema: { type: string, format: uuid }
-        description: The LLM provider id.
     patch:
-      operationId: updateLlmProvider
-      summary: Update a registered LLM provider (admin only).
+      operationId: updateAutonomyPolicy
+      summary: Set the per-tenant assistant autonomy cap (admin only).
       description: >
-        Update a registered LLM provider (rename, retarget `base_url`, toggle
-        `enabled`, or rotate/clear the `api_key`). Changing `base_url` re-runs the
-        https + SSRF validation (else **422**) and re-runs model discovery; rotating
-        the key likewise re-discovers. The key value is never returned — only the
-        updated masked `secret_hint`. `admin`-only (**403** otherwise, INV-5);
-        tenant-scoped (INV-1) — a cross-tenant id is **404** (never 403). Audited
-        (INV-6).
+        Set the caller's tenant's autonomy cap (issue #218): `max_autonomy` is the
+        maximum `AutonomyLevel` any assistant may effectively run at. A tenant-scoped
+        **T1** governance write (spec 0004 §2.5 — "authorized owner; audited; no extra
+        approval"): `admin`-only (**403** otherwise, INV-5), audited as
+        `autonomy_cap.updated` (INV-6). The cap only ever NARROWS — it lowers an
+        assistant's effective autonomy, never raises it. Publishing an assistant above
+        the ceiling is rejected **422**, and a running assistant above it is clamped at
+        the run-time tool gate. An unknown `max_autonomy` is **422** (INV-8). Returns
+        the resulting cap.
       tags: [admin]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/LlmProviderUpdate" }
+            schema: { $ref: "#/components/schemas/AutonomyPolicyUpdate" }
       responses:
         "200":
-          description: The updated provider.
+          description: The updated per-tenant assistant autonomy cap.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/LlmProvider" }
+              schema: { $ref: "#/components/schemas/AutonomyPolicy" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
-    delete:
-      operationId: deleteLlmProvider
-      summary: Remove a registered LLM provider (admin only).
-      description: >
-        Delete the LLM provider and its stored API key (in the CC-C vault).
-        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1) — a
-        cross-tenant id is **404**. Audited (INV-6).
-      tags: [admin]
-      responses:
-        "204": { description: Deleted (provider + its stored API key). }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /admin/llm-providers/{providerId}/refresh:
-    parameters:
-      - name: providerId
-        in: path
-        required: true
-        schema: { type: string, format: uuid }
-        description: The LLM provider id.
-    post:
-      operationId: refreshLlmProvider
-      summary: Re-run model discovery for a provider (admin only).
-      description: >
-        Re-run model discovery for the provider via `GET {base_url}/models`, resolving
-        the API key in-process from the CC-C vault. On success `status: ready` with a
-        fresh `discovered_models`; on failure `status: error` + a safe `last_error`
-        (previous snapshot preserved). Both outcomes return **200** — the result is in
-        `status` / `last_error`, not the HTTP code. `admin`-only (**403** otherwise,
-        INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**. Audited (INV-6).
-      tags: [admin]
-      responses:
-        "200":
-          description: Discovery completed; the updated provider is returned.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/LlmProvider" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
 
   # --- Sources (connector framework + Web URL source) : ADR-0009 / #108 -------
   /sources:
@@ -1753,6 +1727,50 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /assistants/{assistantId}/test:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: testAssistant
+      summary: Preview/test/debug a draft assistant with NO real side effect (E6-5).
+      description: >
+        Runs the assistant's **working (draft) config** against a sample input with
+        **write-tier tools forced into simulate/deny mode** (CC-A #207 read-only
+        demotion), and returns the debug trace (ADR-0011, issue #215). A T1
+        file-writing tool (`write_file`) builds + validates but persists **no**
+        artifact; the T2 code-execution tool (`run_python`) is denied — no container
+        launches. So a test run produces **no artifact, no code run, and no external
+        effect** — it is a safe preview before publishing.
+
+
+        The trace carries the effective system `prompt` (persona-augmented), the
+        sample `input`, the resolved `model`, the `retrieval` grounding (permitted
+        passages only — INV-3, keyed off the caller so a preview can never surface a
+        passage the caller could not retrieve), each `toolCalls` entry (args +
+        result), the streamed `outputs`, any typed `errors`, whether the run
+        `succeeded`, and the wall-clock `durationMs`.
+
+
+        Owner-scoped (owner-or-admin, the same rule the CRUD surface uses): a
+        non-owned / cross-tenant id → **404** (existence non-disclosure,
+        INV-1/INV-2). A malformed body → 422 (INV-8). Audited `assistant.tested`
+        (INV-6); no other row is persisted (the internal transcript is rolled back).
+      tags: [assistants]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantTestRequest" }
+      responses:
+        "200":
+          description: The debug trace of the read-only test run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantTestTrace" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
 
   # --- merged: /code-runs/{codeRunId} ---
   /code-runs/{codeRunId}:
@@ -2136,6 +2154,356 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+
+  # --- merged: /admin/assistants, /admin/assistants/disable-orphans, /admin/assistants/{assistantId}/certify, /admin/assistants/{assistantId}/feature, /admin/assistants/{assistantId}/disable, /admin/assistants/{assistantId}/transfer-ownership ---
+  /admin/assistants:
+    get:
+      operationId: listGovernedAssistants
+      summary: Every assistant in the tenant with its governance state (admin only).
+      description: >
+        The admin library view (E6-6, #217): all assistants across every owner in the
+        tenant, each carrying its certification / featured / disabled state, category,
+        and the `ownerOrphaned` flag (owner no longer a tenant member — flag for
+        reassignment, E6-8). Restricted to the `admin` role; any other role receives
+        **403** (INV-5). Tenant-scoped (INV-1). Cursor-paginated; a malformed cursor is
+        **422** (INV-8).
+      tags: [admin]
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A cursor page of the tenant's assistants with governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistantList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/disable-orphans:
+    post:
+      operationId: disableOrphanedAssistants
+      summary: Disable every orphaned assistant in the tenant (admin only).
+      description: >
+        Bulk E6-8 control (#217): disable every orphaned assistant (owner
+        deprovisioned) so an abandoned assistant does not keep running unattended.
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audits each
+        `assistant.disabled` (INV-6). Idempotent — an already-disabled orphan is
+        skipped. Returns the affected ids.
+      tags: [admin]
+      responses:
+        "200":
+          description: The bulk-sweep outcome (affected ids + the applied action).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkOrphanResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/assistants/{assistantId}/certify:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: certifyAssistant
+      summary: Set an assistant's certification verdict (admin only).
+      description: >
+        Certify / deprecate / clear an assistant's library certification (E6-6, #217) —
+        an orthogonal governance axis. `admin`-only (**403** otherwise, INV-5);
+        tenant-scoped (INV-1); audited `assistant.certified` / `assistant.deprecated`
+        (INV-6). A cross-tenant / missing id is **404** (existence non-disclosure).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantCertifyRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/feature:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: featureAssistant
+      summary: Feature / unfeature an assistant in the library (admin only).
+      description: >
+        Feature / unfeature an assistant (E6-6, #217). `admin`-only (**403** otherwise,
+        INV-5); tenant-scoped (INV-1); audited `assistant.featured` (INV-6). A
+        cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantFeatureRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/disable:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: disableAssistant
+      summary: Disable / re-enable an assistant (admin only).
+      description: >
+        Disable / re-enable an assistant (E6-6, #217). Disabling flips the lifecycle
+        status to `disabled` (and stamps `disabledAt`) so the existing run / chat /
+        schedule gate refuses it — a disabled assistant cannot start (INV-8).
+        Re-enabling returns the head to `draft` (the owner re-publishes to run again).
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.disabled` (INV-6). A cross-tenant / missing id is **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantDisableRequest" }
+      responses:
+        "200":
+          description: The assistant with its updated governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/assistants/{assistantId}/transfer-ownership:
+    parameters:
+      - { $ref: "#/components/parameters/AssistantId" }
+    post:
+      operationId: transferAssistantOwnership
+      summary: Reassign an assistant's accountable owner (admin only).
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8,
+        #217) — the admin rescue for an orphaned assistant. The new owner must be a
+        distinct member of the tenant (else **422**, INV-8). `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1); audited
+        `assistant.ownership_transferred` (INV-6). A cross-tenant / missing id is
+        **404**.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssistantOwnershipTransferRequest" }
+      responses:
+        "200":
+          description: The assistant with its new owner + governance state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GovernedAssistant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+
+  # --- merged: /run-deliveries, /run-deliveries/{deliveryId}/read ---
+  /run-deliveries:
+    get:
+      operationId: listRunDeliveries
+      summary: The run inbox — list a completed run's in-app deliveries (newest first).
+      description: >
+        Lists the caller's in-app run deliveries, tenant- and owner-scoped (ADR-0015
+        §6, spec 0004 INV-1/INV-2), newest first. A completed scheduled/manual run
+        lands here with its `summary` and its `run_id` (a link to the full cited
+        transcript, `GET /runs/{runId}`) so results reach the owner without opening
+        the app. Filter by `status`, or pass `unread=true` for the unread inbox.
+        Digest deliveries are batched by a periodic beat and surface as `delivered`.
+        External channels (email/Slack) are deferred T2-ish egress (INV-7) — this
+        surface is in-app only.
+      tags: [run-deliveries]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/RunDeliveryStatus" }
+          description: Filter to one delivery status.
+        - name: unread
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: When true, exclude already-read deliveries (the unread inbox).
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of run deliveries (newest first).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDeliveryList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /run-deliveries/{deliveryId}/read:
+    parameters:
+      - name: deliveryId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The run-delivery id.
+    post:
+      operationId: markRunDeliveryRead
+      summary: Mark one run delivery as read (idempotent).
+      description: >
+        Marks the delivery read and stamps `read_at`; idempotent (re-marking a read
+        delivery returns it unchanged). Owner-scoped — a delivery in another tenant or
+        addressed to another user is **404** (existence non-disclosure, INV-1/INV-2).
+        Audited (`run.delivery_read`, INV-6).
+      tags: [run-deliveries]
+      responses:
+        "200":
+          description: The updated (read) delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDelivery" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+
+  # --- merged: /admin/llm-providers, /admin/llm-providers/{providerId}, /admin/llm-providers/{providerId}/refresh ---
+  /admin/llm-providers:
+    get:
+      operationId: listLlmProviders
+      summary: The tenant's registered LLM providers + discovered models (admin only).
+      description: >
+        The caller's tenant's registered LLM providers, each with its discovered
+        models and discovery/health `status`. Restricted to the `admin` role; any
+        other role receives **403** (INV-5). Tenant-scoped (INV-1). The stored API key
+        is **never** returned — only a masked `secret_hint`.
+      tags: [admin]
+      responses:
+        "200":
+          description: The tenant's registered LLM providers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProviderList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createLlmProvider
+      summary: Register an LLM provider and auto-discover its models (admin only).
+      description: >
+        Register an OpenAI-compatible LLM provider (name + base URL + optional API
+        key). The backend auto-discovers the provider's models via `GET
+        {base_url}/models` and stores a snapshot + `status`. `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1); audited (INV-6). The `api_key` is
+        write-only — stored envelope-encrypted via CC-C, never returned. An
+        unsupported `provider_type`, or an invalid / non-https / SSRF-blocked
+        `base_url`, is **422** (INV-8). A reachable provider returns `status: ready`
+        with `discovered_models`; a bad key/url returns `status: error` + `last_error`
+        (never a 500).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LlmProviderCreate" }
+      responses:
+        "201":
+          description: The registered provider (with discovered models + status).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/llm-providers/{providerId}:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    patch:
+      operationId: updateLlmProvider
+      summary: Update a registered LLM provider (admin only).
+      description: >
+        Update a registered LLM provider (rename, retarget `base_url`, toggle
+        `enabled`, or rotate/clear the `api_key`). Changing `base_url` re-runs the
+        https + SSRF validation (else **422**) and re-runs model discovery; rotating
+        the key likewise re-discovers. The key value is never returned — only the
+        updated masked `secret_hint`. `admin`-only (**403** otherwise, INV-5);
+        tenant-scoped (INV-1) — a cross-tenant id is **404** (never 403). Audited
+        (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LlmProviderUpdate" }
+      responses:
+        "200":
+          description: The updated provider.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteLlmProvider
+      summary: Remove a registered LLM provider (admin only).
+      description: >
+        Delete the LLM provider and its stored API key (in the CC-C vault).
+        `admin`-only (**403** otherwise, INV-5); tenant-scoped (INV-1) — a
+        cross-tenant id is **404**. Audited (INV-6).
+      tags: [admin]
+      responses:
+        "204": { description: Deleted (provider + its stored API key). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/llm-providers/{providerId}/refresh:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    post:
+      operationId: refreshLlmProvider
+      summary: Re-run model discovery for a provider (admin only).
+      description: >
+        Re-run model discovery for the provider via `GET {base_url}/models`, resolving
+        the API key in-process from the CC-C vault. On success `status: ready` with a
+        fresh `discovered_models`; on failure `status: error` + a safe `last_error`
+        (previous snapshot preserved). Both outcomes return **200** — the result is in
+        `status` / `last_error`, not the HTTP code. `admin`-only (**403** otherwise,
+        INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**. Audited (INV-6).
+      tags: [admin]
+      responses:
+        "200":
+          description: Discovery completed; the updated provider is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmProvider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Cursor:
@@ -2279,6 +2647,13 @@ components:
           type: array
           items: { type: string, enum: [member, admin, security] }
         created_at: { type: string, format: date-time }
+        logo_url:
+          type: [string, "null"]
+          description: >
+            The tenant's application logo as a short-TTL presigned GET URL, or
+            null when none is set (the shell renders the default brand mark). A
+            per-tenant setting an admin uploads via PUT /admin/branding — the same
+            for every user of the tenant.
 
     # --- Collections --------------------------------------------------------
     CollectionCreate:
@@ -2927,6 +3302,21 @@ components:
             the system default applies again (the system default is configured
             server-side, `CHAT_MAX_TOOL_TURNS`).
 
+    # --- Per-tenant application logo (admin branding) -----------------------
+    TenantBranding:
+      type: object
+      additionalProperties: false
+      description: >
+        The tenant's application logo (admin branding). `logo_url` is a short-TTL
+        presigned GET URL for the tenant's uploaded logo, or null when none is set
+        (the shell renders the default brand mark). The current state is also
+        readable via `GET /auth/me` (`logo_url`), so no separate GET is needed.
+      required: [logo_url]
+      properties:
+        logo_url:
+          type: [string, "null"]
+          description: Presigned GET URL for the tenant's logo, or null for the default mark.
+
     # --- Tool governance policy (per-tenant enable + approval, #223) ---------
     ToolPolicyEntry:
       type: object
@@ -2997,139 +3387,6 @@ components:
           description: >
             Whether an invocation still needs approval. Set `false` (with `enabled`
             true) to pre-approve a write-tier tool so the approval gate executes it.
-
-    # --- LLM providers (per-tenant registration + model auto-discovery) -------
-    # Foundation PR: a tenant admin registers OpenAI-compatible providers; the
-    # backend auto-discovers each provider's models via GET {base_url}/models and
-    # stores a snapshot + status. Routing chat/embeddings through a provider (and
-    # surfacing it in the chat model picker) is a SEPARATE follow-up PR.
-    LlmProviderType:
-      type: string
-      description: >
-        The API shape a registered LLM provider speaks. `openai_compatible` covers
-        OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `GET /v1/models`
-        + `POST /v1/chat/completions` shape. The enum is small but extensible (a new
-        provider family adds a value, never a schema migration).
-      enum: [openai_compatible]
-
-    LlmProviderStatus:
-      type: string
-      description: >
-        Model-discovery state from the last probe. `pending` before the first
-        discovery, `ready` after a successful `GET /models` snapshot, `error` when
-        the last discovery failed (see `last_error`).
-      enum: [pending, ready, error]
-
-    LlmProviderModel:
-      type: object
-      additionalProperties: false
-      description: One model discovered from the provider's `/models` catalog.
-      required: [id]
-      properties:
-        id:
-          type: string
-          description: The provider's model id (e.g. `openai/gpt-4o`).
-        label:
-          type: [string, "null"]
-          description: A human-friendly label derived from the catalog entry (or the id).
-
-    LlmProvider:
-      type: object
-      additionalProperties: false
-      description: >
-        One registered per-tenant LLM provider, tenant- and owner-scoped (spec 0004
-        INV-1/INV-2). The response **never** includes the stored API-key value — only
-        a masked `secret_hint`. `discovered_models` is the last successful `GET
-        /models` snapshot. Foundation PR: this catalog is not yet wired into the chat
-        model picker or completion routing (a follow-up PR).
-      required: [id, name, provider_type, base_url, enabled, status, discovered_models, owner_id, created_at, updated_at]
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
-        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
-        base_url:
-          type: string
-          format: uri
-          description: The provider's OpenAI-compatible API root (https only; SSRF-checked on register and every discovery).
-        enabled:
-          type: boolean
-          description: Admin toggle — when false the provider is inactive (its models are not offered; follow-up PR).
-        status: { $ref: "#/components/schemas/LlmProviderStatus" }
-        last_discovery_at:
-          type: [string, "null"]
-          format: date-time
-          description: When the last successful model discovery finished (null before the first success).
-        last_error:
-          type: [string, "null"]
-          description: Safe failure reason when status is error (never contains the API key).
-        discovered_models:
-          type: array
-          items: { $ref: "#/components/schemas/LlmProviderModel" }
-          description: The models discovered on the last successful `GET /models` (empty until first discovery).
-        secret_hint:
-          type: [string, "null"]
-          description: >
-            A **masked** hint at the stored API key (e.g. `"****abcd"`), or null when
-            no key is stored. This is the ONLY key-derived value ever returned — the
-            actual key is write-only, envelope-encrypted in the CC-C vault, and never
-            serialized through any API.
-        owner_id: { type: string, format: uuid }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-
-    LlmProviderList:
-      type: object
-      additionalProperties: false
-      required: [items]
-      properties:
-        items:
-          type: array
-          items: { $ref: "#/components/schemas/LlmProvider" }
-
-    LlmProviderCreate:
-      type: object
-      additionalProperties: false
-      description: >
-        Register an LLM provider. `provider_type` is constrained to the supported
-        values (`openai_compatible`); `base_url` must be https and pass the SSRF check
-        (else 422). The optional `api_key` is **write-only** — stored envelope-
-        encrypted via CC-C and never returned; the response carries only a masked
-        `secret_hint`. The backend auto-discovers the provider's models on create.
-      required: [name, provider_type, base_url]
-      properties:
-        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
-        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
-        base_url:
-          type: string
-          format: uri
-          description: The provider's OpenAI-compatible API root (https only; SSRF-checked).
-        api_key:
-          type: string
-          minLength: 1
-          writeOnly: true
-          description: The provider API key. Write-only — stored in the CC-C vault, never returned.
-
-    LlmProviderUpdate:
-      type: object
-      additionalProperties: false
-      minProperties: 1
-      description: >
-        Update a registered LLM provider. Any subset of fields; at least one. Rotating
-        `api_key` replaces the stored CC-C key (write-only, never returned); send
-        `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF
-        validation (else 422) and re-runs model discovery.
-      properties:
-        name: { type: string, minLength: 1, maxLength: 200 }
-        base_url:
-          type: string
-          format: uri
-          description: The provider's OpenAI-compatible API root (https only; re-validated + SSRF-checked).
-        enabled: { type: boolean, description: Admin toggle. }
-        api_key:
-          oneOf:
-            - { type: string, minLength: 1, writeOnly: true }
-            - type: "null"
-          description: Rotate the write-only API key, or null to clear it.
 
     # --- Sandbox governance policy (per-tenant packages/egress/quotas, #233) --
     SandboxPolicy:
@@ -3282,6 +3539,38 @@ components:
           type: integer
           minimum: 1
           description: Max simultaneous runs for the tenant. Clamped to the config ceiling.
+
+    # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
+    AutonomyPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The per-tenant assistant autonomy cap (issue #218, ADR-0011 §3). `max_autonomy`
+        is the ceiling an assistant's EFFECTIVE autonomy is `min`'d to. `is_default` is
+        true when no cap is stored — there is no ceiling, so `max_autonomy` is reported
+        as the top of the scale (`act_auto`) and every assistant runs at its own
+        configured level. `levels` lists the choice set in ascending order.
+      required: [max_autonomy, is_default, levels]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
+        is_default:
+          type: boolean
+          description: True when no per-tenant cap is stored (no ceiling — the permissive default).
+        levels:
+          type: array
+          items: { $ref: "#/components/schemas/AutonomyLevel" }
+          description: The autonomy values in ascending order (suggest … act_auto).
+
+    AutonomyPolicyUpdate:
+      type: object
+      additionalProperties: false
+      description: >
+        Set the per-tenant assistant autonomy cap (issue #218). `max_autonomy` must be
+        a valid `AutonomyLevel` (an unknown value → 422, INV-8). The cap only ever
+        NARROWS — it lowers an assistant's effective autonomy, never raises it.
+      required: [max_autonomy]
+      properties:
+        max_autonomy: { $ref: "#/components/schemas/AutonomyLevel" }
 
     # --- Sources (connector framework + Web URL source, ADR-0009 / #108) ----
     SourceType:
@@ -3810,7 +4099,7 @@ components:
         A saved, named, governed chat configuration (ADR-0011 §1) — the mutable
         head. Tenant- and owner-scoped (INV-1/INV-2).
       required:
-        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, owner, status, created_at, updated_at]
+        [id, name, model, knowledgeScope, toolAllowlist, autonomyLevel, effectiveAutonomy, owner, status, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, maxLength: 200 }
@@ -3829,6 +4118,13 @@ components:
           items: { type: string }
           description: Tool names the run may use ([] ⇒ the default retrieval tool set until CC-A lands).
         autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        effectiveAutonomy:
+          allOf:
+            - { $ref: "#/components/schemas/AutonomyLevel" }
+          description: >
+            The autonomy the assistant may ACTUALLY run at after the tenant admin cap
+            (min(autonomyLevel, tenant cap), issue #218). Equals autonomyLevel when no
+            cap lowers it — visibility for the library/run detail.
         owner:
           type: string
           format: uuid
@@ -3962,6 +4258,92 @@ components:
         notes:
           type: string
           description: Optional release note for the rollback version.
+
+    AssistantTestRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        A sample input for a read-only assistant test run (E6-5, issue #215).
+        Optional — omitting `input` runs the assistant against a stable default
+        request (the persona-augmented system prompt still carries the real task).
+      properties:
+        input:
+          type: string
+          maxLength: 8000
+          description: The sample user input the assistant is tested against.
+
+    AssistantTestToolCall:
+      type: object
+      additionalProperties: false
+      description: >
+        One tool call captured in a test run's debug trace (E6-5). `args` are the
+        model-supplied arguments; `result` is the governed runner's outcome (`ok`,
+        `summary`, `hitCount`, and an `error` code on failure/denial). A write-tier
+        tool's `result` reflects the simulate/deny outcome — no real write occurred.
+      required: [callId]
+      properties:
+        callId:
+          type: string
+          description: The tool-call id correlating the call with its result.
+        tool:
+          type: [string, "null"]
+          description: The tool name invoked.
+        args:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The model-supplied arguments for the call.
+        result:
+          type: [object, "null"]
+          additionalProperties: true
+          description: The governed runner's result (ok/summary/hitCount/error).
+
+    AssistantTestTrace:
+      type: object
+      additionalProperties: false
+      description: >
+        The debug trace of a read-only assistant test run (E6-5, issue #215) — what
+        the builder debug view renders. Reuses the runtime's own trace vocabulary
+        (retrieval citations + tool-call/result envelopes). NO real side effect was
+        produced (write-tier tools simulate/deny).
+      required: [prompt, input, model, retrieval, toolCalls, outputs, errors, succeeded, durationMs]
+      properties:
+        prompt:
+          type: string
+          description: The effective system prompt (persona-augmented; grounding rules preserved).
+        input:
+          type: string
+          description: The sample input the run answered.
+        model:
+          type: string
+          description: The resolved model id the test run used.
+        retrieval:
+          type: array
+          description: >
+            The grounded citations the run produced — only permitted, retrieved
+            passages (INV-3). Each entry mirrors the citation envelope shape.
+          items:
+            type: object
+            additionalProperties: true
+        toolCalls:
+          type: array
+          description: Each tool call the run made, with its args + result.
+          items: { $ref: "#/components/schemas/AssistantTestToolCall" }
+        outputs:
+          type: string
+          description: The streamed answer text the run produced.
+        errors:
+          type: array
+          description: Any typed problem envelope(s) if the run failed (never a raw vendor string).
+          items:
+            type: object
+            additionalProperties: true
+        succeeded:
+          type: boolean
+          description: Whether the run completed with a terminal `done` and no error.
+        durationMs:
+          type: integer
+          minimum: 0
+          description: Wall-clock duration of the test run in milliseconds.
 
     AssistantList:
       type: object
@@ -4501,6 +4883,316 @@ components:
           type: string
           format: uuid
           description: The user to reassign the run to (its new execution principal).
+
+    # --- merged schemas: CertificationState, GovernedAssistant, GovernedAssistantList, AssistantCertifyRequest, AssistantFeatureRequest, AssistantDisableRequest, AssistantOwnershipTransferRequest, BulkOrphanResult ---
+    CertificationState:
+      type: string
+      description: >
+        Admin library-governance certification (E6-6, #217) — an orthogonal axis to
+        the lifecycle status. `none` = not reviewed; `certified` = an admin vouched
+        for it (trusted in the library); `deprecated` = an admin flagged it for
+        retirement (still runnable, the library warns). Admin-only mutation (INV-5).
+      enum: [none, certified, deprecated]
+
+    GovernedAssistant:
+      type: object
+      additionalProperties: false
+      description: >
+        One assistant in the admin library view (E6-6/E6-8, #217): identity + owner +
+        lifecycle status plus the governance axis (certification / featured / category /
+        disabled) and the `ownerOrphaned` projection (owner no longer a tenant member —
+        flag for reassignment). Admin-only; spans every owner in the tenant.
+      required:
+        [id, name, autonomyLevel, owner, status, certificationState, featured, ownerOrphaned, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        autonomyLevel: { $ref: "#/components/schemas/AutonomyLevel" }
+        owner:
+          type: string
+          format: uuid
+          description: The accountable owner's user id.
+        backupOwner:
+          type: [string, "null"]
+          format: uuid
+        status: { $ref: "#/components/schemas/AssistantStatus" }
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+        featured:
+          type: boolean
+          description: Whether an admin has featured/pinned the assistant.
+        category:
+          type: [string, "null"]
+          description: A library grouping label (null ⇒ uncategorised).
+        disabledAt:
+          type: [string, "null"]
+          format: date-time
+          description: When an admin disabled the assistant (null ⇒ not disabled).
+        ownerOrphaned:
+          type: boolean
+          description: The owner is no longer a member of the tenant (flag for reassignment, E6-8).
+        version:
+          type: [integer, "null"]
+          description: The current published head version number (null while never published).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    GovernedAssistantList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/GovernedAssistant" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    AssistantCertifyRequest:
+      type: object
+      additionalProperties: false
+      required: [certificationState]
+      description: Set an assistant's certification verdict (certify / deprecate / clear).
+      properties:
+        certificationState: { $ref: "#/components/schemas/CertificationState" }
+
+    AssistantFeatureRequest:
+      type: object
+      additionalProperties: false
+      required: [featured]
+      description: Feature / unfeature an assistant in the library.
+      properties:
+        featured: { type: boolean }
+
+    AssistantDisableRequest:
+      type: object
+      additionalProperties: false
+      required: [disabled]
+      description: >
+        Disable / re-enable an assistant. Disabling blocks it from starting a chat /
+        schedule / run (INV-8); re-enabling returns the head to `draft` (the owner
+        must re-publish before it can run again).
+      properties:
+        disabled: { type: boolean }
+
+    AssistantOwnershipTransferRequest:
+      type: object
+      additionalProperties: false
+      required: [newOwner]
+      description: >
+        Reassign the assistant's accountable owner to another tenant member (E6-8). The
+        new owner must be a distinct member of the tenant (else 422). Rescues an
+        orphaned assistant (owner deprovisioned).
+      properties:
+        newOwner:
+          type: string
+          format: uuid
+          description: The new owner's user id (a distinct member of the tenant).
+
+    BulkOrphanResult:
+      type: object
+      additionalProperties: false
+      required: [affected, action]
+      description: The outcome of a bulk reassign/disable of orphaned assistants (E6-8).
+      properties:
+        affected:
+          type: array
+          items: { type: string, format: uuid }
+          description: The assistant ids affected by the sweep.
+        action:
+          type: string
+          description: The action applied to each affected assistant (e.g. "disabled").
+
+    # --- merged schemas: RunDeliveryKind, RunDeliveryStatus, RunDelivery, RunDeliveryList ---
+    RunDeliveryKind:
+      type: string
+      description: >
+        How a completed run's output reached the owner (ADR-0015 §6, #238). `inbox`
+        = an immediate in-app inbox delivery on completion (the default); `digest` =
+        a run rolled into a periodic in-app digest batch. External channels
+        (email/Slack) are deferred T2-ish egress — no kind here.
+      enum: [inbox, digest]
+
+    RunDeliveryStatus:
+      type: string
+      description: >
+        The lifecycle of one in-app run delivery (ADR-0015 §6, #238). `pending` =
+        created, awaiting its digest batch; `delivered` = visible in the inbox
+        (unread); `read` = the owner opened it; `failed` = the delivery could not be
+        produced (visible + retryable via the run detail, never a silent drop).
+      enum: [pending, delivered, read, failed]
+
+    RunDelivery:
+      type: object
+      additionalProperties: false
+      description: >
+        One in-app delivery of a completed run's output (issue #238). Tenant- and
+        owner-scoped (INV-1/§2.2): a delivery in another tenant / addressed to another
+        user is 404. `run_id` links to the full cited transcript (`GET /runs/{id}`).
+      required: [id, run_id, kind, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id:
+          type: string
+          format: uuid
+          description: The completed run this delivery is for (link to its transcript).
+        schedule_id:
+          type: [string, "null"]
+          format: uuid
+          description: The schedule that fired the run, or null for a manual run.
+        kind: { $ref: "#/components/schemas/RunDeliveryKind" }
+        status: { $ref: "#/components/schemas/RunDeliveryStatus" }
+        summary:
+          type: [string, "null"]
+          description: The inbox line — the run's short summary.
+        created_at: { type: string, format: date-time }
+        read_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the owner opened the delivery, or null while unread.
+
+    RunDeliveryList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RunDelivery" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page, or null when exhausted.
+
+    # --- merged schemas: LlmProviderType, LlmProviderStatus, LlmProviderModel, LlmProvider, LlmProviderList, LlmProviderCreate, LlmProviderUpdate ---
+    LlmProviderType:
+      type: string
+      description: >
+        The API shape a registered LLM provider speaks. `openai_compatible` covers
+        OpenRouter / OpenAI / vLLM and any host exposing the OpenAI `GET /v1/models`
+        + `POST /v1/chat/completions` shape. The enum is small but extensible (a new
+        provider family adds a value, never a schema migration).
+      enum: [openai_compatible]
+
+    LlmProviderStatus:
+      type: string
+      description: >
+        Model-discovery state from the last probe. `pending` before the first
+        discovery, `ready` after a successful `GET /models` snapshot, `error` when
+        the last discovery failed (see `last_error`).
+      enum: [pending, ready, error]
+
+    LlmProviderModel:
+      type: object
+      additionalProperties: false
+      description: One model discovered from the provider's `/models` catalog.
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: The provider's model id (e.g. `openai/gpt-4o`).
+        label:
+          type: [string, "null"]
+          description: A human-friendly label derived from the catalog entry (or the id).
+
+    LlmProvider:
+      type: object
+      additionalProperties: false
+      description: >
+        One registered per-tenant LLM provider, tenant- and owner-scoped (spec 0004
+        INV-1/INV-2). The response **never** includes the stored API-key value — only
+        a masked `secret_hint`. `discovered_models` is the last successful `GET
+        /models` snapshot. Foundation PR: this catalog is not yet wired into the chat
+        model picker or completion routing (a follow-up PR).
+      required: [id, name, provider_type, base_url, enabled, status, discovered_models, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; SSRF-checked on register and every discovery).
+        enabled:
+          type: boolean
+          description: Admin toggle — when false the provider is inactive (its models are not offered; follow-up PR).
+        status: { $ref: "#/components/schemas/LlmProviderStatus" }
+        last_discovery_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last successful model discovery finished (null before the first success).
+        last_error:
+          type: [string, "null"]
+          description: Safe failure reason when status is error (never contains the API key).
+        discovered_models:
+          type: array
+          items: { $ref: "#/components/schemas/LlmProviderModel" }
+          description: The models discovered on the last successful `GET /models` (empty until first discovery).
+        secret_hint:
+          type: [string, "null"]
+          description: >
+            A **masked** hint at the stored API key (e.g. `"****abcd"`), or null when
+            no key is stored. This is the ONLY key-derived value ever returned — the
+            actual key is write-only, envelope-encrypted in the CC-C vault, and never
+            serialized through any API.
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    LlmProviderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LlmProvider" }
+
+    LlmProviderCreate:
+      type: object
+      additionalProperties: false
+      description: >
+        Register an LLM provider. `provider_type` is constrained to the supported
+        values (`openai_compatible`); `base_url` must be https and pass the SSRF check
+        (else 422). The optional `api_key` is **write-only** — stored envelope-
+        encrypted via CC-C and never returned; the response carries only a masked
+        `secret_hint`. The backend auto-discovers the provider's models on create.
+      required: [name, provider_type, base_url]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
+        provider_type: { $ref: "#/components/schemas/LlmProviderType" }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; SSRF-checked).
+        api_key:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: The provider API key. Write-only — stored in the CC-C vault, never returned.
+
+    LlmProviderUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >
+        Update a registered LLM provider. Any subset of fields; at least one. Rotating
+        `api_key` replaces the stored CC-C key (write-only, never returned); send
+        `api_key: null` to clear it. Changing `base_url` re-runs the https + SSRF
+        validation (else 422) and re-runs model discovery.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        base_url:
+          type: string
+          format: uri
+          description: The provider's OpenAI-compatible API root (https only; re-validated + SSRF-checked).
+        enabled: { type: boolean, description: Admin toggle. }
+        api_key:
+          oneOf:
+            - { type: string, minLength: 1, writeOnly: true }
+            - type: "null"
+          description: Rotate the write-only API key, or null to clear it.
 
   responses:
     Problem:

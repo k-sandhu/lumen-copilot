@@ -16,6 +16,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type {
+  AutonomyPolicy,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -31,6 +32,8 @@ const getToolPolicy = vi.hoisted(() => vi.fn());
 const updateToolPolicy = vi.hoisted(() => vi.fn());
 const getSandboxPolicy = vi.hoisted(() => vi.fn());
 const updateSandboxPolicy = vi.hoisted(() => vi.fn());
+const getAutonomyPolicy = vi.hoisted(() => vi.fn());
+const updateAutonomyPolicy = vi.hoisted(() => vi.fn());
 vi.mock('@/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api')>();
   return {
@@ -42,6 +45,8 @@ vi.mock('@/api', async (importOriginal) => {
     updateToolPolicy,
     getSandboxPolicy,
     updateSandboxPolicy,
+    getAutonomyPolicy,
+    updateAutonomyPolicy,
   };
 });
 
@@ -84,6 +89,11 @@ const SANDBOX_POLICY: SandboxPolicy = {
   daily_runtime_cap_s_ceiling: 3600,
   max_concurrency_ceiling: 2,
 };
+const AUTONOMY_POLICY: AutonomyPolicy = {
+  max_autonomy: 'act_auto',
+  is_default: true,
+  levels: ['suggest', 'draft', 'act_with_approval', 'act_auto'],
+};
 
 function renderAdmin() {
   const queryClient = new QueryClient({
@@ -106,6 +116,8 @@ beforeEach(() => {
   updateToolPolicy.mockResolvedValue(TOOL_POLICY);
   getSandboxPolicy.mockResolvedValue(SANDBOX_POLICY);
   updateSandboxPolicy.mockResolvedValue(SANDBOX_POLICY);
+  getAutonomyPolicy.mockResolvedValue(AUTONOMY_POLICY);
+  updateAutonomyPolicy.mockResolvedValue(AUTONOMY_POLICY);
 });
 
 describe('AdminPage', () => {
@@ -125,11 +137,12 @@ describe('AdminPage', () => {
     expect(tablist).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /members & roles/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /model governance/i })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /llm providers/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /approvals & risk/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /tool governance/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /sandbox governance/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^autonomy$/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /data minimization/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /branding/i })).toBeInTheDocument();
   });
 
   it('shows the Members panel first and resolves its content', async () => {
@@ -162,9 +175,10 @@ describe('AdminPage', () => {
     await screen.findByText('admin@acme.test');
     expect(screen.getByText(/not available here/i)).toBeInTheDocument();
     // The Members panel (the default) carries no mutation control — the write
-    // surfaces are the Tool / Sandbox governance + LLM providers tabs, not mounted here.
+    // surfaces are the Tool governance + Sandbox governance + Branding tabs, not
+    // mounted here.
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(7);
+    expect(tabs).toHaveLength(9);
     expect(screen.queryAllByRole('switch')).toHaveLength(0);
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
@@ -187,5 +201,13 @@ describe('AdminPage', () => {
       await screen.findByRole('switch', { name: /enable code execution/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /save policy/i })).toBeInTheDocument();
+  });
+
+  it('surfaces the Autonomy cap write control when that tab is active (#218)', async () => {
+    renderAdmin();
+    await screen.findByText('admin@acme.test');
+    await userEvent.click(screen.getByRole('tab', { name: /^autonomy$/i }));
+    // The autonomy cap form renders with its level select (the write surface).
+    expect(await screen.findByLabelText(/maximum autonomy/i)).toBeInTheDocument();
   });
 });

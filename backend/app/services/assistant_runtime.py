@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.domain.entities import AutonomyLevel
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, registered_names
@@ -37,19 +38,23 @@ from app.services.tools.registry import default_allowlist, registered_names
 
 @dataclass(frozen=True, slots=True)
 class AssistantRunConfig:
-    """The three run inputs derived from a pinned assistant version (ADR-0011 §2).
+    """The run inputs derived from a pinned assistant version (ADR-0011 §2).
 
     ``system_prompt`` is the instructions-augmented grounded prompt; ``allowed``
     is the effective allow-list handed to the tool runner (already intersected with
     the registry); ``collection_ids`` is the narrowing retrieval scope (``None`` ⇒
     no collection narrowing, exactly like ad-hoc chat). ``model`` is the version's
     frozen model default (``None`` ⇒ the smart server default resolved at run time).
+    ``autonomy`` is the version's frozen :class:`~app.domain.entities.AutonomyLevel`
+    (issue #218); the caller ``min``'s it to the tenant admin cap before handing the
+    EFFECTIVE level to the runner, which gates side-effecting T1 tools by it.
     """
 
     system_prompt: str
     allowed: frozenset[str]
     collection_ids: list[UUID] | None
     model: str | None
+    autonomy: AutonomyLevel = AutonomyLevel.SUGGEST
 
 
 def _as_list(value: object) -> list[object]:
@@ -114,12 +119,29 @@ def scope_collection_ids(knowledge_scope: object) -> list[UUID] | None:
     return out or None
 
 
+def resolve_autonomy(raw: object) -> AutonomyLevel:
+    """The assistant's frozen autonomy level from the version config (default suggest).
+
+    Reads the version config's ``autonomyLevel`` (the frozen contract value). An
+    unknown / absent value falls back to ``SUGGEST`` — the safest default (a T1 side
+    effect stays gated until the config explicitly raises autonomy). The tenant admin
+    cap is applied by the caller (``min(this, cap)``), not here — this is the
+    assistant's own configured level.
+    """
+    try:
+        return AutonomyLevel(str(raw))
+    except ValueError:
+        return AutonomyLevel.SUGGEST
+
+
 def assemble_run_config(config: dict[str, object]) -> AssistantRunConfig:
-    """Derive the three run inputs from a pinned version's frozen ``config``.
+    """Derive the run inputs from a pinned version's frozen ``config``.
 
     Pure over the snapshot dict (``AssistantVersionConfig`` camelCase shape) so the
-    runtime change is a small, localized thread of two extra parameters (the
-    allowed set + the scope) plus the instructions-augmented system prompt.
+    runtime change is a small, localized thread of the allowed set + the scope + the
+    autonomy level, plus the instructions-augmented system prompt. The ``autonomy``
+    here is the assistant's OWN configured level; the caller ``min``'s it to the
+    tenant cap to get the EFFECTIVE level the runner enforces (issue #218).
     """
     model = config.get("model")
     return AssistantRunConfig(
@@ -127,6 +149,7 @@ def assemble_run_config(config: dict[str, object]) -> AssistantRunConfig:
         allowed=resolve_allowlist(config.get("toolAllowlist")),
         collection_ids=scope_collection_ids(config.get("knowledgeScope")),
         model=str(model) if isinstance(model, str) and model else None,
+        autonomy=resolve_autonomy(config.get("autonomyLevel")),
     )
 
 
@@ -139,5 +162,6 @@ __all__ = [
     "assemble_run_config",
     "build_system_prompt",
     "resolve_allowlist",
+    "resolve_autonomy",
     "scope_collection_ids",
 ]
