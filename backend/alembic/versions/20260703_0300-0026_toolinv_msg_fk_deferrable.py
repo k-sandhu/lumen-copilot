@@ -19,8 +19,8 @@ retained (a deleted message keeps the trace row, message link nulled).
 Data-preserving (only the constraint's check *timing* changes). Reversible:
 ``downgrade`` restores the immediate FK. Offline DDL render asserts the shape.
 
-Revision ID: 0022_toolinv_msg_fk_deferrable
-Revises: 0021_tenant_tool_policy
+Revision ID: 0026_toolinv_msg_fk_deferrable
+Revises: 0025_run_deliveries
 Create Date: 2026-07-03 00:00:00+00:00
 """
 
@@ -31,8 +31,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0022_toolinv_msg_fk_deferrable"
-down_revision: str | None = "0021_tenant_tool_policy"
+revision: str = "0026_toolinv_msg_fk_deferrable"
+down_revision: str | None = "0025_run_deliveries"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
