@@ -8,6 +8,7 @@ import type { StatusTone } from '@/components/StatusBadge';
 import type {
   AssistantStatus,
   AutonomyLevel,
+  CertificationState,
   ChatModelInfo,
   KnowledgeMode,
   Member,
@@ -31,6 +32,29 @@ export function statusTone(status: AssistantStatus): StatusTone {
     default:
       return 'pending';
   }
+}
+
+/**
+ * Human labels for the admin library-governance certification (E6-6, #217). `none`
+ * has no badge (the library shows nothing for an un-reviewed assistant).
+ */
+export const CERTIFICATION_LABEL: Record<CertificationState, string> = {
+  none: '',
+  certified: 'Certified',
+  deprecated: 'Deprecated',
+};
+
+/**
+ * A certification badge descriptor for the library, or `null` for `none` (no badge).
+ * `certified` reads as trusted (ok); `deprecated` warns (danger) — the library
+ * signals a retiring assistant without hiding it.
+ */
+export function certificationBadge(
+  state: CertificationState,
+): { label: string; tone: StatusTone } | null {
+  if (state === 'certified') return { label: CERTIFICATION_LABEL.certified, tone: 'ok' };
+  if (state === 'deprecated') return { label: CERTIFICATION_LABEL.deprecated, tone: 'danger' };
+  return null;
 }
 
 /** Ordered autonomy levels with human labels + a one-line meaning (ADR-0011 §3). */

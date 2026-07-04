@@ -30,7 +30,7 @@ drops the table, restoring the pre-#218 state. Offline DDL render asserts the
 shape; the live apply runs against a disposable throwaway database (the #70
 lesson).
 
-Revision ID: 0023_autonomy_policy
+Revision ID: 0024_autonomy_policy
 Revises: 0022_sandbox_policy
 Create Date: 2026-07-03 00:00:00+00:00
 """
@@ -43,8 +43,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0023_autonomy_policy"
-down_revision: str | None = "0022_sandbox_policy"
+revision: str = "0024_autonomy_policy"
+down_revision: str | None = "0023_assistant_governance"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

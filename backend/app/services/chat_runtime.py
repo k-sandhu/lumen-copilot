@@ -221,6 +221,7 @@ class ChatRuntime:
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
         assistant_config: AssistantRunConfig | None = None,
+        simulate_writes: bool = False,
     ) -> None:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
@@ -236,6 +237,14 @@ class ChatRuntime:
         allowed-tool subset, and its knowledge scope as an **additional narrowing**
         filter over any send-time ``collection_ids`` (scope may only narrow, never
         widen — INV-2). ``assistant_config=None`` is ad-hoc chat, unchanged.
+
+        ``simulate_writes`` is the read-only test/preview seam (F-AB-5, issue #215):
+        when set, the tool context carries ``simulate_writes=True``, so a T1
+        file-writing tool builds + validates the bytes but persists **nothing** — the
+        write is simulated, not executed. The code-execution seam is independently
+        left unwired for a test run (``sandbox=None``), so ``run_python`` reports a
+        typed ``ok=False`` rather than launching a container. A test run therefore
+        performs NO real side effect (the load-bearing property of the harness).
         """
         state = _StreamState(stream_id=stream_id)
         assistant_message_id = uuid.uuid4()
@@ -269,6 +278,7 @@ class ChatRuntime:
                     history=history,
                     collection_ids=collection_ids,
                     assistant_config=assistant_config,
+                    simulate_writes=simulate_writes,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -336,6 +346,7 @@ class ChatRuntime:
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
         assistant_config: AssistantRunConfig | None = None,
+        simulate_writes: bool = False,
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
@@ -463,6 +474,11 @@ class ChatRuntime:
             default_k=_DEFAULT_K,
             session_id=session_id,
             sandbox=sandbox,
+            # Read-only test/preview mode (F-AB-5, issue #215): a T1 file-writing tool
+            # builds + validates but persists nothing, so a test run mutates no state.
+            # ``run_python`` (T2) is already denied for a test run because the sandbox
+            # seam is left unwired above (``sandbox=None``), so no container launches.
+            simulate_writes=simulate_writes,
         )
 
         budget_exhausted = True

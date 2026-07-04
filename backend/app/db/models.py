@@ -39,6 +39,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -1000,6 +1001,12 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
             "status in ('draft', 'published', 'disabled')",
             name="ck_assistants_status",
         ),
+        # Library-governance certification domain (E6-6, #217) — CHECK-pinned so a
+        # bad value can never be stored, the same posture as the other enum columns.
+        CheckConstraint(
+            "certification_state in ('none', 'certified', 'deprecated')",
+            name="ck_assistants_certification_state",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -1025,6 +1032,23 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
     tool_allowlist: Mapped[list[object]] = mapped_column(_JSON, nullable=False, default=list)
     autonomy_level: Mapped[str] = mapped_column(String(20), nullable=False, default="suggest")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+
+    # --- Library governance (E6-6/E6-8, #217) — an orthogonal admin axis --------
+    # Certification verdict (none|certified|deprecated); admin-only mutation.
+    certification_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none", server_default="none"
+    )
+    # Whether an admin has featured/pinned the assistant in the library.
+    featured: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # A free-text library grouping label (nullable ⇒ uncategorised).
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Set (in lockstep with status=disabled) when an admin disables the assistant so
+    # the "only a published assistant may start" gate blocks it; NULL ⇒ not disabled.
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     versions: Mapped[list[AssistantVersion]] = relationship(
         back_populates="assistant", cascade="all, delete-orphan"

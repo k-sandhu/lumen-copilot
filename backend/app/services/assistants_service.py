@@ -236,10 +236,15 @@ class AssistantsService:
             tool_allowlist=assistant.tool_allowlist,
             autonomy_level=assistant.autonomy_level,
             status=assistant.status,
+            certification_state=assistant.certification_state,
+            featured=assistant.featured,
+            category=assistant.category,
+            disabled_at=assistant.disabled_at,
             created_at=assistant.created_at,
             updated_at=assistant.updated_at,
             current_version=head.version if head is not None else None,
             effective_autonomy=effective_autonomy,
+            owner_orphaned=assistant.owner_orphaned,
         )
 
     # --- validation ---------------------------------------------------------

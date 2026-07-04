@@ -47,13 +47,35 @@ import { KnowledgeScopePicker } from './KnowledgeScopePicker';
 import { ToolAllowlist } from './ToolAllowlist';
 import { OwnerPickers } from './OwnerPickers';
 import { VersionHistory } from './VersionHistory';
+import { TestPanel } from './TestPanel';
 
-interface AssistantEditorProps {
-  /** The assistant id in edit mode; null for `/assistants/new`. */
-  assistantId: string | null;
+/**
+ * Advisory notes the conversational builder (#213) attaches to a pre-filled draft:
+ * clarifying questions to answer before publish, notes about anything the builder
+ * omitted (unknown tool / unseeable scope), and warnings about high-risk tools. The
+ * editor renders these read-only above the form so the reviewing user sees them
+ * inline with the draft they're editing.
+ */
+export interface DraftAdvisory {
+  clarifications: string[];
+  notes: string[];
+  warnings: string[];
 }
 
-export function AssistantEditor({ assistantId }: AssistantEditorProps) {
+interface AssistantEditorProps {
+  /** The assistant id in edit mode; null for `/assistants/new` (create). */
+  assistantId: string | null;
+  /**
+   * A pre-filled NEW-mode form (E6-1): when set, the editor starts from this draft
+   * instead of `emptyForm()`. Only meaningful when `assistantId` is null — the
+   * builder never pre-fills an existing head. Ignored in edit mode.
+   */
+  initialForm?: AssistantFormState;
+  /** Builder advisories (clarifications/notes/warnings) shown above a drafted form. */
+  advisory?: DraftAdvisory;
+}
+
+export function AssistantEditor({ assistantId, initialForm, advisory }: AssistantEditorProps) {
   const detail = useAssistant(assistantId);
 
   // In new mode there is nothing to load. In edit mode, gate the form on the
@@ -65,12 +87,19 @@ export function AssistantEditor({ assistantId }: AssistantEditorProps) {
     }
   }
 
+  // Precedence: an existing head (edit mode) → a builder-supplied draft (new mode) →
+  // an empty form. `initialForm` only applies when there is no head to load.
+  const initial = detail.data
+    ? formFromAssistant(detail.data)
+    : (initialForm ?? emptyForm());
+
   return (
     <EditorForm
       key={assistantId ?? 'new'}
       assistantId={assistantId}
-      initial={detail.data ? formFromAssistant(detail.data) : emptyForm()}
+      initial={initial}
       current={detail.data ?? null}
+      advisory={assistantId === null ? advisory : undefined}
     />
   );
 }
@@ -79,10 +108,12 @@ function EditorForm({
   assistantId,
   initial,
   current,
+  advisory,
 }: {
   assistantId: string | null;
   initial: AssistantFormState;
   current: Assistant | null;
+  advisory?: DraftAdvisory;
 }) {
   const navigate = useNavigate();
   const models = useModels();
@@ -181,6 +212,8 @@ function EditorForm({
       noValidate
     >
       <EditorHeader current={current} isNew={isNew} />
+
+      {advisory ? <DraftAdvisories advisory={advisory} /> : null}
 
       {formError ? (
         <p
@@ -367,6 +400,15 @@ function EditorForm({
       ) : null}
     </form>
 
+    {/* Test/preview/debug (#215) — edit mode only; a draft with no id cannot be
+        tested. Runs the working config with write-tier tools simulated/denied —
+        no real side effect — and shows the debug trace. */}
+    {!isNew && assistantId ? (
+      <div className="border-t border-border pt-6">
+        <TestPanel assistantId={assistantId} />
+      </div>
+    ) : null}
+
     {/* Version history + rollback (#214) — edit mode only; a draft with no id
         has no history to show. Publishing above appends a version here. */}
     {!isNew && current ? (
@@ -374,6 +416,64 @@ function EditorForm({
         <VersionHistory assistant={current} members={members.data?.items} />
       </div>
     ) : null}
+    </div>
+  );
+}
+
+/**
+ * The builder's advisories for a drafted config (E6-1, #213), shown read-only above
+ * the pre-filled form: warnings (high-risk tools) first, then clarifying questions
+ * to resolve before publish, then notes about anything the builder omitted. Each
+ * block is only rendered when non-empty, so a clean draft shows nothing.
+ */
+function DraftAdvisories({ advisory }: { advisory: DraftAdvisory }) {
+  const { clarifications, notes, warnings } = advisory;
+  if (clarifications.length === 0 && notes.length === 0 && warnings.length === 0) {
+    return null;
+  }
+  return (
+    <div className="space-y-2" data-testid="draft-advisories">
+      {warnings.length > 0 ? (
+        <section
+          role="alert"
+          className="rounded-md border border-warn/40 bg-warn/10 p-3 text-sm text-warn"
+        >
+          <p className="mb-1 flex items-center gap-1.5 font-medium">
+            <Icon name="alert-triangle" className="shrink-0" aria-hidden="true" />
+            Review before publishing
+          </p>
+          <ul className="list-disc space-y-0.5 pl-5">
+            {warnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {clarifications.length > 0 ? (
+        <section className="rounded-md border border-accent/40 bg-accent/10 p-3 text-sm">
+          <p className="mb-1 flex items-center gap-1.5 font-medium text-accent">
+            <Icon name="sparkles" className="shrink-0" aria-hidden="true" />
+            A few questions to answer
+          </p>
+          <ul className="list-disc space-y-0.5 pl-5 text-foreground">
+            {clarifications.map((q) => (
+              <li key={q}>{q}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {notes.length > 0 ? (
+        <section className="rounded-md border border-border bg-surface-muted p-3 text-xs text-foreground-muted">
+          <p className="mb-1 font-medium">The builder adjusted your draft</p>
+          <ul className="list-disc space-y-0.5 pl-5">
+            {notes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

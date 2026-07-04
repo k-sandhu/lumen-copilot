@@ -3,8 +3,11 @@
  * performs run HTTP. Conforms to the FROZEN contract (contracts/openapi.yaml
  * §runs, ADR-0015 / #234):
  *
- *   GET /runs           ?assistant_id&schedule_id&status&cursor&limit → RunList
- *   GET /runs/{id}                                                    → Run
+ *   GET  /runs           ?assistant_id&schedule_id&status&cursor&limit → RunList
+ *   GET  /runs/{id}                                                    → Run
+ *   POST /runs/{id}/resume                                             → Run (202)
+ *   POST /runs/{id}/cancel                                             → Run (200)
+ *   POST /runs/{id}/reroute   {to_owner_id}                            → Run (202)
  *
  * The list is the run inbox — status/trigger/timestamps + the `summary` digest
  * line per item (transcript, tool calls and citations live on the detail). Runs
@@ -14,7 +17,7 @@
  * non-owned / cross-tenant / unknown id → 404 (existence non-disclosure).
  */
 import { request } from './client';
-import type { Run, RunList, RunStatus } from './types';
+import type { Run, RunList, RunReroute, RunStatus } from './types';
 
 /** List filters + cursor page params for GET /runs. */
 export interface RunPageQuery {
@@ -49,4 +52,32 @@ export function listRuns(query: RunPageQuery = {}, signal?: AbortSignal): Promis
  */
 export function getRun(id: string, signal?: AbortSignal): Promise<Run> {
   return request<Run>(`/runs/${id}`, { signal });
+}
+
+/**
+ * Resume an **escalated** run (E7-5, #239) — re-enqueue it from the escalation
+ * point; returns the run reset to `queued`. Not escalated → 409 (INV-8); a
+ * non-owned / cross-tenant id → 404 (INV-1/INV-2).
+ */
+export function resumeRun(id: string): Promise<Run> {
+  return request<Run>(`/runs/${id}/resume`, { method: 'POST', okStatuses: [202] });
+}
+
+/**
+ * Cancel an **escalated** run (E7-5) — acknowledge + close it to a permanent
+ * terminal (a `cancelled` reason in `error`); returns the closed run. Not escalated
+ * → 409; a non-owned / cross-tenant id → 404.
+ */
+export function cancelRun(id: string): Promise<Run> {
+  return request<Run>(`/runs/${id}/cancel`, { method: 'POST' });
+}
+
+/**
+ * Reroute an **escalated** run to another owner (E7-5) — reassign its execution
+ * principal and re-enqueue it as the new owner (INV-2, never widening access);
+ * returns the run reset to `queued`. The target must be a user in the tenant (else
+ * 404) and not the current owner (else 422). Not escalated → 409.
+ */
+export function rerouteRun(id: string, body: RunReroute): Promise<Run> {
+  return request<Run>(`/runs/${id}/reroute`, { method: 'POST', json: body, okStatuses: [202] });
 }

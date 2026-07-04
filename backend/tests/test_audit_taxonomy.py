@@ -84,10 +84,33 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "assistant.deleted",
         "assistant.published",
         "assistant.rolled_back",
+        # Admin library governance (E6-6/E6-8 / issue #217) — additive; certifying/
+        # featuring/deprecating/disabling an assistant + transferring its ownership are
+        # admin-only governance actions, each audited (INV-5/INV-6).
+        "assistant.certified",
+        "assistant.featured",
+        "assistant.deprecated",
+        "assistant.disabled",
+        "assistant.ownership_transferred",
+        # Read-only test/preview/debug of a draft assistant (E6-5 / issue #215) —
+        # additive; a test run is owner-gated and audited even though it mutates
+        # nothing (write-tier tools forced into simulate/deny mode).
+        "assistant.tested",
+        # Conversational agent builder (E6-1 / issue #213) — additive; drafting a
+        # config from a description is audited (INV-6) even though nothing is
+        # persisted until the user saves via assistant.created.
+        "assistant.drafted",
         # Headless agent runs (ADR-0015 / issue #235) — additive; every run is
         # bracketed by run.started/run.finished (INV-6), actor = the run owner.
         "run.started",
         "run.finished",
+        # Run failure & escalation handling (ADR-0015 §6 / E7-5 / issue #239) —
+        # additive; an escalated run's human handoff (resume/cancel/reroute) is
+        # audited so it is never silently dropped, and the escalate itself is trailed.
+        "run.escalated",
+        "run.resumed",
+        "run.cancelled",
+        "run.rerouted",
         # Dynamic per-tenant scheduler (ADR-0015 §6 / issue #236) — additive; every
         # schedule lifecycle mutation + control is audited (INV-6): create/update/
         # delete, pause/resume, and run-now (the owner's control over the schedule; a
