@@ -1045,10 +1045,11 @@ def _hash_query(query: str) -> str:
 def _is_retrieval_call(call: ToolCall) -> bool:
     """Whether a tool call targets a retrieval tool (gets the ``retrieval.query`` audit).
 
-    The three retrieval tools additionally emit the retrieval-semantics audit event
+    The retrieval tools additionally emit the retrieval-semantics audit event
     (query hash + document ids + hit count, spec 0004 §2.4) on top of the generic
     ``tool.*`` events the runner emits for every tool. Keyed off the retrieval impl's
-    declared names so a future non-retrieval tool does not wrongly get it.
+    declared names (``_RETRIEVAL_TOOL_NAMES``, read from ``TOOLS``) so a newly added
+    retrieval tool is covered automatically and a non-retrieval tool never is.
     """
     return call.name in _RETRIEVAL_TOOL_NAMES
 
