@@ -1172,6 +1172,56 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  # --- Per-user account (user settings) --------------------------------------
+  /me/avatar:
+    put:
+      operationId: updateAvatar
+      summary: Upload the caller's profile avatar.
+      description: >
+        Set the caller's own profile picture shown in the app shell. Stores the image
+        (MinIO), keyed to the caller within their tenant, and persists its key on the
+        user row; the shell reads the resulting presigned URL from `GET /auth/me`
+        (`avatar_url`). Authenticated (INV-4) but NOT admin-gated — a user manages
+        their OWN avatar; audited as `user.avatar_updated` (INV-6). Allowed
+        content-types are `image/png`, `image/jpeg`, `image/svg+xml` and the size cap
+        is `MAX_LOGO_BYTES` (default 1 MiB, reused for avatars), enforced server-side:
+        an over-size avatar is **413**, a non-image content-type **415**, and a
+        missing/blank filename **422** (INV-8). Returns the new avatar URL.
+      tags: [user]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: The caller's avatar URL after upload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAvatar" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: clearAvatar
+      summary: Clear the caller's profile avatar.
+      description: >
+        Revert the app shell to the initials fallback for the caller (the reverse of
+        `PUT /me/avatar`): sets the caller's avatar key to null. Authenticated (INV-4),
+        scoped to the caller's own row (INV-1/INV-2), audited as `user.avatar_updated`
+        (INV-6). Idempotent — clearing an already-unset avatar succeeds with **204**.
+      tags: [user]
+      responses:
+        "204": { description: The avatar was cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # --- Saved searches (spec 0005 §3; epic #144) ------------------------------
   /saved-searches:
     get:
@@ -2654,6 +2704,25 @@ components:
             null when none is set (the shell renders the default brand mark). A
             per-tenant setting an admin uploads via PUT /admin/branding — the same
             for every user of the tenant.
+        avatar_url:
+          type: [string, "null"]
+          description: >
+            The caller's own profile avatar as a short-TTL presigned GET URL, or
+            null when none is set (the shell renders the initials fallback). A
+            per-user setting the user uploads via PUT /me/avatar — theirs alone.
+
+    UserAvatar:
+      type: object
+      additionalProperties: false
+      description: >
+        The caller's profile avatar (user settings). `avatar_url` is a short-TTL
+        presigned GET URL for the caller's uploaded avatar, or null when none is set.
+        The current state is also readable via GET /auth/me (`avatar_url`), so no
+        separate GET is needed.
+      required: [avatar_url]
+      properties:
+        avatar_url:
+          type: [string, "null"]
 
     # --- Collections --------------------------------------------------------
     CollectionCreate:
@@ -3898,7 +3967,7 @@ components:
     UserPreferences:
       type: object
       additionalProperties: false
-      required: [default_model_id, updated_at]
+      required: [default_model_id, custom_instructions, updated_at]
       properties:
         default_model_id:
           type: [string, "null"]
@@ -3906,6 +3975,14 @@ components:
             The caller's preferred default chat model — an id from `/models`, or
             null to use the server default. New chat sessions with no explicit model
             start from this.
+        custom_instructions:
+          type: [string, "null"]
+          maxLength: 2000
+          description: >
+            A per-user free-text preamble prepended to the chat system prompt (the
+            user's persona / standing context), or null for none. Composed BEFORE the
+            grounding/citation contract at chat time — it can shape tone/scope but never
+            removes grounding (INV-3). Capped at 2000 characters (over-limit → 422).
         updated_at:
           type: [string, "null"]
           format: date-time
@@ -3926,6 +4003,13 @@ components:
           description: >
             A `/models` id to set as the default, or null to clear the override
             (fall back to the server default). An unknown id → 422 `unknown_model`.
+        custom_instructions:
+          type: [string, "null"]
+          maxLength: 2000
+          description: >
+            A per-user preamble to set (prepended to the chat system prompt), or null
+            to clear it. Absent = leave unchanged; a value = set; null = clear. Capped
+            at 2000 characters (over-limit → 422).
 
     # --- Saved searches (spec 0005) -----------------------------------------
     SavedSearch:

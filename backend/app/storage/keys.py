@@ -108,6 +108,23 @@ def build_artifact_key(tenant_id: str, data: bytes, filename: str) -> str:
     )
 
 
+def build_avatar_key(tenant_id: str, user_id: str, data: bytes, filename: str) -> str:
+    """Assemble the per-user profile-avatar object key.
+
+    Shape: ``{tenant_id}/{user_id}/{sha256(data)}/{safe_filename}`` — the standard
+    tenant-prefixed, content-addressed key with a ``user_id`` segment inserted so an
+    avatar is scoped to the owning user *within* the tenant. The leading ``tenant_id``
+    is the isolation seam the generic :func:`assert_key_owned_by` enforces (so the
+    same ``presign_get`` retrieval path applies unchanged); ``user_id`` is validated
+    as a single safe segment (a forged/traversing value is refused) so it can never
+    escape its namespace. Identical bytes dedupe per user, like every upload.
+    """
+    return (
+        f"{validate_tenant_id(tenant_id)}/{validate_tenant_id(user_id)}/"
+        f"{sha256_hex(data)}/{safe_filename(filename)}"
+    )
+
+
 def assert_key_owned_by(key: str, tenant_id: str) -> None:
     """Enforce the tenant-prefix isolation seam (AC-5).
 

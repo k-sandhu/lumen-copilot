@@ -75,6 +75,22 @@ def build_system_prompt(instructions: str | None) -> str:
     return f"{text}\n\n{GROUNDED_SYSTEM_PROMPT}"
 
 
+def prepend_user_instructions(custom_instructions: str | None, base_prompt: str) -> str:
+    """Prepend a user's custom instructions to an already-composed system prompt.
+
+    The user's per-account preamble goes *first*, before the assistant's
+    instructions-augmented grounded prompt (or the bare grounded prompt for ad-hoc
+    chat). The final order is therefore ``user custom instructions → (assistant
+    instructions if any) → GROUNDED_SYSTEM_PROMPT`` — persona/standing context is read
+    first, then the non-negotiable grounding/citation rules (INV-3), which are NEVER
+    removed. Blank/absent instructions leave ``base_prompt`` exactly as-is.
+    """
+    text = (custom_instructions or "").strip()
+    if not text:
+        return base_prompt
+    return f"{text}\n\n{base_prompt}"
+
+
 def resolve_allowlist(tool_allowlist: object) -> frozenset[str]:
     """The effective allowed-tool set for a run given the assistant's allow-list.
 
@@ -161,6 +177,7 @@ __all__ = [
     "AssistantRunConfig",
     "assemble_run_config",
     "build_system_prompt",
+    "prepend_user_instructions",
     "resolve_allowlist",
     "resolve_autonomy",
     "scope_collection_ids",

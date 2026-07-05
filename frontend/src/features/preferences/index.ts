@@ -4,3 +4,4 @@
  * consumed by the chat model picker (and a future settings surface).
  */
 export { usePreferences, useUpdatePreferences, preferencesKey } from './model/queries';
+export { DefaultModelSetting } from './components/DefaultModelSetting';

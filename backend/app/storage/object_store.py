@@ -24,6 +24,9 @@ Exposes:
 * :meth:`put_logo` — store a per-tenant application logo (admin branding):
   the standard upload key shape, validated against the image-only logo
   allowlist/limit; retrieval reuses the generic :meth:`presign_get`.
+* :meth:`put_avatar` — store a per-user profile avatar: the same image-only
+  allowlist/limit as the logo (reused), keyed ``{tenant_id}/{user_id}/{sha}/{name}``
+  so it is scoped to the owning user; retrieval reuses the generic :meth:`presign_get`.
 * :meth:`ensure_bucket` — create ``S3_BUCKET`` if missing; called at startup so
   the bucket exists from day one.
 * :meth:`ping` — a cheap reachability check used by the readiness probe.
@@ -54,6 +57,7 @@ from app.storage.keys import (
     assert_artifact_key_owned_by,
     assert_key_owned_by,
     build_artifact_key,
+    build_avatar_key,
     build_key,
     sha256_hex,
 )
@@ -299,6 +303,55 @@ class ObjectStore:
             max_bytes=self._settings.max_logo_bytes,
         )
         key = build_key(tenant_id, data, filename)
+        async with self._client() as client:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+        return StoredObject(
+            key=key,
+            sha256=sha256_hex(data),
+            size_bytes=len(data),
+            content_type=content_type,
+        )
+
+    # --- Per-user profile avatar --------------------------------------------
+    #
+    # Mirrors :meth:`put_logo` but PER-USER (not admin branding): the key carries a
+    # ``user_id`` segment after the tenant prefix ({tenant_id}/{user_id}/{sha}/{name})
+    # so an avatar is scoped to the owning user within the tenant. The tenant prefix
+    # is still the isolation seam the generic ``presign_get`` / ``assert_key_owned_by``
+    # enforce, so retrieval and cross-tenant refusal are unchanged. The image-only
+    # allowlist/limit are REUSED from the logo config (``logo_allowed_content_types`` /
+    # ``max_logo_bytes``) — an avatar has the same "small inline image" constraints, so
+    # a second knob would only add config surface without changing behaviour.
+
+    async def put_avatar(
+        self,
+        tenant_id: str,
+        user_id: str,
+        data: bytes,
+        content_type: str,
+        filename: str,
+    ) -> StoredObject:
+        """Validate, content-address, and store a per-user avatar; return its descriptor.
+
+        The declared ``content_type`` and byte length are validated against the
+        **logo** allowlist/limit (reused for avatars — image-only, small cap)
+        **before** any write; a rejection is a typed ``ValidationError`` (→ 413/415
+        after the service's remap). The key is
+        ``{tenant_id}/{user_id}/{sha256(data)}/{safe_filename}`` so retrieval reuses
+        the generic :meth:`presign_get` and identical bytes dedupe per user.
+        """
+        validate_upload(
+            size_bytes=len(data),
+            content_type=content_type,
+            allowed_content_types=self._settings.logo_allowed_content_types,
+            max_bytes=self._settings.max_logo_bytes,
+        )
+        key = build_avatar_key(tenant_id, user_id, data, filename)
         async with self._client() as client:
             await client.put_object(
                 Bucket=self._bucket,

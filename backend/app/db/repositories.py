@@ -94,6 +94,18 @@ from app.domain.entities import (
 from app.domain.entities import ChatSession as ChatSessionEntity
 from app.domain.scheduling import Cadence, StructuredCadence
 
+
+class _Unset:
+    """Sentinel for "field omitted" in a tri-state partial update.
+
+    Distinguishes "leave unchanged" (``_UNSET``) from "set to ``None``" (clear) so a
+    single upsert can update any subset of a row's nullable fields without a bespoke
+    method per field.
+    """
+
+
+_UNSET = _Unset()
+
 # ---------------------------------------------------------------------------
 # Row → domain mappers (the boundary: ORM rows never escape this module).
 # ---------------------------------------------------------------------------
@@ -119,6 +131,7 @@ def _to_user(row: models.User) -> User:
         roles=tuple(Role(r) for r in row.roles),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        avatar_key=row.avatar_key,
     )
 
 
@@ -232,6 +245,7 @@ def _to_user_preferences(row: models.UserPreference) -> UserPreferences:
         tenant_id=row.tenant_id,
         user_id=row.user_id,
         default_model=row.default_model,
+        custom_instructions=row.custom_instructions,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -817,6 +831,27 @@ class UserRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
+    async def set_avatar_key(self, user_id: UUID, *, avatar_key: str | None) -> User | None:
+        """Set (or clear) the user's per-user profile-avatar key.
+
+        ``avatar_key`` is written as given: a non-null object-store key points the
+        shell at the user's uploaded avatar, ``None`` clears it so the initials
+        fallback applies again. Tenant-scoped (INV-1): a user in another tenant is
+        invisible here, so one user can never touch another's avatar. Returns the
+        updated entity, or ``None`` if no such user exists in this tenant.
+        """
+        stmt = select(models.User).where(
+            models.User.tenant_id == self._tenant_id,
+            models.User.id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.avatar_key = avatar_key
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_user(row)
+
 
 class UserPreferenceRepository(_TenantScopedRepository):
     """A user's account preferences within one tenant (spec 0005, epic #144).
@@ -840,9 +875,37 @@ class UserPreferenceRepository(_TenantScopedRepository):
     async def set_default_model(self, user_id: UUID, default_model: str | None) -> UserPreferences:
         """Upsert the user's default-model override (``None`` clears it).
 
-        Creates the row on first write (lazy), else updates the existing one, and
-        returns the persisted state. Tenant-scoped (INV-1); the ``(tenant_id,
-        user_id)`` singleton is the upsert target.
+        A thin wrapper over :meth:`update` that touches only ``default_model``,
+        leaving ``custom_instructions`` unchanged (the ``_UNSET`` sentinel). Kept as
+        a named method because ``PATCH /preferences`` and the chat session-create path
+        both set the default model directly.
+        """
+        return await self.update(user_id, default_model=default_model)
+
+    async def set_custom_instructions(
+        self, user_id: UUID, custom_instructions: str | None
+    ) -> UserPreferences:
+        """Upsert the user's custom instructions (``None`` clears them).
+
+        A thin wrapper over :meth:`update` that touches only ``custom_instructions``,
+        leaving ``default_model`` unchanged.
+        """
+        return await self.update(user_id, custom_instructions=custom_instructions)
+
+    async def update(
+        self,
+        user_id: UUID,
+        *,
+        default_model: str | None | _Unset = _UNSET,
+        custom_instructions: str | None | _Unset = _UNSET,
+    ) -> UserPreferences:
+        """Lazy upsert of the user's preferences row (the ``(tenant_id, user_id)`` singleton).
+
+        Tri-state per field: pass a value (incl. ``None`` to clear) to set it, or omit
+        it (``_UNSET``) to leave it unchanged. Creates the row on first write, else
+        updates the existing one, and returns the persisted state. Tenant-scoped
+        (INV-1): a foreign-tenant/other-user row is invisible, so one user can never
+        read or clobber another's preferences.
         """
         stmt = select(models.UserPreference).where(
             models.UserPreference.tenant_id == self._tenant_id,
@@ -853,11 +916,17 @@ class UserPreferenceRepository(_TenantScopedRepository):
             row = models.UserPreference(
                 tenant_id=self._tenant_id,
                 user_id=user_id,
-                default_model=default_model,
+                default_model=None if isinstance(default_model, _Unset) else default_model,
+                custom_instructions=(
+                    None if isinstance(custom_instructions, _Unset) else custom_instructions
+                ),
             )
             self._session.add(row)
         else:
-            row.default_model = default_model
+            if not isinstance(default_model, _Unset):
+                row.default_model = default_model
+            if not isinstance(custom_instructions, _Unset):
+                row.custom_instructions = custom_instructions
         await self._session.flush()
         await self._session.refresh(row)
         return _to_user_preferences(row)

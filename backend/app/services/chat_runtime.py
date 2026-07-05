@@ -62,7 +62,7 @@ from app.llm import LLMGateway
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
-from app.services.assistant_runtime import AssistantRunConfig
+from app.services.assistant_runtime import AssistantRunConfig, prepend_user_instructions
 from app.services.audit import AuditSink
 from app.services.autonomy_policy_service import AutonomyPolicyReader
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
@@ -231,6 +231,7 @@ class ChatRuntime:
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
         assistant_config: AssistantRunConfig | None = None,
+        custom_instructions: str | None = None,
         simulate_writes: bool = False,
     ) -> None:
         """Produce the grounded answer for ``stream_id`` end-to-end.
@@ -247,6 +248,13 @@ class ChatRuntime:
         allowed-tool subset, and its knowledge scope as an **additional narrowing**
         filter over any send-time ``collection_ids`` (scope may only narrow, never
         widen — INV-2). ``assistant_config=None`` is ad-hoc chat, unchanged.
+
+        ``custom_instructions`` is the asking user's per-account preamble (from their
+        preferences). When set it is prepended to the system prompt — before any
+        assistant instructions and always before ``GROUNDED_SYSTEM_PROMPT`` — so it can
+        shape persona/tone but never removes the grounding/citation rules (INV-3). It is
+        resolved by the caller (which holds the principal + DB session), never read from
+        inside the gateway.
 
         ``simulate_writes`` is the read-only test/preview seam (F-AB-5, issue #215):
         when set, the tool context carries ``simulate_writes=True``, so a T1
@@ -288,6 +296,7 @@ class ChatRuntime:
                     history=history,
                     collection_ids=collection_ids,
                     assistant_config=assistant_config,
+                    custom_instructions=custom_instructions,
                     simulate_writes=simulate_writes,
                 )
                 await session.commit()
@@ -356,6 +365,7 @@ class ChatRuntime:
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
         assistant_config: AssistantRunConfig | None = None,
+        custom_instructions: str | None = None,
         simulate_writes: bool = False,
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
@@ -398,12 +408,16 @@ class ChatRuntime:
         )
         # The system prompt: the assistant's instructions-augmented grounded prompt
         # when a config is present (grounding/citation rules preserved), else the
-        # bare grounded prompt (ad-hoc chat, unchanged).
-        system_prompt = (
+        # bare grounded prompt (ad-hoc chat, unchanged). The asking user's custom
+        # instructions (from their preferences) are then prepended so the final order
+        # is: user custom instructions → (assistant instructions) → GROUNDED_SYSTEM_PROMPT.
+        # Grounding is NEVER removed — it always follows (INV-3).
+        base_prompt = (
             assistant_config.system_prompt
             if assistant_config is not None
             else GROUNDED_SYSTEM_PROMPT
         )
+        system_prompt = prepend_user_instructions(custom_instructions, base_prompt)
         # The run's EFFECTIVE autonomy (issue #218): for an assistant session, the
         # assistant's configured level min'd to the tenant admin cap; for ad-hoc chat
         # (no assistant) there is no assistant to gate, and the default set is all-T0,

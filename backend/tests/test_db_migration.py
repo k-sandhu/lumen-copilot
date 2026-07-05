@@ -101,7 +101,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0028_llm_providers"]
+    assert list(script.get_heads()) == ["0029_user_settings"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -183,6 +183,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     llm_providers = script.get_revision("0028_llm_providers")
     assert llm_providers is not None
     assert llm_providers.down_revision == "0027_tenant_logo"
+    user_settings = script.get_revision("0029_user_settings")
+    assert user_settings is not None
+    assert user_settings.down_revision == "0028_llm_providers"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -1144,3 +1147,29 @@ def test_offline_tenant_autonomy_policy_migration_round_trips(
     assert "alter table tenant_autonomy_policy disable row level security" in down
     assert "drop index ix_tenant_autonomy_policy_tenant_id" in down
     assert "drop table tenant_autonomy_policy" in down
+
+
+def test_offline_user_settings_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0029 adds ``user_preferences.custom_instructions`` + ``users.avatar_key``; down() reverses.
+
+    AC (user settings): the upgrade renders the nullable ``custom_instructions`` TEXT
+    column on ``user_preferences`` and the nullable ``avatar_key`` column on ``users``;
+    the downgrade drops both. Both are plain add/drop-column steps on existing tables —
+    no RLS policy change (the parent ``users`` table is outside the backstop, and adding
+    a column to ``user_preferences`` does not alter its 0009 policy). Offline DDL render
+    (Postgres dialect) — structural reversibility without a DB (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0028_llm_providers:0029_user_settings", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table user_preferences add column custom_instructions" in up
+    assert "alter table users add column avatar_key" in up
+
+    command.downgrade(cfg, "0029_user_settings:0028_llm_providers", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table users drop column avatar_key" in down
+    assert "alter table user_preferences drop column custom_instructions" in down
