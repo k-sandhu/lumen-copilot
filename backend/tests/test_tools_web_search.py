@@ -95,8 +95,11 @@ def test_web_search_is_off_by_default_allowlist() -> None:
     defn = get_tool("web_search")
     assert defn.default_offered is False
     assert "web_search" not in default_allowlist()
-    # The three retrieval tools remain the ad-hoc default (regression).
-    assert default_allowlist() == frozenset({"search_text", "search_documents", "get_document"})
+    # The read-only retrieval tools remain the ad-hoc default (regression); this is
+    # the full set — four since list_documents joined (#371).
+    assert default_allowlist() == frozenset(
+        {"search_text", "search_documents", "list_documents", "get_document"}
+    )
 
 
 def test_web_search_schema_is_query_and_optional_k() -> None:

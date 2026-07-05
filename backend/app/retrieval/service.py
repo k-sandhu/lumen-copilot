@@ -32,12 +32,14 @@ It returns the domain types in :mod:`app.domain.retrieval`
 never a SQL row or a pgvector value (adapter rule 1). Each carries source
 provenance + char offsets so the chat runtime (#24) can cite (CC-11 / INV-3).
 
-The three **agent tools** (:meth:`search_text`, :meth:`search_documents`,
-:meth:`get_document`) are the callable functions the chat runtime gives the LLM,
-named exactly as the WS ``ChatToolCall`` vocabulary
-(``contracts/websocket-envelopes.schema.json``). Each enforces the **same**
-permission filter — a tool call as user A can never reach user B's or another
-tenant's data (INV-2, asserted by the negative tests).
+The **agent tools** (:meth:`search_text`, :meth:`search_documents`,
+:meth:`list_documents`, :meth:`get_document`) are the callable functions the chat
+runtime gives the LLM, named per the WS ``ChatToolCall`` vocabulary
+(``contracts/websocket-envelopes.schema.json`` — an open-ended set). Each enforces
+the **same** permission filter — a tool call as user A can never reach user B's or
+another tenant's data (INV-2, asserted by the negative tests). :meth:`list_documents`
+is the query-less enumeration ("what can I access"); the others are discovery by a
+known handle (text/name/id).
 """
 
 from __future__ import annotations
@@ -261,6 +263,44 @@ class RetrievalService:
                 score=rrf_score(position),
             )
             for position, hit in enumerate(hits)
+        ]
+
+    async def list_documents(
+        self,
+        *,
+        principal: Principal,
+        k: int = _MAX_DOCUMENT_HITS,
+    ) -> list[DocumentMatch]:
+        """Agent tool ``list_documents``: enumerate the documents the principal can access.
+
+        The enumeration sibling of :meth:`search_documents` — it takes **no query**
+        and returns the documents in the principal's allow-set: owned by the caller
+        **or** explicitly granted to them (directly or via a grant on the document's
+        collection — the cascade). It applies the **same** owner-or-grant predicate
+        (``queries._document_permitted``) as :meth:`search_documents`,
+        :meth:`get_document`, and the engine-backed :meth:`search_text`, so the four
+        agent tools never disagree about what the caller may see (INV-1/INV-2).
+
+        ``k`` caps the count (clamped to ``[1, _MAX_DOCUMENT_HITS]``); the returned
+        :class:`DocumentMatch` ids feed :meth:`get_document`. A principal with no
+        owned/granted documents yields ``[]`` (never another user's or tenant's).
+        """
+        allow_set = AllowSet.for_principal(principal)
+        rows = await queries.list_documents(
+            self._session,
+            allow_set=allow_set,
+            k=min(_MAX_DOCUMENT_HITS, max(1, k)),
+        )
+        # A plain listing has no intrinsic relevance score; expose a descending
+        # positional score so callers see a stable, ordered ranking (as
+        # ``search_documents`` does for its lexical hits).
+        return [
+            DocumentMatch(
+                document_id=row.document_id,
+                document_name=row.document_name,
+                score=rrf_score(position),
+            )
+            for position, row in enumerate(rows)
         ]
 
     async def get_document(

@@ -11,9 +11,9 @@ offsets through to the answer for citations (CC-11).
 Public surface:
 
 * :class:`RetrievalService` — permission-filtered hybrid ``search`` plus the
-  three agent tools (``search_text`` / ``search_documents`` / ``get_document``)
-  the chat runtime (#24) gives the LLM, named per the WS ``ChatToolCall``
-  vocabulary.
+  agent tools (``search_text`` / ``search_documents`` / ``list_documents`` /
+  ``get_document``) the chat runtime (#24) gives the LLM, named per the WS
+  ``ChatToolCall`` vocabulary.
 * The result domain types live in :mod:`app.domain.retrieval`
   (:class:`RetrievedPassage`, :class:`DocumentMatch`, :class:`DocumentText`).
 

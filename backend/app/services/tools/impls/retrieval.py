@@ -1,26 +1,26 @@
-"""The three retrieval tools, behind the governed registry (CC-7 #207 §1).
+"""The retrieval tools, behind the governed registry (CC-7 #207 §1).
 
-The read-only retrieval tools (``search_text`` / ``search_documents`` /
-``get_document``) the chat agent has always had (#24), now expressed as
-:class:`~app.services.tools.types.ToolDefinition`s the registry auto-discovers.
-Each handler is a **thin adapter** that delegates to the permission-filtered
-``retrieval/`` service (INV-2 lives *inside* ``retrieval/``; this module only maps
-the model's args onto the right method and renders the reply) — identical behavior
-to the old ``services/chat_tools.py`` so the migration is a pure regression
-(issue #207 AC-1).
+The read-only retrieval tools the chat agent uses to ground answers in the user's
+own corpus: ``search_text`` (hybrid passage search), ``search_documents`` (find a
+document by name), ``get_document`` (fetch one document's text) — the trio the
+agent has had since #24 — plus ``list_documents`` (enumerate what the user can
+access, no query — #371, the answer to "what documents do I have access to"). All
+are expressed as :class:`~app.services.tools.types.ToolDefinition`s the registry
+auto-discovers. Each handler is a **thin adapter** that delegates to the
+permission-filtered ``retrieval/`` service (INV-2 lives *inside* ``retrieval/``;
+this module only maps the model's args onto the right method and renders the reply).
 
-**ADR-0010 (done, #192/#193):** ``search_text`` now runs on OpenSearch (the single
-retrieval store) and ``search_documents``/``get_document`` stay relational — but
-all three share the identical owner-or-grant permission predicate inside
+**ADR-0010 (done, #192/#193):** ``search_text`` runs on OpenSearch (the single
+retrieval store); ``search_documents`` / ``list_documents`` / ``get_document`` stay
+relational — but all share the identical owner-or-grant permission predicate inside
 ``retrieval/`` (a document owned by the caller *or* granted to them, directly or
-via its collection). These handlers call the service's public methods only, so
-that swap changed what the methods do *inside* ``retrieval/`` and this file did
-not move — one registry, no fork of the tool layer. The three-tool parity is
-proven live in ``test_grants.py``.
+via its collection), so the agent surface never disagrees about what the caller may
+see. These handlers call the service's public methods only — one registry, no fork
+of the tool layer. The owner-or-grant parity is proven live in ``test_grants.py``.
 
-All three are **T0, read-only, no approval** (spec 0004 §2.5 — the entire MVP is
-T0), so they bypass the approval gate; the runner still enforces the allow-list +
-audits + records the ``tool_invocations`` row for each.
+All are **T0, read-only, no approval** (spec 0004 §2.5 — the entire MVP is T0), so
+they bypass the approval gate; the runner still enforces the allow-list + audits +
+records the ``tool_invocations`` row for each.
 """
 
 from __future__ import annotations
@@ -36,19 +36,23 @@ from app.services.tools.types import ToolContext, ToolDefinition
 # from turning into a big scan — the service also clamps). Mirrors the old
 # ``chat_tools._MAX_K`` so tool behavior is unchanged across the migration.
 _MAX_K = 20
+# Cap on how many documents a single ``list_documents`` enumeration returns (kept
+# in step with ``retrieval.service._MAX_DOCUMENT_HITS``); larger corpora are
+# reached by narrowing with ``search_documents`` (pagination is a fast-follow).
+_LIST_MAX = 50
 # How much passage text to surface back to the model per hit (keeps the tool
 # result compact; the citation still carries the full snippet from the chunk).
 _SNIPPET_BUDGET = 600
 
 
-def _clamp_k(value: object, default: int) -> int:
+def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
     if not isinstance(value, int | float | str):
         return default
     try:
         k = int(value)
     except (TypeError, ValueError):
         return default
-    return max(1, min(_MAX_K, k))
+    return max(1, min(maximum, k))
 
 
 def _render_passages(passages: list[RetrievedPassage]) -> str:
@@ -108,6 +112,39 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
     document_ids = tuple(m.document_id for m in matches)
     return ToolHandlerResult(
         content="Documents:\n" + "\n".join(lines),
+        summary=f"{len(matches)} document(s)",
+        hit_count=len(matches),
+        document_ids=document_ids,
+        payload={"document_ids": [str(d) for d in document_ids]},
+    )
+
+
+async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+    k = _clamp_k(args.get("k"), _LIST_MAX, maximum=_LIST_MAX)
+    matches = await ctx.retrieval.list_documents(principal=ctx.principal, k=k)
+    if not matches:
+        # A clean "nothing here" is an ok result, not an error — the user simply
+        # has no documents of their own and none shared with them yet.
+        return ToolHandlerResult(
+            content=(
+                "You don't have access to any documents yet — nothing has been "
+                "uploaded to your account or shared with you."
+            ),
+            summary="0 documents",
+        )
+    lines = [f"- {m.document_name} (id: {m.document_id})" for m in matches]
+    document_ids = tuple(m.document_id for m in matches)
+    content = "Documents you can access:\n" + "\n".join(lines)
+    # No silent truncation: if the reply hit the cap, say so, so the model offers
+    # to narrow rather than implying this is the whole set. A false positive at
+    # exactly ``_LIST_MAX`` documents is acceptable.
+    if len(matches) >= _LIST_MAX:
+        content += (
+            f"\n\n(Showing the first {_LIST_MAX}; there may be more — narrow with "
+            "search_documents using a filename or keyword.)"
+        )
+    return ToolHandlerResult(
+        content=content,
         summary=f"{len(matches)} document(s)",
         hit_count=len(matches),
         document_ids=document_ids,
@@ -188,6 +225,32 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "required": ["name_or_query"],
         },
         handler=_search_documents,
+        risk_tier=RiskTier.T0,
+        read_only=True,
+    ),
+    ToolDefinition(
+        name="list_documents",
+        description=(
+            "List the documents the user can access — their own uploads and any "
+            "shared with them — without needing a search term. Use this to answer "
+            "questions like 'what documents do I have access to' or to show the "
+            "user what is available. Returns document names with their ids (each "
+            "usable with get_document). The list is capped; to find one specific "
+            "document by name, use search_documents instead."
+        ),
+        json_schema={
+            "type": "object",
+            "properties": {
+                "k": {
+                    "type": "integer",
+                    "description": "Maximum number of documents to list (1-50).",
+                    "minimum": 1,
+                    "maximum": _LIST_MAX,
+                },
+            },
+            # No required args — enumeration needs no query.
+        },
+        handler=_list_documents,
         risk_tier=RiskTier.T0,
         read_only=True,
     ),

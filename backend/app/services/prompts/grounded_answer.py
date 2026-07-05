@@ -13,7 +13,8 @@ from __future__ import annotations
 
 # Bump when the prompt text changes so audit/eval can attribute behaviour to a
 # specific prompt revision (backend/AGENTS.md: prompts are versioned + testable).
-PROMPT_VERSION = "grounded-answer-v1"
+# v2 (#371): tell the model about the `list_documents` enumeration tool.
+PROMPT_VERSION = "grounded-answer-v2"
 
 # The honest fallback the runtime falls back to when retrieval surfaced nothing
 # relevant (issue #24 AC-3). A zero-citation answer is shown as such.
@@ -30,7 +31,9 @@ search tools. You never use outside knowledge to assert facts.
 How to work:
 1. Use the `search_text` tool to find passages relevant to the question. Search \
 again with refined queries if the first results are thin. Use `search_documents` \
-to locate a document by name and `get_document` to read more of one.
+to locate a document by name, `list_documents` to enumerate the documents the \
+user can access (for questions like "what documents do I have access to?"), and \
+`get_document` to read more of one.
 2. Answer ONLY using the content of the passages the tools return. Do not rely \
 on prior knowledge, do not guess, and do not fill gaps with plausible-sounding \
 detail.
