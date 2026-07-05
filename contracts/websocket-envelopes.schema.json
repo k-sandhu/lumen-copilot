@@ -139,7 +139,7 @@
         "callId": { "type": "string" },
         "tool": {
           "type": "string",
-          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended). MVP tools: search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; get_document = fetch a permitted document's text."
+          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended). MVP retrieval tools: search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; list_documents = enumerate the documents the user can access (no query); get_document = fetch a permitted document's text."
         },
         "args": { "type": "object", "description": "Tool arguments (shape per tool)." }
       }

@@ -153,12 +153,17 @@ async def _call(session: AsyncSession, principal: Principal, name: str, args: di
 # --- Registry discovery + governance metadata (AC-1) ------------------------
 
 
-def test_registry_discovers_the_three_retrieval_tools() -> None:
-    assert {"search_text", "search_documents", "get_document"} <= registered_names()
+_RETRIEVAL_TOOLS = frozenset(
+    {"search_text", "search_documents", "list_documents", "get_document"}
+)
+
+
+def test_registry_discovers_the_retrieval_tools() -> None:
+    assert _RETRIEVAL_TOOLS <= registered_names()
 
 
 def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
-    for name in ("search_text", "search_documents", "get_document"):
+    for name in _RETRIEVAL_TOOLS:
         defn = get_tool(name)
         assert defn.risk_tier is RiskTier.T0
         assert defn.read_only is True
@@ -166,17 +171,20 @@ def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
 
 
 def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
-    # Ad-hoc chat's default allow-list = the three read-only retrieval tools.
-    assert default_allowlist() == frozenset({"search_text", "search_documents", "get_document"})
+    # Ad-hoc chat's default allow-list = the read-only retrieval tools, now four:
+    # list_documents (T0/read-only/default_offered) auto-joins on discovery (#371).
+    assert default_allowlist() == _RETRIEVAL_TOOLS
 
 
 def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
     specs = tool_specs(default_allowlist())
     names = {s.name for s in specs}
-    assert names == {"search_text", "search_documents", "get_document"}
+    assert names == _RETRIEVAL_TOOLS
     # Each spec carries the JSON-Schema parameters the model fills in.
     by_name = {s.name: s for s in specs}
     assert by_name["search_text"].parameters["required"] == ["query"]
+    # list_documents is a pure enumeration — no required args (no query needed).
+    assert by_name["list_documents"].parameters.get("required", []) == []
 
 
 # --- search_documents -------------------------------------------------------
@@ -211,6 +219,40 @@ async def test_search_documents_blank_query_returns_nothing(
     )
     assert result.hit_count == 0
     assert result.ok is True
+
+
+# --- list_documents (enumeration, INV-1/INV-2) ------------------------------
+
+
+async def test_list_documents_returns_only_callers_docs(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "list_documents",
+        {},  # no args — enumeration needs no query
+    )
+    # Alice sees only her own doc — never Bob's (same tenant) or Carol's (other).
+    assert world.alice_doc in result.document_ids
+    assert world.bob_doc not in result.document_ids
+    assert world.carol_doc not in result.document_ids
+    assert result.hit_count == 1
+    assert result.ok is True
+    assert "alice-taxes.txt" in result.content
+
+
+async def test_list_documents_empty_when_user_has_no_docs(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    # A principal in the tenant who owns nothing and was granted nothing.
+    stranger = _principal(uuid.uuid4(), world.tenant_a)
+    result = await _call(session, stranger, "list_documents", {})
+    assert result.hit_count == 0
+    assert result.ok is True  # "nothing here" is not an error
+    assert "don't have access" in result.content.lower()
 
 
 # --- get_document (INV-2 existence non-disclosure) --------------------------

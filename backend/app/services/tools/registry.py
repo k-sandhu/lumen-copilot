@@ -92,7 +92,7 @@ def all_tools() -> tuple[ToolDefinition, ...]:
 def default_allowlist() -> frozenset[str]:
     """The default per-run allow-list for ad-hoc chat (issue #207 §2).
 
-    The three read-only retrieval tools every ad-hoc chat session gets when no
+    The read-only retrieval tools every ad-hoc chat session gets when no
     assistant/session-specific allow-list is configured (E1 ``tool_allowlist``).
     Kept as the registered read-only, T0, **default-offered** tools — so a newly
     added tool that is off-by-default and admin/assistant-gated (``web_search``,

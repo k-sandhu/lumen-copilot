@@ -278,6 +278,155 @@ async def test_collection_grant_cascades_to_its_documents(
 
 
 # ---------------------------------------------------------------------------
+# list_documents enumeration honours the same owner-or-grant filter (#371).
+# ---------------------------------------------------------------------------
+
+
+async def test_list_documents_includes_owned_and_granted(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-2: ``list_documents`` returns a user's owned docs + docs granted to them.
+
+    Before any grant, B's list is only their own document (deny-by-default); after
+    an explicit document grant, it is their own plus the granted one — and never
+    A's still-private document. The owner sees both of their own throughout.
+    """
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_a, "b@x.test")
+    _coll_a, doc_a_shared = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a-shared.txt", chunk_texts=["a"]
+    )
+    _coll_a2, doc_a_private = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a-private.txt", chunk_texts=["a2"]
+    )
+    _coll_b, doc_b_own = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_b, filename="b-own.txt", chunk_texts=["b"]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+
+    before = await svc.list_documents(principal=_principal(user_b, tenant_a))
+    assert {m.document_id for m in before} == {doc_b_own}
+
+    await _grants_service(
+        session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,)
+    ).create_grant(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a_shared, principal_id=user_b
+    )
+
+    after = await svc.list_documents(principal=_principal(user_b, tenant_a))
+    assert {m.document_id for m in after} == {doc_b_own, doc_a_shared}
+    assert doc_a_private not in {m.document_id for m in after}
+
+    owner = await svc.list_documents(principal=_principal(user_a, tenant_a))
+    assert {m.document_id for m in owner} == {doc_a_shared, doc_a_private}
+
+
+async def test_list_documents_honors_collection_grant_cascade(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-2: a **collection** grant cascades — every doc in it appears in B's list."""
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_a, "b@x.test")
+    coll_a, doc1 = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="one.txt", chunk_texts=["one"]
+    )
+    _c, doc2 = await _make_document(
+        session,
+        tenant_id=tenant_a,
+        owner_id=user_a,
+        filename="two.txt",
+        chunk_texts=["two"],
+        collection_id=coll_a,
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+
+    await _grants_service(
+        session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,)
+    ).create_grant(
+        resource_type=GrantResourceType.COLLECTION, resource_id=coll_a, principal_id=user_b
+    )
+    listed = await svc.list_documents(principal=_principal(user_b, tenant_a))
+    assert {m.document_id for m in listed} == {doc1, doc2}
+
+
+async def test_list_documents_excludes_other_tenant(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-1: a user's list never includes another tenant's documents."""
+    tenant_a, tenant_b = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_b, "b@y.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a.txt", chunk_texts=["a"]
+    )
+    _coll_b, doc_b = await _make_document(
+        session, tenant_id=tenant_b, owner_id=user_b, filename="b.txt", chunk_texts=["b"]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    listed = await svc.list_documents(principal=_principal(user_b, tenant_b))
+    ids = {m.document_id for m in listed}
+    assert ids == {doc_b}
+    assert doc_a not in ids
+
+
+async def test_list_documents_excludes_revoked_grant(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-2: a revoked grant drops the doc from the grantee's list again (deny restored)."""
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_a, "b@x.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="report.txt", chunk_texts=["r"]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    grants = _grants_service(session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,))
+
+    await grants.create_grant(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a, principal_id=user_b
+    )
+    assert doc_a in {
+        m.document_id for m in await svc.list_documents(principal=_principal(user_b, tenant_a))
+    }
+
+    await grants.revoke_grant(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a, principal_id=user_b
+    )
+    # Revoked → gone from B's list (B owns nothing else, so the list is empty again).
+    assert await svc.list_documents(principal=_principal(user_b, tenant_a)) == []
+
+
+async def test_list_documents_ignores_cross_tenant_grant(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-1/INV-2: a grant minted in tenant A cannot surface A's doc in a tenant-B list.
+
+    Enumeration is the highest-signal leak surface (no query filter), so it carries
+    its own regression: a grant on A's document to a principal id equal to ``user_b``
+    but **recorded in tenant A** must not make a tenant-B principal's list include it.
+    """
+    tenant_a, tenant_b = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_b, "b@y.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a-only.txt", chunk_texts=["a"]
+    )
+    await GrantRepository(session, tenant_a).create(
+        resource_type=GrantResourceType.DOCUMENT,
+        resource_id=doc_a,
+        principal_type=GrantPrincipalType.USER,
+        principal_id=user_b,
+        role=GrantRole.VIEWER,
+        granted_by=user_a,
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    # user_b is in tenant B; the doc and grant are in tenant A → not in B's list.
+    assert await svc.list_documents(principal=_principal(user_b, tenant_b)) == []
+
+
+# ---------------------------------------------------------------------------
 # Negative: un-granted excluded; revoked excludes again; cross-tenant denied.
 # ---------------------------------------------------------------------------
 
@@ -829,12 +978,12 @@ async def test_live_hybrid_search_honors_grant() -> None:
 
 @_live
 async def test_live_agent_tools_share_owner_or_grant_path() -> None:
-    """The three agent tools agree on owner-or-grant (ADR-0010 slice 4, #192).
+    """The agent tools agree on owner-or-grant (ADR-0010 slice 4, #192; #371).
 
-    ``search_text`` runs on OpenSearch; ``search_documents`` / ``get_document``
-    stay relational. This proves all three apply the **identical** permission
-    predicate — a document owned by the caller **or** granted to them, directly
-    **or via a grant on its collection** (the cascade).
+    ``search_text`` runs on OpenSearch; ``search_documents`` / ``list_documents`` /
+    ``get_document`` stay relational. This proves all four apply the **identical**
+    permission predicate — a document owned by the caller **or** granted to them,
+    directly **or via a grant on its collection** (the cascade).
 
     Owner A has three matching documents, one per collection:
 
@@ -845,7 +994,7 @@ async def test_live_agent_tools_share_owner_or_grant_path() -> None:
     For grantee B, every tool returns exactly {doc1, doc2} and never doc3; the
     owner sees all three; a foreign-tenant user sees none — so the agent surface
     can never disagree about what B may read (the #181 consistency, across all
-    three tools and both grant kinds).
+    four tools and both grant kinds).
     """
     from sqlalchemy import text as sql_text
     from sqlalchemy.ext.asyncio import create_async_engine as _create
@@ -975,23 +1124,30 @@ async def test_live_agent_tools_share_owner_or_grant_path() -> None:
             matches = await svc.search_documents(principal=grantee_p, name_or_query="quarterly")
             assert {m.document_id for m in matches} == {doc1, doc2}
 
+            # list_documents (relational, no query): the same two, never doc3.
+            listed = await svc.list_documents(principal=grantee_p)
+            assert {m.document_id for m in listed} == {doc1, doc2}
+
             # get_document (relational): granted -> text; non-granted -> None.
             assert await svc.get_document(principal=grantee_p, document_id=doc1) is not None
             assert await svc.get_document(principal=grantee_p, document_id=doc2) is not None
             assert await svc.get_document(principal=grantee_p, document_id=doc3) is None
 
-            # Owner sees all three across the same three tools.
+            # Owner sees all three documents across the same four tools.
             owner_p = _principal(owner.id, tenant)
             owner_passages = await svc.search_text(principal=owner_p, query=query_text, k=10)
             assert {p.document_id for p in owner_passages} == {doc1, doc2, doc3}
             owner_matches = await svc.search_documents(principal=owner_p, name_or_query="quarterly")
             assert {m.document_id for m in owner_matches} == {doc1, doc2, doc3}
+            owner_listed = await svc.list_documents(principal=owner_p)
+            assert {m.document_id for m in owner_listed} == {doc1, doc2, doc3}
             assert await svc.get_document(principal=owner_p, document_id=doc3) is not None
 
             # A foreign-tenant user sees nothing from any tool (INV-1).
             outsider_p = _principal(outsider.id, foreign_tenant)
             assert await svc.search_text(principal=outsider_p, query=query_text, k=10) == []
             assert await svc.search_documents(principal=outsider_p, name_or_query="quarterly") == []
+            assert await svc.list_documents(principal=outsider_p) == []
             assert await svc.get_document(principal=outsider_p, document_id=doc1) is None
     finally:
         import httpx as _httpx

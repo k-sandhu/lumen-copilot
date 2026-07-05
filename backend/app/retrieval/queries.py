@@ -307,6 +307,37 @@ async def document_search(
     return [DocumentRow(document_id=did, document_name=name) for did, name in result.all()]
 
 
+async def list_documents(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    k: int,
+) -> list[DocumentRow]:
+    """Return the permitted documents for a principal, no query (the ``list_documents`` tool).
+
+    The enumeration counterpart of :func:`document_search`: the identical
+    permission predicate (tenant + ownership-or-grant, with the collection-grant
+    cascade — INV-1/INV-2) but **without** a filename filter, so it answers "what
+    documents can I access" rather than "which match this name". Permitted = owned
+    by the requester **or** explicitly granted to them (directly or via the
+    document's collection). Ordered by filename for a stable list; ``k`` caps the
+    count (the service clamps it to a safe ceiling) so a large corpus can never
+    turn into an unbounded scan. A principal with no owned/granted documents yields
+    an empty list.
+    """
+    stmt = (
+        select(models.Document.id, models.Document.filename)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            _document_permitted(allow_set),
+        )
+        .order_by(models.Document.filename.asc(), models.Document.id.asc())
+        .limit(k)
+    )
+    result = await session.execute(stmt)
+    return [DocumentRow(document_id=did, document_name=name) for did, name in result.all()]
+
+
 async def load_document_text(
     session: AsyncSession,
     *,

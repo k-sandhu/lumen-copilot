@@ -39,6 +39,11 @@ export const KNOWN_TOOLS: readonly ToolOption[] = [
     description: 'Semantic retrieval over the assistant’s permitted documents.',
   },
   {
+    name: 'list_documents',
+    label: 'List documents',
+    description: 'Enumerate the documents the assistant can access (no search term needed).',
+  },
+  {
     name: 'get_document',
     label: 'Read document',
     description: 'Fetch the full text of a permitted document by id for grounding.',

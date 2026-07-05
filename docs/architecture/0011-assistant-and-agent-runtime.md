@@ -44,7 +44,7 @@ Two new tenant/owner-scoped tables in `backend/app/db/` (models + repositories; 
 | `instructions` | text, nullable | the system-prompt text injected at run time |
 | `model` | text, **nullable** | a model id from the `/models` registry; `NULL` ⇒ the smart server default, resolved fail-closed at run time exactly like `user_preferences.default_model` |
 | `knowledge_scope` | jsonb, non-null, default `{}` | `{ collection_ids: uuid[], source_ids: uuid[], modes: (company\|uploaded\|web\|model)[] }` — the retrieval filter (a *narrowing* set, §2) |
-| `tool_allowlist` | jsonb (string[]), non-null, default `[]` | tool names the run may use; the CC-A allowed-tool set. `[]` ⇒ the ad-hoc default set (the three retrieval tools) until CC-A lands, then the registry default |
+| `tool_allowlist` | jsonb (string[]), non-null, default `[]` | tool names the run may use; the CC-A allowed-tool set. `[]` ⇒ the ad-hoc default set (the read-only retrieval tools) until CC-A lands, then the registry default |
 | `autonomy_level` | enum, non-null, default `suggest` | `suggest \| draft \| act_with_approval \| act_auto` (§3) |
 | `status` | enum, non-null, default `draft` | `draft \| published \| disabled` |
 | `created_at`, `updated_at` | timestamptz | `TimestampMixin` |
