@@ -18,7 +18,8 @@ Composition (the adapter wires four collaborators, none of which it *is*):
 * the SQLAlchemy async session + :mod:`app.retrieval.queries` for **hydration**
   (every ranked hit is re-read and permission-re-checked against Postgres, the
   source of truth, before becoming a citable passage — defense in depth) and
-  for the relational agent tools (``search_documents`` / ``get_document``);
+  for the relational agent tools (``search_documents`` / ``list_documents`` /
+  ``get_document``);
 * the #36 ``llm/`` gateway ``embed()`` to embed the query (bge-m3) — the only
   model caller (ADR-0004); the gateway is injected so the service is testable
   with a fake and never imports LiteLLM.
@@ -316,10 +317,11 @@ class RetrievalService:
         **or** explicitly granted to them (directly, or via a grant on its
         collection — the cascade). This is the identical owner-or-grant predicate
         the engine-backed :meth:`search`/:meth:`search_text` and the relational
-        :meth:`search_documents` use (``queries._document_permitted``), so the
-        three agent tools never disagree about what the caller may read (the
-        consistency #181 established, proven across all three in the live parity
-        test). A document that is missing, in another tenant, or neither owned nor
+        :meth:`search_documents`/:meth:`list_documents` use
+        (``queries._document_permitted``), so the agent tools never disagree about
+        what the caller may read (the consistency #181 established, proven across
+        all four in the live parity test). A document that is missing, in another
+        tenant, or neither owned nor
         granted yields ``None`` — the runtime treats that as "not found"
         (existence non-disclosure, INV-2; never reveals a foreign document
         exists).

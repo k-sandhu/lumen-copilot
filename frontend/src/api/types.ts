@@ -1406,7 +1406,12 @@ export interface ChatCitation {
  * citations (#221). An unknown/renamed tool still arrives as a string and the UI
  * falls back to a generic label (see ToolActivity).
  */
-export type ChatTool = 'search_text' | 'search_documents' | 'get_document' | 'web_search';
+export type ChatTool =
+  | 'search_text'
+  | 'search_documents'
+  | 'list_documents'
+  | 'get_document'
+  | 'web_search';
 
 /** `event.data` for name=tool_call — the agent invoked a retrieval tool. */
 export interface ChatToolCall {

@@ -371,6 +371,61 @@ async def test_list_documents_excludes_other_tenant(
     assert doc_a not in ids
 
 
+async def test_list_documents_excludes_revoked_grant(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-2: a revoked grant drops the doc from the grantee's list again (deny restored)."""
+    tenant_a, _ = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_a, "b@x.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="report.txt", chunk_texts=["r"]
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    grants = _grants_service(session, tenant_id=tenant_a, owner_id=user_a, roles=(Role.MEMBER,))
+
+    await grants.create_grant(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a, principal_id=user_b
+    )
+    assert doc_a in {
+        m.document_id for m in await svc.list_documents(principal=_principal(user_b, tenant_a))
+    }
+
+    await grants.revoke_grant(
+        resource_type=GrantResourceType.DOCUMENT, resource_id=doc_a, principal_id=user_b
+    )
+    # Revoked → gone from B's list (B owns nothing else, so the list is empty again).
+    assert await svc.list_documents(principal=_principal(user_b, tenant_a)) == []
+
+
+async def test_list_documents_ignores_cross_tenant_grant(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-1/INV-2: a grant minted in tenant A cannot surface A's doc in a tenant-B list.
+
+    Enumeration is the highest-signal leak surface (no query filter), so it carries
+    its own regression: a grant on A's document to a principal id equal to ``user_b``
+    but **recorded in tenant A** must not make a tenant-B principal's list include it.
+    """
+    tenant_a, tenant_b = two_tenants
+    user_a = await _make_user(session, tenant_a, "a@x.test")
+    user_b = await _make_user(session, tenant_b, "b@y.test")
+    _coll, doc_a = await _make_document(
+        session, tenant_id=tenant_a, owner_id=user_a, filename="a-only.txt", chunk_texts=["a"]
+    )
+    await GrantRepository(session, tenant_a).create(
+        resource_type=GrantResourceType.DOCUMENT,
+        resource_id=doc_a,
+        principal_type=GrantPrincipalType.USER,
+        principal_id=user_b,
+        role=GrantRole.VIEWER,
+        granted_by=user_a,
+    )
+    svc = RetrievalService(session, gateway=_FakeGateway())
+    # user_b is in tenant B; the doc and grant are in tenant A → not in B's list.
+    assert await svc.list_documents(principal=_principal(user_b, tenant_b)) == []
+
+
 # ---------------------------------------------------------------------------
 # Negative: un-granted excluded; revoked excludes again; cross-tenant denied.
 # ---------------------------------------------------------------------------
@@ -1078,7 +1133,7 @@ async def test_live_agent_tools_share_owner_or_grant_path() -> None:
             assert await svc.get_document(principal=grantee_p, document_id=doc2) is not None
             assert await svc.get_document(principal=grantee_p, document_id=doc3) is None
 
-            # Owner sees all three across the same three tools.
+            # Owner sees all three documents across the same four tools.
             owner_p = _principal(owner.id, tenant)
             owner_passages = await svc.search_text(principal=owner_p, query=query_text, k=10)
             assert {p.document_id for p in owner_passages} == {doc1, doc2, doc3}

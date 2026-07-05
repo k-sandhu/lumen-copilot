@@ -135,12 +135,14 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
     lines = [f"- {m.document_name} (id: {m.document_id})" for m in matches]
     document_ids = tuple(m.document_id for m in matches)
     content = "Documents you can access:\n" + "\n".join(lines)
-    # No silent truncation: if the reply hit the cap, say so, so the model offers
-    # to narrow rather than implying this is the whole set. A false positive at
-    # exactly ``_LIST_MAX`` documents is acceptable.
-    if len(matches) >= _LIST_MAX:
+    # No silent truncation: when the result fills the requested limit there may be
+    # more, so say so — the model then offers to narrow rather than implying this is
+    # the whole set. Keyed off the effective limit ``k`` (not the hard ``_LIST_MAX``)
+    # so the hint still fires when the model asks for fewer than the cap. A false
+    # positive at exactly ``k`` accessible documents is acceptable.
+    if len(matches) >= k:
         content += (
-            f"\n\n(Showing the first {_LIST_MAX}; there may be more — narrow with "
+            f"\n\n(Showing the first {k}; there may be more — narrow with "
             "search_documents using a filename or keyword.)"
         )
     return ToolHandlerResult(

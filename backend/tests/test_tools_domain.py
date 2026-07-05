@@ -7,7 +7,7 @@ Pure, zero-I/O checks that the governance metadata is **structural**, not prose:
   (T2/T3) tool MUST require approval (INV-7 by construction).
 * :class:`~app.domain.tools.ToolResult` enforces the ``ok`` XOR ``error``
   invariant so a persisted row is never ambiguous (issue #207 §4).
-* AC-1: the registry auto-discovers the three retrieval tools and adding one is a
+* AC-1: the registry auto-discovers the retrieval tools and adding one is a
   new file in ``impls/`` (no include-list edit) — asserted via the discovery scan.
 * AC-N (architecture): the ONLY tool-invocation path is the runner — the chat
   runtime no longer calls a per-tool ``run_tool``; it goes through ``ToolRunner``.
@@ -129,7 +129,8 @@ def test_tool_result_failure_factory_sets_error() -> None:
 
 
 def test_registry_discovers_retrieval_tools() -> None:
-    assert {"search_text", "search_documents", "get_document"} <= registered_names()
+    expected = {"search_text", "search_documents", "list_documents", "get_document"}
+    assert expected <= registered_names()
     # ``all_tools`` is deterministically ordered by name.
     names = [t.name for t in all_tools()]
     assert names == sorted(names)

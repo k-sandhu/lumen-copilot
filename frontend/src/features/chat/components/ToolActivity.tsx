@@ -11,6 +11,7 @@ import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
 const TOOL_LABEL: Record<ChatTool, string> = {
   search_text: 'Searching documents',
   search_documents: 'Looking up documents',
+  list_documents: 'Listing documents',
   get_document: 'Reading a document',
   web_search: 'Searching the web',
 };
