@@ -65,6 +65,12 @@ class AuditAction(str, enum.Enum):
     # T1 action (spec 0004 §2.5 — "authorized owner; audited; no extra approval"):
     # an admin sets or clears the tenant's logo, audited like every /admin write.
     TENANT_BRANDING_UPDATED = "tenant.branding_updated"
+    # Per-user profile avatar. Additive to the §2.4 taxonomy — deny-by-default is
+    # preserved (the set only grows). A reversible action a user takes on their OWN
+    # account (not admin-gated): setting or clearing their avatar, audited like every
+    # consequential account change (INV-6). The object key itself is not audited (it is
+    # derivable and not security-relevant) — only that the action ran and who ran it.
+    USER_AVATAR_UPDATED = "user.avatar_updated"
     # Per-tenant secrets vault (issue #209). Additive to the §2.4 taxonomy —
     # deny-by-default is preserved (the set only grows). Credential handling is a
     # single-chokepoint concern like auth/audit: storing, *reading* (which

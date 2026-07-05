@@ -25,6 +25,7 @@ from app.db.repositories import (
     LlmProviderRepository,
     MessageRepository,
     TenantRepository,
+    UserPreferenceRepository,
     UserRepository,
 )
 from app.domain.entities import LlmProviderStatus, MessageRole, Role
@@ -333,6 +334,44 @@ async def test_send_persists_user_message_and_returns_stream_id(
     assert owner is not None
     assert owner.owner_id == world.alice
     assert owner.tenant_id == world.tenant_a
+
+
+async def test_send_threads_users_custom_instructions(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """The asking user's stored custom instructions ride the SendResult to the runtime."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        # Alice sets custom instructions on her own preferences row.
+        await UserPreferenceRepository(session, world.tenant_a).set_custom_instructions(
+            world.alice, "You are Alice's assistant."
+        )
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        await session.commit()
+        result = await svc.send_message(
+            created.session.id, content="hi", model=None, backplane=InMemoryBackplane()
+        )
+        await session.commit()
+    assert result is not None
+    assert result.custom_instructions == "You are Alice's assistant."
+
+
+async def test_send_without_preferences_has_no_custom_instructions(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """A user with no preferences row sends with custom_instructions=None (ad-hoc)."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        await session.commit()
+        result = await svc.send_message(
+            created.session.id, content="hi", model=None, backplane=InMemoryBackplane()
+        )
+        await session.commit()
+    assert result is not None
+    assert result.custom_instructions is None
 
 
 async def test_send_unknown_model_is_422_before_persist(

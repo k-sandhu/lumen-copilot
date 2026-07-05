@@ -826,3 +826,83 @@ async def test_ad_hoc_session_never_wires_run_python_seam(ctx: _Ctx) -> None:
     )
     # The factory was NEVER invoked — no execution plumbing on a path that can't use it.
     assert factory.contexts == []
+
+
+# ---------------------------------------------------------------------------
+# Custom-instructions injection (user settings) — composed BEFORE grounding.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingGateway:
+    """A gateway that records the ``messages`` of the first ``stream_tools`` call.
+
+    Answers in a single tool-free turn so the run reaches the model exactly once with
+    the composed system prompt as ``messages[0]`` — which the test inspects to assert
+    the custom-instructions → grounding ordering.
+    """
+
+    def __init__(self) -> None:
+        self.system_prompt: str | None = None
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if self.system_prompt is None and isinstance(messages, list) and messages:
+            # The runtime places the composed system prompt as the first ChatMessage.
+            self.system_prompt = messages[0].content
+        yield StreamEvent(text="ok")
+        yield StreamEvent(finish_reason="stop")
+
+
+async def test_custom_instructions_prepended_before_grounding(ctx: _Ctx) -> None:
+    """The user's custom instructions lead the system prompt; grounding still follows."""
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+
+    gateway = _CapturingGateway()
+    backplane = InMemoryBackplane()
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    instructions = "You are Alice's tax assistant. Always be concise."
+    await runtime.run(
+        stream_id=uuid.uuid4().hex,
+        session_id=ctx.session_id,
+        question="hello",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        custom_instructions=instructions,
+    )
+
+    prompt = gateway.system_prompt
+    assert prompt is not None
+    # The custom instructions appear …
+    assert instructions in prompt
+    # … AND the grounding contract still follows (INV-3 preserved) …
+    assert GROUNDED_SYSTEM_PROMPT in prompt
+    # … in that order (instructions first, then grounding).
+    assert prompt.index(instructions) < prompt.index(GROUNDED_SYSTEM_PROMPT)
+
+
+async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> None:
+    """Ad-hoc chat with no custom instructions uses the grounded prompt unchanged."""
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+
+    gateway = _CapturingGateway()
+    backplane = InMemoryBackplane()
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=uuid.uuid4().hex,
+        session_id=ctx.session_id,
+        question="hello",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        custom_instructions=None,
+    )
+    assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT

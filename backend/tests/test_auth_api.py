@@ -121,6 +121,7 @@ async def test_me_returns_current_user_after_login(client: AsyncClient) -> None:
         "roles",
         "created_at",
         "logo_url",
+        "avatar_url",
     }
     assert body["email"] == _DEV_EMAIL
     # The human-readable tenant name (the tenants.name column) rides alongside the
@@ -129,6 +130,8 @@ async def test_me_returns_current_user_after_login(client: AsyncClient) -> None:
     assert body["roles"] == ["member"]
     # A fresh tenant has no logo → null (the shell renders the default brand mark).
     assert body["logo_url"] is None
+    # A fresh user has no avatar → null (the shell renders the initials fallback).
+    assert body["avatar_url"] is None
 
 
 async def test_refresh_rotates_and_old_token_is_rejected(app: FastAPI, client: AsyncClient) -> None:

@@ -584,6 +584,10 @@ class User:
     roles: tuple[Role, ...]
     created_at: datetime
     updated_at: datetime
+    # Per-user profile avatar (object-store key); ``None`` ⇒ the shell renders the
+    # initials fallback. The user manages their own; the shell reads a presigned GET
+    # URL delivered on ``GET /auth/me`` (mirrors the tenant ``logo_key``, but per-user).
+    avatar_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,6 +869,9 @@ class UserPreferences:
     tenant_id: UUID
     user_id: UUID
     default_model: str | None
+    # A per-user free-text instruction prepended to the chat system prompt; ``None``
+    # ⇒ none. Composed before the grounding contract at chat time (INV-3 preserved).
+    custom_instructions: str | None
     created_at: datetime
     updated_at: datetime
 

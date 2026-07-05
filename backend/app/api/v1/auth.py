@@ -85,6 +85,10 @@ class CurrentUserResponse(BaseModel):
     # none is set (the shell then renders the default brand mark). Per-tenant
     # branding — the same for every user of the tenant (admin uploads it).
     logo_url: str | None = None
+    # The caller's own profile avatar as a short-TTL presigned GET URL, or null when
+    # none is set (the shell then renders the initials fallback). Per-user — the user
+    # uploads it for their own account (PUT /me/avatar).
+    avatar_url: str | None = None
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -201,8 +205,10 @@ async def get_current_user(
     the email + ``created_at`` and the tenant row for ``tenant_name`` (so the UI
     never has to surface the raw tenant UUID, #247) and the per-tenant application
     ``logo_key``. When a logo is set, we mint a short-TTL presigned GET URL for the
-    shell to render (else ``logo_url`` is null → the default brand mark). A token
-    whose subject no longer exists is treated as unauthenticated (401).
+    shell to render (else ``logo_url`` is null → the default brand mark). The user's
+    own ``avatar_key`` is presigned the same way into ``avatar_url`` (null → the shell
+    renders the initials fallback). A token whose subject no longer exists is treated
+    as unauthenticated (401).
 
     Depends on ``CurrentTenant`` (not just the principal's ``tenant_id``) so the
     RLS GUC is bound on this request session before the tenant-scoped read (#17);
@@ -219,6 +225,13 @@ async def get_current_user(
         if tenant.logo_key is not None
         else None
     )
+    # The caller's own profile avatar, presigned the same way (per-user, not
+    # per-tenant): null when unset → the shell renders the initials fallback.
+    avatar_url = (
+        await object_store.presign_get(str(tenant_id), user.avatar_key)
+        if user.avatar_key is not None
+        else None
+    )
     return CurrentUserResponse(
         id=str(user.id),
         email=user.email,
@@ -227,4 +240,5 @@ async def get_current_user(
         roles=[r.value for r in user.roles],
         created_at=user.created_at,
         logo_url=logo_url,
+        avatar_url=avatar_url,
     )

@@ -537,6 +537,7 @@ def _schedule_answer(
             history=history,
             collection_ids=collection_ids,
             assistant_config=result.assistant_config,
+            custom_instructions=result.custom_instructions,
         )
 
     tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks

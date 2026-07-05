@@ -61,6 +61,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # Admin per-tenant application logo (branding) — additive; an admin sets or
         # clears the tenant's shell logo, a reversible T1 action audited (INV-6).
         "tenant.branding_updated",
+        # Per-user profile avatar (user settings) — additive; a user sets or clears
+        # their OWN avatar, a reversible account action audited (INV-6). Not
+        # admin-gated: it only ever touches the caller's own row.
+        "user.avatar_updated",
         # Per-tenant secrets vault (issue #209) — additive; store/access/delete of
         # an encrypted credential. ``secret.accessed`` records who/what read it,
         # never the value (mission filter #4 "auditable").

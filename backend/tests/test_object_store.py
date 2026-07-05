@@ -31,6 +31,7 @@ from app.storage.keys import (
     assert_artifact_key_owned_by,
     assert_key_owned_by,
     build_artifact_key,
+    build_avatar_key,
     build_key,
     safe_filename,
     sha256_hex,
@@ -121,6 +122,32 @@ def test_build_artifact_key_rejects_unsafe_tenant_id() -> None:
 
 def test_build_artifact_key_sanitizes_filename() -> None:
     key = build_artifact_key("t", b"x", "../../etc/passwd")
+    assert key.endswith("/passwd")
+    assert ".." not in key
+
+
+def test_build_avatar_key_is_tenant_and_user_prefixed_and_content_addressed() -> None:
+    data = b"avatar bytes"
+    key = build_avatar_key("tenant-a", "user-1", data, "me.png")
+    # {tenant_id}/{user_id}/{sha}/{name} — the tenant prefix is the isolation seam,
+    # the user_id segment scopes it to the owning user.
+    assert key == f"tenant-a/user-1/{sha256_hex(data)}/me.png"
+    # The generic tenant-prefix seam still applies (retrieval reuses presign_get).
+    assert_key_owned_by(key, "tenant-a")
+    with pytest.raises(ForbiddenError):
+        assert_key_owned_by(key, "tenant-b")
+
+
+def test_build_avatar_key_rejects_unsafe_tenant_or_user_id() -> None:
+    for bad in ["../other", "a/b", "", ".", "/abs"]:
+        with pytest.raises(ValidationError):
+            build_avatar_key(bad, "user-1", b"x", "f.png")
+        with pytest.raises(ValidationError):
+            build_avatar_key("tenant-a", bad, b"x", "f.png")
+
+
+def test_build_avatar_key_sanitizes_filename() -> None:
+    key = build_avatar_key("t", "u", b"x", "../../etc/passwd")
     assert key.endswith("/passwd")
     assert ".." not in key
 

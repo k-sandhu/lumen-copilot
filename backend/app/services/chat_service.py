@@ -103,6 +103,9 @@ class SendResult:
     and uses ``stream_id`` / ``model`` / ``history`` to launch the answer runtime.
     ``assistant_config`` is the assembled run config when the session is pinned to
     an assistant version (ADR-0011 §2), else ``None`` (ad-hoc chat).
+    ``custom_instructions`` is the asking user's per-account preamble (from their
+    preferences, resolved here where the principal + session are already held); the
+    runtime prepends it to the system prompt before the grounding contract.
     """
 
     user_message: Message
@@ -110,6 +113,7 @@ class SendResult:
     model: str
     history: tuple[Message, ...]
     assistant_config: AssistantRunConfig | None = None
+    custom_instructions: str | None = None
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -408,6 +412,13 @@ class ChatService:
         # knowledge_scope → the narrowing retrieval filter. Load the exact pinned
         # version so the run is reproducible even after the assistant is edited.
         assistant_config = await self._load_assistant_config(session.assistant_version_id)
+        # The asking user's per-account custom instructions (spec: user settings). Read
+        # from THEIR preferences row (tenant-scoped, keyed off the resolved owner — never
+        # request input); threaded to the runtime, which prepends it to the system prompt
+        # before the grounding contract. A fresh user / cleared value is ``None`` (ad-hoc
+        # chat, unchanged). Resolved here where the principal + session are already held,
+        # not inside the gateway.
+        custom_instructions = await self._resolve_custom_instructions()
         prior = await self._messages.list_for_session(session_id)
         user_message = await self._messages.add(
             session_id=session_id,
@@ -427,7 +438,20 @@ class ChatService:
             model=resolved_model,
             history=tuple(prior[-_HISTORY_TURNS:]),
             assistant_config=assistant_config,
+            custom_instructions=custom_instructions,
         )
+
+    async def _resolve_custom_instructions(self) -> str | None:
+        """The asking user's stored custom instructions for this turn, or ``None``.
+
+        Reads the caller's own preferences row (tenant-scoped repository, keyed off
+        the resolved ``owner_id``). A fresh user (no row) or a cleared value yields
+        ``None`` — the runtime then composes the system prompt exactly as ad-hoc chat.
+        """
+        prefs = await self._prefs.get(self._owner_id)
+        if prefs is None:
+            return None
+        return prefs.custom_instructions
 
     async def _load_assistant_config(
         self, assistant_version_id: UUID | None

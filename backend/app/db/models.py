@@ -130,6 +130,12 @@ class User(TenantScopedMixin, TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     # RBAC roles (spec 0004 §2.3); a string array — empty = no privileges.
     roles: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
+    # Per-user profile avatar (object-store key); NULL ⇒ the initials fallback in the
+    # shell. Keyed ``{tenant_id}/{user_id}/{sha}/{filename}`` — the tenant prefix is
+    # the isolation seam, the user_id segment scopes it to the owning user. The user
+    # manages their OWN avatar (not admin-gated); the shell renders it via a presigned
+    # GET URL delivered on ``GET /auth/me``.
+    avatar_key: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
 
 class RefreshToken(TenantScopedMixin, Base):
@@ -361,6 +367,11 @@ class UserPreference(TenantScopedMixin, TimestampMixin, Base):
         index=True,
     )
     default_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # A per-user free-text instruction prepended to the chat system prompt (the
+    # user's persona/preamble). NULL ⇒ no custom instructions. Capped in the wire
+    # model (422 over-limit); composed BEFORE the grounding contract at chat time so
+    # it can shape tone/scope but never remove grounding/citation rules (INV-3).
+    custom_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SavedSearch(TenantScopedMixin, TimestampMixin, Base):

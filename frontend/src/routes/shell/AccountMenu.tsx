@@ -1,9 +1,11 @@
 /**
  * Account menu (issue #110) — the avatar in the top bar opens a popover with the
- * signed-in principal (from GET /auth/me) and the EXISTING `CurrentUserMenu`
- * (profile + sign out). The avatar shows initials derived from the email; the
+ * signed-in principal (from GET /auth/me), a link to the full Settings page, and the
+ * EXISTING `CurrentUserMenu` (profile + sign out). The avatar shows the user's uploaded
+ * profile picture (`avatar_url`) when set, else initials derived from the email; the
  * popover handles loading/error like every async surface (quality bar).
  */
+import { Link } from 'react-router-dom';
 import { CurrentUserMenu, useCurrentUser } from '@/features/auth';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
@@ -21,6 +23,7 @@ function initials(email: string | undefined): string {
 export function AccountMenu() {
   const me = useCurrentUser();
   const { open, toggle, triggerRef, menuRef } = useDisclosure();
+  const avatarUrl = me.data?.avatar_url ?? null;
 
   return (
     <div style={{ position: 'relative' }}>
@@ -33,7 +36,13 @@ export function AccountMenu() {
         aria-label="Account menu"
         onClick={toggle}
       >
-        {me.data ? initials(me.data.email) : <Icon name="user" />}
+        {avatarUrl ? (
+          <img src={avatarUrl} alt="" className="lc-avatar__img" />
+        ) : me.data ? (
+          initials(me.data.email)
+        ) : (
+          <Icon name="user" />
+        )}
       </button>
 
       {open ? (
@@ -57,6 +66,17 @@ export function AccountMenu() {
                 </div>
               </>
             )}
+          </div>
+          <div className="lc-menu__sep" />
+          <div style={{ padding: '2px 4px' }}>
+            <Link
+              to="/settings"
+              role="menuitem"
+              className="lc-menu__link"
+              onClick={toggle}
+            >
+              Settings
+            </Link>
           </div>
           <div className="lc-menu__sep" />
           <div style={{ padding: '2px 4px 4px' }}>

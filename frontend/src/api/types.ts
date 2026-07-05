@@ -69,6 +69,18 @@ export interface CurrentUser {
    * setting an admin uploads — the same for every user of the tenant.
    */
   logo_url?: string | null;
+  /**
+   * The caller's own profile avatar as a short-TTL presigned GET URL, or null/absent
+   * when none is set (the shell renders the initials fallback). A per-user setting the
+   * user uploads via PUT /me/avatar — theirs alone.
+   */
+  avatar_url?: string | null;
+}
+
+/** 200 from PUT /me/avatar — the caller's avatar after upload. */
+export interface UserAvatar {
+  /** A short-TTL presigned GET URL for the uploaded avatar, or null when cleared. */
+  avatar_url: string | null;
 }
 
 // --- Collections (contracts/openapi.yaml §collections) ---
@@ -1483,6 +1495,11 @@ export interface CodeResult {
 export interface UserPreferences {
   /** A `/models` id, or null to use the server default. */
   default_model_id: string | null;
+  /**
+   * A per-user free-text preamble prepended to the chat system prompt (before the
+   * grounding contract), or null for none. Capped at 2000 characters.
+   */
+  custom_instructions: string | null;
   /** When last changed, or null if never (the implicit server-default state). */
   updated_at: string | null;
 }
@@ -1491,6 +1508,11 @@ export interface UserPreferences {
 export interface UserPreferencesUpdate {
   /** A `/models` id to set, or null to clear (fall back to the server default). */
   default_model_id?: string | null;
+  /**
+   * A per-user preamble to set, or null to clear. Absent = leave unchanged. Capped at
+   * 2000 characters (over-limit → 422).
+   */
+  custom_instructions?: string | null;
 }
 
 /** A saved `/search` query + its filters. */

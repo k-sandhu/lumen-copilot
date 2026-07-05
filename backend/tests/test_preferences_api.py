@@ -144,7 +144,7 @@ async def test_fresh_user_gets_implicit_default_without_writing(
     resp = await client.get("/api/v1/preferences", headers=_auth(token))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body == {"default_model_id": None, "updated_at": None}
+    assert body == {"default_model_id": None, "custom_instructions": None, "updated_at": None}
     # The read must NOT have created a row (read-before-write).
     assert await _count_preference_rows(sessionmaker) == 0
 
@@ -224,7 +224,11 @@ async def test_preferences_are_per_user(client: AsyncClient, seeded: _Seeded) ->
         other = await _login(client, email)
         resp = await client.get("/api/v1/preferences", headers=_auth(other))
         assert resp.status_code == 200
-        assert resp.json() == {"default_model_id": None, "updated_at": None}
+        assert resp.json() == {
+            "default_model_id": None,
+            "custom_instructions": None,
+            "updated_at": None,
+        }
 
 
 async def test_preferences_requires_auth(client: AsyncClient) -> None:
@@ -232,3 +236,93 @@ async def test_preferences_requires_auth(client: AsyncClient) -> None:
     assert (
         await client.patch("/api/v1/preferences", json={"default_model_id": None})
     ).status_code == 401
+
+
+# --- Custom instructions: get / set / clear / cap ---------------------------
+
+
+async def test_fresh_user_custom_instructions_null(client: AsyncClient, seeded: _Seeded) -> None:
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get("/api/v1/preferences", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["custom_instructions"] is None
+
+
+async def test_set_then_clear_custom_instructions(client: AsyncClient, seeded: _Seeded) -> None:
+    token = await _login(client, seeded.alice_email)
+    text = "Always answer concisely and cite sources."
+
+    set_resp = await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": text}
+    )
+    assert set_resp.status_code == 200, set_resp.text
+    body = set_resp.json()
+    assert body["custom_instructions"] == text
+    assert body["updated_at"] is not None
+
+    got = await client.get("/api/v1/preferences", headers=_auth(token))
+    assert got.json()["custom_instructions"] == text
+
+    cleared = await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": None}
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["custom_instructions"] is None
+
+
+async def test_blank_custom_instructions_clears(client: AsyncClient, seeded: _Seeded) -> None:
+    token = await _login(client, seeded.alice_email)
+    await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": "hi there"}
+    )
+    # A whitespace-only string normalizes to None (clear), not an empty stored value.
+    resp = await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": "   "}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["custom_instructions"] is None
+
+
+async def test_custom_instructions_over_limit_is_422(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _login(client, seeded.alice_email)
+    too_long = "x" * 2001
+    resp = await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": too_long}
+    )
+    assert resp.status_code == 422, resp.text
+    # Nothing persisted on rejection.
+    assert await _count_preference_rows(sessionmaker) == 0
+
+
+async def test_custom_instructions_and_default_model_are_independent(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    token = await _login(client, seeded.alice_email)
+    model = await _a_non_default_model(client, token)
+    # Set only the default model — custom_instructions stays untouched (unset).
+    await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"default_model_id": model}
+    )
+    # Now set only custom_instructions — the default model must NOT be cleared.
+    resp = await client.patch(
+        "/api/v1/preferences", headers=_auth(token), json={"custom_instructions": "Be brief."}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["custom_instructions"] == "Be brief."
+    assert body["default_model_id"] == model
+
+
+async def test_custom_instructions_are_per_user(client: AsyncClient, seeded: _Seeded) -> None:
+    alice = await _login(client, seeded.alice_email)
+    await client.patch(
+        "/api/v1/preferences", headers=_auth(alice), json={"custom_instructions": "Alice only."}
+    )
+    # Bob (same tenant) and Carol (other tenant) are unaffected (INV-1/INV-2).
+    for email in (seeded.bob_email, seeded.carol_email):
+        other = await _login(client, email)
+        resp = await client.get("/api/v1/preferences", headers=_auth(other))
+        assert resp.status_code == 200
+        assert resp.json()["custom_instructions"] is None
