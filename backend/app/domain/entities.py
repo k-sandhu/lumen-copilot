@@ -1050,6 +1050,9 @@ class ToolInvocation:
     # Short, user-safe result line from OUR tool handler ("3 passages",
     # "13 documents") for the thread trace (#377); never raw args/payloads.
     result_summary: str | None = None
+    # Per-message arrival order (#397) — the real oldest-first key; created_at
+    # is the transaction timestamp, so same-turn rows tie on it.
+    ordinal: int = 0
     run_id: UUID | None = None
     created_at: datetime = field(default_factory=lambda: datetime.min)
 

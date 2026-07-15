@@ -439,6 +439,7 @@ def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
         ok=row.ok,
         error=row.error,
         result_summary=row.result_summary,
+        ordinal=row.ordinal,
         duration_ms=row.duration_ms,
         created_at=row.created_at,
     )
@@ -3265,6 +3266,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
         run_id: UUID | None = None,
         error: str | None = None,
         result_summary: str | None = None,
+        ordinal: int = 0,
     ) -> ToolInvocation:
         """Append one tool-invocation record for this tenant, returning it.
 
@@ -3282,6 +3284,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
             ok=ok,
             error=error,
             result_summary=(result_summary[:300] if result_summary else None),
+            ordinal=ordinal,
             duration_ms=max(0, duration_ms),
         )
         self._session.add(row)
@@ -3296,7 +3299,11 @@ class ToolInvocationRepository(_TenantScopedRepository):
                 models.ToolInvocation.tenant_id == self._tenant_id,
                 models.ToolInvocation.session_id == session_id,
             )
-            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+            .order_by(
+                models.ToolInvocation.created_at.asc(),
+                models.ToolInvocation.ordinal.asc(),
+                models.ToolInvocation.id.asc(),
+            )
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -3320,7 +3327,11 @@ class ToolInvocationRepository(_TenantScopedRepository):
                 models.ToolInvocation.tenant_id == self._tenant_id,
                 models.ToolInvocation.message_id.in_(list(message_ids)),
             )
-            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+            .order_by(
+                models.ToolInvocation.created_at.asc(),
+                models.ToolInvocation.ordinal.asc(),
+                models.ToolInvocation.id.asc(),
+            )
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         by_message: dict[UUID, list[ToolInvocation]] = {}
