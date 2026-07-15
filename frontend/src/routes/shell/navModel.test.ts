@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { buildRailGroups, RAIL_GROUPS, RAIL_PATHS } from './navModel';
+import { featureNavItems } from '../discovery';
 
 const DISCOVERED_NAV = [
   { to: '/search', label: 'Search' },
@@ -94,5 +95,37 @@ describe('buildRailGroups', () => {
     const groups = buildRailGroups(DISCOVERED_NAV, [{ path: '/admin/*' }]);
     const admin = groups.flatMap((g) => g.links).find((l) => l.to === '/admin');
     expect(admin?.available).toBe(true);
+  });
+});
+
+/**
+ * The mechanism that keeps #374 fixed (root AGENTS.md "prose ↔ mechanism"):
+ * items not listed in the shell map are excluded from the rail AND the ⌘K
+ * palette by construction, so a feature that ships a `nav.ts` without a
+ * matching RAIL_ITEMS entry would be invisible. This invariant runs against
+ * the REAL discovered manifests — adding a user-facing feature without a rail
+ * entry fails CI here instead of silently shipping an unreachable screen.
+ */
+describe('rail coverage invariant (#374)', () => {
+  // Pages deliberately NOT in the rail. Each entry names its actual anchor —
+  // adding a path here is a conscious decision that the screen is reachable
+  // some other way (or is developer-only), never an accident.
+  const NON_RAIL_PAGES = new Set([
+    '/docs', // developer page (dev builds only)
+    '/features', // developer page (dev builds only)
+    '/settings', // anchored in the account menu popover (#373), like every peer product
+  ]);
+
+  it('every discovered user-facing nav item has a rail entry', () => {
+    expect(featureNavItems.length).toBeGreaterThan(0); // discovery actually ran
+    for (const item of featureNavItems) {
+      if (NON_RAIL_PAGES.has(item.to)) continue;
+      expect(
+        RAIL_PATHS.has(item.to),
+        `feature nav "${item.label}" (${item.to}) has no RAIL_ITEMS entry — it would be ` +
+          `unreachable from the rail and the palette (#374). Add it to navModel.ts, or to ` +
+          `NON_RAIL_PAGES here if it is deliberately developer-only.`,
+      ).toBe(true);
+    }
   });
 });
