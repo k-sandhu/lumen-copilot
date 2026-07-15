@@ -33,9 +33,16 @@ import { Icon } from '@/ui';
 import { useCreateSavedSearch, useSearch, useSearchCollections } from '../model/queries';
 import { SearchTypeahead } from './SearchTypeahead';
 import { DirectAnswerBlock } from './DirectAnswerBlock';
+import { ResultPreviewDrawer } from './ResultPreviewDrawer';
 import { SearchResultRow } from './SearchResultRow';
 import { SearchFilters, type SearchFilterState } from './SearchFilters';
 import { TrimNotice } from './TrimNotice';
+
+/** The document a clicked result opened (#375), or null while none is open. */
+interface OpenPreview {
+  documentId: string;
+  title: string;
+}
 
 /** Map a transport failure to a user-facing, actionable message. */
 function errorMessage(error: unknown): string {
@@ -55,6 +62,7 @@ export function SearchScreen() {
   const [draft, setDraft] = useState('');
   const [submitted, setSubmitted] = useState('');
   const [filters, setFilters] = useState<SearchFilterState>({});
+  const [preview, setPreview] = useState<OpenPreview | null>(null);
 
   // Collection, source AND content-type are ALL server params: routing every
   // facet through `/search` keeps results + direct_answer + hidden_count coherent
@@ -173,11 +181,24 @@ export function SearchScreen() {
                     <TrimNotice hiddenCount={data.hidden_count} />
 
                     <ul className="space-y-3" aria-label="Search results">
-                      {results.map((result) => (
-                        <li key={result.id}>
-                          <SearchResultRow result={result} />
-                        </li>
-                      ))}
+                      {results.map((result) => {
+                        // Only a result that resolves to a document is openable
+                        // (#375); rows without one stay non-interactive.
+                        const documentId = result.document_id;
+                        return (
+                          <li key={result.id}>
+                            <SearchResultRow
+                              result={result}
+                              {...(documentId
+                                ? {
+                                    onOpen: () =>
+                                      setPreview({ documentId, title: result.title }),
+                                  }
+                                : {})}
+                            />
+                          </li>
+                        );
+                      })}
                     </ul>
                   </>
                 )}
@@ -186,6 +207,15 @@ export function SearchScreen() {
           ) : null}
         </div>
       </ScrollArea>
+
+      {/* The document a clicked result opened (#375). */}
+      {preview ? (
+        <ResultPreviewDrawer
+          documentId={preview.documentId}
+          title={preview.title}
+          onClose={() => setPreview(null)}
+        />
+      ) : null}
     </div>
   );
 }
