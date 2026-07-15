@@ -186,6 +186,6 @@ describe('ChatThread', () => {
       tool_invocations: [],
     };
     render(thread({ messages: [user] }));
-    expect(screen.queryByRole('list', { name: /retrieval activity/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: /tool activity/i })).not.toBeInTheDocument();
   });
 });

@@ -42,6 +42,7 @@ import hashlib
 import json
 import time
 from collections.abc import Mapping
+from itertools import count
 from uuid import UUID
 
 from app.core.logging import get_logger
@@ -166,6 +167,9 @@ class ToolRunner:
         self._gate: ApprovalGate = gate or DenyAllApprovalGate()
         self._extra_tools: Mapping[str, ToolDefinition] = extra_tools or {}
         self._autonomy = autonomy
+        # Per-turn arrival counter (#397): a runner lives exactly one answer
+        # turn, so this is the per-message ordinal the trace orders by.
+        self._ordinal = count()
 
     async def run(
         self, *, call: ToolCall, context: ToolContext, message_id: UUID | None = None
@@ -426,6 +430,7 @@ class ToolRunner:
             # persists so the thread trace can say what the tool returned (#377).
             # Bounded by the repository; never raw args/payloads.
             result_summary=result.summary,
+            ordinal=next(self._ordinal),
         )
         return result
 
