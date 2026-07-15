@@ -684,6 +684,17 @@ def test_send_then_stream_then_history_reloads_citations(app: FastAPI, seeded: _
         assert len(citations) == 1
         assert citations[0]["document_name"] == "taxes.pdf"
         assert citations[0]["chunk_id"] == str(seeded.alice_chunk)
+        # The contract Message now carries the governed tool trace (#377): the
+        # retrieval tool this turn ran is visible on the reloaded message, with
+        # name + outcome only (arguments stay hashed, never exposed).
+        invocations = assistant[0]["tool_invocations"]
+        assert isinstance(invocations, list) and len(invocations) >= 1
+        expected_keys = {"id", "tool_name", "ok", "duration_ms", "created_at"}
+        assert all(set(t) >= expected_keys for t in invocations)
+        assert all("args" not in t and "args_hash" not in t for t in invocations)
+        # User messages carry an empty trace.
+        user_items = [m for m in items if m["role"] == "user"]
+        assert all(m["tool_invocations"] == [] for m in user_items)
 
 
 # --- Graceful shutdown: detached, tracked answer tasks (issue #156) ----------

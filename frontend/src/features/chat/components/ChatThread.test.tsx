@@ -149,4 +149,43 @@ describe('ChatThread', () => {
     rerender(thread());
     expect(screen.getByText(/ask a question to start/i)).toBeInTheDocument();
   });
+
+  it('renders persisted tool invocations on a reloaded assistant message (#377)', () => {
+    mockScrollIntoView();
+    const assistant: Message = {
+      ...message('a1', 'You have 13 documents.'),
+      role: 'assistant',
+      tool_invocations: [
+        {
+          id: 'i1',
+          tool_name: 'list_documents',
+          ok: true,
+          duration_ms: 12,
+          created_at: '2026-07-15T00:00:00Z',
+        },
+        {
+          id: 'i2',
+          tool_name: 'run_python',
+          ok: false,
+          error: 'tool_denied',
+          duration_ms: 0,
+          created_at: '2026-07-15T00:00:01Z',
+        },
+      ],
+    };
+    render(thread({ messages: [assistant] }));
+    // The settled turn shows WHICH tools ran and their outcome — not only live.
+    expect(screen.getByText('Listing documents — 12 ms')).toBeInTheDocument();
+    expect(screen.getByText('run_python — failed (tool_denied)')).toBeInTheDocument();
+  });
+
+  it('keeps a persisted user message free of tool badges (#377)', () => {
+    mockScrollIntoView();
+    const user: Message = {
+      ...message('u1', 'list my docs'),
+      tool_invocations: [],
+    };
+    render(thread({ messages: [user] }));
+    expect(screen.queryByRole('list', { name: /retrieval activity/i })).not.toBeInTheDocument();
+  });
 });

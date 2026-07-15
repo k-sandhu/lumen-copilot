@@ -31,7 +31,7 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,9 +46,10 @@ from app.db.repositories import (
     CitationView,
     LlmProviderRepository,
     MessageRepository,
+    ToolInvocationRepository,
     UserPreferenceRepository,
 )
-from app.domain.entities import AssistantStatus, ChatSession, Message, MessageRole
+from app.domain.entities import AssistantStatus, ChatSession, Message, MessageRole, ToolInvocation
 from app.realtime.backplane import Backplane, StreamOwner
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.models_service import is_allowed_model
@@ -81,10 +82,16 @@ class SessionPage:
 
 @dataclass(frozen=True, slots=True)
 class MessageView:
-    """A message + its hydrated citations (contract ``Message``)."""
+    """A message + its hydrated citations and tool trace (contract ``Message``).
+
+    ``tool_invocations`` (#377) carries the governed tool calls behind an
+    assistant message (oldest first; ``[]`` for user messages) so a settled
+    answer's tool activity stays visible in the thread, not only in the audit log.
+    """
 
     message: Message
     citations: list[CitationView]
+    tool_invocations: list[ToolInvocation] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +172,7 @@ class ChatService:
         self._sessions = ChatSessionRepository(session, tenant_id)
         self._messages = MessageRepository(session, tenant_id)
         self._citations = CitationRepository(session, tenant_id)
+        self._tool_invocations = ToolInvocationRepository(session, tenant_id)
         self._prefs = UserPreferenceRepository(session, tenant_id)
         self._assistants = AssistantRepository(session, tenant_id)
         self._versions = AssistantVersionRepository(session, tenant_id)
@@ -379,7 +387,17 @@ class ChatService:
         citations_by_message = await self._citations.list_for_messages_hydrated(
             [m.id for m in page]
         )
-        items = [MessageView(message=m, citations=citations_by_message.get(m.id, [])) for m in page]
+        # The governed tool trace per assistant message (#377) — batched like
+        # citations (no N+1); user messages simply have no rows.
+        tools_by_message = await self._tool_invocations.list_for_messages([m.id for m in page])
+        items = [
+            MessageView(
+                message=m,
+                citations=citations_by_message.get(m.id, []),
+                tool_invocations=tools_by_message.get(m.id, []),
+            )
+            for m in page
+        ]
         return MessagePage(items=items, next_cursor=next_cursor)
 
     async def send_message(

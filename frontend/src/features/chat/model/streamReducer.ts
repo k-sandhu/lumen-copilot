@@ -40,6 +40,12 @@ export interface ToolActivity {
   /** Hit count from the tool_result (absent while running). */
   hitCount?: number;
   summary?: string;
+  /**
+   * Whether the call succeeded (#377). Absent on the live stream (a relayed
+   * tool_result is implicitly ok); false on a persisted governance denial or
+   * tool failure — rendered as a danger badge.
+   */
+  ok?: boolean;
 }
 
 /**

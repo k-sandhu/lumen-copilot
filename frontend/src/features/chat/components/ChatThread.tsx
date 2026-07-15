@@ -24,6 +24,7 @@ import {
   isStale,
   modelBadgeLabel,
   relativeTime,
+  toolActivityFromInvocations,
   usedWebSearch,
 } from '../model/presentation';
 import type { StreamPhase, ToolActivity, CodeRunActivity } from '../model/streamReducer';
@@ -170,6 +171,12 @@ export function ChatThread({
         {messages.map((message) => {
           const citations = (message.citations ?? []).map(fromRestCitation);
           const isAssistant = message.role === 'assistant';
+          // The persisted governed tool trace (#377), rendered through the SAME
+          // ToolActivity badges as a live turn — an answer's tool activity stays
+          // visible after reload, not only in the audit log.
+          const tools = isAssistant
+            ? toolActivityFromInvocations(message.tool_invocations ?? [])
+            : [];
           const trace = isAssistant
             ? buildRetrievalSummary(citations, [])
             : { summary: '', steps: [], hasContent: false };
@@ -189,10 +196,13 @@ export function ChatThread({
               sourceMeta={isAssistant ? sourceMetaFor(citations, message.created_at) : undefined}
               traceSummary={isAssistant && trace.hasContent ? trace.summary : undefined}
               traceSteps={trace.steps}
+              tools={tools}
               answeredAt={answeredAt}
               showNoCitationsNotice={isAssistant && citations.length === 0}
-              // Persisted turns don't replay tool activity, so web usage is
-              // derived from the presence of a web citation (#221).
+              // Web usage on a persisted turn is derived from citations only — the
+              // persisted trace records that web_search RAN, while the disclosure
+              // means "web results were used"; a run with no web citation stays
+              // conservative (#221).
               webUsed={isAssistant && usedWebSearch(citations, [])}
               onOpenCitation={onOpenCitation}
             />

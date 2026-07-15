@@ -269,6 +269,22 @@ export interface Citation {
   score?: number;
 }
 
+/**
+ * One governed tool call that contributed to an assistant message (#377) —
+ * `#/components/schemas/MessageToolInvocation`. Tool name + outcome only: call
+ * arguments are never stored raw (the trace keeps a non-reversible hash).
+ */
+export interface MessageToolInvocation {
+  id: string;
+  tool_name: string;
+  /** False for a governance denial or a tool failure. */
+  ok: boolean;
+  /** Stable machine-readable code when ok=false (never a raw vendor string). */
+  error?: string | null;
+  duration_ms: number;
+  created_at: string;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -278,6 +294,8 @@ export interface Message {
   model?: string;
   /** Passage-level citations (assistant messages only). */
   citations?: Citation[];
+  /** Governed tool calls behind an assistant message, oldest first (#377). */
+  tool_invocations?: MessageToolInvocation[];
   created_at: string;
 }
 

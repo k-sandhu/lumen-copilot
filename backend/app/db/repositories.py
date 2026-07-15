@@ -3294,6 +3294,34 @@ class ToolInvocationRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_tool_invocation(r) for r in rows]
 
+    async def list_for_messages(
+        self, message_ids: Sequence[UUID]
+    ) -> dict[UUID, list[ToolInvocation]]:
+        """The tool trace per assistant message, batched (no N+1), oldest first.
+
+        Hydrates the contract ``Message.tool_invocations`` (#377) the same way
+        citations are hydrated for a history page: one IN query over the page's
+        message ids, tenant-scoped (INV-1). Ids with no trace are simply absent —
+        the caller defaults to ``[]``.
+        """
+        if not message_ids:
+            return {}
+        stmt = (
+            select(models.ToolInvocation)
+            .where(
+                models.ToolInvocation.tenant_id == self._tenant_id,
+                models.ToolInvocation.message_id.in_(list(message_ids)),
+            )
+            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        by_message: dict[UUID, list[ToolInvocation]] = {}
+        for row in rows:
+            if row.message_id is None:  # pragma: no cover — filtered by the IN clause
+                continue
+            by_message.setdefault(row.message_id, []).append(_to_tool_invocation(row))
+        return by_message
+
 
 class AssistantRepository(_TenantScopedRepository):
     """Assistants (the mutable head) within one tenant (ADR-0011 §1, #211).

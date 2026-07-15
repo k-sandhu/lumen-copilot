@@ -2952,10 +2952,32 @@ components:
           type: number
           description: Optional retrieval/rerank score.
 
+    MessageToolInvocation:
+      type: object
+      additionalProperties: false
+      description: >
+        One governed tool call that contributed to an assistant message (#377) —
+        surfaced so a settled answer's tool activity stays visible in the thread,
+        not only in the audit log (mission: auditable in place). Carries the tool
+        name and outcome only: call arguments are never stored raw (the trace
+        keeps a non-reversible hash — spec 0004 §2.4 discipline).
+      required: [id, tool_name, ok, duration_ms, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tool_name: { type: string }
+        ok:
+          type: boolean
+          description: False for a governance denial or a tool failure.
+        error:
+          type: [string, "null"]
+          description: Stable machine-readable code when ok=false (never a raw vendor string).
+        duration_ms: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+
     Message:
       type: object
       additionalProperties: false
-      required: [id, session_id, role, content, citations, created_at]
+      required: [id, session_id, role, content, citations, tool_invocations, created_at]
       properties:
         id: { type: string, format: uuid }
         session_id: { type: string, format: uuid }
@@ -2968,6 +2990,12 @@ components:
           type: array
           description: Passage-level citations (assistant messages only).
           items: { $ref: "#/components/schemas/Citation" }
+        tool_invocations:
+          type: array
+          description: >
+            Governed tool calls behind an assistant message, oldest first
+            (empty for user messages) (#377).
+          items: { $ref: "#/components/schemas/MessageToolInvocation" }
         created_at: { type: string, format: date-time }
 
     MessageList:

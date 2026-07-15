@@ -18,9 +18,10 @@ const TOOL_LABEL: Record<ChatTool, string> = {
 
 function describe(item: ToolActivityItem): string {
   // A tool value outside the known union (a renamed/new backend tool ahead of a
-  // types.ts update, or a model-hallucinated name) must not render the literal
-  // "undefined…" — fall back to a generic, honest label (#280).
-  const label = TOOL_LABEL[item.tool] ?? 'Searching sources';
+  // types.ts update, a model-hallucinated name, or a persisted governed tool —
+  // run_python, MCP tools — #377) must not render the literal "undefined…".
+  // Fall back to the actual tool name (honest), guarding the empty case (#280).
+  const label = TOOL_LABEL[item.tool] ?? (item.tool || 'Tool');
   if (item.status === 'running') return `${label}…`;
   if (item.summary) return `${label} — ${item.summary}`;
   const n = item.hitCount ?? 0;
@@ -33,9 +34,15 @@ export function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
     <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Retrieval activity">
       {tools.map((item) => {
         const running = item.status === 'running';
+        // A persisted governance denial / tool failure (#377) is a danger badge —
+        // visible, never silently dropped. The live stream leaves `ok` unset.
+        const failed = item.ok === false;
         return (
           <li key={item.callId}>
-            <StatusBadge tone={running ? 'pending' : 'ok'} pulse={running}>
+            <StatusBadge
+              tone={running ? 'pending' : failed ? 'danger' : 'ok'}
+              pulse={running}
+            >
               {describe(item)}
             </StatusBadge>
           </li>

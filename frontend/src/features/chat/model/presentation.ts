@@ -8,7 +8,7 @@
  */
 import type { TraceStep } from '@/ui';
 import type { SourcePassage } from '@/ui';
-import type { ChatSession, KnowledgeMode } from '@/api';
+import type { ChatSession, ChatTool, KnowledgeMode, MessageToolInvocation } from '@/api';
 import { kindOfCitation, type UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
 import type { ModeAvailability } from './knowledgeModes';
@@ -133,6 +133,37 @@ export function buildRetrievalSummary(
     steps,
     hasContent: sourceCount > 0 || passageCount > 0 || excludedCount > 0,
   };
+}
+
+/** Human duration for a settled tool call, e.g. 12 → "12 ms", 1400 → "1.4 s". */
+function formatToolDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+/**
+ * Map the wire's persisted tool trace (#377) onto the SAME ToolActivity shape
+ * the live stream renders, so a reloaded assistant message shows its tool
+ * activity exactly like a live turn. Everything is settled (`status: 'done'`);
+ * the summary carries the duration for a success and the stable error code for
+ * a failure/denial — never invented detail (the wire stores no raw arguments).
+ */
+export function toolActivityFromInvocations(
+  invocations: readonly MessageToolInvocation[],
+): ToolActivity[] {
+  return invocations.map((inv) => ({
+    callId: inv.id,
+    // Persisted names span the whole governed registry (run_python, MCP tools…);
+    // the renderer falls back to the raw name for anything outside ChatTool.
+    tool: inv.tool_name as ChatTool,
+    status: 'done' as const,
+    ok: inv.ok,
+    summary: inv.ok
+      ? formatToolDuration(inv.duration_ms)
+      : inv.error
+        ? `failed (${inv.error})`
+        : 'failed',
+  }));
 }
 
 /** One document's cited passages, grouped for the "Sources used" strip (#248). */

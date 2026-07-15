@@ -19,14 +19,16 @@ describe('ToolActivity', () => {
     expect(screen.getByText('Searching documents…')).toBeInTheDocument();
   });
 
-  it('falls back to a generic label for an unknown tool — never "undefined" (#280)', () => {
+  it('falls back to the raw tool name for an unknown tool — never "undefined" (#280, #377)', () => {
     // A tool outside the ChatTool union reaches the reducer (asToolCall only
-    // checks typeof tool === 'string') and must not render "undefined…".
+    // checks typeof tool === 'string') — and persisted invocations (#377) carry
+    // arbitrary governed tool names (run_python, MCP tools). Showing the actual
+    // name is honest; the guard against a literal "undefined…" stays.
     render(
-      <ToolActivity tools={[item({ tool: 'search_web' as ToolActivityItem['tool'] })]} />,
+      <ToolActivity tools={[item({ tool: 'run_python' as ToolActivityItem['tool'] })]} />,
     );
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
-    expect(screen.getByText('Searching sources…')).toBeInTheDocument();
+    expect(screen.getByText('run_python…')).toBeInTheDocument();
   });
 
   it('falls back for an unknown DONE tool too (with the passage count)', () => {
@@ -36,6 +38,24 @@ describe('ToolActivity', () => {
       />,
     );
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
-    expect(screen.getByText('Searching sources — 3 passages')).toBeInTheDocument();
+    expect(screen.getByText('search_web — 3 passages')).toBeInTheDocument();
+  });
+
+  it('renders a failed/denied invocation with a danger badge (#377)', () => {
+    const { container } = render(
+      <ToolActivity
+        tools={[item({ status: 'done', ok: false, summary: 'failed (tool_denied)' })]}
+      />,
+    );
+    expect(screen.getByText('Searching documents — failed (tool_denied)')).toBeInTheDocument();
+    expect(container.querySelector('.text-danger')).toBeTruthy();
+  });
+
+  it('keeps the ok badge for a successful settled invocation', () => {
+    const { container } = render(
+      <ToolActivity tools={[item({ status: 'done', ok: true, summary: '12 ms' })]} />,
+    );
+    expect(screen.getByText('Searching documents — 12 ms')).toBeInTheDocument();
+    expect(container.querySelector('.text-danger')).toBeNull();
   });
 });
