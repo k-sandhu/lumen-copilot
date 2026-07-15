@@ -8,8 +8,9 @@
  * auto-discovered nav (`routes/discovery` featureNavItems) for its label — so a
  * feature still owns its own label — while the shell owns icon + group + order.
  * Items NOT listed here (the developer pages `/docs`, `/features`) are excluded
- * from the rail by construction. An item whose route is not yet discovered (e.g.
- * `/sources`, pending the connector framework #20/#27) renders as a disabled
+ * from the rail by construction — which means EVERY user-facing screen must be
+ * listed here, or it is unreachable from both the rail and the command palette
+ * (#374). An item whose route is not yet discovered renders as a disabled
  * "coming soon" rail entry rather than a dead link.
  */
 import type { IconName } from '@/ui';
@@ -42,16 +43,27 @@ export const RAIL_ITEMS: readonly RailItemSpec[] = [
   { to: '/', group: 'Workspace', icon: 'message-square', fallbackLabel: 'Assistant', order: 0 },
   { to: '/search', group: 'Workspace', icon: 'search', fallbackLabel: 'Search', order: 1 },
   { to: '/documents', group: 'Workspace', icon: 'file-text', fallbackLabel: 'Documents', order: 2 },
+  { to: '/assistants', group: 'Workspace', icon: 'sparkles', fallbackLabel: 'Assistants', order: 3 },
+  { to: '/schedules', group: 'Workspace', icon: 'calendar', fallbackLabel: 'Schedules', order: 4 },
+  { to: '/runs', group: 'Workspace', icon: 'play', fallbackLabel: 'Run history', order: 5 },
+  { to: '/artifacts', group: 'Workspace', icon: 'inbox', fallbackLabel: 'Artifacts', order: 6 },
   // Administration
   { to: '/sources', group: 'Administration', icon: 'plug', fallbackLabel: 'Sources', order: 0 },
+  {
+    to: '/mcp-servers',
+    group: 'Administration',
+    icon: 'database',
+    fallbackLabel: 'MCP servers',
+    order: 1,
+  },
   {
     to: '/audit',
     group: 'Administration',
     icon: 'shield-check',
     fallbackLabel: 'Audit log',
-    order: 1,
+    order: 2,
   },
-  { to: '/admin', group: 'Administration', icon: 'sliders', fallbackLabel: 'Admin', order: 2 },
+  { to: '/admin', group: 'Administration', icon: 'sliders', fallbackLabel: 'Admin', order: 3 },
 ] as const;
 
 /** One resolved rail link ready to render. */

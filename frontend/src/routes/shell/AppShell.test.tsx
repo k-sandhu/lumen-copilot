@@ -46,6 +46,8 @@ function renderShell(initialPath = '/') {
               <Route path="/documents" element={<div>documents screen</div>} />
               <Route path="/audit" element={<div>audit screen</div>} />
               <Route path="/admin" element={<div>admin screen</div>} />
+              {/* Deep links into the #374 surfaces still render the shell. */}
+              <Route path="*" element={<div>feature screen</div>} />
             </Route>
           </Routes>
         </MemoryRouter>
@@ -109,6 +111,48 @@ describe('AppShell', () => {
     const link = within(rail).getByRole('link', { name: /sources/i });
     expect(link).toHaveAttribute('href', '/sources');
     expect(link).not.toHaveAttribute('aria-disabled');
+  });
+
+  it('lists every #374 surface as an enabled rail link (real discovery manifests)', () => {
+    renderShell();
+    const rail = screen.getByRole('navigation', { name: /primary/i });
+    for (const [label, href] of [
+      ['Assistants', '/assistants'],
+      ['Schedules', '/schedules'],
+      ['Run history', '/runs'],
+      ['Artifacts', '/artifacts'],
+      ['MCP servers', '/mcp-servers'],
+    ] as const) {
+      const link = within(rail).getByRole('link', { name: new RegExp(`^${label}$`, 'i') });
+      expect(link).toHaveAttribute('href', href);
+      expect(link).not.toHaveAttribute('aria-disabled');
+    }
+  });
+
+  it('highlights the rail item for a DEEP link into a #374 surface', () => {
+    renderShell('/assistants/a1');
+    expect(screen.getByRole('link', { name: /^assistants$/i })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    // The chat home link ('/') must not claim the deep path.
+    expect(screen.getByRole('link', { name: /^assistant$/i })).not.toHaveAttribute('aria-current');
+  });
+
+  it('offers a palette command for every #374 surface', async () => {
+    const user = userEvent.setup();
+    renderShell();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: /command palette/i });
+    for (const label of [
+      'Go to Assistants',
+      'Go to Schedules',
+      'Go to Run history',
+      'Go to Artifacts',
+      'Go to MCP servers',
+    ]) {
+      expect(within(dialog).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it('opens the command palette from the omni bar', async () => {
