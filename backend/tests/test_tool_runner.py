@@ -246,14 +246,20 @@ async def test_runner_records_increasing_ordinals_per_turn(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each call in one runner lifetime (= one answer turn) gets the next
-    ordinal, so the persisted trace is genuinely oldest-first even when every
-    row shares the transaction timestamp (#397)."""
+    ordinal IN CALL ORDER, so the persisted trace is genuinely oldest-first
+    even when every row shares the transaction timestamp (#397). Distinct
+    arguments tie each recorded row back to its originating call via the args
+    hash — a regression assigning 2,1,0 to calls c0,c1,c2 fails here."""
     _patch_tool(monkeypatch, _ok_tool("probe"))
     r, _, _ = _make_runner(world, allowed=frozenset({"probe"}))
     for i in range(3):
-        await r.run(call=ToolCall(id=f"c{i}", name="probe", arguments={}), context=_context(world))
+        await r.run(
+            call=ToolCall(id=f"c{i}", name="probe", arguments={"call": i}),
+            context=_context(world),
+        )
     invocations = await _all_invocations(world)
-    assert sorted(inv.ordinal for inv in invocations) == [0, 1, 2]
+    by_hash = {inv.args_hash: inv.ordinal for inv in invocations}
+    assert [by_hash[hash_args({"call": i})] for i in range(3)] == [0, 1, 2]
 
 
 # --- AC-2 (INV-style): off-allow-list tool → tool_not_permitted -------------

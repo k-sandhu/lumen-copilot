@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ValidationError
+from app.db import models as db_models
 from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
@@ -532,6 +535,14 @@ async def test_list_messages_orders_tool_invocations_by_ordinal_within_a_tie(
                 message_id=answer.id,
                 ordinal=ordinal,
             )
+        # Force the premise deterministically: pin every row to ONE created_at so
+        # the primary sort key ties by construction (an insert crossing a second
+        # boundary would otherwise legitimately order 'third' first and flake).
+        await session.execute(
+            sa_update(db_models.ToolInvocation).values(
+                created_at=datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
+            )
+        )
         await session.commit()
 
         page = await svc.list_messages(created.session.id, cursor=None, limit=20)
