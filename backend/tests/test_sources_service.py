@@ -383,4 +383,3 @@ async def test_delete_removes_ingested_document_objects(
 
     assert ok is True
     assert set(store.deleted) == {key_a, key_b}
-

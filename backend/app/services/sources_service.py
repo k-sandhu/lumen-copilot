@@ -40,9 +40,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextvars
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,12 +129,24 @@ def _dispatch_off_loop(fn: Callable[[], None], *, name: str) -> None:
         except Exception as exc:  # noqa: BLE001 — best-effort by contract
             log.warning("enqueue.dispatch_failed", dispatch=name, error=type(exc).__name__)
 
+    # Carry the request's structlog contextvars (request_id / tenant_id, bound
+    # by CorrelationMiddleware) across the thread hop — run_in_executor does NOT
+    # copy contextvars, and an enqueue failure log without its correlation ids
+    # is useless during exactly the incident this dispatcher exists for.
+    ctx = contextvars.copy_context()
+    runner = partial(ctx.run, _run)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        threading.Thread(target=_run, name=name, daemon=True).start()
+        threading.Thread(target=runner, name=name, daemon=True).start()
         return
-    loop.run_in_executor(None, _run)
+    try:
+        loop.run_in_executor(None, runner)
+    except RuntimeError as exc:
+        # The default executor can reject submissions during shutdown; the
+        # enqueue is best-effort, so log the drop — never propagate (the
+        # docstring's guarantee) and never block shutdown on a broker call.
+        log.warning("enqueue.dispatch_rejected", dispatch=name, error=type(exc).__name__)
 
 
 class SourcesService:

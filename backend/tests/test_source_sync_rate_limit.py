@@ -69,6 +69,7 @@ class _FakeRedis:
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRedis]:
     _FakeRedis.reset()
+
     def _from_url(cls: type, url: str, **kwargs: object) -> _FakeRedis:
         _FakeRedis.from_url_kwargs = dict(kwargs)
         return _FakeRedis()
