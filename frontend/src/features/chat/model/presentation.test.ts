@@ -310,7 +310,16 @@ describe('modeAvailability', () => {
   it('marks web UNAVAILABLE with a reason when the scope omits it (AC-3)', () => {
     const web = modeAvailability(['company']).web;
     expect(web?.available).toBe(false);
-    expect(web?.reason).toMatch(/not enabled/i);
+    expect(web?.reason).toMatch(/web search is off/i);
+  });
+
+  it('gives a reason that points at the real path, not a nonexistent setting (#378)', () => {
+    const web = modeAvailability(undefined).web;
+    // An ad-hoc chat has no assistant settings page — the reason must name the
+    // actual route to web access (start a chat from an assistant that allows
+    // it), never instruct the user to "turn on" a control that doesn't exist.
+    expect(web?.reason).toMatch(/assistant that allows web/i);
+    expect(web?.reason).not.toMatch(/turn it on/i);
   });
 
   it('fails web closed for an ad-hoc chat (no scope)', () => {

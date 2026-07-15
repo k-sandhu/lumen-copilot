@@ -339,10 +339,12 @@ export const DEFAULT_CHAT_MODES: readonly KnowledgeMode[] = ['company', 'uploade
 /**
  * The web toggle's reason string when web is not enabled for this session
  * (governed / off by default — ADR-0014). Shown on the disabled toggle so the
- * user learns WHY, never a silent no-op.
+ * user learns WHY, never a silent no-op. The copy must name the REAL path to
+ * web access — an ad-hoc chat has no per-chat web setting, so pointing at one
+ * is a dead end (#378).
  */
 export const WEB_DISABLED_REASON =
-  'Web search is not enabled for this chat — turn it on for the assistant to allow it.';
+  'Web search is off for this chat. To use it, start a chat from an assistant that allows web access (Assistants → Start chat).';
 
 /**
  * The initial composer mode selection for a session. From an assistant we seed
