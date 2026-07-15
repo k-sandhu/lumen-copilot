@@ -50,14 +50,18 @@ export function SearchResultRow({ result, onOpen }: SearchResultRowProps) {
         <div className="min-w-0 flex-1">
           <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {onOpen ? (
-              <h3 className="min-w-0 truncate text-sm font-semibold text-foreground">
+              // No `truncate` (overflow-hidden) on the h3 or button: the focus
+              // ring is drawn OUTSIDE the button's border box and an
+              // overflow-hidden ancestor would clip it (frontend/AGENTS.md
+              // visible-focus bar). Ellipsis lives on the inner span only.
+              <h3 className="min-w-0 text-sm font-semibold text-foreground">
                 <button
                   type="button"
                   onClick={onOpen}
                   aria-label={`Open ${result.title}`}
-                  className="inline-flex max-w-full items-center gap-1.5 truncate rounded-sm text-left hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-sm text-left hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >
-                  <span className="truncate">{result.title}</span>
+                  <span className="min-w-0 truncate">{result.title}</span>
                   <Icon name="arrow-up-right" aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
                 </button>
               </h3>

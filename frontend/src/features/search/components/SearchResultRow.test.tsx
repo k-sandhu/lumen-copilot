@@ -78,4 +78,16 @@ describe('SearchResultRow', () => {
     expect(screen.getByRole('heading', { name: 'PTO Policy 2026' })).toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
+
+  it('keeps the focus ring unclipped: no overflow-hidden ancestor above the Open button', () => {
+    // The focus ring draws OUTSIDE the button's border box; any ancestor with
+    // `truncate`/`overflow-hidden` between the button and the card would clip it
+    // (visible-focus bar, frontend/AGENTS.md). Ellipsis belongs to the inner span.
+    render(<SearchResultRow result={base} onOpen={() => {}} />);
+    const button = screen.getByRole('button', { name: 'Open PTO Policy 2026' });
+    for (let el = button.parentElement; el && el.tagName !== 'ARTICLE'; el = el.parentElement) {
+      expect(el.className).not.toMatch(/truncate|overflow-hidden/);
+    }
+    expect(button.className).not.toMatch(/truncate|overflow-hidden/);
+  });
 });
