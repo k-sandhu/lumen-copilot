@@ -99,7 +99,12 @@ class _DisabledGateway:
     ) -> Completion:  # pragma: no cover
         raise AssertionError("chat must not be called when the gateway is disabled")
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0] * _EMBED_DIM, model="fake") for _ in inputs]
 
 
@@ -108,8 +113,9 @@ class _AnsweringGateway:
 
     enabled = True
 
-    def __init__(self, answer: str) -> None:
+    def __init__(self, answer: str, *, finish_reason: str | None = "stop") -> None:
         self._answer = answer
+        self._finish_reason = finish_reason
         self.calls: list[list[ChatMessage]] = []
         self.max_tokens_seen: list[int | None] = []
 
@@ -122,9 +128,19 @@ class _AnsweringGateway:
     ) -> Completion:
         self.calls.append(list(messages))
         self.max_tokens_seen.append(max_tokens)
-        return Completion(content=self._answer, model="fake", usage=TokenUsage())
+        return Completion(
+            content=self._answer,
+            model="fake",
+            finish_reason=self._finish_reason,
+            usage=TokenUsage(),
+        )
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0] * _EMBED_DIM, model="fake") for _ in inputs]
 
 
@@ -589,6 +605,40 @@ async def test_direct_answer_cites_results_present_in_page(session: AsyncSession
     assert gateway.max_tokens_seen == [300]
 
 
+async def test_direct_answer_omitted_when_length_capped(session: AsyncSession) -> None:
+    """A completion the cap stopped mid-thought is NOT a usable grounded answer.
+
+    finish_reason == "length" means the model hit SEARCH_DIRECT_ANSWER_MAX_TOKENS:
+    publishing the partial claim with a confident citation set would violate the
+    "usable grounded answer or omit it" behavior (mission filter #2) — omit.
+    """
+    tenant = (await TenantRepository(session).create(name="T")).id
+    user, doc, chunk_ids = await _seed_document(
+        session,
+        tenant_id=tenant,
+        email="a@x.test",
+        filename="f.txt",
+        chunk_texts=["the 2024 budget is $5M"],
+    )
+    retrieval = _FakeRetrieval(
+        [
+            _passage(
+                chunk_id=chunk_ids[0], document_id=doc, name="f.txt", text="the 2024 budget is $5M"
+            )
+        ]
+    )
+    gateway = _AnsweringGateway("The 2024 budget is $5M and furthermo", finish_reason="length")
+    svc = _service(
+        session, principal=_principal(user, tenant), retrieval=retrieval, gateway=gateway
+    )
+
+    page = await svc.search(query="budget")
+
+    # The results are untouched; only the optional answer is omitted.
+    assert page.results
+    assert page.direct_answer is None
+
+
 async def test_direct_answer_omitted_when_no_results(session: AsyncSession) -> None:
     """No permitted results → no answer attempt (prefer 'no answer', mission filter #2)."""
     tenant = (await TenantRepository(session).create(name="T")).id
@@ -752,7 +802,12 @@ class _LiveGateway:
     ) -> Completion:  # pragma: no cover
         raise AssertionError("disabled gateway")
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=list(self._vector), model="fake") for _ in inputs]
 
 

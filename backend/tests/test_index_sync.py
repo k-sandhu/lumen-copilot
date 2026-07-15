@@ -134,7 +134,13 @@ class _FakeObjectStore:
 class _FakeGateway:
     """Deterministic embeddings, no network."""
 
-    async def embed(self, inputs: Sequence[str], *, model: str | None = None) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        model: str | None = None,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=[1.0] * _DIM, model="fake") for _ in inputs]
 
 

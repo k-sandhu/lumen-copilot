@@ -351,6 +351,20 @@ class Settings(BaseSettings):
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
+
+    # #395 — operational/cost controls for the search path (config-driven per
+    # backend/AGENTS.md: limits are never hardcoded at call sites).
+    # Query-embedding cache (single-text, default-credential, namespaced calls).
+    llm_embed_cache_max_entries: int = Field(
+        default=512, gt=0, alias="LLM_EMBED_CACHE_MAX_ENTRIES"
+    )
+    llm_embed_cache_ttl_seconds: float = Field(
+        default=900.0, gt=0, alias="LLM_EMBED_CACHE_TTL_SECONDS"
+    )
+    # Output ceiling for the short cited direct answer on /search.
+    search_direct_answer_max_tokens: int = Field(
+        default=300, gt=0, alias="SEARCH_DIRECT_ANSWER_MAX_TOKENS"
+    )
     # How many tool-calling turns the grounded answer runtime may take before it
     # forces a final, tool-free synthesis (issue #148 — the agent loop bound; a
     # "turn" is one streamed completion that may request tools). This is the

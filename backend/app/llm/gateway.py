@@ -26,6 +26,7 @@ scope (issue #25 fences) and get their own decision later.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections import OrderedDict
@@ -98,13 +99,15 @@ def _map_vendor_error(exc: Exception) -> AppError:
 # Search re-embeds the IDENTICAL query text on every facet change (each filter
 # is a server param, #118), paying a provider roundtrip for a deterministic
 # result. A small process-local LRU+TTL cache absorbs those repeats. Scope is
-# deliberately narrow: single-text calls on the DEFAULT credentials only —
-# bulk ingestion embeds and per-tenant credential overrides always go to the
-# provider. Keyed by (model id, effective api_base, text): no tenant data, and
-# a config change to either key part naturally misses.
-_EMBED_CACHE_MAX_ENTRIES = 512
-_EMBED_CACHE_TTL_SECONDS = 15 * 60.0
-_embed_cache: OrderedDict[tuple[str, str, str], tuple[float, list[float]]] = OrderedDict()
+# deliberately OPT-IN: the caller must supply a ``cache_namespace`` (the
+# retrieval chokepoint passes the tenant id), so cardinality never infers
+# intent — a single-chunk ingestion batch takes the uncached path because
+# ingestion passes no namespace, and entries are never shared across
+# namespaces/tenants. Credential overrides also bypass. The key carries a
+# SHA-256 digest of the text (query text is sensitive — the audit trail hashes
+# it for the same reason), never the raw string. Capacity/TTL come from
+# Settings (LLM_EMBED_CACHE_MAX_ENTRIES / LLM_EMBED_CACHE_TTL_SECONDS).
+_embed_cache: OrderedDict[tuple[str, str, str, str], tuple[float, list[float]]] = OrderedDict()
 
 
 def _monotonic() -> float:  # seam for TTL tests
@@ -116,22 +119,26 @@ def clear_embed_cache() -> None:
     _embed_cache.clear()
 
 
-def _embed_cache_get(key: tuple[str, str, str]) -> list[float] | None:
+def _embed_cache_get(
+    key: tuple[str, str, str, str], *, ttl_seconds: float
+) -> list[float] | None:
     entry = _embed_cache.get(key)
     if entry is None:
         return None
     stored_at, vector = entry
-    if _monotonic() - stored_at > _EMBED_CACHE_TTL_SECONDS:
+    if _monotonic() - stored_at > ttl_seconds:
         del _embed_cache[key]
         return None
     _embed_cache.move_to_end(key)
     return vector
 
 
-def _embed_cache_put(key: tuple[str, str, str], vector: list[float]) -> None:
+def _embed_cache_put(
+    key: tuple[str, str, str, str], vector: list[float], *, max_entries: int
+) -> None:
     _embed_cache[key] = (_monotonic(), list(vector))
     _embed_cache.move_to_end(key)
-    while len(_embed_cache) > _EMBED_CACHE_MAX_ENTRIES:
+    while len(_embed_cache) > max_entries:
         _embed_cache.popitem(last=False)
 
 
@@ -416,6 +423,7 @@ class LLMGateway:
         model: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        cache_namespace: str | None = None,
     ) -> list[Embedding]:
         """Return one :class:`Embedding` per input string (AC-3).
 
@@ -436,13 +444,24 @@ class LLMGateway:
             api_base if api_base is not None else self._settings.llm_embedding_api_base
         )
 
-        # #395: serve a repeated single-text default-credential query (the search
-        # path) from the process-local cache. Bulk ingestion embeds and per-tenant
-        # credential overrides always go to the provider.
-        cacheable = len(inputs) == 1 and api_key is None and api_base is None
-        cache_key = (model_id, effective_api_base or "", inputs[0]) if cacheable else None
-        if cache_key is not None:
-            cached = _embed_cache_get(cache_key)
+        # #395: serve a repeated single-text query from the process-local cache —
+        # OPT-IN only (the caller passes its namespace; retrieval passes the
+        # tenant id). No namespace, no caching: ingestion batches — even a
+        # singleton final batch — always go to the provider, and entries are
+        # never shared across namespaces. Credential overrides also bypass.
+        cacheable = (
+            cache_namespace is not None
+            and len(inputs) == 1
+            and api_key is None
+            and api_base is None
+        )
+        cache_key: tuple[str, str, str, str] | None = None
+        if cacheable:
+            digest = hashlib.sha256(inputs[0].encode("utf-8")).hexdigest()
+            cache_key = (cache_namespace or "", model_id, effective_api_base or "", digest)
+            cached = _embed_cache_get(
+                cache_key, ttl_seconds=self._settings.llm_embed_cache_ttl_seconds
+            )
             if cached is not None:
                 # Copy on the way out so a caller mutating its vector cannot
                 # poison the cache.
@@ -462,7 +481,11 @@ class LLMGateway:
             Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data
         ]
         if cache_key is not None and len(embeddings) == 1:
-            _embed_cache_put(cache_key, embeddings[0].vector)
+            _embed_cache_put(
+                cache_key,
+                embeddings[0].vector,
+                max_entries=self._settings.llm_embed_cache_max_entries,
+            )
         return embeddings
 
 

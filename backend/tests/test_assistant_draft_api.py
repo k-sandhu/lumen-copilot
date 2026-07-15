@@ -90,7 +90,12 @@ class _ScriptedGateway:
     ) -> Completion:
         return Completion(content=json.dumps(self._payload), model="fake", usage=TokenUsage())
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0], model="fake") for _ in inputs]
 
 
@@ -104,7 +109,12 @@ class _DisabledGateway:
     ) -> Completion:  # pragma: no cover — never called when disabled
         raise AssertionError("disabled gateway must not be called")
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0], model="fake") for _ in inputs]
 
 
