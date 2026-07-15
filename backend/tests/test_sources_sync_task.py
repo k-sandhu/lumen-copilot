@@ -152,6 +152,22 @@ def _offline_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.tasks.index_sync.OpenSearchStore", _FakeIndexStore)
 
 
+@pytest.fixture(autouse=True)
+def _no_broker_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the after-commit enqueue inert AND inline (#271 review).
+
+    This suite drives the sync task directly; the SourcesService commits it
+    performs must not leak real Redis/broker work onto executor threads that
+    outlive the test (offline contract + fixture-teardown isolation).
+    """
+    monkeypatch.setattr(
+        "app.services.sources_service._dispatch_off_loop",
+        lambda fn, *, name: fn(),
+    )
+    monkeypatch.setattr("app.tasks.enqueue_source_sync", lambda *a, **k: None)
+    monkeypatch.setattr("app.tasks.enqueue_index_sync", lambda *a, **k: None)
+
+
 @pytest_asyncio.fixture
 async def sqlite_engine() -> AsyncIterator[None]:
     """Point ``db.session`` globals at a fresh in-memory SQLite for the task."""

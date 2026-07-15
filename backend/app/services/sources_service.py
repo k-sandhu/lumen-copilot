@@ -37,9 +37,14 @@ is rejected fail-closed (422).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import contextvars
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,6 +107,46 @@ def _clamp_limit(limit: int | None) -> int:
     if limit is None:
         return _DEFAULT_LIMIT
     return max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
+
+
+def _dispatch_off_loop(fn: Callable[[], None], *, name: str) -> None:
+    """Run a blocking enqueue OFF the event loop (#271).
+
+    The after-commit listeners fire synchronously inside the greenlet driving
+    ``await session.commit()`` — ON the loop thread — and the enqueue does
+    blocking Redis (the fixed-window rate limiter) + broker
+    (kombu ``ensure_connection``) socket I/O. A Redis/broker blip there stalls
+    every request the loop is serving. Dispatch to the loop's default executor
+    when a loop is running (bounded thread pool); fall back to a daemon thread
+    for loop-less callers. The enqueue is best-effort by contract (a broker
+    outage is logged and swallowed downstream), so failures are logged, never
+    propagated.
+    """
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            log.warning("enqueue.dispatch_failed", dispatch=name, error=type(exc).__name__)
+
+    # Carry the request's structlog contextvars (request_id / tenant_id, bound
+    # by CorrelationMiddleware) across the thread hop — run_in_executor does NOT
+    # copy contextvars, and an enqueue failure log without its correlation ids
+    # is useless during exactly the incident this dispatcher exists for.
+    ctx = contextvars.copy_context()
+    runner = partial(ctx.run, _run)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        threading.Thread(target=runner, name=name, daemon=True).start()
+        return
+    try:
+        loop.run_in_executor(None, runner)
+    except RuntimeError as exc:
+        # The default executor can reject submissions during shutdown; the
+        # enqueue is best-effort, so log the drop — never propagate (the
+        # docstring's guarantee) and never block shutdown on a broker call.
+        log.warning("enqueue.dispatch_rejected", dispatch=name, error=type(exc).__name__)
 
 
 class SourcesService:
@@ -438,7 +483,11 @@ class SourcesService:
         tenant_id = self._tenant_id
 
         def _on_commit(_session: object) -> None:
-            tasks.enqueue_source_sync(tenant_id, source_id)
+            # Off the loop (#271): the enqueue blocks on Redis + the broker.
+            _dispatch_off_loop(
+                lambda: tasks.enqueue_source_sync(tenant_id, source_id),
+                name="enqueue-source-sync",
+            )
 
         event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
 
@@ -456,7 +505,11 @@ class SourcesService:
         tenant_id = self._tenant_id
 
         def _on_commit(_session: object) -> None:
-            tasks.enqueue_index_sync(tenant_id, document_id)
+            # Off the loop (#271): the enqueue blocks on the broker.
+            _dispatch_off_loop(
+                lambda: tasks.enqueue_index_sync(tenant_id, document_id),
+                name="enqueue-index-sync",
+            )
 
         event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
 

@@ -34,6 +34,8 @@ _log = structlog.get_logger(__name__)
 
 # Redis key namespace for the fetch rate-limit counters (distinct from the
 # Celery broker / WS backplane keyspaces sharing the same Redis).
+_SOCKET_TIMEOUT_SECONDS = 2.0
+
 _KEY_PREFIX = "lumen:ratelimit:source_sync"
 
 
@@ -83,7 +85,13 @@ class RedisFixedWindowRateLimiter:
         """
         key = f"{self._key_prefix}:{tenant_id}"
         try:
-            client: redis.Redis = redis.Redis.from_url(self._redis_url)
+            client: redis.Redis = redis.Redis.from_url(
+                self._redis_url,
+                # #271: bound the blocking socket I/O — a Redis blip fails fast
+                # (and fail-open below) instead of hanging the calling thread.
+                socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
+                socket_timeout=_SOCKET_TIMEOUT_SECONDS,
+            )
             try:
                 # The sync client's stubs share the async surface (return type is a
                 # union including Awaitable); on the sync client these are concrete
