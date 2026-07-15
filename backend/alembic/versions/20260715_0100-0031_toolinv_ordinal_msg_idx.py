@@ -18,7 +18,7 @@ Hand-written and reversible (backend/AGENTS.md "Data & migrations"): downgrade
 drops the index and the column. Plain ``add_column`` / ``create_index`` so it
 renders offline; the live apply runs against a disposable throwaway database.
 
-Revision ID: 0031_toolinv_ordinal_and_message_index
+Revision ID: 0031_toolinv_ordinal_msg_idx
 Revises: 0030_toolinv_result_summary
 Create Date: 2026-07-15 01:00:00+00:00
 """
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0031_toolinv_ordinal_and_message_index"
+revision: str = "0031_toolinv_ordinal_msg_idx"
 down_revision: str | None = "0030_toolinv_result_summary"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

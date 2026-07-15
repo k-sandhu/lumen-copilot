@@ -93,6 +93,22 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
+def test_every_revision_id_fits_alembic_version_column() -> None:
+    """Every revision id must fit ``alembic_version.version_num`` — varchar(32).
+
+    The #402 lesson: a 39-char revision id passes every offline test (offline
+    DDL never touches ``alembic_version``), then crash-loops the backend at
+    boot when the live version UPDATE truncates. Pin the constraint here so an
+    oversized id fails in CI, not in a deploy.
+    """
+    script = ScriptDirectory.from_config(_alembic_config())
+    for rev in script.walk_revisions():
+        assert len(rev.revision) <= 32, (
+            f"revision id {rev.revision!r} is {len(rev.revision)} chars — "
+            "alembic_version.version_num is varchar(32); shorten the id."
+        )
+
+
 def test_migration_chain_is_linear_single_head() -> None:
     """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
 
@@ -101,7 +117,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0031_toolinv_ordinal_and_message_index"]
+    assert list(script.get_heads()) == ["0031_toolinv_ordinal_msg_idx"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -189,7 +205,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     toolinv_summary = script.get_revision("0030_toolinv_result_summary")
     assert toolinv_summary is not None
     assert toolinv_summary.down_revision == "0029_user_settings"
-    toolinv_ordinal = script.get_revision("0031_toolinv_ordinal_and_message_index")
+    toolinv_ordinal = script.get_revision("0031_toolinv_ordinal_msg_idx")
     assert toolinv_ordinal is not None
     assert toolinv_ordinal.down_revision == "0030_toolinv_result_summary"
 
@@ -1195,14 +1211,14 @@ def test_offline_toolinv_trace_migrations_round_trip(
     from alembic import command
 
     cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
-    command.upgrade(cfg, "0029_user_settings:0031_toolinv_ordinal_and_message_index", sql=True)
+    command.upgrade(cfg, "0029_user_settings:0031_toolinv_ordinal_msg_idx", sql=True)
     up = capsys.readouterr().out.lower()
     assert "alter table tool_invocations add column result_summary" in up
     assert "alter table tool_invocations add column ordinal" in up
     assert "not null" in up
     assert "ix_tool_invocations_tenant_message" in up
 
-    command.downgrade(cfg, "0031_toolinv_ordinal_and_message_index:0029_user_settings", sql=True)
+    command.downgrade(cfg, "0031_toolinv_ordinal_msg_idx:0029_user_settings", sql=True)
     down = capsys.readouterr().out.lower()
     assert "drop index ix_tool_invocations_tenant_message" in down
     assert "alter table tool_invocations drop column ordinal" in down
