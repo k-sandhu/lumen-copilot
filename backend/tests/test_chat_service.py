@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ValidationError
+from app.db import models as db_models
 from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
@@ -473,6 +476,7 @@ async def test_list_messages_hydrates_tool_invocations(
             session_id=created.session.id,
             message_id=answer.id,
             result_summary="13 documents",
+            ordinal=0,
         )
         await tools.record(
             tool_name="run_python",
@@ -482,6 +486,7 @@ async def test_list_messages_hydrates_tool_invocations(
             duration_ms=0,
             session_id=created.session.id,
             message_id=answer.id,
+            ordinal=1,
         )
         await session.commit()
 
@@ -491,17 +496,97 @@ async def test_list_messages_hydrates_tool_invocations(
         # The user message carries no tool trace.
         assert by_id[user_msg.id].tool_invocations == []
         # The assistant message carries BOTH invocations (success and denial) —
-        # a denial is never silently dropped (CC-7). Same-second rows have no
-        # deterministic relative order under SQLite timestamps, so assert by name.
-        got = {t.tool_name: t for t in by_id[answer.id].tool_invocations}
-        assert set(got) == {"list_documents", "run_python"}
-        assert got["list_documents"].ok is True
-        assert got["list_documents"].duration_ms == 12
+        # a denial is never silently dropped (CC-7) — in STRICT oldest-first
+        # order. Both rows share one SQLite second-precision timestamp, so this
+        # pins the per-message ordinal as the real ordering key (#397).
+        got = by_id[answer.id].tool_invocations
+        assert [t.tool_name for t in got] == ["list_documents", "run_python"]
+        assert got[0].ok is True
+        assert got[0].duration_ms == 12
         # The handler's result line round-trips (#377 "what it returned").
-        assert got["list_documents"].result_summary == "13 documents"
-        assert got["run_python"].ok is False
-        assert got["run_python"].error == "tool_denied"
-        assert got["run_python"].result_summary is None
+        assert got[0].result_summary == "13 documents"
+        assert got[1].ok is False
+        assert got[1].error == "tool_denied"
+        assert got[1].result_summary is None
+
+
+async def test_list_messages_orders_tool_invocations_by_ordinal_within_a_tie(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """Insertion order out of arrival order: the ordinal wins within a timestamp tie (#397)."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        repo = MessageRepository(session, world.tenant_a)
+        answer = await repo.add(
+            session_id=created.session.id, role=MessageRole.ASSISTANT, content="a"
+        )
+        tools = ToolInvocationRepository(session, world.tenant_a)
+        # Recorded out of logical order — the ordinal, not insertion order or the
+        # random UUID id, must drive what the caller sees.
+        for name, ordinal in [("third", 2), ("first", 0), ("second", 1)]:
+            await tools.record(
+                tool_name=name,
+                args_hash="h",
+                ok=True,
+                duration_ms=1,
+                session_id=created.session.id,
+                message_id=answer.id,
+                ordinal=ordinal,
+            )
+        # Force the premise deterministically: pin every row to ONE created_at so
+        # the primary sort key ties by construction (an insert crossing a second
+        # boundary would otherwise legitimately order 'third' first and flake).
+        await session.execute(
+            sa_update(db_models.ToolInvocation).values(
+                created_at=datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
+            )
+        )
+        await session.commit()
+
+        page = await svc.list_messages(created.session.id, cursor=None, limit=20)
+        assert page is not None
+        got = page.items[-1].tool_invocations
+        assert [t.tool_name for t in got] == ["first", "second", "third"]
+
+
+async def test_list_for_messages_excludes_foreign_tenant_rows(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """INV-1: a foreign-tenant invocation is invisible — even one whose
+    ``message_id`` points at OUR message (the non-composite FK permits that
+    hostile/corrupt shape, so the tenant predicate must do the work)."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        repo = MessageRepository(session, world.tenant_a)
+        answer = await repo.add(
+            session_id=created.session.id, role=MessageRole.ASSISTANT, content="a"
+        )
+        await ToolInvocationRepository(session, world.tenant_a).record(
+            tool_name="ours",
+            args_hash="h",
+            ok=True,
+            duration_ms=1,
+            session_id=created.session.id,
+            message_id=answer.id,
+        )
+        # Hostile shape: a TENANT-B invocation row referencing tenant A's message.
+        await ToolInvocationRepository(session, world.tenant_b).record(
+            tool_name="theirs",
+            args_hash="h",
+            ok=True,
+            duration_ms=1,
+            message_id=answer.id,
+        )
+        await session.commit()
+
+        by_message = await ToolInvocationRepository(session, world.tenant_a).list_for_messages(
+            [answer.id]
+        )
+        assert [t.tool_name for t in by_message.get(answer.id, [])] == ["ours"]
 
 
 async def test_list_messages_other_owner_is_none(

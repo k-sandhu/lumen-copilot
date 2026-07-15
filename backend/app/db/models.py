@@ -1028,6 +1028,11 @@ class ToolInvocation(TenantScopedMixin, Base):
     __table_args__ = (
         Index("ix_tool_invocations_tenant_session", "tenant_id", "session_id"),
         Index("ix_tool_invocations_tenant_tool", "tenant_id", "tool_name"),
+        # The message-hydration read path (#377 history reload) filters on
+        # (tenant_id, message_id IN …) — Postgres does not index the FK
+        # automatically, so without this every history fetch scans the tenant's
+        # trace rows (#397).
+        Index("ix_tool_invocations_tenant_message", "tenant_id", "message_id"),
         CheckConstraint("duration_ms >= 0", name="ck_tool_invocations_duration_nonneg"),
     )
 
@@ -1064,6 +1069,11 @@ class ToolInvocation(TenantScopedMixin, Base):
     # never a raw payload or vendor string, and bounded at the write chokepoint
     # (the repository truncates). Null when the handler produced none (denials).
     result_summary: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # Per-message arrival order (#397). ``created_at``'s server default is the
+    # TRANSACTION timestamp on Postgres, so every call in one answer turn ties —
+    # the ordinal (assigned by the runner's per-turn counter) is what actually
+    # guarantees the contract's oldest-first ordering.
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

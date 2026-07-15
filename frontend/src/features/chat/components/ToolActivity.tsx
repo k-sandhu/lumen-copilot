@@ -31,7 +31,10 @@ function describe(item: ToolActivityItem): string {
 export function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
   if (tools.length === 0) return null;
   return (
-    <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Retrieval activity">
+    // "Tool activity", not "Retrieval activity" (#397): this list renders the
+    // whole governed registry — run_python, MCP tools, denials — not only
+    // retrieval, and the accessible name must say so.
+    <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Tool activity">
       {tools.map((item) => {
         const running = item.status === 'running';
         // A persisted governance denial / tool failure (#377) is a danger badge —

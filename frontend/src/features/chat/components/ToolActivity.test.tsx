@@ -58,4 +58,12 @@ describe('ToolActivity', () => {
     expect(screen.getByText('Searching documents — 12 ms')).toBeInTheDocument();
     expect(container.querySelector('.text-danger')).toBeNull();
   });
+
+  it('names the list "Tool activity" — it renders the whole governed registry (#397)', () => {
+    // Positive accessible-name pin: run_python/MCP/denials render here too, so a
+    // screen reader must not announce them as "Retrieval activity".
+    render(<ToolActivity tools={[item()]} />);
+    expect(screen.getByRole('list', { name: /tool activity/i })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: /retrieval activity/i })).not.toBeInTheDocument();
+  });
 });

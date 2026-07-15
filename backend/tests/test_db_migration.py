@@ -101,7 +101,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0029_user_settings"]
+    assert list(script.get_heads()) == ["0031_toolinv_ordinal_and_message_index"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -186,6 +186,12 @@ def test_migration_chain_is_linear_single_head() -> None:
     user_settings = script.get_revision("0029_user_settings")
     assert user_settings is not None
     assert user_settings.down_revision == "0028_llm_providers"
+    toolinv_summary = script.get_revision("0030_toolinv_result_summary")
+    assert toolinv_summary is not None
+    assert toolinv_summary.down_revision == "0029_user_settings"
+    toolinv_ordinal = script.get_revision("0031_toolinv_ordinal_and_message_index")
+    assert toolinv_ordinal is not None
+    assert toolinv_ordinal.down_revision == "0030_toolinv_result_summary"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(
@@ -1173,3 +1179,31 @@ def test_offline_user_settings_migration_round_trips(
     down = capsys.readouterr().out.lower()
     assert "alter table users drop column avatar_key" in down
     assert "alter table user_preferences drop column custom_instructions" in down
+
+
+def test_offline_toolinv_trace_migrations_round_trip(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0030 adds ``result_summary``; 0031 adds ``ordinal`` + the message index; both reverse.
+
+    The executable reversibility mechanism for the #377/#397 trace columns
+    (backend/AGENTS.md "Data & migrations"): the upgrades render the nullable
+    ``result_summary``, the NOT NULL DEFAULT 0 ``ordinal``, and the
+    ``(tenant_id, message_id)`` hydration index; the downgrades drop them in
+    reverse. Offline DDL render (Postgres dialect) — no DB needed (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0029_user_settings:0031_toolinv_ordinal_and_message_index", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table tool_invocations add column result_summary" in up
+    assert "alter table tool_invocations add column ordinal" in up
+    assert "not null" in up
+    assert "ix_tool_invocations_tenant_message" in up
+
+    command.downgrade(cfg, "0031_toolinv_ordinal_and_message_index:0029_user_settings", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop index ix_tool_invocations_tenant_message" in down
+    assert "alter table tool_invocations drop column ordinal" in down
+    assert "alter table tool_invocations drop column result_summary" in down
