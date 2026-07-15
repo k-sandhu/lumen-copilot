@@ -133,6 +133,12 @@ def no_broker(monkeypatch: pytest.MonkeyPatch) -> list[tuple[uuid.UUID, uuid.UUI
         "app.tasks.enqueue_source_sync",
         lambda tid, sid: calls.append((tid, sid)),
     )
+    # The after-commit listeners now dispatch OFF the loop (#271); run inline in
+    # tests so the recorder is deterministically populated by commit-time.
+    monkeypatch.setattr(
+        "app.services.sources_service._dispatch_off_loop",
+        lambda fn, *, name: fn(),
+    )
     return calls
 
 

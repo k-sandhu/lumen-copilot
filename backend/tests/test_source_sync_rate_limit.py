@@ -41,6 +41,7 @@ class _FakeRedis:
 
     store: dict[str, int] = {}
     expired: dict[str, int] = {}
+    from_url_kwargs: dict[str, object] = {}
 
     def __init__(self) -> None:
         # Shared class-level dicts so every ``from_url`` returns the same view —
@@ -51,6 +52,7 @@ class _FakeRedis:
     def reset(cls) -> None:
         cls.store = {}
         cls.expired = {}
+        cls.from_url_kwargs = {}
 
     def incr(self, key: str) -> int:
         _FakeRedis.store[key] = _FakeRedis.store.get(key, 0) + 1
@@ -67,7 +69,11 @@ class _FakeRedis:
 @pytest.fixture
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRedis]:
     _FakeRedis.reset()
-    monkeypatch.setattr(redis.Redis, "from_url", classmethod(lambda cls, url: _FakeRedis()))
+    def _from_url(cls: type, url: str, **kwargs: object) -> _FakeRedis:
+        _FakeRedis.from_url_kwargs = dict(kwargs)
+        return _FakeRedis()
+
+    monkeypatch.setattr(redis.Redis, "from_url", classmethod(_from_url))
     return _FakeRedis
 
 
@@ -103,6 +109,17 @@ def test_limiter_arms_window_ttl_on_first_hit(fake_redis: type[_FakeRedis]) -> N
     assert fake_redis.expired == {key: 42}
 
 
+def test_limiter_client_carries_socket_timeouts(fake_redis: type[_FakeRedis]) -> None:
+    """#271: the sync client is bounded — a Redis blip must fail fast, not hang
+    whatever thread runs the enqueue."""
+    limiter = RedisFixedWindowRateLimiter(
+        "redis://localhost:6379/0", max_per_window=1, window_seconds=60
+    )
+    limiter.try_acquire(uuid.uuid4())
+    assert fake_redis.from_url_kwargs.get("socket_connect_timeout") == 2.0
+    assert fake_redis.from_url_kwargs.get("socket_timeout") == 2.0
+
+
 def test_limiter_is_per_tenant(fake_redis: type[_FakeRedis]) -> None:
     """One tenant's spend does not throttle another (the window is per-tenant)."""
     limiter = RedisFixedWindowRateLimiter(
@@ -118,7 +135,7 @@ def test_limiter_is_per_tenant(fake_redis: type[_FakeRedis]) -> None:
 def test_limiter_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Redis outage admits the sync (availability; SSRF guard stays authoritative)."""
 
-    def _boom(cls: type, url: str) -> object:
+    def _boom(cls: type, url: str, **kwargs: object) -> object:
         raise redis.ConnectionError("redis down")
 
     monkeypatch.setattr(redis.Redis, "from_url", classmethod(_boom))
