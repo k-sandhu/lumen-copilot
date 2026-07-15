@@ -145,8 +145,9 @@ function formatToolDuration(ms: number): string {
  * Map the wire's persisted tool trace (#377) onto the SAME ToolActivity shape
  * the live stream renders, so a reloaded assistant message shows its tool
  * activity exactly like a live turn. Everything is settled (`status: 'done'`);
- * the summary carries the duration for a success and the stable error code for
- * a failure/denial — never invented detail (the wire stores no raw arguments).
+ * a success prefers the handler's persisted result line ("13 documents") and
+ * falls back to the duration; a failure/denial carries the stable error code —
+ * never invented detail (the wire stores no raw arguments).
  */
 export function toolActivityFromInvocations(
   invocations: readonly MessageToolInvocation[],
@@ -159,7 +160,7 @@ export function toolActivityFromInvocations(
     status: 'done' as const,
     ok: inv.ok,
     summary: inv.ok
-      ? formatToolDuration(inv.duration_ms)
+      ? (inv.result_summary ?? formatToolDuration(inv.duration_ms))
       : inv.error
         ? `failed (${inv.error})`
         : 'failed',

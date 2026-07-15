@@ -278,13 +278,20 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
       if (envelope.name === 'tool_result') {
         const result = asToolResult(envelope.data);
         if (!result) return base;
+        // The wire's ok/error are additive (absent ⇒ ok, CC-7). A denied/failed
+        // call surfaces live as a danger badge (#377) — same failure text the
+        // persisted trace renders, so live and reloaded turns never contradict.
+        const failed = result.ok === false;
+        const summary =
+          result.summary ?? (failed ? `failed (${result.error ?? 'error'})` : undefined);
         const tools = base.tools.map((t) =>
           t.callId === result.callId
             ? {
                 ...t,
                 status: 'done' as const,
                 hitCount: result.hitCount,
-                ...(result.summary !== undefined ? { summary: result.summary } : {}),
+                ...(result.ok !== undefined ? { ok: result.ok } : {}),
+                ...(summary !== undefined ? { summary } : {}),
               }
             : t,
         );

@@ -147,6 +147,7 @@ class MessageToolInvocationResponse(BaseModel):
     tool_name: str
     ok: bool
     error: str | None = None
+    result_summary: str | None = None
     duration_ms: int
     created_at: datetime
 
@@ -236,6 +237,7 @@ def _tool_invocation_to_response(inv: ToolInvocation) -> MessageToolInvocationRe
         tool_name=inv.tool_name,
         ok=inv.ok,
         error=inv.error,
+        result_summary=inv.result_summary,
         duration_ms=inv.duration_ms,
         created_at=inv.created_at,
     )

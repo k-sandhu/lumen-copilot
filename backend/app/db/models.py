@@ -1059,6 +1059,11 @@ class ToolInvocation(TenantScopedMixin, Base):
     # The ``ERROR_*`` code when ``ok`` is False (governance denial or failure);
     # null on success.
     error: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # A short, user-safe result summary for the thread trace (#377 — "what it
+    # returned"): produced by OUR tool handlers (e.g. "3 passages", "13 documents"),
+    # never a raw payload or vendor string, and bounded at the write chokepoint
+    # (the repository truncates). Null when the handler produced none (denials).
+    result_summary: Mapped[str | None] = mapped_column(String(300), nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

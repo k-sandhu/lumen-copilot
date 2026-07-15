@@ -2971,6 +2971,13 @@ components:
         error:
           type: [string, "null"]
           description: Stable machine-readable code when ok=false (never a raw vendor string).
+        result_summary:
+          type: [string, "null"]
+          maxLength: 300
+          description: >
+            Short handler-produced result line ("3 passages", "13 documents") —
+            what the tool returned, in user-safe form. Never raw arguments,
+            payloads, or vendor text. Null when the handler produced none.
         duration_ms: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
 

@@ -188,6 +188,11 @@ describe('toolActivityFromInvocations (#377)', () => {
     });
   });
 
+  it('prefers the persisted handler result line over the duration (#377 "what it returned")', () => {
+    const [t] = toolActivityFromInvocations([inv({ result_summary: '13 documents' })]);
+    expect(t?.summary).toBe('13 documents');
+  });
+
   it('formats second-scale durations as seconds', () => {
     expect(toolActivityFromInvocations([inv({ duration_ms: 1400 })])[0]?.summary).toBe('1.4 s');
   });

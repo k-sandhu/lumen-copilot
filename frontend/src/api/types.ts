@@ -281,6 +281,11 @@ export interface MessageToolInvocation {
   ok: boolean;
   /** Stable machine-readable code when ok=false (never a raw vendor string). */
   error?: string | null;
+  /**
+   * Short handler-produced result line ("3 passages", "13 documents") — what
+   * the tool returned, user-safe. Null when the handler produced none.
+   */
+  result_summary?: string | null;
   duration_ms: number;
   created_at: string;
 }
@@ -1456,6 +1461,10 @@ export interface ChatToolResult {
   tool: ChatTool;
   hitCount: number;
   summary?: string;
+  /** Whether the tool succeeded. Absent ⇒ treat as ok (back-compat, CC-7). */
+  ok?: boolean;
+  /** Typed error code when ok=false (e.g. tool_not_permitted, tool_error). */
+  error?: string;
 }
 
 /** `done.data` — terminal success summary for a chat answer. */

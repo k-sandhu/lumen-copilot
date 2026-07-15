@@ -164,6 +164,28 @@ describe('reduceStream', () => {
 
     s = reduceStream(s, toolResult(2, 'c1', 3));
     expect(s.tools[0]).toMatchObject({ status: 'done', hitCount: 3, summary: 'found passages' });
+    // The wire's additive ok is absent on this result — the activity leaves it
+    // unset (treated as ok), matching CC-7 back-compat.
+    expect(s.tools[0]?.ok).toBeUndefined();
+  });
+
+  it('propagates a denied/failed tool_result (ok=false) with a failure summary (#377)', () => {
+    let s = fold(initialStreamState, start(0), toolCall(1, 'c1'));
+    s = reduceStream(s, {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'tool_result',
+      data: { callId: 'c1', tool: 'search_text', hitCount: 0, ok: false, error: 'tool_denied' },
+    } as EventEnvelope);
+    // Live failures must not render as successes (they'd contradict the
+    // persisted trace after reload): ok=false flows through, and the summary
+    // matches the persisted-trace failure text exactly.
+    expect(s.tools[0]).toMatchObject({
+      status: 'done',
+      ok: false,
+      summary: 'failed (tool_denied)',
+    });
   });
 
   it('collects citations and dedupes by id (AC-2)', () => {

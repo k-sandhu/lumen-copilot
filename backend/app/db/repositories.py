@@ -438,6 +438,7 @@ def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
         args_hash=row.args_hash,
         ok=row.ok,
         error=row.error,
+        result_summary=row.result_summary,
         duration_ms=row.duration_ms,
         created_at=row.created_at,
     )
@@ -3263,8 +3264,14 @@ class ToolInvocationRepository(_TenantScopedRepository):
         message_id: UUID | None = None,
         run_id: UUID | None = None,
         error: str | None = None,
+        result_summary: str | None = None,
     ) -> ToolInvocation:
-        """Append one tool-invocation record for this tenant, returning it."""
+        """Append one tool-invocation record for this tenant, returning it.
+
+        ``result_summary`` is the handler-produced, user-safe result line (#377);
+        it is bounded HERE (the single write chokepoint) so no caller can persist
+        an unbounded string into the trace.
+        """
         row = models.ToolInvocation(
             tenant_id=self._tenant_id,
             session_id=session_id,
@@ -3274,6 +3281,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
             args_hash=args_hash,
             ok=ok,
             error=error,
+            result_summary=(result_summary[:300] if result_summary else None),
             duration_ms=max(0, duration_ms),
         )
         self._session.add(row)

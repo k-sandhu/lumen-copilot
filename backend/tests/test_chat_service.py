@@ -472,6 +472,7 @@ async def test_list_messages_hydrates_tool_invocations(
             duration_ms=12,
             session_id=created.session.id,
             message_id=answer.id,
+            result_summary="13 documents",
         )
         await tools.record(
             tool_name="run_python",
@@ -496,8 +497,11 @@ async def test_list_messages_hydrates_tool_invocations(
         assert set(got) == {"list_documents", "run_python"}
         assert got["list_documents"].ok is True
         assert got["list_documents"].duration_ms == 12
+        # The handler's result line round-trips (#377 "what it returned").
+        assert got["list_documents"].result_summary == "13 documents"
         assert got["run_python"].ok is False
         assert got["run_python"].error == "tool_denied"
+        assert got["run_python"].result_summary is None
 
 
 async def test_list_messages_other_owner_is_none(
