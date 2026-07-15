@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -295,6 +296,78 @@ async def test_list_sessions_only_callers_own(
         page = await svc.list_sessions(cursor=None, limit=20)
     titles = {v.session.title for v in page.items}
     assert titles == {"mine"}
+
+
+async def test_list_sessions_batches_message_counts_no_n_plus_one(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """The page's message counts come from ONE grouped query, not one per row (#396).
+
+    Counts are asserted per session (correctness) AND the SELECT count during
+    ``list_sessions`` is pinned to a constant (the sessions page + the grouped
+    count), so a reintroduced per-row ``count_messages`` fails here.
+    """
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        repo = MessageRepository(session, world.tenant_a)
+        expected: dict[str, int] = {}
+        for i in range(5):
+            created = await svc.create_session(title=f"s{i}", model=None)
+            for j in range(i):
+                await repo.add(
+                    session_id=created.session.id, role=MessageRole.USER, content=f"m{j}"
+                )
+            expected[f"s{i}"] = i
+        await session.commit()
+
+        select_count = 0
+
+        def _count_selects(  # noqa: ANN001 — SQLAlchemy event signature
+            conn, cursor, statement, parameters, context, executemany
+        ) -> None:
+            nonlocal select_count
+            if statement.lstrip().upper().startswith("SELECT"):
+                select_count += 1
+
+        sync_engine = session.get_bind()  # the sync Engine driving the async session
+        event.listen(sync_engine, "before_cursor_execute", _count_selects)
+        try:
+            page = await svc.list_sessions(cursor=None, limit=20)
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", _count_selects)
+
+    assert {v.session.title: v.message_count for v in page.items} == expected
+    # One page query + one grouped count — NOT 1 + N. A small buffer (<=3) keeps
+    # the pin robust to an extra cursor/metadata query without hiding an N+1
+    # (which would cost 6 SELECTs for these 5 sessions).
+    assert select_count <= 3, f"expected a batched count, saw {select_count} SELECTs"
+
+
+async def test_count_for_sessions_excludes_foreign_tenant_rows(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """INV-1: the batched count never counts (or even names) another tenant's
+    sessions — a tenant-A repository asked about a tenant-B session id returns
+    no entry for it, so its messages can't leak into a count."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        a_repo = ChatSessionRepository(session, world.tenant_a)
+        b_repo = ChatSessionRepository(session, world.tenant_b)
+        a_session = await a_repo.create(owner_id=world.alice, model="anthropic/claude-opus-4.8")
+        b_session = await b_repo.create(owner_id=world.carol, model="anthropic/claude-opus-4.8")
+        await MessageRepository(session, world.tenant_a).add(
+            session_id=a_session.id, role=MessageRole.USER, content="a"
+        )
+        await MessageRepository(session, world.tenant_b).add(
+            session_id=b_session.id, role=MessageRole.USER, content="b"
+        )
+        await session.commit()
+
+        counts = await a_repo.count_for_sessions([a_session.id, b_session.id])
+
+    assert counts == {a_session.id: 1}
+    assert b_session.id not in counts
 
 
 async def test_update_other_owner_session_is_none(

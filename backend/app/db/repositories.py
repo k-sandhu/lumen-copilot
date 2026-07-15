@@ -1886,6 +1886,26 @@ class ChatSessionRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def count_for_sessions(self, session_ids: Sequence[UUID]) -> dict[UUID, int]:
+        """Message counts per session, batched (one GROUP BY — no N+1, #396).
+
+        Tenant-scoped (INV-1). Sessions with no messages are simply absent —
+        the caller defaults to ``0``. The single-id :meth:`count_messages`
+        stays for the one-session paths.
+        """
+        if not session_ids:
+            return {}
+        stmt = (
+            select(models.Message.session_id, func.count())
+            .where(
+                models.Message.tenant_id == self._tenant_id,
+                models.Message.session_id.in_(list(session_ids)),
+            )
+            .group_by(models.Message.session_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: int(row[1]) for row in rows}
+
     async def update(
         self,
         session_id: UUID,
