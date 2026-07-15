@@ -110,11 +110,20 @@ class _DisabledGateway:
     enabled = False
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:  # pragma: no cover
         raise AssertionError("disabled")
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0], model="fake") for _ in inputs]
 
 
@@ -122,13 +131,22 @@ class _AnsweringGateway:
     enabled = True
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
         return Completion(
             content="The 2024 standard deduction is $14,600.", model="fake", usage=TokenUsage()
         )
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:  # pragma: no cover
         return [Embedding(vector=[0.0], model="fake") for _ in inputs]
 
 

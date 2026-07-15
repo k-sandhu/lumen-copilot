@@ -117,7 +117,13 @@ class _FakeGateway:
         self.fail = fail
         self.calls: list[int] = []  # batch sizes, in order
 
-    async def embed(self, inputs: Sequence[str], *, model: str | None = None) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        model: str | None = None,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         if self.fail:
             raise DependencyError("no key", code="llm_unconfigured")
         self.calls.append(len(inputs))

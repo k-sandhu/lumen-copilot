@@ -155,7 +155,12 @@ class DeterministicEmbedder:
     deterministic semantic ranking in the offline eval, with zero dependencies.
     """
 
-    async def embed(self, inputs: Sequence[str]) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=self.vector(t), model="deterministic-eval") for t in inputs]
 
     @staticmethod

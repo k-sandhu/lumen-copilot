@@ -137,7 +137,12 @@ class _FakeEmbeddingGateway:
     def __init__(self, embedder: DeterministicEmbedder) -> None:
         self._embedder = embedder
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return await self._embedder.embed(inputs)
 
 

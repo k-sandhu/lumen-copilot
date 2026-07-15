@@ -78,7 +78,12 @@ class _FakeGateway:
     def __init__(self, vector: list[float] | None = None) -> None:
         self._vector = vector if vector is not None else [0.0] * _EMBED_DIM
 
-    async def embed(self, inputs: list[str]) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=list(self._vector), model="fake-bge-m3") for _ in inputs]
 
 

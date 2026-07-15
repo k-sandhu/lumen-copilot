@@ -43,7 +43,12 @@ _EMBED_DIM = 1024
 
 
 class _FakeGateway:
-    async def embed(self, inputs: list[str]) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: list[str],
+        *,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=[0.0] * _EMBED_DIM, model="fake") for _ in inputs]
 
 

@@ -105,7 +105,13 @@ class _FakeObjectStore:
 class _FakeGateway:
     """Fake LLM gateway: a deterministic vector per input (offline)."""
 
-    async def embed(self, inputs: Sequence[str], *, model: str | None = None) -> list[Embedding]:
+    async def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        model: str | None = None,
+        cache_namespace: str | None = None,
+    ) -> list[Embedding]:
         return [Embedding(vector=[float(len(t) % 5)] * _DIM, model="fake") for t in inputs]
 
 

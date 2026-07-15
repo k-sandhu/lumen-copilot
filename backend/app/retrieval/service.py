@@ -162,7 +162,12 @@ class RetrievalService:
 
         # Embed the query (the only model call; the gateway returns a domain
         # Embedding — no LiteLLM type crosses the boundary).
-        embeddings = await self._gateway.embed([query])
+        embeddings = await self._gateway.embed(
+            [query],
+            # #395: opt into the query-embedding cache, namespaced by tenant so
+            # entries are never observable across principals.
+            cache_namespace=str(principal.tenant_id),
+        )
         query_vector = embeddings[0].vector
 
         store = self._search_store()

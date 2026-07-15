@@ -58,6 +58,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
+from app.core.config import get_settings
 from app.core.errors import AppError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import DocumentRepository, RecentSearchRepository
@@ -82,6 +83,10 @@ _CURSOR_PREFIX = "search:"
 # How many results to consider for grounding the optional direct answer. Kept
 # small so the prompt stays cheap and the answer cites only the strongest hits.
 _DIRECT_ANSWER_TOP_K = 4
+
+# The direct answer's output ceiling is config-driven
+# (SEARCH_DIRECT_ANSWER_MAX_TOKENS, #395): bounding the generation keeps search
+# latency and cost flat instead of letting a rambling model run to its own stop.
 # Hard ceiling on the snippet text fed into the grounding prompt per result, so a
 # very long passage cannot blow the context window.
 _GROUNDING_SNIPPET_CHARS = 600
@@ -449,10 +454,19 @@ class SearchService:
         if not top:
             return None
         try:
-            completion = await self._gateway.chat(self._grounding_messages(query, top))
+            completion = await self._gateway.chat(
+                self._grounding_messages(query, top),
+                max_tokens=get_settings().search_direct_answer_max_tokens,
+            )
         except AppError as exc:
             # Never fail the search on the optional answer; log the *type* only.
             log.info("search.direct_answer_skipped", code=exc.code)
+            return None
+        if completion.finish_reason == "length":
+            # The cap stopped the model mid-thought: a truncated claim is not a
+            # usable grounded answer — omit rather than publish a partial
+            # sentence with a confident citation set (mission filter #2).
+            log.info("search.direct_answer_skipped", code="length_capped")
             return None
         text = completion.content.strip()
         if not text:
