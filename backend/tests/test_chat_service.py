@@ -341,6 +341,32 @@ async def test_list_sessions_batches_message_counts_no_n_plus_one(
     assert select_count <= 3, f"expected a batched count, saw {select_count} SELECTs"
 
 
+async def test_count_for_sessions_excludes_foreign_tenant_rows(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """INV-1: the batched count never counts (or even names) another tenant's
+    sessions — a tenant-A repository asked about a tenant-B session id returns
+    no entry for it, so its messages can't leak into a count."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        a_repo = ChatSessionRepository(session, world.tenant_a)
+        b_repo = ChatSessionRepository(session, world.tenant_b)
+        a_session = await a_repo.create(owner_id=world.alice, model="anthropic/claude-opus-4.8")
+        b_session = await b_repo.create(owner_id=world.carol, model="anthropic/claude-opus-4.8")
+        await MessageRepository(session, world.tenant_a).add(
+            session_id=a_session.id, role=MessageRole.USER, content="a"
+        )
+        await MessageRepository(session, world.tenant_b).add(
+            session_id=b_session.id, role=MessageRole.USER, content="b"
+        )
+        await session.commit()
+
+        counts = await a_repo.count_for_sessions([a_session.id, b_session.id])
+
+    assert counts == {a_session.id: 1}
+    assert b_session.id not in counts
+
+
 async def test_update_other_owner_session_is_none(
     world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
 ) -> None:
