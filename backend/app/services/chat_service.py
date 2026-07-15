@@ -325,7 +325,12 @@ class ChatService:
         next_cursor = (
             _encode_cursor(_SESSION_CURSOR_PREFIX, page[-1].id) if has_more and page else None
         )
-        items = [await self._view(s) for s in page]
+        # One grouped count for the whole page (no per-row COUNT — #396); the
+        # single-session paths keep `_view`.
+        counts = await self._sessions.count_for_sessions([s.id for s in page])
+        items = [
+            SessionView(session=s, message_count=counts.get(s.id, 0)) for s in page
+        ]
         return SessionPage(items=items, next_cursor=next_cursor)
 
     async def get_session(self, session_id: UUID) -> SessionView | None:
