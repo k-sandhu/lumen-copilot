@@ -110,7 +110,11 @@ class _DisabledGateway:
     enabled = False
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:  # pragma: no cover
         raise AssertionError("disabled")
 
@@ -122,7 +126,11 @@ class _AnsweringGateway:
     enabled = True
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
         return Completion(
             content="The 2024 standard deduction is $14,600.", model="fake", usage=TokenUsage()

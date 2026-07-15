@@ -27,6 +27,8 @@ scope (issue #25 fences) and get their own decision later.
 from __future__ import annotations
 
 import json
+import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -90,6 +92,47 @@ def _map_vendor_error(exc: Exception) -> AppError:
         f"The model provider is unavailable ({vendor}).",
         code="llm_unavailable",
     )
+
+
+# --- query-embedding cache (#395) -------------------------------------------
+# Search re-embeds the IDENTICAL query text on every facet change (each filter
+# is a server param, #118), paying a provider roundtrip for a deterministic
+# result. A small process-local LRU+TTL cache absorbs those repeats. Scope is
+# deliberately narrow: single-text calls on the DEFAULT credentials only —
+# bulk ingestion embeds and per-tenant credential overrides always go to the
+# provider. Keyed by (model id, effective api_base, text): no tenant data, and
+# a config change to either key part naturally misses.
+_EMBED_CACHE_MAX_ENTRIES = 512
+_EMBED_CACHE_TTL_SECONDS = 15 * 60.0
+_embed_cache: OrderedDict[tuple[str, str, str], tuple[float, list[float]]] = OrderedDict()
+
+
+def _monotonic() -> float:  # seam for TTL tests
+    return time.monotonic()
+
+
+def clear_embed_cache() -> None:
+    """Drop every cached query embedding (test isolation)."""
+    _embed_cache.clear()
+
+
+def _embed_cache_get(key: tuple[str, str, str]) -> list[float] | None:
+    entry = _embed_cache.get(key)
+    if entry is None:
+        return None
+    stored_at, vector = entry
+    if _monotonic() - stored_at > _EMBED_CACHE_TTL_SECONDS:
+        del _embed_cache[key]
+        return None
+    _embed_cache.move_to_end(key)
+    return vector
+
+
+def _embed_cache_put(key: tuple[str, str, str], vector: list[float]) -> None:
+    _embed_cache[key] = (_monotonic(), list(vector))
+    _embed_cache.move_to_end(key)
+    while len(_embed_cache) > _EMBED_CACHE_MAX_ENTRIES:
+        _embed_cache.popitem(last=False)
 
 
 class LLMGateway:
@@ -188,6 +231,7 @@ class LLMGateway:
         model: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
         """Return a single (non-streamed) completion for ``messages``.
 
@@ -195,7 +239,10 @@ class LLMGateway:
         returned :class:`Completion` carries token usage for later cost &
         observability (AC-5). ``api_key`` / ``api_base`` OVERRIDE the process
         defaults when given — the seam a per-tenant LLM provider routes through
-        (PR 2a); ``None`` ⇒ the default credentials, unchanged.
+        (PR 2a); ``None`` ⇒ the default credentials, unchanged. ``max_tokens``
+        bounds the generation when the caller knows the shape of the answer it
+        wants (e.g. the short search direct answer, #395); ``None`` ⇒ unbounded,
+        unchanged.
         """
         self._require_enabled()
         import litellm  # lazy: no network/import cost until first use
@@ -207,6 +254,7 @@ class LLMGateway:
                 messages=self._to_wire_messages(messages),
                 stream=False,
                 timeout=self._settings.llm_timeout_seconds,
+                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
@@ -387,6 +435,19 @@ class LLMGateway:
         effective_api_base = (
             api_base if api_base is not None else self._settings.llm_embedding_api_base
         )
+
+        # #395: serve a repeated single-text default-credential query (the search
+        # path) from the process-local cache. Bulk ingestion embeds and per-tenant
+        # credential overrides always go to the provider.
+        cacheable = len(inputs) == 1 and api_key is None and api_base is None
+        cache_key = (model_id, effective_api_base or "", inputs[0]) if cacheable else None
+        if cache_key is not None:
+            cached = _embed_cache_get(cache_key)
+            if cached is not None:
+                # Copy on the way out so a caller mutating its vector cannot
+                # poison the cache.
+                return [Embedding(vector=list(cached), model=model_id)]
+
         try:
             response = await litellm.aembedding(
                 model=model_id,
@@ -397,7 +458,12 @@ class LLMGateway:
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
-        return [Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data]
+        embeddings = [
+            Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data
+        ]
+        if cache_key is not None and len(embeddings) == 1:
+            _embed_cache_put(cache_key, embeddings[0].vector)
+        return embeddings
 
 
 class _ToolCallAccumulator:

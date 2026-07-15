@@ -91,7 +91,11 @@ class _DisabledGateway:
     enabled = False
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:  # pragma: no cover
         raise AssertionError("chat must not be called when the gateway is disabled")
 
@@ -107,11 +111,17 @@ class _AnsweringGateway:
     def __init__(self, answer: str) -> None:
         self._answer = answer
         self.calls: list[list[ChatMessage]] = []
+        self.max_tokens_seen: list[int | None] = []
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
         self.calls.append(list(messages))
+        self.max_tokens_seen.append(max_tokens)
         return Completion(content=self._answer, model="fake", usage=TokenUsage())
 
     async def embed(self, inputs: list[str]) -> list[Embedding]:  # pragma: no cover
@@ -574,6 +584,9 @@ async def test_direct_answer_cites_results_present_in_page(session: AsyncSession
     assert page.direct_answer.citations
     for citation in page.direct_answer.citations:
         assert citation.result_id in result_ids
+    # #395: the short synthesis is BOUNDED — an unbounded generation would let
+    # search latency/cost float with the model's verbosity.
+    assert gateway.max_tokens_seen == [300]
 
 
 async def test_direct_answer_omitted_when_no_results(session: AsyncSession) -> None:
@@ -731,7 +744,11 @@ class _LiveGateway:
         self._vector = vector
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, model: str | None = None
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:  # pragma: no cover
         raise AssertionError("disabled gateway")
 

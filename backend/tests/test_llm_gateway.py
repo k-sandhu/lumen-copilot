@@ -40,7 +40,15 @@ from app.domain.llm import (
     Role,
     TokenUsage,
 )
-from app.llm.gateway import LLMGateway, aclose_litellm_clients
+from app.llm.gateway import LLMGateway, aclose_litellm_clients, clear_embed_cache
+
+
+@pytest.fixture(autouse=True)
+def _fresh_embed_cache() -> Any:
+    """Isolate the module-level query-embedding cache (#395) between tests."""
+    clear_embed_cache()
+    yield
+    clear_embed_cache()
 
 # --- Test settings ---------------------------------------------------------
 
@@ -414,6 +422,134 @@ async def test_embed_omits_api_base_when_blank(monkeypatch: pytest.MonkeyPatch) 
 
     await gw.embed(["x"])
     assert "api_base" not in captured
+
+
+# --- #395: query-embedding cache (single-text, default-credential calls) ----
+
+
+async def test_embed_caches_repeated_single_text_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SAME query text embeds once; the repeat is served from cache (#395).
+
+    Search re-embeds the identical query on every facet change (every filter is
+    a server param, #118) — the second call must not pay the provider roundtrip.
+    """
+    calls = 0
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        nonlocal calls
+        calls += 1
+        return _EmbeddingResponse([[0.1, 0.2]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    first = await gw.embed(["connection pool"])
+    second = await gw.embed(["connection pool"])
+    assert calls == 1
+    assert second[0].vector == first[0].vector
+
+    # A caller mutating its returned vector must not poison the cache.
+    second[0].vector.append(9.9)
+    third = await gw.embed(["connection pool"])
+    assert third[0].vector == [0.1, 0.2]
+
+
+async def test_embed_cache_scopes_by_text_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        nonlocal calls
+        calls += 1
+        return _EmbeddingResponse([[float(calls)]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    await gw.embed(["alpha"])
+    await gw.embed(["beta"])  # different text → miss
+    await gw.embed(["alpha"], model="openrouter/voyage/voyage-3")  # different model → miss
+    assert calls == 3
+
+
+async def test_embed_cache_skips_batches_and_credential_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bulk (ingestion) embeds and per-tenant credential overrides are never cached."""
+    calls = 0
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        nonlocal calls
+        calls += 1
+        n = len(kwargs["input"])
+        return _EmbeddingResponse([[1.0]] * n)
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    await gw.embed(["a", "b"])
+    await gw.embed(["a", "b"])  # batches bypass the cache
+    assert calls == 2
+
+    await gw.embed(["a"], api_key="sk-tenant-override")
+    await gw.embed(["a"], api_key="sk-tenant-override")  # overrides bypass the cache
+    assert calls == 4
+
+
+async def test_embed_cache_entries_expire(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        nonlocal calls
+        calls += 1
+        return _EmbeddingResponse([[1.0]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    fake_now = [1000.0]
+    monkeypatch.setattr("app.llm.gateway._monotonic", lambda: fake_now[0])
+
+    await gw.embed(["alpha"])
+    fake_now[0] += 10.0
+    await gw.embed(["alpha"])  # still fresh → cached
+    assert calls == 1
+
+    fake_now[0] += 20 * 60.0  # past the TTL
+    await gw.embed(["alpha"])
+    assert calls == 2
+
+
+# --- #395: bounded completions ----------------------------------------------
+
+
+async def test_chat_passes_max_tokens_when_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _Response("ok")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    await gw.chat([ChatMessage(role=Role.USER, content="hi")], max_tokens=300)
+    assert captured["max_tokens"] == 300
+
+
+async def test_chat_omits_max_tokens_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _Response("ok")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert "max_tokens" not in captured
 
 
 # --- AC-6: blank key -> DependencyError, no network, no hang ----------------

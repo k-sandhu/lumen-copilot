@@ -82,6 +82,12 @@ _CURSOR_PREFIX = "search:"
 # How many results to consider for grounding the optional direct answer. Kept
 # small so the prompt stays cheap and the answer cites only the strongest hits.
 _DIRECT_ANSWER_TOP_K = 4
+
+# The direct answer is a SHORT cited synthesis (the grounding prompt asks for a
+# few sentences); bounding the generation keeps search latency and cost flat
+# instead of letting a rambling model run to its own stop (#395). Generous
+# relative to the asked-for length so truncation is not a realistic outcome.
+_DIRECT_ANSWER_MAX_TOKENS = 300
 # Hard ceiling on the snippet text fed into the grounding prompt per result, so a
 # very long passage cannot blow the context window.
 _GROUNDING_SNIPPET_CHARS = 600
@@ -449,7 +455,10 @@ class SearchService:
         if not top:
             return None
         try:
-            completion = await self._gateway.chat(self._grounding_messages(query, top))
+            completion = await self._gateway.chat(
+                self._grounding_messages(query, top),
+                max_tokens=_DIRECT_ANSWER_MAX_TOKENS,
+            )
         except AppError as exc:
             # Never fail the search on the optional answer; log the *type* only.
             log.info("search.direct_answer_skipped", code=exc.code)
