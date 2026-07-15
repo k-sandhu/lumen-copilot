@@ -438,6 +438,7 @@ def _to_tool_invocation(row: models.ToolInvocation) -> ToolInvocation:
         args_hash=row.args_hash,
         ok=row.ok,
         error=row.error,
+        result_summary=row.result_summary,
         duration_ms=row.duration_ms,
         created_at=row.created_at,
     )
@@ -3263,8 +3264,14 @@ class ToolInvocationRepository(_TenantScopedRepository):
         message_id: UUID | None = None,
         run_id: UUID | None = None,
         error: str | None = None,
+        result_summary: str | None = None,
     ) -> ToolInvocation:
-        """Append one tool-invocation record for this tenant, returning it."""
+        """Append one tool-invocation record for this tenant, returning it.
+
+        ``result_summary`` is the handler-produced, user-safe result line (#377);
+        it is bounded HERE (the single write chokepoint) so no caller can persist
+        an unbounded string into the trace.
+        """
         row = models.ToolInvocation(
             tenant_id=self._tenant_id,
             session_id=session_id,
@@ -3274,6 +3281,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
             args_hash=args_hash,
             ok=ok,
             error=error,
+            result_summary=(result_summary[:300] if result_summary else None),
             duration_ms=max(0, duration_ms),
         )
         self._session.add(row)
@@ -3293,6 +3301,34 @@ class ToolInvocationRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_tool_invocation(r) for r in rows]
+
+    async def list_for_messages(
+        self, message_ids: Sequence[UUID]
+    ) -> dict[UUID, list[ToolInvocation]]:
+        """The tool trace per assistant message, batched (no N+1), oldest first.
+
+        Hydrates the contract ``Message.tool_invocations`` (#377) the same way
+        citations are hydrated for a history page: one IN query over the page's
+        message ids, tenant-scoped (INV-1). Ids with no trace are simply absent —
+        the caller defaults to ``[]``.
+        """
+        if not message_ids:
+            return {}
+        stmt = (
+            select(models.ToolInvocation)
+            .where(
+                models.ToolInvocation.tenant_id == self._tenant_id,
+                models.ToolInvocation.message_id.in_(list(message_ids)),
+            )
+            .order_by(models.ToolInvocation.created_at.asc(), models.ToolInvocation.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        by_message: dict[UUID, list[ToolInvocation]] = {}
+        for row in rows:
+            if row.message_id is None:  # pragma: no cover — filtered by the IN clause
+                continue
+            by_message.setdefault(row.message_id, []).append(_to_tool_invocation(row))
+        return by_message
 
 
 class AssistantRepository(_TenantScopedRepository):

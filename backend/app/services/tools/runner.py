@@ -422,6 +422,10 @@ class ToolRunner:
             session_id=self._session_id,
             message_id=message_id,
             error=result.error,
+            # The handler's user-safe result line ("3 passages", "13 documents")
+            # persists so the thread trace can say what the tool returned (#377).
+            # Bounded by the repository; never raw args/payloads.
+            result_summary=result.summary,
         )
         return result
 

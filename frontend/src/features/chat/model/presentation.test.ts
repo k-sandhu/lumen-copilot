@@ -24,9 +24,10 @@ import {
   partitionCitations,
   DEFAULT_CHAT_MODES,
 } from './presentation';
+import { toolActivityFromInvocations } from './presentation';
 import type { UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
-import type { ChatSession, KnowledgeMode } from '@/api';
+import type { ChatSession, KnowledgeMode, MessageToolInvocation } from '@/api';
 
 const NOW = Date.parse('2026-06-19T12:00:00Z');
 
@@ -163,6 +164,51 @@ describe('buildRetrievalSummary', () => {
     const result = buildRetrievalSummary([], [doneTool({ hitCount: 10 })], 38);
     expect(result.summary).toBe('Looked at 10 passages · 38 excluded');
     expect(result.summary).not.toMatch(/0 sources/);
+  });
+});
+
+describe('toolActivityFromInvocations (#377)', () => {
+  const inv = (over: Partial<MessageToolInvocation> = {}): MessageToolInvocation => ({
+    id: 'i1',
+    tool_name: 'list_documents',
+    ok: true,
+    duration_ms: 12,
+    created_at: '2026-07-15T00:00:00Z',
+    ...over,
+  });
+
+  it('maps a persisted invocation to a settled ToolActivity with a duration summary', () => {
+    const [t] = toolActivityFromInvocations([inv()]);
+    expect(t).toMatchObject({
+      callId: 'i1',
+      tool: 'list_documents',
+      status: 'done',
+      ok: true,
+      summary: '12 ms',
+    });
+  });
+
+  it('prefers the persisted handler result line over the duration (#377 "what it returned")', () => {
+    const [t] = toolActivityFromInvocations([inv({ result_summary: '13 documents' })]);
+    expect(t?.summary).toBe('13 documents');
+  });
+
+  it('formats second-scale durations as seconds', () => {
+    expect(toolActivityFromInvocations([inv({ duration_ms: 1400 })])[0]?.summary).toBe('1.4 s');
+  });
+
+  it('marks a failure/denial with ok=false and the stable error code', () => {
+    const [t] = toolActivityFromInvocations([
+      inv({ ok: false, error: 'tool_denied', duration_ms: 0 }),
+    ]);
+    expect(t?.ok).toBe(false);
+    expect(t?.summary).toBe('failed (tool_denied)');
+  });
+
+  it('reports an errorless failure honestly (no invented code)', () => {
+    expect(toolActivityFromInvocations([inv({ ok: false, error: null })])[0]?.summary).toBe(
+      'failed',
+    );
   });
 });
 

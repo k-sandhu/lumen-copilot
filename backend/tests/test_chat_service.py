@@ -25,6 +25,7 @@ from app.db.repositories import (
     LlmProviderRepository,
     MessageRepository,
     TenantRepository,
+    ToolInvocationRepository,
     UserPreferenceRepository,
     UserRepository,
 )
@@ -446,6 +447,61 @@ async def test_list_messages_pagination_is_consistent_and_complete(
     # No dupes, every message returned, and in the same order as the full query.
     assert seen == expected_order
     assert set(seen) == {"m0", "m1", "m2", "m3", "m4"}
+
+
+async def test_list_messages_hydrates_tool_invocations(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """An assistant message carries its governed tool trace; others carry [] (#377)."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        repo = MessageRepository(session, world.tenant_a)
+        user_msg = await repo.add(
+            session_id=created.session.id, role=MessageRole.USER, content="list my docs"
+        )
+        answer = await repo.add(
+            session_id=created.session.id, role=MessageRole.ASSISTANT, content="You have 13."
+        )
+        tools = ToolInvocationRepository(session, world.tenant_a)
+        await tools.record(
+            tool_name="list_documents",
+            args_hash="h1",
+            ok=True,
+            duration_ms=12,
+            session_id=created.session.id,
+            message_id=answer.id,
+            result_summary="13 documents",
+        )
+        await tools.record(
+            tool_name="run_python",
+            args_hash="h2",
+            ok=False,
+            error="tool_denied",
+            duration_ms=0,
+            session_id=created.session.id,
+            message_id=answer.id,
+        )
+        await session.commit()
+
+        page = await svc.list_messages(created.session.id, cursor=None, limit=20)
+        assert page is not None
+        by_id = {v.message.id: v for v in page.items}
+        # The user message carries no tool trace.
+        assert by_id[user_msg.id].tool_invocations == []
+        # The assistant message carries BOTH invocations (success and denial) —
+        # a denial is never silently dropped (CC-7). Same-second rows have no
+        # deterministic relative order under SQLite timestamps, so assert by name.
+        got = {t.tool_name: t for t in by_id[answer.id].tool_invocations}
+        assert set(got) == {"list_documents", "run_python"}
+        assert got["list_documents"].ok is True
+        assert got["list_documents"].duration_ms == 12
+        # The handler's result line round-trips (#377 "what it returned").
+        assert got["list_documents"].result_summary == "13 documents"
+        assert got["run_python"].ok is False
+        assert got["run_python"].error == "tool_denied"
+        assert got["run_python"].result_summary is None
 
 
 async def test_list_messages_other_owner_is_none(

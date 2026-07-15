@@ -41,7 +41,7 @@ from app.core.config import Settings
 from app.core.errors import NotFoundError
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
-from app.domain.entities import Message, MessageRole
+from app.domain.entities import Message, MessageRole, ToolInvocation
 from app.domain.llm import ChatMessage, Role
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
@@ -134,6 +134,24 @@ class CitationResponse(BaseModel):
     score: float | None = None
 
 
+class MessageToolInvocationResponse(BaseModel):
+    """``#/components/schemas/MessageToolInvocation`` (#377).
+
+    Tool name + outcome only — call arguments are never stored raw (the trace
+    keeps a non-reversible hash, spec 0004 §2.4 discipline), so none are exposed.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    tool_name: str
+    ok: bool
+    error: str | None = None
+    result_summary: str | None = None
+    duration_ms: int
+    created_at: datetime
+
+
 class MessageResponse(BaseModel):
     """``#/components/schemas/Message``."""
 
@@ -145,6 +163,7 @@ class MessageResponse(BaseModel):
     content: str
     model: str | None = None
     citations: list[CitationResponse]
+    tool_invocations: list[MessageToolInvocationResponse]
     created_at: datetime
 
 
@@ -212,6 +231,18 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
     )
 
 
+def _tool_invocation_to_response(inv: ToolInvocation) -> MessageToolInvocationResponse:
+    return MessageToolInvocationResponse(
+        id=inv.id,
+        tool_name=inv.tool_name,
+        ok=inv.ok,
+        error=inv.error,
+        result_summary=inv.result_summary,
+        duration_ms=inv.duration_ms,
+        created_at=inv.created_at,
+    )
+
+
 def _message_to_response(view: MessageView) -> MessageResponse:
     m = view.message
     return MessageResponse(
@@ -221,6 +252,7 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         content=m.content,
         model=m.model,
         citations=[_citation_to_response(c) for c in view.citations],
+        tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         created_at=m.created_at,
     )
 
@@ -233,7 +265,7 @@ def _message_list_to_response(page: MessagePage) -> MessageListResponse:
 
 
 def _bare_message_to_response(message: Message) -> MessageResponse:
-    """The persisted user message for the 202 body (no citations yet)."""
+    """The persisted user message for the 202 body (no citations/tools yet)."""
     return MessageResponse(
         id=message.id,
         session_id=message.session_id,
@@ -241,6 +273,7 @@ def _bare_message_to_response(message: Message) -> MessageResponse:
         content=message.content,
         model=message.model,
         citations=[],
+        tool_invocations=[],
         created_at=message.created_at,
     )
 

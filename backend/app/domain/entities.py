@@ -1047,6 +1047,9 @@ class ToolInvocation:
     ok: bool
     error: str | None
     duration_ms: int
+    # Short, user-safe result line from OUR tool handler ("3 passages",
+    # "13 documents") for the thread trace (#377); never raw args/payloads.
+    result_summary: str | None = None
     run_id: UUID | None = None
     created_at: datetime = field(default_factory=lambda: datetime.min)
 
