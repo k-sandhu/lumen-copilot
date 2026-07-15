@@ -3,9 +3,12 @@
  * matched snippet is <mark>-highlighted from match_spans, the why-it-matched
  * rationale, owner, freshness, and a permission pill all render. A `restricted`
  * result shows the restricted pill (content withheld) rather than the granted one.
+ * With an `onOpen` handler (#375) the title is an "Open …" button; without one
+ * the row stays non-interactive.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { SearchResult } from '@/api';
 import { SearchResultRow } from './SearchResultRow';
 
@@ -59,5 +62,32 @@ describe('SearchResultRow', () => {
   it('omits the owner line when the result has no owner', () => {
     render(<SearchResultRow result={{ ...base, owner: null }} />);
     expect(screen.queryByText('Dana Ruiz')).not.toBeInTheDocument();
+  });
+
+  it('renders the title as an "Open …" button and fires onOpen when clicked (#375)', async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    render(<SearchResultRow result={base} onOpen={onOpen} />);
+    const button = screen.getByRole('button', { name: 'Open PTO Policy 2026' });
+    await user.click(button);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays non-interactive (plain heading, no button) without onOpen', () => {
+    render(<SearchResultRow result={base} />);
+    expect(screen.getByRole('heading', { name: 'PTO Policy 2026' })).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('keeps the focus ring unclipped: no overflow-hidden ancestor above the Open button', () => {
+    // The focus ring draws OUTSIDE the button's border box; any ancestor with
+    // `truncate`/`overflow-hidden` between the button and the card would clip it
+    // (visible-focus bar, frontend/AGENTS.md). Ellipsis belongs to the inner span.
+    render(<SearchResultRow result={base} onOpen={() => {}} />);
+    const button = screen.getByRole('button', { name: 'Open PTO Policy 2026' });
+    for (let el = button.parentElement; el && el.tagName !== 'ARTICLE'; el = el.parentElement) {
+      expect(el.className).not.toMatch(/truncate|overflow-hidden/);
+    }
+    expect(button.className).not.toMatch(/truncate|overflow-hidden/);
   });
 });

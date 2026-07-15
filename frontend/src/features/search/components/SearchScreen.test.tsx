@@ -9,8 +9,14 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { CollectionList, SearchResponse } from '@/api';
+import type { CollectionList, SearchResponse, SearchResult } from '@/api';
 import { SearchScreen } from './SearchScreen';
+
+// The preview drawer (#375) embeds the shared DocumentPreviewBody, which fetches
+// document bytes/text on mount — stub it so drawer tests stay transport-free.
+vi.mock('@/components/DocumentPreviewBody', () => ({
+  DocumentPreviewBody: () => <div data-testid="preview-body" />,
+}));
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -357,5 +363,33 @@ describe('SearchScreen', () => {
 
     // Clearing the scope brings the chat result back.
     expect(await screen.findByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
+  });
+
+  it('opens the document preview drawer from a result row and closes on Escape (#375)', async () => {
+    const first = fullResponse.results[0] as SearchResult;
+    mockSearch(
+      json({
+        ...fullResponse,
+        results: [{ ...first, document_id: 'd1' }],
+      } satisfies SearchResponse),
+    );
+    renderWithQuery(<SearchScreen />);
+    const user = await runSearch();
+
+    await user.click(await screen.findByRole('button', { name: 'Open PTO Policy 2026' }));
+    const dialog = await screen.findByRole('dialog', { name: /PTO Policy 2026/i });
+    expect(within(dialog).getByTestId('preview-body')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps a result without document_id non-interactive (#375)', async () => {
+    mockSearch(json(fullResponse)); // r1 carries no document_id
+    renderWithQuery(<SearchScreen />);
+    await runSearch();
+
+    expect(await screen.findByRole('article', { name: /PTO Policy 2026/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /open pto policy 2026/i })).not.toBeInTheDocument();
   });
 });
