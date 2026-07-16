@@ -320,3 +320,58 @@ async def test_get_document_invalid_id_is_a_bad_args_rejection(
     assert result.ok is False
     assert result.error == ERROR_BAD_ARGS
     assert "invalid" in result.content.lower()
+
+
+class _RecordingRetrieval:
+    """A retrieval stand-in that records the ``k`` each tool passes through."""
+
+    def __init__(self) -> None:
+        self.text_k: int | None = None
+        self.docs_k: int | None = None
+        self.list_k: int | None = None
+
+    async def search_text(
+        self, *, principal: object, query: str, k: int, collection_ids: object = None
+    ) -> list:
+        self.text_k = k
+        return []
+
+    async def search_documents(
+        self, *, principal: object, name_or_query: str, k: int = 10
+    ) -> list:
+        self.docs_k = k
+        return []
+
+    async def list_documents(self, *, principal: object, k: int) -> list:
+        self.list_k = k
+        return []
+
+
+async def test_tight_budget_clamps_every_retrieval_tool(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    """#424 final re-review: a tight ``ctx.max_k`` clamps the ``k`` passed to
+    search_text, search_documents (explicit AND omitted), AND list_documents —
+    the whole retrieval surface degrades before the per-turn guard has to refuse."""
+    _, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    spy = _RecordingRetrieval()
+    ctx = ToolContext(
+        principal=principal,
+        retrieval=spy,  # type: ignore[arg-type]
+        collection_ids=None,
+        default_k=3,
+        max_k=3,  # a tight budget lowered the ceiling
+    )
+
+    await get_tool("search_text").handler({"query": "q", "k": 20}, ctx)
+    assert spy.text_k == 3  # explicit k=20 hard-clamped to the tight ceiling
+
+    await get_tool("search_documents").handler({"name_or_query": "q", "k": 20}, ctx)
+    assert spy.docs_k == 3  # explicit clamped
+
+    await get_tool("search_documents").handler({"name_or_query": "q"}, ctx)
+    assert spy.docs_k == 3  # omitted default (10) also clamped down
+
+    await get_tool("list_documents").handler({"k": 50}, ctx)
+    assert spy.list_k == 3  # list_documents now honours the tight ceiling too

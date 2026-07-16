@@ -505,7 +505,7 @@ async def test_send_hands_full_history_to_runtime_not_a_fixed_slice(
         svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
         created = await svc.create_session(title="t", model=None)
         repo = MessageRepository(session, world.tenant_a)
-        # 30 prior short turns — well beyond any old fixed-20/200 slice.
+        # 30 prior short turns — beyond the old fixed-20 slice that used to drop them.
         for i in range(30):
             role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
             await repo.add(session_id=created.session.id, role=role, content=f"turn {i}")

@@ -62,9 +62,12 @@ _DEFAULT_RETRIEVAL_K = 6
 #: The ``k`` a *tight* budget falls back to (degrade order step 3): fewer, so a
 #: near-full window is not immediately blown by the next search's passages.
 _TIGHT_RETRIEVAL_K = 3
-#: The absolute ceiling on a single search's ``k`` under a ROOMY budget — mirrors
-#: ``retrieval.impls._MAX_K`` so the assembler's cap never widens the tool's own.
-_ROOMY_MAX_K = 20
+#: The retrieval-``k`` ceiling under a ROOMY budget — the WIDEST any retrieval
+#: tool allows (``list_documents``'s ``_LIST_MAX`` of 50). Each tool still clamps
+#: to its OWN cap (``search_*`` to 20), so a roomy run is unchanged; a tight
+#: budget lowers this so EVERY tool — including ``list_documents`` — shrinks
+#: (ADR-0016 §1 degrade order, #424 final re-review).
+_ROOMY_MAX_K = 50
 #: Per-passage snippet char budget under a roomy window — mirrors
 #: ``retrieval.impls._SNIPPET_BUDGET`` so a roomy run renders exactly as before.
 _ROOMY_SNIPPET_BUDGET = 600
@@ -430,20 +433,22 @@ def fit_transcript(
     # between the system head and that question is shed.
     tail_start = _last_question_index(working)
     dropped = 0
-    # Shed the oldest **plain** history message (no tool_calls, no tool_call_id) —
-    # NEVER a message that is half of a tool-call/result pair, so a result can't be
-    # orphaned from its call (#424 third re-review, tool-pair safety). Scan forward
-    # from the system head for the first sheddable message; if the region holds only
-    # tool-bearing messages, stop and let the refusal below fire.
+    # Shed the oldest history UNIT atomically: either a single plain message, or a
+    # complete assistant(tool_calls) + its following tool-result messages. Dropping
+    # whole groups means a tool result is never orphaned from its call (#424 third
+    # re-review) AND a historical tool group can still be shed when doing so would
+    # fit (#424 final re-review) — not skipped into an avoidable refusal. If the
+    # history region is empty, stop and let the refusal below fire.
     while total > budget:
-        idx = _oldest_sheddable_index(working, tail_start)
-        if idx is None:
+        span = _oldest_sheddable_span(working, tail_start)
+        if span is None:
             break
-        total -= costs[idx]
-        del working[idx]
-        del costs[idx]
-        tail_start -= 1
-        dropped += 1
+        start, end = span
+        total -= sum(costs[start:end])
+        del working[start:end]
+        del costs[start:end]
+        tail_start -= end - start
+        dropped += end - start
 
     if dropped:
         log.info("context.transcript_refit", dropped_messages=dropped, budget_tokens=budget)
@@ -477,22 +482,36 @@ def _last_question_index(messages: Sequence[ChatMessage]) -> int:
     return len(messages)
 
 
-def _oldest_sheddable_index(messages: Sequence[ChatMessage], tail_start: int) -> int | None:
-    """Index of the oldest history message safe to shed, or ``None`` if there is none.
+def _oldest_sheddable_span(
+    messages: Sequence[ChatMessage], tail_start: int
+) -> tuple[int, int] | None:
+    """The ``[start, end)`` of the oldest history UNIT safe to shed, or ``None``.
 
-    Sheds only from the history region ``[1, tail_start)`` (after the system head,
-    before the protected question + live tool tail), and only a **plain** message —
-    one with no ``tool_calls`` (an assistant tool-request) and no ``tool_call_id``
-    (a tool result). Skipping tool-bearing messages guarantees a tool result is
-    never orphaned from its call (#424 third re-review). The runtime's history is
-    text-only by construction, so in practice the first history message is always
-    plain; this makes the public helper's pairing contract hold for any caller.
+    Considers only the history region ``[1, tail_start)`` (after the system head,
+    before the protected question + live tool tail). A "unit" is:
+
+    * a **plain** message (no ``tool_calls``, no ``tool_call_id``) → span of one; or
+    * an assistant **tool-call** message plus the contiguous ``tool``-result
+      messages that follow it → the whole group, dropped atomically so a result is
+      never orphaned from its call (#424 third re-review) and a historical tool
+      group can still be shed when that would fit (#424 final re-review).
+
+    A dangling ``tool`` result with no preceding call (defensive — the runtime never
+    produces this in history) is treated as its own one-message unit. Returns the
+    OLDEST such unit; ``None`` when the region is empty. The runtime's persisted
+    history is text-only, so in practice every unit is a single plain message.
     """
-    for i in range(1, tail_start):
-        m = messages[i]
-        if not m.tool_calls and m.tool_call_id is None:
-            return i
-    return None
+    if tail_start <= 1:
+        return None
+    start = 1
+    m = messages[start]
+    if m.tool_calls:
+        # An assistant tool-call: extend over the contiguous tool results it owns.
+        end = start + 1
+        while end < tail_start and messages[end].tool_call_id is not None:
+            end += 1
+        return (start, end)
+    return (start, start + 1)
 
 
 def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:

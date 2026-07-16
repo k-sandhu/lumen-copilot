@@ -136,7 +136,12 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
 
 
 async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
-    k = _clamp_k(args.get("k"), _LIST_MAX, maximum=_LIST_MAX)
+    # Clamp to the budget-derived ceiling as well as the tool's own _LIST_MAX
+    # (#424 final re-review): a tight window lowers ``ctx.max_k`` so the listing
+    # degrades to a budgeted count instead of enumerating 50 then refusing on the
+    # next turn. ``ctx.max_k`` defaults to _LIST_MAX (50), so a roomy run is
+    # unchanged — it still lists up to 50.
+    k = _clamp_k(args.get("k"), _LIST_MAX, maximum=min(_LIST_MAX, ctx.max_k))
     matches = await ctx.retrieval.list_documents(principal=ctx.principal, k=k)
     if not matches:
         # A clean "nothing here" is an ok result, not an error — the user simply

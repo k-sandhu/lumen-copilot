@@ -166,7 +166,9 @@ def test_tight_budget_shrinks_retrieval_k_and_max_k() -> None:
 
     roomy = _assemble(history=[_msg(Role.USER, "x")], max_input=50_000)
     assert roomy.retrieval_k == 6
-    assert roomy.max_k == 20  # inert ceiling on a roomy budget
+    # Roomy ceiling is the WIDEST tool cap (50, list_documents); each search tool
+    # still clamps to its own 20 — so this is inert for search, permissive for list.
+    assert roomy.max_k == 50
 
 
 # --- #424 review, finding 1: the GROWN transcript is re-fit before every turn --

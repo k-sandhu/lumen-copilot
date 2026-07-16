@@ -147,9 +147,10 @@ class ToolContext:
     #: the context assembler derives it from the input budget and a retrieval tool
     #: clamps even an explicit, model-supplied ``k`` to it, so a search issued
     #: after assembly cannot overflow the window it was budgeted against. Defaults
-    #: to the retrieval tool's own absolute max (20) — inert unless a tighter
-    #: budget lowers it.
-    max_k: int = 20
+    #: to the widest retrieval ceiling (50, ``list_documents``'s cap) — each tool
+    #: still clamps to its OWN max, so this is inert on a roomy run and only bites
+    #: when a tight budget lowers it.
+    max_k: int = 50
     #: The per-passage snippet char budget a search renders into the transcript
     #: (ADR-0016 §1 / #410): the assembler lowers it under a tight window so each
     #: returned passage adds less to the context. Defaults to the retrieval tool's
