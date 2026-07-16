@@ -963,15 +963,18 @@ async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
 
 
 class _RecordingSearchGateway:
-    """Records the byte-size of every ``messages`` payload; always asks to search.
+    """Records the FULL wire estimate of every ``messages`` + ``tools`` payload.
 
     Drives the loop so tool results accumulate (#424 review, finding 1). Records
-    each turn's total message-content bytes so a test can prove no over-budget
-    payload is ever sent to the provider.
+    each turn's estimate via the SAME assembler metric the guard uses (message
+    wire form + tool schemas + framing) — not just content bytes — so a test can
+    prove no over-budget payload is ever sent, and would FAIL if the guard were
+    removed. Records whether the turn was a forced synthesis (tool_choice="none").
     """
 
     def __init__(self) -> None:
-        self.payload_bytes: list[int] = []
+        self.estimates: list[int] = []
+        self.synthesis_estimates: list[int] = []
 
     async def stream_tools(
         self,
@@ -983,9 +986,16 @@ class _RecordingSearchGateway:
         api_key: object = None,
         api_base: object = None,
     ) -> AsyncIterator[StreamEvent]:
+        from app.llm.context import estimate_message_tokens
+
         assert isinstance(messages, list)
-        self.payload_bytes.append(sum(len(m.content.encode("utf-8")) for m in messages))
+        assert isinstance(tools, list)
+        est = estimate_message_tokens(
+            messages, tools, counter=lambda t: len(t.encode("utf-8"))
+        )
+        self.estimates.append(est)
         if tool_choice == "none":
+            self.synthesis_estimates.append(est)
             yield StreamEvent(text="final")
             yield StreamEvent(finish_reason="stop")
             return
@@ -1053,16 +1063,76 @@ async def test_oversized_tool_results_never_exceed_budget(
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
     budget = 5024 - 1024
-    # Every payload the gateway actually received was within budget — the guard
-    # refused (or trimmed) before ever sending the grown, over-budget transcript.
-    assert gateway.payload_bytes  # the loop ran at least once (initial fit)
-    assert all(b <= budget for b in gateway.payload_bytes), gateway.payload_bytes
-    # The run terminated cleanly (exactly one terminal), with the typed refusal.
+    # Every payload the gateway received — measured by the SAME full-wire estimate
+    # the guard uses — was within budget. Without the guard, the accumulating tool
+    # results would push a later estimate over budget and this would FAIL.
+    assert gateway.estimates  # the loop ran at least once (initial fit)
+    assert all(e <= budget for e in gateway.estimates), gateway.estimates
+    # And the guard actually fired: the run terminated with the typed refusal
+    # rather than sending an over-budget call.
     types = [e["type"] for e in envs]
     assert types.count("done") + types.count("error") == 1
     terminal = envs[-1]
-    if terminal["type"] == "error":
-        assert terminal["problem"]["code"] == "context_too_large"  # type: ignore[index]
+    assert terminal["type"] == "error"
+    assert terminal["problem"]["code"] == "context_too_large"  # type: ignore[index]
+
+
+async def test_forced_synthesis_payload_is_budget_guarded(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#424 third re-review: with a single tool turn, the FORCED-SYNTHESIS call
+    must also be budget-guarded — a huge result gathered on the one turn cannot
+    be sent unchecked at synthesis time."""
+    import asyncio
+    import sys
+    import types as _types
+
+    from app.llm.context import ContextConfig
+
+    def _raise(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer in test")
+
+    fake = _types.SimpleNamespace(token_counter=_raise, get_model_info=_raise)
+    monkeypatch.setitem(sys.modules, "litellm", fake)  # type: ignore[arg-type]
+
+    huge = RetrievedPassage(
+        chunk_id=ctx.chunk_id,
+        document_id=ctx.document_id,
+        document_name="big.pdf",
+        ord=0,
+        text="Q" * 8000,
+        char_start=0,
+        char_end=8000,
+        score=0.9,
+    )
+    gateway = _RecordingSearchGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # max_tool_turns=1: one tool turn, then the loop is exhausted and the runtime
+    # makes the forced-synthesis call. Budget 4000 (5024 − 1024); the one huge
+    # result makes the synthesis payload oversized ⇒ must be refused, not sent.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([huge]),
+        backplane=backplane,
+        default_max_tool_turns=1,
+        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="summarize the big doc",
+        model="some/unknown-model-not-in-map",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    budget = 5024 - 1024
+    # No payload (ordinary or forced-synthesis) exceeded budget.
+    assert all(e <= budget for e in gateway.estimates), gateway.estimates
 
 
 # --- #409: token & cache usage — reported on done, recorded per answer -------

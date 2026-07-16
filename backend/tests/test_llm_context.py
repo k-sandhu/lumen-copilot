@@ -286,24 +286,35 @@ def test_conservative_fallback_is_a_byte_upper_bound() -> None:
     assert ctx_mod._conservative_tokens(cjk) >= len(cjk)  # upper bound, not //4
 
 
-def test_token_counter_degrades_when_litellm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """findings 4/5: a litellm token_counter/import failure degrades to the
-    conservative byte bound and never raises."""
+def test_token_counter_degrades_when_litellm_call_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """finding 5: a litellm token_counter CALL failure degrades to the byte bound."""
     import sys
     import types as _types
 
     import app.llm.context as ctx_mod
 
-    # A fake litellm whose token_counter raises — the SAME except path a genuine
-    # import failure takes (the import is inside the try), so this covers both.
     def _boom(**_kw: object) -> int:
         raise RuntimeError("no tokenizer")
 
     monkeypatch.setitem(sys.modules, "litellm", _types.SimpleNamespace(token_counter=_boom))  # type: ignore[arg-type]
     counter = ctx_mod.litellm_token_counter("some/model")
     assert counter("") == 0
-    # Falls back to the byte count rather than raising.
     assert counter("日本語") == len("日本語".encode())
+
+
+def test_token_counter_degrades_when_litellm_import_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """finding 5: a genuine ``import litellm`` FAILURE (not just a call failure)
+    degrades to the conservative byte bound — the import is inside the guard."""
+    import sys
+
+    import app.llm.context as ctx_mod
+
+    # sys.modules["litellm"] = None makes ``import litellm`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "litellm", None)
+    counter = ctx_mod.litellm_token_counter("some/model")
+    assert counter("hello") == len(b"hello")
+    # The resolver seam degrades the same way — unknown window ⇒ None ⇒ fallback.
+    assert ctx_mod.litellm_max_input_tokens("some/model") is None
 
 
 def test_estimate_counts_tool_call_arguments_not_just_content() -> None:
@@ -349,3 +360,31 @@ def test_more_than_twenty_short_turns_all_fit() -> None:
     assert out.dropped_history_messages == 0
     # All 40 short turns survive (system + 40 + question).
     assert len(out.messages) == 42
+
+
+def test_fit_transcript_never_orphans_a_tool_pair_in_history() -> None:
+    """#424 third re-review, moderate 3: shedding is tool-pair-aware — a history
+    tool result is never left without its call. Given a plain turn followed by a
+    tool-call/result pair in history, over budget, the plain turn is shed but the
+    pair stays intact (or the whole thing refuses); no orphaned tool_call_id."""
+    system = _msg(Role.SYSTEM, "SYS")
+    plain = _msg(Role.USER, "p" * 300)  # sheddable
+    hist_call = ChatMessage(
+        role=Role.ASSISTANT,
+        content="",
+        tool_calls=(ToolCall(id="h1", name="search_text", arguments={"query": "z"}),),
+    )
+    hist_result = ChatMessage(
+        role=Role.TOOL, content="r" * 100, tool_call_id="h1", name="search_text"
+    )
+    question = _msg(Role.USER, "current")
+    messages = [system, plain, hist_call, hist_result, question]
+
+    # Budget that forces shedding the plain turn but keeps the rest.
+    fitted = _fit(messages, max_input=1024 + 500)
+    # The plain turn is gone; the tool pair is intact and adjacent.
+    assert not any(m.content.startswith("p" * 10) for m in fitted)
+    call_ids = {tc.id for m in fitted for tc in m.tool_calls}
+    result_ref_ids = {m.tool_call_id for m in fitted if m.tool_call_id is not None}
+    # Every retained tool result still has its call present — no orphan.
+    assert result_ref_ids <= call_ids

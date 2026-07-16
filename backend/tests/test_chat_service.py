@@ -492,6 +492,37 @@ async def test_send_to_other_owner_session_is_none(
 # --- history ----------------------------------------------------------------
 
 
+async def test_send_hands_full_history_to_runtime_not_a_fixed_slice(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """#424 third re-review, major 2: send_message no longer pre-slices history to
+    a fixed count — it hands ALL prior messages to the runtime, where the
+    token-budgeted assembler decides what fits. Proves the service path, not just
+    assemble_context directly."""
+    world, factory = world_and_factory
+    backplane = InMemoryBackplane()
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        repo = MessageRepository(session, world.tenant_a)
+        # 30 prior short turns — well beyond any old fixed-20/200 slice.
+        for i in range(30):
+            role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+            await repo.add(session_id=created.session.id, role=role, content=f"turn {i}")
+        await session.commit()
+
+        result = await svc.send_message(
+            created.session.id, content="the newest question", model=None, backplane=backplane
+        )
+        await session.commit()
+
+    assert result is not None
+    # Every one of the 30 prior turns rides the SendResult to the runtime — none
+    # were silently dropped before the assembler saw them.
+    assert len(result.history) == 30
+    assert [m.content for m in result.history] == [f"turn {i}" for i in range(30)]
+
+
 async def test_list_messages_pagination_is_consistent_and_complete(
     world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
 ) -> None:

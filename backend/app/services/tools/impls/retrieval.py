@@ -184,7 +184,12 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     if doc is None:
         # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
         return ToolHandlerResult(content="Document not found.", summary="not found")
-    body = doc.text[: _SNIPPET_BUDGET * 4]
+    # Bound the returned body to the budget-derived snippet allowance (#424 third
+    # re-review): a document read is ~4× a passage snippet, and a tight context
+    # window lowers ``ctx.snippet_budget`` so ``get_document`` doesn't blow the
+    # remaining budget either. Capped at the tool's own ceiling; roomy = unchanged.
+    body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
+    body = doc.text[:body_budget]
     return ToolHandlerResult(
         content=f"Document: {doc.document_name}\n\n{body}",
         summary=doc.document_name,

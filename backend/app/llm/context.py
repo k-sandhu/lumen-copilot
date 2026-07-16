@@ -14,9 +14,9 @@ content is empty in this feature; the slots exist so those later features drop
 in without reordering the prefix and invalidating caches. Only ``history`` is
 shrinkable in v1.
 
-Why this exists (ADR-0016 §1): the previous inline assembly was count-based
-(the last N turns, whatever their size — ``chat_service._HISTORY_LOAD_CAP``) and
-cache-blind, and an oversize prompt failed *reactively* as the provider's
+Why this exists (ADR-0016 §1): the previous approach was count-based (the last N
+prior turns, whatever their size — a fixed slice that used to live in
+``chat_service``) and cache-blind, and an oversize prompt failed *reactively* as the provider's
 ``ContextWindowExceeded`` → 422. Here the budget is enforced **before** the
 call, with a deliberate degrade order: shrink the (reserved) memory segment →
 roll history into the (reserved) summary → drop oldest history messages → a
@@ -74,6 +74,12 @@ _TIGHT_SNIPPET_BUDGET = 300
 #: The remaining-history fraction below which the budget is considered "tight"
 #: and the retrieval knobs shrink.
 _TIGHT_BUDGET_FRACTION = 0.15
+#: Wire framing the ``messages`` array adds beyond each entry's own JSON: a small
+#: allowance per entry (the inter-entry separator) so the token estimate is a true
+#: upper bound, not just a per-object sum (#424 third re-review).
+_MESSAGE_FRAMING_TOKENS = 4
+#: The outer ``[]`` framing of the messages array (counted once).
+_ARRAY_FRAMING_TOKENS = 2
 
 #: Counts the tokens of a TEXT fragment for the answer's model.
 TokenCounter = Callable[[str], int]
@@ -242,11 +248,19 @@ def assemble_context(
     system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt)
     question_message = ChatMessage(role=Role.USER, content=question)
     tools_text = _tools_wire_text(tools)
+
+    def _msg_cost(m: ChatMessage) -> int:
+        # A message's wire form + the per-entry array framing — the SAME per-message
+        # cost :func:`estimate_message_tokens` / :func:`fit_transcript` use, so the
+        # initial assembly and the per-turn refit agree exactly (#424 third re-review).
+        return count(_message_wire_text(m)) + _MESSAGE_FRAMING_TOKENS
+
     fixed = (
-        count(_message_wire_text(system_message))
-        + count(_message_wire_text(question_message))
+        _msg_cost(system_message)
+        + _msg_cost(question_message)
         + count(tools_text)
-        + sum(count(_message_wire_text(m)) for m in reserved)
+        + _ARRAY_FRAMING_TOKENS
+        + sum(_msg_cost(m) for m in reserved)
     )
     if fixed > budget:
         raise ValidationError(
@@ -263,7 +277,7 @@ def assemble_context(
     dropped = 0
     spent = 0
     for message in reversed(list(history)):
-        message_tokens = count(_message_wire_text(message))
+        message_tokens = _msg_cost(message)
         if spent + message_tokens > remaining:
             # Everything older than the first non-fitting message drops too — a
             # gap in the middle of a conversation reads worse than an
@@ -316,11 +330,16 @@ def estimate_message_tokens(
     ``tool_call_id``, and ``name`` (#424 re-review): a model that emits a large
     tool *argument* would otherwise be radically under-counted (a probe measured
     estimate 18 vs actual wire 5231) and slip past the guard. Plus the serialized
-    tool schemas. Exposed so the runtime can re-check the *grown* transcript
-    before every model call (#424 review, finding 1).
+    tool schemas, plus the ``messages`` array framing (outer brackets + the
+    separators between entries, which no single entry's JSON includes) so the
+    total is a true UPPER bound, not a per-object sum (#424 third re-review).
+    Exposed so the runtime can re-check the *grown* transcript before every model
+    call (#424 review, finding 1).
     """
-    return counter(_tools_wire_text(tools)) + sum(
-        counter(_message_wire_text(m)) for m in messages
+    return (
+        counter(_tools_wire_text(tools))
+        + _ARRAY_FRAMING_TOKENS
+        + sum(counter(_message_wire_text(m)) + _MESSAGE_FRAMING_TOKENS for m in messages)
     )
 
 
@@ -395,26 +414,34 @@ def fit_transcript(
     )
 
     working = list(messages)
-    # Cost each message ONCE, then shed by subtracting from a running total —
-    # linear, not the O(n²) re-count-per-deletion the naive loop would be (#424
-    # re-review, perf). ``tools`` is costed once; it is invariant across shedding.
-    costs = [count(_message_wire_text(m)) for m in working]
-    tools_cost = count(_tools_wire_text(tools))
-    total = tools_cost + sum(costs)
+    # Cost each message ONCE (its wire form + the per-entry array framing), then
+    # shed by subtracting from a running total — linear, not the O(n²)
+    # re-count-per-deletion the naive loop would be (#424 re-review, perf).
+    # ``tools`` + the array brackets are costed once; invariant across shedding.
+    costs = [count(_message_wire_text(m)) + _MESSAGE_FRAMING_TOKENS for m in working]
+    fixed_cost = count(_tools_wire_text(tools)) + _ARRAY_FRAMING_TOKENS
+    total = fixed_cost + sum(costs)
     if total <= budget:
         return working
 
     # The protected tail begins at the LAST plain user message (the current
-    # question); everything from there on is this answer's live turn. History is
-    # the plain user/assistant messages between the system head and that question.
+    # question); everything from there on is this answer's live turn (question +
+    # this answer's tool-call/result messages). Only the *conversation history*
+    # between the system head and that question is shed.
     tail_start = _last_question_index(working)
     dropped = 0
-    # Drop oldest history first (index 1, after the system head), stopping before
-    # the protected tail, subtracting each shed message's cost, until it fits.
-    while tail_start > 1 and total > budget:
-        total -= costs[1]
-        del working[1]
-        del costs[1]
+    # Shed the oldest **plain** history message (no tool_calls, no tool_call_id) —
+    # NEVER a message that is half of a tool-call/result pair, so a result can't be
+    # orphaned from its call (#424 third re-review, tool-pair safety). Scan forward
+    # from the system head for the first sheddable message; if the region holds only
+    # tool-bearing messages, stop and let the refusal below fire.
+    while total > budget:
+        idx = _oldest_sheddable_index(working, tail_start)
+        if idx is None:
+            break
+        total -= costs[idx]
+        del working[idx]
+        del costs[idx]
         tail_start -= 1
         dropped += 1
 
@@ -448,6 +475,24 @@ def _last_question_index(messages: Sequence[ChatMessage]) -> int:
         if m.role is Role.USER and m.tool_call_id is None:
             return i
     return len(messages)
+
+
+def _oldest_sheddable_index(messages: Sequence[ChatMessage], tail_start: int) -> int | None:
+    """Index of the oldest history message safe to shed, or ``None`` if there is none.
+
+    Sheds only from the history region ``[1, tail_start)`` (after the system head,
+    before the protected question + live tool tail), and only a **plain** message —
+    one with no ``tool_calls`` (an assistant tool-request) and no ``tool_call_id``
+    (a tool result). Skipping tool-bearing messages guarantees a tool result is
+    never orphaned from its call (#424 third re-review). The runtime's history is
+    text-only by construction, so in practice the first history message is always
+    plain; this makes the public helper's pairing contract hold for any caller.
+    """
+    for i in range(1, tail_start):
+        m = messages[i]
+        if not m.tool_calls and m.tool_call_id is None:
+            return i
+    return None
 
 
 def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
