@@ -59,9 +59,13 @@ _MIN_LIMIT = 1
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 20
 
-# How many prior turns to include as conversation context for the answer (keeps
-# the prompt bounded; the runtime adds the system prompt + the new question).
-_HISTORY_TURNS = 20
+# A generous upper bound on how many prior messages to LOAD as candidate
+# conversation context (a DB-materialisation safety cap, not the semantic limit).
+# The real limiter is the runtime's token-budgeted context assembler (ADR-0016
+# §1 / #410): it keeps as many recent turns as the model's input window allows
+# and trims the rest oldest-first — so short turns beyond the old fixed 20 are no
+# longer silently discarded before the assembler ever sees them (#424 re-review).
+_HISTORY_LOAD_CAP = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +463,7 @@ class ChatService:
             user_message=user_message,
             stream_id=stream_id,
             model=resolved_model,
-            history=tuple(prior[-_HISTORY_TURNS:]),
+            history=tuple(prior[-_HISTORY_LOAD_CAP:]),
             assistant_config=assistant_config,
             custom_instructions=custom_instructions,
         )

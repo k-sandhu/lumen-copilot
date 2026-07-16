@@ -15,7 +15,7 @@ in without reordering the prefix and invalidating caches. Only ``history`` is
 shrinkable in v1.
 
 Why this exists (ADR-0016 §1): the previous inline assembly was count-based
-(the last N turns, whatever their size — ``chat_service._HISTORY_TURNS``) and
+(the last N turns, whatever their size — ``chat_service._HISTORY_LOAD_CAP``) and
 cache-blind, and an oversize prompt failed *reactively* as the provider's
 ``ContextWindowExceeded`` → 422. Here the budget is enforced **before** the
 call, with a deliberate degrade order: shrink the (reserved) memory segment →
@@ -56,8 +56,6 @@ DEFAULT_OUTPUT_HEADROOM_TOKENS = 8_000
 #: Fixed safety margin against tokenizer drift: the local estimate and the
 #: provider's real tokenizer disagree by a few percent; the margin absorbs it.
 _SAFETY_MARGIN_TOKENS = 1_024
-#: Per-message wire overhead (role/framing tokens) added on top of content.
-_PER_MESSAGE_OVERHEAD_TOKENS = 4
 #: The retrieval ``k`` an ordinary (roomy) budget uses — mirrors the runtime's
 #: historical ``_DEFAULT_K`` so behaviour is unchanged when the window is ample.
 _DEFAULT_RETRIEVAL_K = 6
@@ -135,8 +133,9 @@ class _Segments:
 def litellm_token_counter(model: str) -> TokenCounter:
     """The default counter seam: LiteLLM's tokenizer for ``model``, lazily.
 
-    A model whose tokenizer LiteLLM does not know falls back to the classic
-    ~4-chars-per-token heuristic — a counter must *never* fail an answer.
+    A model whose tokenizer LiteLLM does not know (or a litellm import failure)
+    falls back to :func:`_conservative_tokens` — a UTF-8 byte UPPER bound — so a
+    counter never fails an answer *and* never under-counts into an overflow.
     """
 
     def _count(text: str) -> int:
@@ -234,17 +233,20 @@ def assemble_context(
     # positive floor so the question alone can be judged against SOMETHING.
     budget = max(max_input - cfg.output_headroom_tokens - _SAFETY_MARGIN_TOKENS, 1)
 
-    # The fixed spend: system + the reserved segments (empty now) + question
-    # (+ their per-message overheads) + the serialized tool schemas (they ride
-    # the ``tools`` param but spend the same window).
+    # The fixed spend: system + the reserved segments (empty now) + question +
+    # the serialized tool schemas — each counted in its exact WIRE form (the same
+    # metric :func:`estimate_message_tokens` / :func:`fit_transcript` use, so the
+    # initial assembly and the per-turn refit never disagree about a message's
+    # size, #424 re-review). Tools ride the ``tools`` param but spend the window.
     reserved = [*segments.memory, *segments.summary]
+    system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt)
+    question_message = ChatMessage(role=Role.USER, content=question)
     tools_text = _tools_wire_text(tools)
     fixed = (
-        count(system_prompt)
-        + count(question)
+        count(_message_wire_text(system_message))
+        + count(_message_wire_text(question_message))
         + count(tools_text)
-        + sum(count(m.content) + _PER_MESSAGE_OVERHEAD_TOKENS for m in reserved)
-        + 2 * _PER_MESSAGE_OVERHEAD_TOKENS
+        + sum(count(_message_wire_text(m)) for m in reserved)
     )
     if fixed > budget:
         raise ValidationError(
@@ -261,7 +263,7 @@ def assemble_context(
     dropped = 0
     spent = 0
     for message in reversed(list(history)):
-        message_tokens = count(message.content) + _PER_MESSAGE_OVERHEAD_TOKENS
+        message_tokens = count(_message_wire_text(message))
         if spent + message_tokens > remaining:
             # Everything older than the first non-fitting message drops too — a
             # gap in the middle of a conversation reads worse than an
@@ -280,12 +282,7 @@ def assemble_context(
             budget_tokens=budget,
         )
 
-    messages: list[ChatMessage] = [
-        ChatMessage(role=Role.SYSTEM, content=system_prompt),
-        *reserved,
-        *kept,
-        ChatMessage(role=Role.USER, content=question),
-    ]
+    messages: list[ChatMessage] = [system_message, *reserved, *kept, question_message]
     # Degrade order step 3: under a tight remaining window, tell the run to
     # retrieve fewer passages so the next search does not immediately overflow —
     # both the default ``k`` AND the enforceable ceiling shrink, so even an
@@ -314,14 +311,48 @@ def estimate_message_tokens(
 ) -> int:
     """Estimate the tokens an outgoing ``messages`` + ``tools`` payload will spend.
 
-    Counts each message's content (plus the per-message wire overhead) and the
-    serialized tool schemas — the same accounting :func:`assemble_context` uses,
-    exposed so the runtime can re-check the *grown* transcript before every model
-    call (#424 review, finding 1).
+    Counts the FULL wire form of each message — not just ``content`` — because the
+    gateway also serializes ``tool_calls`` (name + arguments JSON + id),
+    ``tool_call_id``, and ``name`` (#424 re-review): a model that emits a large
+    tool *argument* would otherwise be radically under-counted (a probe measured
+    estimate 18 vs actual wire 5231) and slip past the guard. Plus the serialized
+    tool schemas. Exposed so the runtime can re-check the *grown* transcript
+    before every model call (#424 review, finding 1).
     """
     return counter(_tools_wire_text(tools)) + sum(
-        counter(m.content) + _PER_MESSAGE_OVERHEAD_TOKENS for m in messages
+        counter(_message_wire_text(m)) for m in messages
     )
+
+
+def _message_wire_text(message: ChatMessage) -> str:
+    """Serialize one message to the EXACT wire shape the gateway sends, for counting.
+
+    Mirrors :meth:`LLMGateway._to_wire_messages` field-for-field (role, content,
+    the OpenAI ``tool_calls`` array with each call's id/name/serialized arguments,
+    ``tool_call_id``, and ``name``) so the estimate counts every byte the provider
+    actually receives — tool-call metadata included (#424 re-review, new finding
+    1). ``sort_keys`` for determinism.
+    """
+    import json
+
+    entry: dict[str, object] = {"role": message.role.value, "content": message.content}
+    if message.tool_calls:
+        entry["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+            }
+            for tc in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        entry["tool_call_id"] = message.tool_call_id
+    if message.name is not None:
+        entry["name"] = message.name
+    try:
+        return json.dumps(entry, sort_keys=True)
+    except (TypeError, ValueError):  # pragma: no cover — args are JSON by construction
+        return str(entry)
 
 
 def fit_transcript(
@@ -364,7 +395,13 @@ def fit_transcript(
     )
 
     working = list(messages)
-    if estimate_message_tokens(working, tools, counter=count) <= budget:
+    # Cost each message ONCE, then shed by subtracting from a running total —
+    # linear, not the O(n²) re-count-per-deletion the naive loop would be (#424
+    # re-review, perf). ``tools`` is costed once; it is invariant across shedding.
+    costs = [count(_message_wire_text(m)) for m in working]
+    tools_cost = count(_tools_wire_text(tools))
+    total = tools_cost + sum(costs)
+    if total <= budget:
         return working
 
     # The protected tail begins at the LAST plain user message (the current
@@ -373,19 +410,18 @@ def fit_transcript(
     tail_start = _last_question_index(working)
     dropped = 0
     # Drop oldest history first (index 1, after the system head), stopping before
-    # the protected tail, until the payload fits or no history remains.
-    while (
-        tail_start > 1
-        and estimate_message_tokens(working, tools, counter=count) > budget
-    ):
+    # the protected tail, subtracting each shed message's cost, until it fits.
+    while tail_start > 1 and total > budget:
+        total -= costs[1]
         del working[1]
+        del costs[1]
         tail_start -= 1
         dropped += 1
 
     if dropped:
         log.info("context.transcript_refit", dropped_messages=dropped, budget_tokens=budget)
 
-    if estimate_message_tokens(working, tools, counter=count) > budget:
+    if total > budget:
         # Even with all history shed, the system prompt + current live turn
         # exceed the window. Refuse deterministically rather than send an
         # over-budget call (the #415 follow-up will compact the tail instead).

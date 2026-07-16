@@ -147,6 +147,19 @@ def test_context_headroom_not_below_window_rejected() -> None:
         )
 
 
+def test_context_budget_margin_gap_rejected() -> None:
+    """fallback 1025 + headroom 1024 passes the field bounds but leaves only a
+    1-token budget after the 1024 safety margin — the cross-field check rejects
+    it (#424 re-review, the margin must be part of the guard)."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_BASE,
+            CONTEXT_FALLBACK_MAX_INPUT_TOKENS=1025,
+            CONTEXT_OUTPUT_HEADROOM_TOKENS=1024,
+        )
+
+
 def test_context_valid_budget_accepted() -> None:
     s = Settings(
         _env_file=None,

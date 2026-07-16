@@ -46,12 +46,15 @@ _SNIPPET_BUDGET = 600
 
 
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
+    # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
+    # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than
+    # the tool's own default, and the default must not slip past it either.
     if not isinstance(value, int | float | str):
-        return default
+        return max(1, min(maximum, default))
     try:
         k = int(value)
     except (TypeError, ValueError):
-        return default
+        return max(1, min(maximum, default))
     return max(1, min(maximum, k))
 
 

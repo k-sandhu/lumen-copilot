@@ -398,17 +398,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _context_budget_leaves_room(self) -> Settings:
-        """The fallback window must leave positive input room after the headroom.
+        """The fallback window must leave positive input room after headroom + margin.
 
-        Combined with the field bounds above, this rejects a config where the
-        reserved output headroom meets or exceeds the fallback input window —
-        which would drive the assembler's budget to its degenerate 1-token floor
-        and refuse every prompt built on the fallback path (#424 review).
+        The assembler computes ``budget = fallback − headroom − safety_margin``
+        (the margin absorbs tokenizer drift). This rejects a config where that
+        derived budget is not strictly positive — e.g. fallback 1025 + headroom
+        1024, which passes the field bounds yet floors the budget to 1 and refuses
+        even an empty prompt (#424 re-review). The margin is mirrored from
+        ``app.llm.context._SAFETY_MARGIN_TOKENS`` (kept in lockstep — both are the
+        same 1024-token drift allowance).
         """
-        if self.context_output_headroom_tokens >= self.context_fallback_max_input_tokens:
+        _context_safety_margin = 1024
+        derived_budget = (
+            self.context_fallback_max_input_tokens
+            - self.context_output_headroom_tokens
+            - _context_safety_margin
+        )
+        if derived_budget <= 0:
             raise ValueError(
-                "CONTEXT_OUTPUT_HEADROOM_TOKENS must be less than "
-                "CONTEXT_FALLBACK_MAX_INPUT_TOKENS (issue #410)"
+                "CONTEXT_FALLBACK_MAX_INPUT_TOKENS must exceed "
+                "CONTEXT_OUTPUT_HEADROOM_TOKENS by more than the 1024-token safety "
+                "margin so a positive input budget remains (issue #410)"
             )
         return self
 

@@ -36,3 +36,4 @@ playwright-report/
 
 # Generated contract artifacts (regenerated from contracts/; never committed)
 frontend/src/api/generated/
+codex-review-*.md

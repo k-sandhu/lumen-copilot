@@ -484,7 +484,7 @@ class ChatRuntime:
 
         # Assemble the prompt under the model's input budget (ADR-0016 §1, #410),
         # replacing the old inline ``[system, *history, question]`` build and the
-        # count-based history window (``chat_service._HISTORY_TURNS``). History
+        # count-based history window (``chat_service._HISTORY_LOAD_CAP``). History
         # trims oldest-first to fit; an oversize *fixed* prompt raises a typed
         # ``context_too_large`` (422) that ``run``'s ``except AppError`` arm turns
         # into the terminal problem envelope — a deliberate refusal, never a

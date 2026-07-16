@@ -136,19 +136,18 @@ def test_fixed_segments_over_budget_refuse_typed() -> None:
 def test_tool_schemas_spend_the_budget() -> None:
     """Advertised tool specs count against the window — including the full
     OpenAI wire framing, not just name+description+schema (#424 review, finding 3)."""
-    # budget 350 (max_input 1374 − 1024 margin). One history msg = 104 tokens.
-    # Without tools: fixed = 3+1+0+8 = 12, remaining 338 ≥ 104 ⇒ fits.
-    # With the fat tool: the SERIALIZED wire form ({"type":"function",...} with
-    # the "d"*200 description + framing) pushes fixed to ~300, so remaining ~48
-    # < 104 ⇒ the message no longer fits (dropped).
+    # budget 450 (max_input 1474 − 1024 margin). The single history message
+    # (wire ≈130) fits without tools, but the fat tool's serialized wire form
+    # (the full {"type":"function",...} envelope + the "d"*200 description) spends
+    # enough of the budget that the message no longer fits (dropped).
     history = [_msg(Role.USER, "h" * 100)]
     fat_tool = ToolSpec(
         name="t",
         description="d" * 200,
         parameters={"type": "object", "properties": {}},
     )
-    without = _assemble(history=history, max_input=1024 + 350)
-    with_tools = _assemble(history=history, max_input=1024 + 350, tools=(fat_tool,))
+    without = _assemble(history=history, max_input=1024 + 450)
+    with_tools = _assemble(history=history, max_input=1024 + 450, tools=(fat_tool,))
     assert without.dropped_history_messages == 0
     assert with_tools.dropped_history_messages == 1
 
@@ -158,7 +157,9 @@ def test_tight_budget_shrinks_retrieval_k_and_max_k() -> None:
     the enforceable ceiling (#424 review, finding 3), so even an explicit large k
     is clamped downstream."""
     history = [_msg(Role.USER, "z" * 1000)]
-    tight = _assemble(history=history, max_input=1100 + 1024)  # budget 1100, msg 1004
+    # budget 1200 (max_input 2224 − 1024): the ~1030-token message fits but leaves
+    # only ~100 free (< 15% of budget), so the window is "tight".
+    tight = _assemble(history=history, max_input=2224)
     assert tight.dropped_history_messages == 0
     assert tight.retrieval_k == 3
     assert tight.max_k == 3  # the CEILING drops too — clamps explicit k
@@ -215,10 +216,10 @@ def test_fit_transcript_sheds_oldest_history_preserving_live_tail() -> None:
     )
     messages = [system, *old_hist, question, tool_call, tool_result]
 
-    # budget 300 (1324 − 1024): total is ~683, so BOTH ~244-token history turns
-    # must go, but the system head (7) + question (20) + live tool tail (~168)
-    # = ~195 fits comfortably.
-    fitted = _fit(messages, max_input=1324)
+    # budget 600 (1624 − 1024): with full wire counting the live tail (system +
+    # question + tool_call + tool_result) is ~400 and each history turn ~270, so
+    # BOTH history turns must be shed but the protected tail fits.
+    fitted = _fit(messages, max_input=1624)
     contents = [m.content for m in fitted]
     assert "old q " * 40 not in contents  # history shed
     assert "old a " * 40 not in contents
@@ -274,22 +275,77 @@ def test_resolver_none_uses_configured_fallback_not_refusal() -> None:
     assert out.dropped_history_messages == 0
 
 
-def test_token_counter_degrades_to_conservative_bytes_on_failure() -> None:
-    """findings 4/5: a tokenizer/import failure falls back to a UTF-8 BYTE upper
-    bound (≥ real tokens), and never raises."""
+def test_conservative_fallback_is_a_byte_upper_bound() -> None:
+    """finding 4: the fallback is a UTF-8 BYTE upper bound (≥ real tokens)."""
     import app.llm.context as ctx_mod
 
-    # Force the litellm import path to fail so the fallback runs; assert the
-    # fallback is the conservative byte count for a multi-byte string.
-    original = ctx_mod.litellm_token_counter
-    counter = original("some/unknown-model")  # builds the real seam
     # A CJK string: 3 chars but 9 UTF-8 bytes — the old len//4 would say 0/1,
-    # the conservative bound says >= the byte length.
+    # the conservative bound says the byte length (≥ the char count).
     cjk = "日本語"
-    # The seam tries litellm first; on a machine without that tokenizer it
-    # degrades. We assert the fallback path's value directly via the helper.
     assert ctx_mod._conservative_tokens(cjk) == len(cjk.encode("utf-8"))
     assert ctx_mod._conservative_tokens(cjk) >= len(cjk)  # upper bound, not //4
-    # And the built counter never raises for any input.
+
+
+def test_token_counter_degrades_when_litellm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """findings 4/5: a litellm token_counter/import failure degrades to the
+    conservative byte bound and never raises."""
+    import sys
+    import types as _types
+
+    import app.llm.context as ctx_mod
+
+    # A fake litellm whose token_counter raises — the SAME except path a genuine
+    # import failure takes (the import is inside the try), so this covers both.
+    def _boom(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer")
+
+    monkeypatch.setitem(sys.modules, "litellm", _types.SimpleNamespace(token_counter=_boom))  # type: ignore[arg-type]
+    counter = ctx_mod.litellm_token_counter("some/model")
     assert counter("") == 0
-    assert counter("hello") >= 1
+    # Falls back to the byte count rather than raising.
+    assert counter("日本語") == len("日本語".encode())
+
+
+def test_estimate_counts_tool_call_arguments_not_just_content() -> None:
+    """#424 re-review, new finding 1: a message's tool_call arguments/ids/name are
+    counted, so a big tool ARGUMENT is not radically under-counted (content=empty)."""
+    from app.llm.context import estimate_message_tokens
+
+    plain = ChatMessage(role=Role.ASSISTANT, content="")
+    with_big_args = ChatMessage(
+        role=Role.ASSISTANT,
+        content="",  # NO content — the weight is entirely in the arguments
+        tool_calls=(
+            ToolCall(id="c1", name="run_python", arguments={"code": "X" * 4000}),
+        ),
+    )
+    plain_cost = estimate_message_tokens([plain], counter=_CHAR_COUNTER)
+    big_cost = estimate_message_tokens([with_big_args], counter=_CHAR_COUNTER)
+    # The 4000-char argument dominates — the estimate must reflect it, not ~0.
+    assert big_cost > 4000
+    assert big_cost > plain_cost + 4000
+
+
+def test_fit_transcript_refuses_on_oversized_tool_argument() -> None:
+    """#424 re-review, new finding 1: an oversized tool ARGUMENT (not content) in
+    the live tail is caught — the guard refuses rather than sending it."""
+    system = _msg(Role.SYSTEM, "SYS")
+    question = _msg(Role.USER, "q")
+    huge_arg_call = ChatMessage(
+        role=Role.ASSISTANT,
+        content="",
+        tool_calls=(ToolCall(id="c1", name="run_python", arguments={"code": "Y" * 6000}),),
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        _fit([system, question, huge_arg_call], max_input=1024 + 500)
+    assert excinfo.value.code == "context_too_large"
+
+
+def test_more_than_twenty_short_turns_all_fit() -> None:
+    """#424 re-review, major 2: with a roomy budget, far more than the old
+    fixed-20 history turns are retained (the assembler token-budgets, not counts)."""
+    history = [_msg(Role.USER if i % 2 == 0 else Role.ASSISTANT, f"turn {i}") for i in range(40)]
+    out = _assemble(history=history, max_input=200_000)
+    assert out.dropped_history_messages == 0
+    # All 40 short turns survive (system + 40 + question).
+    assert len(out.messages) == 42
