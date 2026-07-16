@@ -24,5 +24,8 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0013](0013-code-execution-sandbox.md) | Code-execution sandbox for agent-authored Python (container-per-run via a `sandbox-runner` service) | Accepted |
 | [0014](0014-web-search-provider.md) | Web-search provider & egress (`web_search` agent tool — self-hosted SearXNG) | Accepted |
 | [0015](0015-scheduling-and-headless-runs.md) | Scheduling & headless agent runs (celery-redbeat + a persisting run sink) | Accepted |
+| [0016](0016-context-engine-and-cache-first-prompting.md) | Context engine & cache-first prompting (assembler, caching, compression, resilience, tool concurrency) | Accepted |
+| [0017](0017-hierarchical-memory.md) | Hierarchical memory (org/assistant/user) with governed promotion | Accepted |
+| [0018](0018-sub-agent-orchestration.md) | Sub-agent orchestration (orchestrator–worker fan-out; feeds the research epic) | Accepted |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.
