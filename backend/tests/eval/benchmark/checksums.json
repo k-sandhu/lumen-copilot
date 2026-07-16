@@ -1,0 +1,110 @@
+{
+  "arxiv-attention": {
+    "sha256": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697",
+    "size_bytes": 2215244
+  },
+  "arxiv-bert": {
+    "sha256": "5692a5514787a8c6727b4ff3b726a3385798bc68e12138d1d4af83947e2acf6e",
+    "size_bytes": 775166
+  },
+  "census-county-population": {
+    "sha256": "18ed5f28af2119dfb9fe1e2a70436e6c6d3da2c6573a6c40fc00e05e03632563",
+    "size_bytes": 189904
+  },
+  "census-state-population": {
+    "sha256": "4a98cd464d3f9e122e74b47b38f1584e78e9077f4b36be1cabf7a79ab5942852",
+    "size_bytes": 15507
+  },
+  "census-state-population-csv": {
+    "sha256": "b8b50bd345d8a5f33d5c8a28c95aeaa0a50971356f000d9b48276a65fd9022a7",
+    "size_bytes": 41378
+  },
+  "census-statistical-abstract-2012": {
+    "sha256": "c3e04155c3b32f170d3fa5a67749052c095b6f56a7630f499a28d6171e2f40cb",
+    "size_bytes": 31959786
+  },
+  "example-homepage-html": {
+    "sha256": "ff67a9d764d6a2367a187734e697f6a53217db9a21c101d410a113ca871a299d",
+    "size_bytes": 559
+  },
+  "fastapi-readme": {
+    "sha256": "c8f4a2e78fff720c814b7c8fc73e02814ca96b81a5ec93098bb07cb9deee4aba",
+    "size_bytes": 24204
+  },
+  "gutenberg-faust-de": {
+    "sha256": "fed2a58edd6910ee96d27ada614d34bcc41f03750d86541c41246bb74c564ff7",
+    "size_bytes": 218440
+  },
+  "gutenberg-moby-dick": {
+    "sha256": "9a6844ac0703853720010787c7b6c70b0020f1ab1862dcd74452fa46474d1215",
+    "size_bytes": 1276263
+  },
+  "gutenberg-persuasion": {
+    "sha256": "64ffb821b9e9eb1040c103a44c28893c94ebe33ffbb911288b5022efaecbfefc",
+    "size_bytes": 497555
+  },
+  "gutenberg-pride-prejudice": {
+    "sha256": "74f2665d6e6925fc2c17dec644bec9e87df478a0f1836822125e8acbb3777806",
+    "size_bytes": 772386
+  },
+  "gutenberg-shakespeare": {
+    "sha256": "3cf4b3d44ee14cff4e14e78e2ad3318eff76f3f7f2afc3cee6bb925879110a37",
+    "size_bytes": 5638480
+  },
+  "ipcc-ar6-wg1-chapter02": {
+    "sha256": "1ed0ebc9c9997ba25be7c1d3f6de71d2f7624531481e61c9290640a87b61710c",
+    "size_bytes": 26196128
+  },
+  "ipcc-ar6-wg1-spm": {
+    "sha256": "37c9fa760757524c8d69630a89cecab9ebcacb66786970a3439da0619875e446",
+    "size_bytes": 3361797
+  },
+  "irs-1040-instructions-2024": {
+    "sha256": "0ae53ed5020d69e6571d40cd7955b7735f44a28df483626d128628d2810e93d4",
+    "size_bytes": 4375877
+  },
+  "irs-form-1040-1913": {
+    "sha256": "7bb00943803f5cecc34782145cd75dfd8feaa07a1c4daadeab2689f0980f810b",
+    "size_bytes": 129985
+  },
+  "kubernetes-changelog-1-31": {
+    "sha256": "156f4d163bb912873de1b643b9afae7d671507b59d26612853713b8bb4482d02",
+    "size_bytes": 173053
+  },
+  "nidcr-monitoring-guidelines": {
+    "sha256": "a5f40d4a823eac253ee9cbef6d16131e221afc968cc842c3f6784620f10c7941",
+    "size_bytes": 86487
+  },
+  "nidcr-monitoring-plan-template": {
+    "sha256": "747b02779e3d84ba32ff322e719dc1535185f4b09c43575fd2eb961ed7fd3307",
+    "size_bytes": 91918
+  },
+  "nidcr-site-activation-checklist": {
+    "sha256": "b31542040d3a700042ab49065501a3a927ed7d9a341b27121550bd65445f2d4d",
+    "size_bytes": 57362
+  },
+  "nist-sp-800-63b": {
+    "sha256": "ccfce7510a1267933f912d023306c6e7d485f21be63d271108b61aad6139127e",
+    "size_bytes": 1480377
+  },
+  "pandoc-manual": {
+    "sha256": "3bc86522f0c38ef9a3406940dff9f881ca6d6505d87eb694d493cb39cce62332",
+    "size_bytes": 286239
+  },
+  "rfc9110-http-semantics": {
+    "sha256": "21c1cdce6ab0e5509b04d84a28000836c7a087cf786efe6f04877ebfff47232a",
+    "size_bytes": 502941
+  },
+  "rfc9112-http11": {
+    "sha256": "e4f426bac6206b67fdf9e0da826154f70588db2133a0a86b15cde4ff725d8937",
+    "size_bytes": 109913
+  },
+  "unsd-data-collection-tech": {
+    "sha256": "5d67a05757044cac2487324717ce9d93b0c71a8abc9b12810af827914cc7a4c9",
+    "size_bytes": 177979
+  },
+  "unsd-trade-in-services": {
+    "sha256": "d90441b328432ae3120010c9cbc65d99cff2de2691775d1b34cb3780a08bf905",
+    "size_bytes": 309119
+  }
+}
