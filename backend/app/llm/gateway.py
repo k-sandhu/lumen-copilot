@@ -537,6 +537,12 @@ def _extract_usage(response: Any) -> TokenUsage:
 
     Some providers omit ``usage`` entirely; in that case return a zeroed
     :class:`TokenUsage`. ``total_tokens`` falls back to the sum when absent.
+
+    Cache accounting (#409, ADR-0016 §2.6) is read from BOTH normalized shapes —
+    OpenAI-style ``prompt_tokens_details.cached_tokens`` and Anthropic-style
+    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever the
+    provider populated (LiteLLM passes each through as-is). Absent/None fields
+    stay ``0``: a provider with no cache detail never breaks extraction.
     """
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -544,10 +550,17 @@ def _extract_usage(response: Any) -> TokenUsage:
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion = int(getattr(usage, "completion_tokens", 0) or 0)
     total = int(getattr(usage, "total_tokens", 0) or 0) or (prompt + completion)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0) if details is not None else 0
+    if not cached:
+        cached = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
     return TokenUsage(
         prompt_tokens=prompt,
         completion_tokens=completion,
         total_tokens=total,
+        cached_prompt_tokens=cached,
+        cache_write_tokens=cache_write,
     )
 
 

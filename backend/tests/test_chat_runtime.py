@@ -906,3 +906,133 @@ async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> 
         custom_instructions=None,
     )
     assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT
+
+
+# --- #409: token & cache usage — reported on done, recorded per answer -------
+
+
+async def test_usage_summed_reported_and_recorded_with_cache_fields(ctx: _Ctx) -> None:
+    """#409 AC-1/AC-2: ``done.usage`` carries the cache fields summed across turns,
+    and exactly one ``llm_usage`` row lands, linked to the session + assistant message."""
+    import asyncio
+
+    from app.db.repositories import LlmUsageRepository
+    from app.domain.llm import TokenUsage
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "deduction"}),
+                    ),
+                    finish_reason="tool_calls",
+                    usage=TokenUsage(
+                        prompt_tokens=100,
+                        completion_tokens=10,
+                        total_tokens=110,
+                        cached_prompt_tokens=0,
+                        cache_write_tokens=80,
+                    ),
+                ),
+            ],
+            [
+                StreamEvent(text="The 2024 standard deduction is $14,600."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(
+                        prompt_tokens=120,
+                        completion_tokens=20,
+                        total_tokens=140,
+                        cached_prompt_tokens=90,
+                        cache_write_tokens=0,
+                    ),
+                ),
+            ],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="What is the 2024 standard deduction?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    done = envs[-1]
+    assert done["type"] == "done"
+    usage = done["data"]["usage"]  # type: ignore[index]
+    assert usage == {
+        "promptTokens": 220,
+        "completionTokens": 30,
+        "totalTokens": 250,
+        "cachedPromptTokens": 90,
+        "cacheWriteTokens": 80,
+    }
+
+    # AC-2: one recorded row per answer, tenant-scoped, linked to the message.
+    start = envs[0]
+    message_id = uuid.UUID(start["data"]["messageId"])  # type: ignore[index]
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.message_id == message_id
+        assert row.model == "anthropic/claude-opus-4.8"
+        assert row.prompt_tokens == 220
+        assert row.completion_tokens == 30
+        assert row.total_tokens == 250
+        assert row.cached_prompt_tokens == 90
+        assert row.cache_write_tokens == 80
+
+
+async def test_usage_row_zeroed_when_provider_omits_usage_and_is_tenant_scoped(
+    ctx: _Ctx,
+) -> None:
+    """#409 AC-3/AC-4 negatives: no provider usage ⇒ zeroed fields but the row still
+    lands (never a crash); a foreign tenant's repository sees nothing (INV-1)."""
+    import asyncio
+
+    from app.db.repositories import LlmUsageRepository
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="An answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="hello",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.prompt_tokens == 0
+        assert row.completion_tokens == 0
+        assert row.total_tokens == 0
+        assert row.cached_prompt_tokens == 0
+        assert row.cache_write_tokens == 0
+
+        # INV-1: a repository bound to another tenant must see nothing.
+        foreign = await LlmUsageRepository(session, uuid.uuid4()).list_for_session(ctx.session_id)
+        assert foreign == []

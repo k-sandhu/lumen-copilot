@@ -77,6 +77,8 @@ _ALL_TABLES = _MVP_TABLES | {
     "tenant_autonomy_policy",
     "llm_providers",
     "run_deliveries",
+    # 0032, issue #409 — per-answer token & cache usage accounting.
+    "llm_usage",
 }
 
 
@@ -117,7 +119,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0031_toolinv_ordinal_msg_idx"]
+    assert list(script.get_heads()) == ["0032_llm_usage"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -208,6 +210,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     toolinv_ordinal = script.get_revision("0031_toolinv_ordinal_msg_idx")
     assert toolinv_ordinal is not None
     assert toolinv_ordinal.down_revision == "0030_toolinv_result_summary"
+    llm_usage = script.get_revision("0032_llm_usage")
+    assert llm_usage is not None
+    assert llm_usage.down_revision == "0031_toolinv_ordinal_msg_idx"
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(

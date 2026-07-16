@@ -649,3 +649,42 @@ async def test_inv1_chunk_replace_and_delete_are_tenant_scoped(
     assert await chunks_b.delete_for_document(doc_id) == 0
     # A's chunk is still there.
     assert len(await chunks_a.list_for_document(doc_id)) == 1
+
+
+# ---------------------------------------------------------------------------
+# #409 — llm_usage: per-answer token/cache accounting is tenant-scoped (INV-1).
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_usage_record_roundtrip_and_tenant_isolation(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    from app.db.repositories import LlmUsageRepository
+    from app.domain.entities import Role
+
+    tenant_a, tenant_b = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="usage@a.test", password_hash="x", roles=[Role.MEMBER]
+    )
+    chat = await ChatSessionRepository(session, tenant_a).create(
+        owner_id=user.id, model="m", title="t"
+    )
+
+    row = await LlmUsageRepository(session, tenant_a).record(
+        model="anthropic/claude-opus-4.8",
+        prompt_tokens=220,
+        completion_tokens=30,
+        total_tokens=250,
+        cached_prompt_tokens=90,
+        cache_write_tokens=80,
+        session_id=chat.id,
+    )
+    assert row.tenant_id == tenant_a
+    assert row.cached_prompt_tokens == 90
+
+    mine = await LlmUsageRepository(session, tenant_a).list_for_session(chat.id)
+    assert [r.id for r in mine] == [row.id]
+
+    # INV-1 negative: tenant B's repository must not see tenant A's usage.
+    theirs = await LlmUsageRepository(session, tenant_b).list_for_session(chat.id)
+    assert theirs == []

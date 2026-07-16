@@ -1080,6 +1080,68 @@ class ToolInvocation(TenantScopedMixin, Base):
     )
 
 
+class LlmUsage(TenantScopedMixin, Base):
+    """Per-answer LLM token/cache accounting (#409, ADR-0016 §2.6) — write-once.
+
+    One row per produced answer (chat AND headless runs — both ride the shared
+    runtime), summing token usage across every completion turn of the answer's
+    loop: prompt/completion/total plus the provider cache accounting
+    (``cached_prompt_tokens`` read from cache, ``cache_write_tokens`` written to
+    it). This is the substrate the cache-hit KPI, AgentOps analytics (#300),
+    credit budgets, and the ADR-0018 sub-agent budgets read — the *record*, not
+    the dashboard (those are #300's).
+
+    Like ``tool_invocations`` it is a trace/analytics table, not the append-only
+    audit log: written once (no ``updated_at``), ordinary tenant-scoped access,
+    nullable SET-NULL links so deleting a session/message keeps the accounting.
+    ``model`` records the id the caller *requested* (matching ``messages.model``
+    — a per-tenant ``provider:`` id stays attributable). ``run_id`` is reserved
+    for headless-run / sub-agent grouping (nullable; no FK yet, mirroring
+    ``tool_invocations.run_id``). RLS: the ``0032`` migration puts it under the
+    same fail-closed ``app.tenant_id`` backstop as every tenant-scoped table.
+    """
+
+    __tablename__ = "llm_usage"
+    __table_args__ = (
+        Index("ix_llm_usage_tenant_session", "tenant_id", "session_id"),
+        # Time-window reads ("usage this month") are the #300 analytics access
+        # path; tenant-leading (INV-1).
+        Index("ix_llm_usage_tenant_created", "tenant_id", "created_at"),
+        CheckConstraint(
+            "prompt_tokens >= 0 AND completion_tokens >= 0 AND total_tokens >= 0 "
+            "AND cached_prompt_tokens >= 0 AND cache_write_tokens >= 0",
+            name="ck_llm_usage_tokens_nonneg",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The assistant message the answer persisted as. DEFERRABLE INITIALLY
+    # DEFERRED for the same reason as ``tool_invocations.message_id``: the row is
+    # written in the SAME transaction that inserts the message, so the FK must
+    # validate at COMMIT, not at flush.
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL", deferrable=True, initially="DEFERRED"),
+        nullable=True,
+    )
+    # Reserved for headless-run / sub-agent grouping (ADR-0018); no FK yet.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Assistant(TenantScopedMixin, TimestampMixin, Base):
     """A saved, named, governed chat configuration — the mutable head (ADR-0011 §1, #211).
 

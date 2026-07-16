@@ -176,7 +176,17 @@
           "properties": {
             "promptTokens": { "type": "integer", "minimum": 0 },
             "completionTokens": { "type": "integer", "minimum": 0 },
-            "totalTokens": { "type": "integer", "minimum": 0 }
+            "totalTokens": { "type": "integer", "minimum": 0 },
+            "cachedPromptTokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Prompt tokens served from the provider's prompt cache this answer (#409, ADR-0016 §2.6). Additive; 0 when the provider reports no cache detail."
+            },
+            "cacheWriteTokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Prompt tokens written INTO the provider's prompt cache this answer (Anthropic-style cache creation). Additive; 0 when unreported."
+            }
           }
         }
       }

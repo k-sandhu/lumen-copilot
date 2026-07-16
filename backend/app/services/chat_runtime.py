@@ -48,6 +48,7 @@ from app.core.logging import get_logger
 from app.db.repositories import (
     AuditEventRepository,
     CitationRepository,
+    LlmUsageRepository,
     MessageRepository,
     TenantRepository,
     ToolInvocationRepository,
@@ -147,16 +148,26 @@ class _StreamState:
 
 @dataclass(slots=True)
 class _Usage:
-    """Mutable running token usage across the turns of one answer."""
+    """Mutable running token usage across the turns of one answer.
+
+    Carries the provider cache accounting too (#409, ADR-0016 §2.6):
+    ``cached_prompt_tokens`` served from the provider's prompt cache and
+    ``cache_write_tokens`` written into it — summed across turns exactly like
+    the base counters, and zero for providers that report no cache detail.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_prompt_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def add(self, usage: TokenUsage) -> None:
         self.prompt_tokens += usage.prompt_tokens
         self.completion_tokens += usage.completion_tokens
         self.total_tokens += usage.total_tokens
+        self.cached_prompt_tokens += usage.cached_prompt_tokens
+        self.cache_write_tokens += usage.cache_write_tokens
 
 
 class ChatRuntime:
@@ -346,6 +357,11 @@ class ChatRuntime:
                         "promptTokens": result.prompt_tokens,
                         "completionTokens": result.completion_tokens,
                         "totalTokens": result.total_tokens,
+                        # Provider cache accounting (#409, ADR-0016 §2.6) —
+                        # additive contract fields; zero when the provider
+                        # reports no cache detail.
+                        "cachedPromptTokens": result.cached_prompt_tokens,
+                        "cacheWriteTokens": result.cache_write_tokens,
                     },
                 },
             ),
@@ -592,6 +608,22 @@ class ChatRuntime:
             content=answer_text,
             citations=list(cited.values()),
         )
+        # Record the answer's summed token/cache usage (#409) — one row per
+        # answer, in the SAME transaction as the message it accounts for (the
+        # deferred FK validates at commit). ``model`` is the requested id so a
+        # per-tenant ``provider:`` id stays attributable, matching the message
+        # row. Zeroed fields (a provider that omitted usage) still record: the
+        # answer happened, and "no usage reported" must be visible, not a gap.
+        await LlmUsageRepository(session, tenant_id).record(
+            model=model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            session_id=session_id,
+            message_id=assistant_message_id,
+        )
         # Emit a citation event per persisted citation (now carrying its row id).
         # ``cited`` is already deduplicated by chunk_id, so each stored citation is
         # a distinct permitted passage — one event each, no extra guard needed.
@@ -620,6 +652,8 @@ class ChatRuntime:
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
         )
 
     async def _resolve_mcp_tools(
@@ -996,6 +1030,8 @@ class _RunResult:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    cached_prompt_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 def _mcp_tool_specs(

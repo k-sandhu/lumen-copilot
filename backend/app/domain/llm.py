@@ -62,11 +62,20 @@ class TokenUsage:
     Providers do not always report usage; fields default to ``0`` so callers can
     sum without ``None`` checks. ``total`` falls back to ``prompt + completion``
     when the provider omits it.
+
+    ``cached_prompt_tokens`` / ``cache_write_tokens`` are the provider cache
+    accounting (#409, ADR-0016 §2.6): prompt tokens served from the provider's
+    prompt cache, and tokens written INTO it (Anthropic-style cache creation).
+    Both are subsets/adjuncts of ``prompt_tokens`` bookkeeping — they never count
+    toward ``total_tokens`` on their own — and default ``0`` for providers that
+    report no cache detail.
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_prompt_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)

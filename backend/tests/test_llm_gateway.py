@@ -306,6 +306,85 @@ async def test_chat_usage_total_falls_back_to_sum(monkeypatch: pytest.MonkeyPatc
     assert result.usage.total_tokens == 10
 
 
+class _UsageDetails:
+    """OpenAI-style ``prompt_tokens_details`` (the LiteLLM-normalized shape)."""
+
+    def __init__(self, cached_tokens: int) -> None:
+        self.cached_tokens = cached_tokens
+
+
+class _CacheUsage(_Usage):
+    """A vendor usage object carrying the provider cache-accounting fields (#409).
+
+    OpenAI-style reports cached reads under ``prompt_tokens_details.cached_tokens``;
+    Anthropic-style reports ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    (both as LiteLLM normalizes them). ``None`` models a provider omitting the field.
+    """
+
+    def __init__(
+        self,
+        prompt: int,
+        completion: int,
+        total: int | None,
+        *,
+        cached_details: int | None = None,
+        cache_read: int | None = None,
+        cache_creation: int | None = None,
+    ) -> None:
+        super().__init__(prompt, completion, total)
+        self.prompt_tokens_details = (
+            _UsageDetails(cached_details) if cached_details is not None else None
+        )
+        self.cache_read_input_tokens = cache_read
+        self.cache_creation_input_tokens = cache_creation
+
+
+async def test_chat_usage_extracts_openai_style_cached_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#409 — cached prompt tokens ride ``prompt_tokens_details.cached_tokens``."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_CacheUsage(100, 5, 105, cached_details=64))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cached_prompt_tokens == 64
+    assert result.usage.cache_write_tokens == 0
+
+
+async def test_chat_usage_extracts_anthropic_style_cache_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#409 — Anthropic-style cache read/creation fields map to the domain usage."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_CacheUsage(100, 5, 105, cache_read=90, cache_creation=10))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cached_prompt_tokens == 90
+    assert result.usage.cache_write_tokens == 10
+
+
+async def test_chat_usage_cache_fields_default_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#409 negative — providers reporting no cache detail yield zeros, never a crash."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_Usage(3, 5, 8))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cached_prompt_tokens == 0
+    assert result.usage.cache_write_tokens == 0
+
+
 # --- AC-2: streaming yields chunks; consumer break stops generation cleanly -
 
 
