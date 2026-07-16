@@ -380,7 +380,14 @@ class _TestHarnessGateway:
     """A scripted gateway that answers directly (no tools) — the preview happy path."""
 
     async def stream_tools(
-        self, messages: object, *, tools: object, model: object = None, tool_choice: object = None
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
     ):  # noqa: ANN201 — async generator
         from app.domain.llm import StreamEvent
 
