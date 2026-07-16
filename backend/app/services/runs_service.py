@@ -68,6 +68,7 @@ from app.domain.entities import (
 )
 from app.domain.escalation import classify_terminal, is_transient, normalize_reason
 from app.llm import LLMGateway
+from app.llm.context import ContextConfig
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
@@ -345,6 +346,10 @@ async def execute_run(
         request_id=request_id,
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
+        context_config=ContextConfig(
+            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
+            output_headroom_tokens=settings.context_output_headroom_tokens,
+        ),
         mcp_tools_factory=_build_run_mcp_tools_factory(
             principal=principal,
             settings=settings,

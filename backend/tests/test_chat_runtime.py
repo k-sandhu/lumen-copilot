@@ -240,6 +240,7 @@ def _runtime(
     retrieval: object,
     backplane: InMemoryBackplane,
     default_max_tool_turns: int = 4,
+    context_config: object = None,
 ) -> ChatRuntime:
     return ChatRuntime(
         sessionmaker=ctx.sessionmaker,
@@ -249,6 +250,7 @@ def _runtime(
         request_id="req-1",
         source_ip="127.0.0.1",
         default_max_tool_turns=default_max_tool_turns,
+        context_config=context_config,  # type: ignore[arg-type]
         retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
     )
 
@@ -843,6 +845,7 @@ class _CapturingGateway:
 
     def __init__(self) -> None:
         self.system_prompt: str | None = None
+        self.first_messages: list[object] | None = None
 
     async def stream_tools(
         self,
@@ -857,6 +860,7 @@ class _CapturingGateway:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
             self.system_prompt = messages[0].content
+            self.first_messages = list(messages)
         yield StreamEvent(text="ok")
         yield StreamEvent(finish_reason="stop")
 
@@ -906,6 +910,55 @@ async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> 
         custom_instructions=None,
     )
     assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT
+
+
+async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
+    """#410: the runtime assembles under a budget — a tiny window trims old history.
+
+    Proves the assembler is actually wired into the runtime (not just unit-tested):
+    with a small injected ``ContextConfig`` fallback window and no model in the
+    map, the oldest turns are dropped before the prompt reaches the gateway, so
+    the captured ``messages`` carry only the newest history + the question.
+    """
+    from app.domain.llm import ChatMessage
+    from app.domain.llm import Role as LlmRole
+    from app.llm.context import ContextConfig
+
+    gateway = _CapturingGateway()
+    backplane = InMemoryBackplane()
+    # A moderate window (fallback 6000 − 1024 margin ⇒ ~4976 budget) that easily
+    # holds the fixed segments (grounded prompt + tool schemas + question) but is
+    # dwarfed by the two ENORMOUS ancient turns below — so the assembler trims
+    # them and keeps the tiny recent turn, rather than refusing. The unknown model
+    # id (not in the litellm map) exercises the fallback resolver (AC-3) too.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        context_config=ContextConfig(fallback_max_input_tokens=6000, output_headroom_tokens=0),
+    )
+    long_history = [
+        ChatMessage(role=LlmRole.USER, content="ancient question " * 3000),
+        ChatMessage(role=LlmRole.ASSISTANT, content="ancient answer " * 3000),
+        ChatMessage(role=LlmRole.USER, content="recent question"),
+    ]
+    await runtime.run(
+        stream_id=uuid.uuid4().hex,
+        session_id=ctx.session_id,
+        question="the new question",
+        model="some/unknown-model-not-in-map",
+        history=long_history,
+        collection_ids=None,
+    )
+    assert gateway.first_messages is not None
+    contents = [m.content for m in gateway.first_messages]  # type: ignore[attr-defined]
+    # The ancient, oversized turns were dropped; the new question is always last;
+    # the grounded system prompt still leads (segment order preserved).
+    assert "ancient question " * 3000 not in contents
+    assert "ancient answer " * 3000 not in contents
+    assert contents[-1] == "the new question"
+    assert contents[0].startswith("You are Lumen Copilot")
 
 
 # --- #409: token & cache usage — reported on done, recorded per answer -------

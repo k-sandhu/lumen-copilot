@@ -382,6 +382,16 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
+    # input-window used when the model is unknown to the local model map, and the
+    # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).
+    context_fallback_max_input_tokens: int = Field(
+        default=100_000, alias="CONTEXT_FALLBACK_MAX_INPUT_TOKENS"
+    )
+    context_output_headroom_tokens: int = Field(
+        default=8_000, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
+    )
+
     # How long (seconds) the app lifespan waits for in-flight answer producers to
     # cancel and drain on shutdown before it stops waiting and proceeds to engine
     # disposal (issue #156). The answer runtime runs off the request as a tracked

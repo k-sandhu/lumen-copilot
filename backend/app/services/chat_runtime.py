@@ -60,6 +60,7 @@ from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway
+from app.llm.context import ContextConfig, assemble_context
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
@@ -124,8 +125,10 @@ McpToolsFactory = Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]
 # configured default is injected (offline tests); the API always passes the
 # configured value, which a tenant admin may override per tenant (issue #148).
 _DEFAULT_MAX_TOOL_TURNS = 20
-# Default passages per search (configurable budget; kept small for the MVP).
-_DEFAULT_K = 6
+# The per-search passage budget now comes from the context assembler
+# (``ContextBudget.retrieval_k``, ADR-0016 §1 / #410): the historical default of
+# 6 when the window is roomy, fewer when it is tight — so the knob is derived
+# from the input budget rather than a fixed constant here.
 
 
 @dataclass(slots=True)
@@ -189,6 +192,7 @@ class ChatRuntime:
         request_id: str,
         source_ip: str,
         default_max_tool_turns: int = _DEFAULT_MAX_TOOL_TURNS,
+        context_config: ContextConfig | None = None,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
         mcp_tools_factory: McpToolsFactory | None = None,
@@ -203,6 +207,11 @@ class ChatRuntime:
         # System default tool-turn budget (``Settings.chat_max_tool_turns``); a
         # tenant's ``max_tool_turns`` override beats it when set (issue #148).
         self._default_max_tool_turns = default_max_tool_turns
+        # The context-assembler budget knobs (ADR-0016 §1, issue #410): the
+        # unknown-model fallback window + the output headroom. Injectable so the
+        # API wires ``Settings``; defaults (module constants) keep offline tests
+        # and any un-wired caller building prompts exactly as before.
+        self._context_config = context_config or ContextConfig()
         # The retrieval service is built per-answer over the runtime's own
         # session. Injectable so the offline tests supply a fake whose
         # ``search_text`` does not need pgvector; defaults to the real adapter.
@@ -473,11 +482,25 @@ class ChatRuntime:
         # the configured system default (issue #148).
         max_tool_turns = await self._resolve_max_tool_turns(session, tenant_id)
 
-        messages: list[ChatMessage] = [
-            ChatMessage(role=Role.SYSTEM, content=system_prompt),
-            *history,
-            ChatMessage(role=Role.USER, content=question),
-        ]
+        # Assemble the prompt under the model's input budget (ADR-0016 §1, #410),
+        # replacing the old inline ``[system, *history, question]`` build and the
+        # count-based history window (``chat_service._HISTORY_TURNS``). History
+        # trims oldest-first to fit; an oversize *fixed* prompt raises a typed
+        # ``context_too_large`` (422) that ``run``'s ``except AppError`` arm turns
+        # into the terminal problem envelope — a deliberate refusal, never a
+        # provider 422. The tokenizer keys off the RESOLVED route model (the raw
+        # id the provider actually sees). The derived ``retrieval_k`` flows into
+        # the ``ToolContext`` below so a search issued after assembly respects the
+        # same window.
+        assembled = assemble_context(
+            model=route.model,
+            system_prompt=system_prompt,
+            history=history,
+            question=question,
+            tools=advertised,
+            config=self._context_config,
+        )
+        messages: list[ChatMessage] = assembled.messages
 
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
@@ -518,7 +541,12 @@ class ChatRuntime:
             principal=self._principal,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
-            default_k=_DEFAULT_K,
+            # The retrieval ``k`` the assembler derived from the input budget
+            # (ADR-0016 §1 degrade order): the historical default when the window
+            # is roomy, fewer when it is tight — so a search issued after
+            # assembly cannot immediately overflow the context it was budgeted
+            # against. Set here, before any tool runs (never shrunk retroactively).
+            default_k=assembled.retrieval_k,
             session_id=session_id,
             sandbox=sandbox,
             # Read-only test/preview mode (F-AB-5, issue #215): a T1 file-writing tool
