@@ -116,3 +116,43 @@ def test_version_is_sourced_from_package_single_source() -> None:
 
     s = Settings(_env_file=None, **_BASE)
     assert s.version == app.__version__
+
+
+# --- Context-assembler budget guardrails (#410 / #424 review, finding 6) ------
+
+
+def test_context_negative_headroom_rejected() -> None:
+    """A NEGATIVE output headroom would inflate the input budget beyond the
+    model's window, defeating the overflow guard — reject at startup."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CONTEXT_OUTPUT_HEADROOM_TOKENS=-1)
+
+
+def test_context_nonpositive_fallback_rejected() -> None:
+    """A non-positive fallback window would floor the budget to a confusing
+    1-token refusal — reject at startup."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CONTEXT_FALLBACK_MAX_INPUT_TOKENS=0)
+
+
+def test_context_headroom_not_below_window_rejected() -> None:
+    """Reserved output headroom >= the fallback input window leaves no room —
+    the cross-field validator rejects it."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_BASE,
+            CONTEXT_FALLBACK_MAX_INPUT_TOKENS=8000,
+            CONTEXT_OUTPUT_HEADROOM_TOKENS=8000,
+        )
+
+
+def test_context_valid_budget_accepted() -> None:
+    s = Settings(
+        _env_file=None,
+        **_BASE,
+        CONTEXT_FALLBACK_MAX_INPUT_TOKENS=120_000,
+        CONTEXT_OUTPUT_HEADROOM_TOKENS=4000,
+    )
+    assert s.context_fallback_max_input_tokens == 120_000
+    assert s.context_output_headroom_tokens == 4000

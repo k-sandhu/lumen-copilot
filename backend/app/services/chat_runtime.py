@@ -60,7 +60,7 @@ from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway
-from app.llm.context import ContextConfig, assemble_context
+from app.llm.context import ContextConfig, assemble_context, fit_transcript
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
@@ -541,12 +541,16 @@ class ChatRuntime:
             principal=self._principal,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
-            # The retrieval ``k`` the assembler derived from the input budget
-            # (ADR-0016 §1 degrade order): the historical default when the window
-            # is roomy, fewer when it is tight — so a search issued after
-            # assembly cannot immediately overflow the context it was budgeted
-            # against. Set here, before any tool runs (never shrunk retroactively).
+            # The retrieval knobs the assembler derived from the input budget
+            # (ADR-0016 §1 degrade order): the DEFAULT ``k`` (used when the model
+            # omits it) plus the enforceable ceiling ``max_k`` that clamps even an
+            # explicit model-supplied ``k`` (#424 review, finding 3) — both shrink
+            # under a tight window so a search issued after assembly cannot
+            # immediately overflow the context it was budgeted against. Set here,
+            # before any tool runs (never shrunk retroactively).
             default_k=assembled.retrieval_k,
+            max_k=assembled.max_k,
+            snippet_budget=assembled.snippet_budget,
             session_id=session_id,
             sandbox=sandbox,
             # Read-only test/preview mode (F-AB-5, issue #215): a T1 file-writing tool
@@ -558,6 +562,17 @@ class ChatRuntime:
 
         budget_exhausted = True
         for _turn in range(max_tool_turns):
+            # Re-fit the GROWN transcript to the input budget before every turn
+            # (#424 review, finding 1): the loop appends each turn's tool-call +
+            # tool-result messages, so a one-shot assembly at the top does not
+            # keep later turns within the window. ``fit_transcript`` sheds oldest
+            # conversation history (protecting the system head and this answer's
+            # live tool tail); if even that cannot fit it raises the typed
+            # ``context_too_large``, which ``run``'s ``except AppError`` arm turns
+            # into the terminal problem envelope — never an over-budget call.
+            messages = fit_transcript(
+                messages, model=route.model, tools=advertised, config=self._context_config
+            )
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised
             )
@@ -606,7 +621,12 @@ class ChatRuntime:
             # synthesis turn with tools disabled so the model answers over the
             # gathered tool context, then stream + persist THAT as the answer. The
             # narration from the exhausted tool turns was never emitted, so the
-            # live stream and the stored message agree.
+            # live stream and the stored message agree. Re-fit here too (#424
+            # finding 1): the forced-synthesis call sends the full accumulated
+            # transcript, so it must respect the budget like every other turn.
+            messages = fit_transcript(
+                messages, model=route.model, tools=advertised, config=self._context_config
+            )
             _, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised, tool_choice="none"
             )

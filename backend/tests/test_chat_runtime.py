@@ -24,6 +24,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -959,6 +960,109 @@ async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
     assert "ancient answer " * 3000 not in contents
     assert contents[-1] == "the new question"
     assert contents[0].startswith("You are Lumen Copilot")
+
+
+class _RecordingSearchGateway:
+    """Records the byte-size of every ``messages`` payload; always asks to search.
+
+    Drives the loop so tool results accumulate (#424 review, finding 1). Records
+    each turn's total message-content bytes so a test can prove no over-budget
+    payload is ever sent to the provider.
+    """
+
+    def __init__(self) -> None:
+        self.payload_bytes: list[int] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        assert isinstance(messages, list)
+        self.payload_bytes.append(sum(len(m.content.encode("utf-8")) for m in messages))
+        if tool_choice == "none":
+            yield StreamEvent(text="final")
+            yield StreamEvent(finish_reason="stop")
+            return
+        yield StreamEvent(
+            tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+            finish_reason="tool_calls",
+        )
+
+
+async def test_oversized_tool_results_never_exceed_budget(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#424 review, finding 1: with huge tool results and a tiny window, the loop
+    never sends an over-budget payload — it refuses deterministically instead."""
+    import asyncio
+    import sys
+    import types as _types
+
+    from app.llm.context import ContextConfig
+
+    # Force the assembler's counting/resolver onto their deterministic fallbacks
+    # (conservative UTF-8 bytes; the configured fallback window) by making litellm
+    # unavailable — so the token budget is measured in BYTES and the assertion
+    # below is exact rather than dependent on a real tokenizer.
+    def _raise(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer in test")
+
+    fake_litellm = _types.SimpleNamespace(token_counter=_raise, get_model_info=_raise)
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)  # type: ignore[attr-defined]
+
+    # A retrieval that returns a passage far larger than the window.
+    huge = RetrievedPassage(
+        chunk_id=ctx.chunk_id,
+        document_id=ctx.document_id,
+        document_name="big.pdf",
+        ord=0,
+        text="P" * 8000,
+        char_start=0,
+        char_end=8000,
+        score=0.9,
+    )
+    gateway = _RecordingSearchGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # fallback 5024 − 0 headroom − 1024 margin ⇒ budget 4000 bytes. The initial
+    # [system, question] + tool schemas fits, but the accumulating tool results
+    # push a later turn over budget — where the guard must refuse, not send.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([huge]),
+        backplane=backplane,
+        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="summarize the big doc",
+        model="some/unknown-model-not-in-map",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    budget = 5024 - 1024
+    # Every payload the gateway actually received was within budget — the guard
+    # refused (or trimmed) before ever sending the grown, over-budget transcript.
+    assert gateway.payload_bytes  # the loop ran at least once (initial fit)
+    assert all(b <= budget for b in gateway.payload_bytes), gateway.payload_bytes
+    # The run terminated cleanly (exactly one terminal), with the typed refusal.
+    types = [e["type"] for e in envs]
+    assert types.count("done") + types.count("error") == 1
+    terminal = envs[-1]
+    if terminal["type"] == "error":
+        assert terminal["problem"]["code"] == "context_too_large"  # type: ignore[index]
 
 
 # --- #409: token & cache usage — reported on done, recorded per answer -------

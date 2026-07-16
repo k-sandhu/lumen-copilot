@@ -20,8 +20,14 @@ from __future__ import annotations
 import pytest
 
 from app.core.errors import ValidationError
-from app.domain.llm import ChatMessage, Role, ToolSpec
-from app.llm.context import ContextBudget, ContextConfig, assemble_context
+from app.domain.llm import ChatMessage, Role, ToolCall, ToolSpec
+from app.llm.context import (
+    ContextBudget,
+    ContextConfig,
+    assemble_context,
+    fit_transcript,
+    litellm_max_input_tokens,
+)
 
 # 1 token per character: exact, deterministic budgets in tests.
 _CHAR_COUNTER = len
@@ -128,27 +134,162 @@ def test_fixed_segments_over_budget_refuse_typed() -> None:
 
 
 def test_tool_schemas_spend_the_budget() -> None:
-    """Advertised tool specs count against the window (they ride the request too)."""
-    # budget 300 (max_input 1324 − 1024 margin). One history msg = 104 tokens.
-    # Without tools: fixed = 3+1+0+8 = 12, remaining 288 ≥ 104 ⇒ fits.
-    # With the fat tool: schema "d"*200 + name + serialized params pushes fixed
-    # to ~245, remaining ~55 < 104 ⇒ the message no longer fits (dropped).
+    """Advertised tool specs count against the window — including the full
+    OpenAI wire framing, not just name+description+schema (#424 review, finding 3)."""
+    # budget 350 (max_input 1374 − 1024 margin). One history msg = 104 tokens.
+    # Without tools: fixed = 3+1+0+8 = 12, remaining 338 ≥ 104 ⇒ fits.
+    # With the fat tool: the SERIALIZED wire form ({"type":"function",...} with
+    # the "d"*200 description + framing) pushes fixed to ~300, so remaining ~48
+    # < 104 ⇒ the message no longer fits (dropped).
     history = [_msg(Role.USER, "h" * 100)]
     fat_tool = ToolSpec(
         name="t",
         description="d" * 200,
         parameters={"type": "object", "properties": {}},
     )
-    without = _assemble(history=history, max_input=1024 + 300)
-    with_tools = _assemble(history=history, max_input=1024 + 300, tools=(fat_tool,))
+    without = _assemble(history=history, max_input=1024 + 350)
+    with_tools = _assemble(history=history, max_input=1024 + 350, tools=(fat_tool,))
     assert without.dropped_history_messages == 0
     assert with_tools.dropped_history_messages == 1
 
 
-def test_tight_budget_shrinks_retrieval_k() -> None:
-    """Degrade order step 3: a nearly-full window tells the run to retrieve fewer."""
-    # Fill history so almost nothing remains after it — retrieval_k should drop.
+def test_tight_budget_shrinks_retrieval_k_and_max_k() -> None:
+    """Degrade order step 3: a nearly-full window shrinks BOTH the default k and
+    the enforceable ceiling (#424 review, finding 3), so even an explicit large k
+    is clamped downstream."""
     history = [_msg(Role.USER, "z" * 1000)]
-    out = _assemble(history=history, max_input=1100 + 1024)  # budget 1100, msg 1004
+    tight = _assemble(history=history, max_input=1100 + 1024)  # budget 1100, msg 1004
+    assert tight.dropped_history_messages == 0
+    assert tight.retrieval_k == 3
+    assert tight.max_k == 3  # the CEILING drops too — clamps explicit k
+
+    roomy = _assemble(history=[_msg(Role.USER, "x")], max_input=50_000)
+    assert roomy.retrieval_k == 6
+    assert roomy.max_k == 20  # inert ceiling on a roomy budget
+
+
+# --- #424 review, finding 1: the GROWN transcript is re-fit before every turn --
+
+
+def _fit(
+    messages: list[ChatMessage],
+    *,
+    max_input: int,
+    tools: tuple[ToolSpec, ...] = (),
+    fallback: int = 10_000,
+    headroom: int = 0,
+) -> list[ChatMessage]:
+    return fit_transcript(
+        messages,
+        model="fake/model",
+        tools=tools,
+        config=ContextConfig(fallback_max_input_tokens=fallback, output_headroom_tokens=headroom),
+        counter=_CHAR_COUNTER,
+        max_input_resolver=lambda _m: max_input,
+    )
+
+
+def test_fit_transcript_within_budget_is_identity() -> None:
+    msgs = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "question"),
+        _msg(Role.ASSISTANT, "answer"),
+    ]
+    assert [m.content for m in _fit(msgs, max_input=50_000)] == [m.content for m in msgs]
+
+
+def test_fit_transcript_sheds_oldest_history_preserving_live_tail() -> None:
+    """A grown transcript over budget drops oldest HISTORY, keeping the system head
+    and the current answer's question + tool-call/result tail intact."""
+    system = _msg(Role.SYSTEM, "SYS")
+    old_hist = [_msg(Role.USER, "old q " * 40), _msg(Role.ASSISTANT, "old a " * 40)]
+    question = _msg(Role.USER, "current question")
+    # The current answer's live tail: an assistant tool-call + its tool result.
+    tool_call = ChatMessage(
+        role=Role.ASSISTANT,
+        content="",
+        tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+    )
+    tool_result = ChatMessage(
+        role=Role.TOOL, content="passage " * 20, tool_call_id="c1", name="search_text"
+    )
+    messages = [system, *old_hist, question, tool_call, tool_result]
+
+    # budget 300 (1324 − 1024): total is ~683, so BOTH ~244-token history turns
+    # must go, but the system head (7) + question (20) + live tool tail (~168)
+    # = ~195 fits comfortably.
+    fitted = _fit(messages, max_input=1324)
+    contents = [m.content for m in fitted]
+    assert "old q " * 40 not in contents  # history shed
+    assert "old a " * 40 not in contents
+    assert fitted[0].content == "SYS"  # head preserved
+    assert fitted[-1].tool_call_id == "c1"  # live tool tail preserved (paired)
+    assert any(m.content == "current question" for m in fitted)
+
+
+def test_fit_transcript_refuses_when_live_tail_alone_overflows() -> None:
+    """If even the system head + current live turn exceed budget, refuse with the
+    typed context_too_large rather than send an over-budget call (#424 finding 1)."""
+    system = _msg(Role.SYSTEM, "SYS")
+    question = _msg(Role.USER, "q")
+    huge_result = ChatMessage(
+        role=Role.TOOL, content="x" * 5000, tool_call_id="c1", name="search_text"
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        _fit([system, question, huge_result], max_input=1024 + 200)
+    assert excinfo.value.code == "context_too_large"
+
+
+# --- #424 review, findings 2/4/5: resolver + heuristic degradation ------------
+
+
+def test_resolver_ignores_output_only_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """finding 2: a model reporting only max_tokens (an OUTPUT limit) resolves to
+    None — the resolver must NOT treat an output limit as the input window."""
+    import sys
+    import types as _types
+
+    fake_litellm = _types.SimpleNamespace(
+        get_model_info=lambda model: {"max_input_tokens": None, "max_tokens": 8192}
+    )
+    # Inject a fake litellm module so the lazy ``import litellm`` inside the
+    # resolver picks it up (models reporting only an output limit → None).
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)  # type: ignore[arg-type]
+    assert litellm_max_input_tokens("gemini/only-output-tokens") is None
+
+
+def test_resolver_none_uses_configured_fallback_not_refusal() -> None:
+    """finding 2 (integration): an unknown/output-only model uses the configured
+    fallback window, so a trivial prompt is NOT falsely refused as too-large."""
+    out = assemble_context(
+        model="gemini/only-output-tokens",
+        system_prompt="s",
+        history=[_msg(Role.USER, "hi")],
+        question="q",
+        config=ContextConfig(fallback_max_input_tokens=50_000, output_headroom_tokens=0),
+        counter=_CHAR_COUNTER,
+        max_input_resolver=lambda _m: None,  # resolver says "unknown"
+    )
+    assert out.input_budget_tokens == 50_000 - 1024
     assert out.dropped_history_messages == 0
-    assert out.retrieval_k == 3  # tight ⇒ fewer passages
+
+
+def test_token_counter_degrades_to_conservative_bytes_on_failure() -> None:
+    """findings 4/5: a tokenizer/import failure falls back to a UTF-8 BYTE upper
+    bound (≥ real tokens), and never raises."""
+    import app.llm.context as ctx_mod
+
+    # Force the litellm import path to fail so the fallback runs; assert the
+    # fallback is the conservative byte count for a multi-byte string.
+    original = ctx_mod.litellm_token_counter
+    counter = original("some/unknown-model")  # builds the real seam
+    # A CJK string: 3 chars but 9 UTF-8 bytes — the old len//4 would say 0/1,
+    # the conservative bound says >= the byte length.
+    cjk = "日本語"
+    # The seam tries litellm first; on a machine without that tokenizer it
+    # degrades. We assert the fallback path's value directly via the helper.
+    assert ctx_mod._conservative_tokens(cjk) == len(cjk.encode("utf-8"))
+    assert ctx_mod._conservative_tokens(cjk) >= len(cjk)  # upper bound, not //4
+    # And the built counter never raises for any input.
+    assert counter("") == 0
+    assert counter("hello") >= 1

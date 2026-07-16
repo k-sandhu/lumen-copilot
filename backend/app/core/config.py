@@ -385,12 +385,32 @@ class Settings(BaseSettings):
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the
     # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).
+    # Bounded so a bad value fails at startup, not as a silent guard bypass (#424
+    # review, finding 6): a non-positive fallback would floor the budget to a
+    # confusing 1-token refusal, and a NEGATIVE headroom would INFLATE the input
+    # budget beyond the model's real window — defeating the overflow guard.
     context_fallback_max_input_tokens: int = Field(
-        default=100_000, alias="CONTEXT_FALLBACK_MAX_INPUT_TOKENS"
+        default=100_000, gt=0, alias="CONTEXT_FALLBACK_MAX_INPUT_TOKENS"
     )
     context_output_headroom_tokens: int = Field(
-        default=8_000, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
+        default=8_000, ge=0, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
     )
+
+    @model_validator(mode="after")
+    def _context_budget_leaves_room(self) -> Settings:
+        """The fallback window must leave positive input room after the headroom.
+
+        Combined with the field bounds above, this rejects a config where the
+        reserved output headroom meets or exceeds the fallback input window —
+        which would drive the assembler's budget to its degenerate 1-token floor
+        and refuse every prompt built on the fallback path (#424 review).
+        """
+        if self.context_output_headroom_tokens >= self.context_fallback_max_input_tokens:
+            raise ValueError(
+                "CONTEXT_OUTPUT_HEADROOM_TOKENS must be less than "
+                "CONTEXT_FALLBACK_MAX_INPUT_TOKENS (issue #410)"
+            )
+        return self
 
     # How long (seconds) the app lifespan waits for in-flight answer producers to
     # cancel and drain on shutdown before it stops waiting and proceeds to engine
