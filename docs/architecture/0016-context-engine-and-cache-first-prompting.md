@@ -1,88 +1,93 @@
 # 16. Context engine & cache-first prompting (the runtime performance track)
 
-- **Status:** Accepted *(direction approved by the sponsor in-session 2026-07-16; this ADR records it)*
+- **Status:** Accepted *(direction approved by the sponsor in-session 2026-07-16; amended same day for the [#417 review](https://github.com/k-sandhu/lumen-copilot/pull/417) findings before first merge — an accepted ADR is immutable thereafter; changes supersede)*
 - **Date:** 2026-07-16
-- **Builds on:** [ADR-0003](0003-application-stack.md) (LLM-agnostic; every model call via the `llm/` gateway), [ADR-0004](0004-architecture-boundaries-and-adapters.md) (one owning module per concern; domain types only), [ADR-0011](0011-assistant-and-agent-runtime.md) (one shared `chat_runtime` for ad-hoc chat, assistants, and headless runs), [spec 0004](../specs/0004-security-and-domain-invariants.md) (INV-2 permissioned retrieval, INV-3 citations, INV-6 audit)
-- **Scope:** SPIKE — the only deliverable of [#405](https://github.com/k-sandhu/lumen-copilot/issues/405); no product code. It records the design for [epic #404](https://github.com/k-sandhu/lumen-copilot/issues/404) and is **guidance** for its features ([#409](https://github.com/k-sandhu/lumen-copilot/issues/409)–[#416](https://github.com/k-sandhu/lumen-copilot/issues/416)). [ADR-0017](0017-hierarchical-memory.md) (memory) and [ADR-0018](0018-sub-agent-orchestration.md) (sub-agents) build on the segments and executor decided here.
+- **Builds on:** [ADR-0003](0003-application-stack.md) (LLM-agnostic; every model call via the `llm/` gateway), [ADR-0004](0004-architecture-boundaries-and-adapters.md) (one owning module per concern; domain types only), [ADR-0011](0011-assistant-and-agent-runtime.md) (one shared `chat_runtime`), [spec 0004](../specs/0004-security-and-domain-invariants.md) (INV-2 permissioned retrieval, INV-3 citations, INV-6 audit)
+- **Scope:** SPIKE — the only deliverable of [#405](https://github.com/k-sandhu/lumen-copilot/issues/405); no product code. Guidance for [epic #404](https://github.com/k-sandhu/lumen-copilot/issues/404) ([#409](https://github.com/k-sandhu/lumen-copilot/issues/409)–[#416](https://github.com/k-sandhu/lumen-copilot/issues/416)). [ADR-0017](0017-hierarchical-memory.md) and [ADR-0018](0018-sub-agent-orchestration.md) build on the segments and executor decided here.
 
 ## Context
 
-The answer runtime is safely **bounded** everywhere — tool-turn budget, `k` caps, snippet caps, per-tool timeouts — but it is *count-based and cache-blind*:
+The answer path is *bounded but count-based and cache-unaware*. Precisely (naming the actual owners):
 
-- **The prompt is assembled inline** (`chat_runtime._answer`): system prompt + the last `_HISTORY_TURNS = 20` user/assistant **text-only** turns + the question. There is no token accounting anywhere; an oversize prompt fails *reactively* as the provider's `ContextWindowExceeded` → 422. Prior turns' tool calls, results, and citations are dropped entirely, so "expand point 2 from that doc" forces a blind re-search.
-- **Nothing is cached.** One answer runs up to 20 sequential completion turns, each re-sending the full prefix (tool specs + system + history + the growing tool transcript) at full price with zero cache directives. Provider state (verified 2026-07): OpenAI-style caching is automatic on stable 1024+-token prefixes (now up to a 90% discount on cached tokens, retention up to 24h on newer models, with a `prompt_cache_key` routing hint); Anthropic-style caching is explicit `cache_control` breakpoints (~1.25× write, ~0.1× read). LiteLLM — our one gateway dependency — passes both through and can auto-inject breakpoints (`cache_control_injection_points`).
-- **Tool calls execute sequentially** (`for call in turn_tool_calls: await …`) even though the gateway already *parses* parallel tool-call fragments correctly. A three-search turn pays the sum of latencies instead of the max.
-- **A transient provider fault mid-answer kills the whole answer** (typed 503 terminal); `finish_reason == "length"` is unhandled; there is no fallback model. (Routing/fallback was explicitly fenced out of #25 — this ADR closes that deferral at the *turn* level.)
-- **Pre-tool narration is dropped** (the #148 fix): a tool-calling turn's text is neither streamed nor persisted, which keeps the persisted answer equal to the streamed answer — but it also means *nothing* streams until a whole turn completes, so long agentic answers look stalled.
+- **History selection** is a fixed 20-message slice in `chat_service` (`_HISTORY_TURNS`), projected **text-only** in the API layer (`api/v1/chat._to_chat_messages`); the runtime (`chat_runtime._answer`) then builds `[system, *history, question]` with **no token accounting anywhere**. An oversize prompt fails *reactively* as the provider's `ContextWindowExceeded` → 422. Prior turns' tool evidence is dropped entirely.
+- **No completion-side caching.** One answer runs up to 20 sequential completion turns, each re-sending the full prefix (tool specs + system + history + growing tool transcript) with no cache directives and no `prompt_cache_key`. (A *query-embedding* LRU cache exists — #395 — that is retrieval-side and unrelated.)
+- **Tool calls execute sequentially** even though the gateway already parses parallel tool-call fragments.
+- **A transient provider fault mid-answer kills the whole answer**; `finish_reason == "length"` is unhandled; no fallback model (routing/fallback was fenced out of #25 — this ADR closes that at the *turn* level).
+- **Pre-tool narration is dropped** (the #148 fix), so nothing streams until a whole turn completes.
 
-These are one design problem, not five. Caching, compression, and (later) memory all constrain each other through **prefix stability**: a naive sliding history window invalidates the cache every turn; a mid-answer memory write invalidates everything after it. The consensus architecture across leading runtimes (Claude Code compaction / Anthropic context editing + server-side compaction, OpenAI truncation strategies, Manus's cache-first context engineering, LangGraph summarization nodes) is a **deliberate context assembler with a stability gradient** — which is what this ADR adopts.
+Provider state (2026-07, links current as of writing): OpenAI-style caching is automatic on stable ≥1024-token prefixes with a `prompt_cache_key` routing hint ([OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)); Anthropic-style caching is explicit `cache_control` breakpoints ([Anthropic docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching); ~1.25× write, ~0.1× read pricing). LiteLLM passes both through and (in versions **later than our pinned 1.55.9**) can auto-inject breakpoints via `cache_control_injection_points` ([LiteLLM PR #9996](https://github.com/BerriAI/litellm/pull/9996)) — see §2.4's prerequisite. Published external results (e.g. Anthropic's [context-editing benchmark](https://platform.claude.com/docs/en/build-with-claude/context-editing), 84% token savings on a 100-turn task) are **external references, not Lumen guarantees**; our targets live in Consequences with their acceptance gates.
+
+These are one design problem: caching, compression, and (later) memory constrain each other through **prefix stability** — a sliding per-message window invalidates the cache every turn; a mid-answer memory write invalidates everything after it. The consensus architecture is a deliberate context assembler with a stability gradient; this ADR adopts it.
 
 ## Decision
 
 ### 1. A segmented, token-budgeted context assembler owned by `llm/`
 
-A new `backend/app/llm/context.py` (inside the existing `llm/` boundary — prompt assembly is part of "the model boundary", so **no new AGENTS.md §6 row is needed**) owns turning the run's inputs into the message list. The prompt becomes ordered **segments with a stability gradient** (most stable first):
+A new `backend/app/llm/context.py` (prompt assembly is part of the model boundary — no new AGENTS.md §6 row) owns turning the run's inputs into the message list, as ordered **segments with a stability gradient**:
 
 | # | Segment | Content | Stability |
 |---|---|---|---|
-| 1 | `tools` | The advertised tool specs (already deterministically sorted) | Per allow-list |
-| 2 | `system` | user custom instructions → assistant instructions → `GROUNDED_SYSTEM_PROMPT` | Per session |
-| 3 | `memory` | **Reserved, empty in v1** — filled by ADR-0017; versioned, changes only between answers | Semi-stable |
-| 4 | `summary` | **Reserved in v1** — the rolling session summary (§3.2); versioned, changes only between answers | Semi-stable |
-| 5 | `history` | Verbatim recent turns, **token-budgeted** (replaces `_HISTORY_TURNS`) | Rolls at answer boundaries |
-| 6 | `live` | The question + this answer's growing tool transcript | Append-only within the answer |
+| 1 | `tools` | Advertised tool specs (deterministically sorted) | Per allow-list |
+| 2 | `system` | user custom instructions → assistant instructions → grounded prompt | Per session |
+| 3 | `memory` | **Reserved, empty in v1** (ADR-0017); changes only between answers | Semi-stable |
+| 4 | `summary` | **Reserved in v1** (§3.2); versioned; changes only between answers | Semi-stable |
+| 5 | `history` | Verbatim recent turns, token-budgeted | Rolls at answer boundaries |
+| 6 | `live` | Question + this answer's growing tool transcript | Append-only in-answer |
 
-Mechanics:
+**Budget mechanics (the `ContextBudget` contract):**
 
-- **Budgets:** the model's input budget comes from `litellm.get_model_info(model).max_input_tokens` with a conservative fallback when unknown; reserve output headroom; count with `litellm.token_counter`. Each segment gets a budget; the **degrade order** is: shrink `memory` → roll more `history` into `summary` → shrink retrieval `k`/snippet budgets → honest typed refusal. An oversize prompt is a *deliberate* decision, never a provider 422.
-- **Determinism:** stable serialization (sorted tool specs — already true; stable JSON key order; no timestamps or per-request values in segments 1–4).
-- The assembler is pure over its inputs (unit-testable offline); `chat_runtime` composes it.
-- **Semantic note (recorded decision):** the existing instruction order (user → assistant → grounding) is *kept* in v1. It costs cross-user prefix sharing (a per-user segment sits early), but preserving the documented precedence semantics beats a cache micro-optimization; the intra-session and in-answer caching below is where the real money is. Revisit only with eval evidence.
+- `input_budget = max_input_tokens(model) − output_headroom − safety_margin`. `max_input_tokens` resolves via the local model map; an **unknown model uses a configured conservative fallback** (`Settings`, default 100k) — never a crash (#410 AC-3). Headroom and fallback are `Settings`-tunable.
+- Counting: an injectable token-counter seam (default: LiteLLM tokenizer, lazily imported; heuristic fallback for unknown tokenizers) counts **system, question, history messages (plus a fixed per-message overhead), and the serialized tool schemas** — tool specs ride the `tools` param but spend the same window. A fixed safety margin absorbs local-vs-provider tokenizer drift.
+- **Degrade order, applied *before* the first model call:** shrink the memory segment → roll history into the summary → drop oldest history messages → **typed refusal**: a prompt whose *fixed* segments (system + tools + question + headroom) cannot fit raises `ValidationError` (`context_too_large`, 422), mapped to the terminal problem envelope. Retrieval-side budgets (`default_k`, snippet caps) are **derived at context-build time and passed into the run's `ToolContext`** — the assembler never "shrinks k retroactively"; it sets the knobs before any tool executes.
+- Required tests: unknown model → fallback; deterministic assembly; oldest-first trimming; oversized tool schemas; the typed refusal; tokenizer-variance tolerance.
 
-### 2. Cache-first prompting rules (the invariants the assembler enforces)
+### 2. Cache-first prompting rules
 
-1. **Stable prefix ordering** — the segment table above; volatile content only at the tail.
-2. **Append-only within an answer** — the loop only ever appends messages (already true); never mutate earlier messages mid-answer *except* the chunked compaction in §3.1, which is threshold-triggered precisely to amortize invalidation.
-3. **Trim only at answer boundaries** — history rolls into the summary between answers, never mid-loop, and in **chunks** (roll K turns at once), so the prefix changes once per roll rather than every turn.
-4. **Breakpoints:** for Anthropic-style providers, `cache_control` marks at the segment 2/3/4 boundaries plus a **moving mark on the last message of each loop turn** (incremental caching), injected in the gateway via LiteLLM; for OpenAI-style providers, no marks — prefix stability does the work, and the gateway passes `prompt_cache_key = session_id` as the routing hint. Providers without caching support get no directives and identical behaviour to today.
-5. **Mask, don't remove** — the advertised tool set stays stable for the life of a session (per-session allow-lists already are); MCP `discovered_tools` snapshots are persisted, so re-discovery (which may reorder/change specs) naturally lands between sessions.
-6. **Measure it** — cached-read / cache-write tokens are recorded per answer via the usage substrate ([#409](https://github.com/k-sandhu/lumen-copilot/issues/409)): `TokenUsage` gains `cached_prompt_tokens` + `cache_write_tokens`, the `done` envelope reports them (additive contract change), and a per-answer `llm_usage` row (tenant/session/message/model + the five token fields) is the substrate for the cache-hit KPI, AgentOps ([#300](https://github.com/k-sandhu/lumen-copilot/issues/300)) and the ADR-0018 budgets.
+1. **Stable prefix ordering** (the table above); volatile content only at the tail; deterministic serialization (sorted tool specs, stable JSON key order, no timestamps in segments 1–4).
+2. **Append-only within an answer** (already true) — except §3.1's *chunked* compaction, threshold-triggered to amortize invalidation.
+3. **Trim only at answer boundaries, in chunks** (roll K turns at once).
+4. **Breakpoints & routing hints — prerequisite named:** the pinned LiteLLM (1.55.9) predates `cache_control_injection_points`; **upgrading LiteLLM and revalidating the gateway suite is an explicit prerequisite task of [#411](https://github.com/k-sandhu/lumen-copilot/issues/411)**. The gateway then gains a **route-capability map** (inside `llm/`, keyed off the resolved route): `anthropic-style` → explicit `cache_control` marks at segment boundaries plus a moving mark per loop turn; `openai-style` → no marks, pass `prompt_cache_key=session_id`; `unknown/custom base_url` → **omit every cache directive, fail-safe**. `ModelRoute` grows the capability field; each category gets a gateway *payload* test. No provider knowledge leaks above `llm/`.
+5. **Mask, don't remove, tools — per-ANSWER stability:** the offered set is stable within an answer by construction (resolved once). Across answers, MCP **rediscovery rewrites `discovered_tools` and can change schemas/order mid-session** — accepted: correctness and **security revocation always outrank cache stability** (a disabled server's tools vanish immediately, ADR-0012); the cost of a rediscovery is one prefix invalidation. A per-session pinned tool manifest was considered and rejected for v1 (staleness risk over cache micro-savings).
+6. **Measure it** — §2.6.
+
+Recorded semantic decision: the existing instruction order (user → assistant → grounding) is kept; cross-user prefix sharing is deliberately not optimized. Revisit only with eval evidence.
+
+### 2.6 Usage accounting (the substrate — [#409](https://github.com/k-sandhu/lumen-copilot/issues/409))
+
+`TokenUsage` gains `cached_prompt_tokens` / `cache_write_tokens`; the `done` envelope reports them (additive contract fields); the tenant-scoped **`llm_usage` table is the accounting ledger**. Granularity: **one row per (answer, model-route attempt-scope)** — with today's single-model no-retry loop that is exactly one row per answer, keyed by `message_id`. When §4 retries/fallback and ADR-0018 workers land, **additional rows** attribute those spends: each row's `model` is the model *actually used*; fallback-attempt and worker rows carry `message_id` NULL and key by `run_id`/worker identity; per-answer totals are aggregations over the ledger. The uniqueness guard is therefore **partial — one row per non-null `message_id`**. Terminal audit events record the actually-used model whenever it differs from the requested one.
 
 ### 3. Compression (three timescales)
 
-**3.1 In-answer tool-result compaction** ([#415](https://github.com/k-sandhu/lumen-copilot/issues/415)). When the live transcript crosses a threshold (a fraction of the input budget), replace the **oldest** tool results' `content` with `[cleared — {summary}]`, keeping the calls and the most recent results verbatim. The one-line `summary` every `ToolResult` already persists is the placeholder text. Clearing happens in **chunks** (≥N results at once) to amortize the cache invalidation it necessarily causes — the same trade Anthropic's `clear_tool_uses` context editing makes. Citations are unaffected: `GroundedCitation`s are recorded at retrieval time (INV-3 structural), not re-read from the transcript.
+**3.1 In-answer tool-result compaction ([#415](https://github.com/k-sandhu/lumen-copilot/issues/415)).** When the live transcript crosses a budget threshold, the **oldest** tool results' contents are replaced by a placeholder, cleared in **chunks** to amortize cache invalidation. The placeholder is a **`context_digest`: a bounded, content-bearing extract produced from the result's actual content at clearing time** — NOT the user-facing `summary` (an optional ≤300-char count-style line; "3 passages" is not evidence and must never be all the model is left with). Constraints: results whose passages the answer **already cited** keep the cited snippets verbatim in the digest; the compression-regression eval (§3.2) must prove post-compaction answers stay grounded (INV-3).
 
-**3.2 Rolling session summary + token-based window + evidence carry-forward** ([#416](https://github.com/k-sandhu/lumen-copilot/issues/416)).
+**3.2 Rolling session summary + token window + evidence carry-forward ([#416](https://github.com/k-sandhu/lumen-copilot/issues/416)).**
 
-- A `session_summaries` row per session (`session_id`, `summary`, `covers_through_message_id`, `version`), updated **asynchronously post-answer** (Celery, ADR-0015 infra) — the hot path never pays for summarization, and the prompt prefix only changes at answer boundaries (cache-aligned). Summaries are per-session and sessions are per-user, so INV-2 holds by construction; the summarizer runs over content the session's user already saw.
-- Assembly consumes `[summary vN] + [last M turns verbatim]` with M token-budgeted — this **replaces** `_HISTORY_TURNS`.
-- **Evidence carry-forward:** each answer persists a compact digest of what it cited (document ids + chunk ids + one line each — data already in hand at persist time); the *next* answer's `live` segment includes the previous digest, so follow-ups can target `get_document`/`search_text` by id instead of re-searching blind.
-- Summarizer failure degrades to today's behaviour (verbatim window only) — never a failed answer.
-- The eval harness gains a **compression-regression suite**: golden multi-turn conversations must hold groundedness/citation metrics with compacted context.
+- `session_summaries` is a **tenant-scoped table like every other** (`tenant_id` FK + the fail-closed RLS backstop; owner scoping via the session's owner), updated asynchronously post-answer under a **tenant-bound Celery scope** (the ADR-0015 pattern). Assembly consumes `[summary vN] + [last M turns verbatim]`, M token-budgeted — replacing `_HISTORY_TURNS`.
+- **Summaries carry conversational content only — never source-document text.** The **evidence digest is IDs only** (document + chunk ids); the next answer **rehydrates them through `retrieval/` under the requester's *current* permissions** (INV-2 — "the user saw it last turn" does not prove they may see it now; revoked/deleted evidence is silently stripped). Summarization and evidence rehydration emit audit events (INV-6).
+- Summarizer failure degrades to the verbatim window; never a failed answer.
+- The eval harness gains the compression-regression suite (golden multi-turn conversations; groundedness/citation thresholds hold under compaction).
 
 ### 4. Turn-level resilience ([#413](https://github.com/k-sandhu/lumen-copilot/issues/413))
 
-A loop turn is **buffered and pure** — `_stream_one_turn` publishes nothing, and tools run *between* turns — so retrying a failed turn is safe by construction (no duplicate user-visible text, no re-executed side effects). Therefore:
+- **Retryability is classified, not blanket:** the gateway (the only reader of vendor exceptions) maps provider failures to typed categories — `retryable` (timeout, connection, 429 with backoff honoring `Retry-After`, provider 5xx) vs `terminal` (auth/permission, malformed request, unknown model, configuration). Only `retryable` faults retry (≤2, backoff); auth/config faults fail fast exactly as today.
+- **The retry window closes at first emission:** a turn retries **only if nothing of it has been published**. Narration streams live (§6), so a turn that already emitted narration is not retried — a fault after emission ends the answer with the typed terminal, exactly as today. Tool side effects run between turns, so a retry can never re-execute a tool.
+- **Fallback models are a defined, validated configuration** (new in #413): an ordered per-tenant list of model ids, each validated against the tenant's provider config exactly like the primary (the send-path rules), resolved to routes once, keys via the existing PR-2a path. `done` + audit record the model actually used; its `llm_usage` row attributes the spend (§2.6).
+- **Length continuation:** on `finish_reason == "length"`, the buffered partial text is appended to the transcript as the assistant turn and **one** continuation turn runs with `tool_choice="none"` — a continuation can never re-issue tool calls, so duplicate tool execution is structurally impossible; the streamed answer is the concatenation.
 
-- Retry a turn ≤2 times with backoff on `DependencyError` (transient 5xx/timeout/connection).
-- Then walk the tenant's **fallback model list** (an ordered list on the existing per-tenant provider routing; each route resolved once, keys never re-decrypted per attempt). The `done` envelope and the answer audit record the model that actually answered.
-- `finish_reason == "length"`: one continuation turn stitched onto the buffered text before the terminal.
-- Exhausted routes → exactly one typed terminal `error`, exactly as today; vendor errors still never leak.
+### 5. Concurrent tool execution ([#412](https://github.com/k-sandhu/lumen-copilot/issues/412))
 
-### 5. Concurrent tool execution semantics ([#412](https://github.com/k-sandhu/lumen-copilot/issues/412))
+- The calls of one turn run under `asyncio.gather` with a small semaphore. **Ordinals are preassigned at dispatch** (the runner's counter moves to dispatch time); `tool_call` events emit at dispatch, `tool_result` events on completion; transcript messages append in **original call order**.
+- **Per-call isolation is a context, not just a session:** `ToolContext` gains a factory yielding, per concurrent call, a **fully isolated call scope** — its own `AsyncSession` (tenant-bound via `bind_tenant`, RLS-armed), its own `RetrievalService`, and its own repository/audit/approval-gate handles. Completed results queue into a **serialized persistence coordinator** (the runtime session) that writes `tool_invocations` rows and audit events in dispatch order — the INV-6 trace stays gap-free under parallelism.
+- v1 conservatism: read-only T0 calls run concurrently; T1+ calls in the same batch run serially after them. Required tests: parallel RLS isolation, audit completeness, ordinal order, hanging-call timeout containment, mid-batch failure, rollback behavior.
 
-- The calls of one turn run under `asyncio.gather` with a small semaphore. `tool_call` events are emitted at **dispatch** (with the audit `ordinal` assigned at dispatch); `tool_result` events emit as each completes; transcript messages append in **original call order** (provider protocol + cache determinism).
-- **Sessions:** `AsyncSession` is not concurrency-safe, and both the retrieval tools (permission predicates) and the runner's `_finalise` (audit + `tool_invocations`) touch it. The `ToolContext` therefore carries a **session factory**; each concurrent handler opens its own short-lived session (and its own `RetrievalService`). `_finalise` stays **serialized** on the runtime's session. The governed per-call path (allow-list → autonomy → approval → bounded execute → uniform result → audit) is unchanged.
-- v1 conservatism: read-only **T0** calls run concurrently; side-effecting (T1+) calls in the same batch execute serially after the T0 batch.
+### 6. Narration streaming ([#414](https://github.com/k-sandhu/lumen-copilot/issues/414)) — named `event:narration`
 
-### 6. `event:thinking` — narration becomes visible, the answer invariant stays ([#414](https://github.com/k-sandhu/lumen-copilot/issues/414))
-
-A tool-calling turn's text streams live as a new **`event:thinking`** envelope (additive `contracts/` change) instead of being silently dropped. It is **never** a `delta` and **never persisted**, so the #148 invariant — the streamed answer equals the stored message — holds untouched; clients render it as a transient status affordance. Replays do not re-materialize thinking text into the message.
+A tool-calling turn's text streams live as **`event:narration`** (not "thinking": this is the model's ordinary *visible* narration text; **provider hidden-reasoning blocks are explicitly excluded** — never requested, never forwarded). Never a `delta`, never persisted — the #148 invariant (streamed answer == stored message) holds. The §4 interaction is explicit: narration emission **closes the turn's retry window**; replays (the Redis buffer) re-deliver narration envelopes idempotently by `seq` like every other event, rendered as transient status — no user-visible duplication.
 
 ## Consequences
 
-- **Cost/latency:** 50–80% input-cost reduction on tool-heavy answers (in-answer prefix reuse dominates), 2–4× lower tool latency on multi-call turns, and answers that survive provider weather. The KPI is observable from day one via #409.
-- **Complexity moves to one place:** prompt construction stops being incidental and becomes a tested component with declared budgets. That is new surface, but it is the surface ADR-0017 (memory segment) and ADR-0018 (worker budgets/executor) already need — built once.
-- **Cache invalidation is now a managed trade:** summary rolls and compaction chunks deliberately pay occasional cache-write costs to keep steady-state hits high.
-- **The eval harness becomes load-bearing** for this track: compression and caching changes land only behind the groundedness/citation/recall gates (the OD-7 CI lane wires them; until then they run locally per the Definition of Done).
-- Deliberately **not** decided here: server-side provider compaction betas (we compress client-side and stay provider-agnostic), cross-user prefix sharing (semantic order kept), KV-cache-aware routing across multiple deployments (single-deployment today; a LiteLLM router concern for later).
+- **Targets, each with a gate** (not guarantees): tool-heavy input-cost reduction ~50–80% — *measured by the §2.6 cache-hit KPI on a fixed golden workload before/after #411*; multi-call tool latency approaching max-of-latencies — *the #412 test workload*; zero context-window 422s on golden conversations — *the #410/#416 suites*.
+- Prompt construction becomes one tested component with declared budgets; ADR-0017/0018 consume its segments and executor.
+- Cache invalidation becomes a managed trade (summary rolls, compaction chunks, MCP rediscovery).
+- **Prerequisites made explicit:** the LiteLLM upgrade (with gateway-suite revalidation) gates #411; eval thresholds (OD-7 lane) gate #415/#416; no provider behavior escapes `llm/`.
+- Deliberately not decided: server-side provider compaction betas (we compress client-side, provider-agnostic), cross-user prefix sharing, KV-cache-aware multi-deployment routing.
