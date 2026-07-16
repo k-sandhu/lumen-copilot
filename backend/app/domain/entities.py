@@ -1058,6 +1058,34 @@ class ToolInvocation:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmUsageRecord:
+    """Per-answer LLM token/cache accounting — the ``llm_usage`` table row (#409).
+
+    One record per produced answer, summing token usage across every completion
+    turn of the answer's loop, including the provider cache accounting
+    (``cached_prompt_tokens`` served from the provider's prompt cache,
+    ``cache_write_tokens`` written into it — ADR-0016 §2.6). The substrate the
+    cache-hit KPI, AgentOps analytics (#300), credit budgets, and sub-agent
+    budgets (ADR-0018) read. Tenant-scoped (INV-1). ``model`` is the id the
+    caller requested (matches ``Message.model``); ``run_id`` is reserved for
+    headless-run / sub-agent grouping.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    session_id: UUID | None
+    message_id: UUID | None
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int = 0
+    cache_write_tokens: int = 0
+    run_id: UUID | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.min)
+
+
+@dataclass(frozen=True, slots=True)
 class RunError:
     """A typed run failure / escalation reason — the ``runs.error`` jsonb (ADR-0015 §2).
 

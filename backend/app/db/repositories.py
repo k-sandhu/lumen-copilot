@@ -58,6 +58,7 @@ from app.domain.entities import (
     KnowledgeScope,
     LlmProvider,
     LlmProviderStatus,
+    LlmUsageRecord,
     McpServer,
     McpServerStatus,
     Message,
@@ -3360,6 +3361,86 @@ class ToolInvocationRepository(_TenantScopedRepository):
                 continue
             by_message.setdefault(row.message_id, []).append(_to_tool_invocation(row))
         return by_message
+
+
+def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
+    return LlmUsageRecord(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        session_id=row.session_id,
+        message_id=row.message_id,
+        run_id=row.run_id,
+        model=row.model,
+        prompt_tokens=row.prompt_tokens,
+        completion_tokens=row.completion_tokens,
+        total_tokens=row.total_tokens,
+        cached_prompt_tokens=row.cached_prompt_tokens,
+        cache_write_tokens=row.cache_write_tokens,
+        created_at=row.created_at,
+    )
+
+
+class LlmUsageRepository(_TenantScopedRepository):
+    """Per-answer LLM token/cache accounting within one tenant (#409, ADR-0016 §2.6).
+
+    One ``record`` per produced answer (chat and headless runs alike — both ride
+    the shared runtime), summing the answer loop's turns. Tenant-scoped (INV-1):
+    tenant A's spend is invisible to a tenant-B repository. A trace/analytics
+    table like ``tool_invocations`` (ordinary access, no UPDATE/DELETE revoke);
+    writes are flushed not committed — the runtime owns the transaction so the
+    usage row lands atomically with the answer it accounts for. Reads here are
+    the substrate consumers (#300 analytics, budgets) build on.
+    """
+
+    async def record(
+        self,
+        *,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        cached_prompt_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        session_id: UUID | None = None,
+        message_id: UUID | None = None,
+        run_id: UUID | None = None,
+    ) -> LlmUsageRecord:
+        """Append one usage record for this tenant, returning it.
+
+        Values are clamped non-negative HERE (the single write chokepoint) so no
+        caller can persist a negative count (the table CHECK is the backstop).
+        """
+        row = models.LlmUsage(
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            run_id=run_id,
+            model=model,
+            prompt_tokens=max(0, prompt_tokens),
+            completion_tokens=max(0, completion_tokens),
+            total_tokens=max(0, total_tokens),
+            cached_prompt_tokens=max(0, cached_prompt_tokens),
+            cache_write_tokens=max(0, cache_write_tokens),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_llm_usage(row)
+
+    async def list_for_session(
+        self, session_id: UUID, *, limit: int = 200
+    ) -> list[LlmUsageRecord]:
+        """The usage records for one chat session (tenant-scoped), oldest first."""
+        stmt = (
+            select(models.LlmUsage)
+            .where(
+                models.LlmUsage.tenant_id == self._tenant_id,
+                models.LlmUsage.session_id == session_id,
+            )
+            .order_by(models.LlmUsage.created_at.asc(), models.LlmUsage.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_llm_usage(r) for r in rows]
 
 
 class AssistantRepository(_TenantScopedRepository):

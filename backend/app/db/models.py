@@ -1080,6 +1080,92 @@ class ToolInvocation(TenantScopedMixin, Base):
     )
 
 
+class LlmUsage(TenantScopedMixin, Base):
+    """Per-answer LLM token/cache accounting (#409, ADR-0016 §2.6) — write-once.
+
+    One row per produced answer (chat AND headless runs — both ride the shared
+    runtime), summing token usage across every completion turn of the answer's
+    loop: prompt/completion/total plus the provider cache accounting
+    (``cached_prompt_tokens`` read from cache, ``cache_write_tokens`` written to
+    it). This is the substrate the cache-hit KPI, AgentOps analytics (#300),
+    credit budgets, and the ADR-0018 sub-agent budgets read — the *record*, not
+    the dashboard (those are #300's).
+
+    Like ``tool_invocations`` it is a trace/analytics table, not the append-only
+    audit log: written once (no ``updated_at``), ordinary tenant-scoped access,
+    nullable SET-NULL links so deleting a session/message keeps the accounting.
+    ``model`` records the id the caller *requested* — ``String(255)`` to MATCH
+    ``messages.model`` (a narrower width could fail the usage insert, and the
+    whole answer, for an id the message row accepts). The partial-unique
+    ``(tenant_id, message_id)`` index makes "one row per answer" structural (a
+    second record for a message is an IntegrityError, not silent
+    double-counting); it is partial so historical message-less rows (SET NULL on
+    delete) and future headless/sub-agent rows (keyed by ``run_id``) stay
+    unconstrained. ``run_id`` is reserved for that grouping (nullable; no FK yet,
+    mirroring ``tool_invocations.run_id``). RLS: the ``0032`` migration puts it
+    under the same fail-closed ``app.tenant_id`` backstop as every tenant-scoped
+    table.
+    """
+
+    __tablename__ = "llm_usage"
+    __table_args__ = (
+        Index("ix_llm_usage_tenant_session", "tenant_id", "session_id"),
+        # Time-window reads ("usage this month") are the #300 analytics access
+        # path; tenant-leading (INV-1).
+        Index("ix_llm_usage_tenant_created", "tenant_id", "created_at"),
+        # "One row per answer" made structural (#419 review): a second record
+        # for the same assistant message is an IntegrityError, not silent
+        # double-counting. Partial (message_id IS NOT NULL) so historical rows
+        # whose message was deleted (SET NULL) — and future message-less rows
+        # (headless/sub-agent, keyed by run_id) — stay unconstrained.
+        Index(
+            "uq_llm_usage_tenant_message",
+            "tenant_id",
+            "message_id",
+            unique=True,
+            postgresql_where=text("message_id IS NOT NULL"),
+            sqlite_where=text("message_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "prompt_tokens >= 0 AND completion_tokens >= 0 AND total_tokens >= 0 "
+            "AND cached_prompt_tokens >= 0 AND cache_write_tokens >= 0",
+            name="ck_llm_usage_tokens_nonneg",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The assistant message the answer persisted as. An ORDINARY immediate FK
+    # (#419 review): unlike ``tool_invocations`` (written DURING the loop,
+    # before the message insert), the usage row is recorded strictly AFTER
+    # ``_persist`` flushes the message row in the same transaction — there is
+    # no forward reference, so no deferral is needed.
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Reserved for headless-run / sub-agent grouping (ADR-0018); no FK yet —
+    # deliberately mirroring the ``tool_invocations.run_id`` precedent (0013).
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    # 255 to match ``messages.model`` (#419 review): the value is copied from
+    # the same requested id, so a width mismatch could fail the usage insert —
+    # and with it the whole answer — for a model id the message row accepts.
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Assistant(TenantScopedMixin, TimestampMixin, Base):
     """A saved, named, governed chat configuration — the mutable head (ADR-0011 §1, #211).
 

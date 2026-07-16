@@ -1477,6 +1477,10 @@ export interface ChatDoneData {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    /** Prompt tokens served from the provider's prompt cache (#409). 0 when unreported. */
+    cachedPromptTokens?: number;
+    /** Prompt tokens written INTO the provider's prompt cache (#409). 0 when unreported. */
+    cacheWriteTokens?: number;
   };
 }
 
