@@ -43,6 +43,7 @@ from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
 from app.domain.entities import Message, MessageRole, ToolInvocation
 from app.domain.llm import ChatMessage, Role
+from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.tool_runner import ChatSandboxToolRunner
@@ -539,6 +540,10 @@ def _schedule_answer(
         request_id=request_id,
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
+        context_config=ContextConfig(
+            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
+            output_headroom_tokens=settings.context_output_headroom_tokens,
+        ),
         sandbox_factory=_build_sandbox_factory(
             principal=principal,
             backplane=backplane,

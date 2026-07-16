@@ -49,6 +49,7 @@ from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Assistant, AuditOutcome, Role
 from app.llm import LLMGateway
+from app.llm.context import ContextConfig
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink
@@ -256,6 +257,10 @@ class AssistantTestService:
                 request_id=self._request_id,
                 source_ip=self._source_ip,
                 default_max_tool_turns=self._settings.chat_max_tool_turns,
+                context_config=ContextConfig(
+                    fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
+                    output_headroom_tokens=self._settings.context_output_headroom_tokens,
+                ),
             )
             await runtime.run(
                 stream_id=sink.stream_id,

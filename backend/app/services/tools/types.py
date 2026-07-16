@@ -143,6 +143,19 @@ class ToolContext:
     retrieval: RetrievalService
     collection_ids: list[UUID] | None = None
     default_k: int = 6
+    #: The enforceable CEILING on a single search's ``k`` (ADR-0016 §1 / #410):
+    #: the context assembler derives it from the input budget and a retrieval tool
+    #: clamps even an explicit, model-supplied ``k`` to it, so a search issued
+    #: after assembly cannot overflow the window it was budgeted against. Defaults
+    #: to the widest retrieval ceiling (50, ``list_documents``'s cap) — each tool
+    #: still clamps to its OWN max, so this is inert on a roomy run and only bites
+    #: when a tight budget lowers it.
+    max_k: int = 50
+    #: The per-passage snippet char budget a search renders into the transcript
+    #: (ADR-0016 §1 / #410): the assembler lowers it under a tight window so each
+    #: returned passage adds less to the context. Defaults to the retrieval tool's
+    #: own snippet cap (600) — inert unless a tighter budget lowers it.
+    snippet_budget: int = 600
     artifacts: ArtifactWriter | None = None
     session_id: UUID | None = None
     simulate_writes: bool = False

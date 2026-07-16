@@ -59,9 +59,13 @@ _MIN_LIMIT = 1
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 20
 
-# How many prior turns to include as conversation context for the answer (keeps
-# the prompt bounded; the runtime adds the system prompt + the new question).
-_HISTORY_TURNS = 20
+# History is no longer pre-sliced to a fixed count here (#424 re-review): the
+# already-loaded prior messages are handed WHOLE to the runtime's token-budgeted
+# context assembler (ADR-0016 §1 / #410), which keeps as many recent turns as the
+# model's input window allows and trims the rest oldest-first, *logging* what it
+# drops. A fixed slice here would silently discard turns that would have fit.
+# (The unbounded ``list_for_session`` load is pre-existing; token-budget-driven
+# reverse paging of that query is a separate optimisation — issue #428.)
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +463,7 @@ class ChatService:
             user_message=user_message,
             stream_id=stream_id,
             model=resolved_model,
-            history=tuple(prior[-_HISTORY_TURNS:]),
+            history=tuple(prior),
             assistant_config=assistant_config,
             custom_instructions=custom_instructions,
         )

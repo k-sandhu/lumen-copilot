@@ -46,27 +46,35 @@ _SNIPPET_BUDGET = 600
 
 
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
+    # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
+    # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than
+    # the tool's own default, and the default must not slip past it either.
     if not isinstance(value, int | float | str):
-        return default
+        return max(1, min(maximum, default))
     try:
         k = int(value)
     except (TypeError, ValueError):
-        return default
+        return max(1, min(maximum, default))
     return max(1, min(maximum, k))
 
 
-def _render_passages(passages: list[RetrievedPassage]) -> str:
+def _render_passages(
+    passages: list[RetrievedPassage], snippet_budget: int = _SNIPPET_BUDGET
+) -> str:
     """Render retrieved passages as the tool reply the model reads.
 
     Each passage is labelled with its source document + chunk id so the model can
-    attribute a claim, and trimmed to a budget so the context stays bounded. The
-    full snippet still travels to the citation via the passage object.
+    attribute a claim, and trimmed to ``snippet_budget`` chars so the context
+    stays bounded — the assembler lowers that budget under a tight window (#424
+    review, finding 2). The full snippet still travels to the citation via the
+    passage object, so trimming the model's view never weakens INV-3.
     """
+    budget = max(1, min(snippet_budget, _SNIPPET_BUDGET))
     blocks: list[str] = []
     for i, p in enumerate(passages, start=1):
         snippet = p.text.strip()
-        if len(snippet) > _SNIPPET_BUDGET:
-            snippet = snippet[:_SNIPPET_BUDGET].rstrip() + "…"
+        if len(snippet) > budget:
+            snippet = snippet[:budget].rstrip() + "…"
         blocks.append(
             f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}):\n"
             f"{snippet}"
@@ -78,7 +86,12 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
     query = str(args.get("query") or "").strip()
     if not query:
         return ToolHandlerResult(content="No query provided.", summary="no query")
-    k = _clamp_k(args.get("k"), ctx.default_k)
+    # Clamp to the budget-derived ceiling, not just the tool's absolute _MAX_K
+    # (#424 review, finding 3): under a tight context window ``ctx.max_k`` is
+    # lowered by the assembler, so even an explicit large ``k`` cannot pull in
+    # more evidence than the remaining budget. ``ctx.max_k`` defaults to _MAX_K,
+    # so a roomy run is unchanged.
+    k = _clamp_k(args.get("k"), ctx.default_k, maximum=min(_MAX_K, ctx.max_k))
     passages = await ctx.retrieval.search_text(
         principal=ctx.principal, query=query, k=k, collection_ids=ctx.collection_ids
     )
@@ -89,7 +102,7 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
         )
     document_ids = tuple({p.document_id for p in passages})
     return ToolHandlerResult(
-        content=_render_passages(passages),
+        content=_render_passages(passages, ctx.snippet_budget),
         summary=f"{len(passages)} passage(s)",
         hit_count=len(passages),
         passages=tuple(passages),
@@ -102,7 +115,10 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
     name_or_query = str(args.get("name_or_query") or "").strip()
     if not name_or_query:
         return ToolHandlerResult(content="No document query provided.", summary="no query")
-    k = _clamp_k(args.get("k"), 10)
+    # Clamp to the budget-derived ceiling like search_text (#424 review, finding
+    # 2): a tight window lowers ``ctx.max_k`` so even an explicit large ``k`` is
+    # bounded. Defaults to _MAX_K, so a roomy run is unchanged.
+    k = _clamp_k(args.get("k"), 10, maximum=min(_MAX_K, ctx.max_k))
     matches = await ctx.retrieval.search_documents(
         principal=ctx.principal, name_or_query=name_or_query, k=k
     )
@@ -120,7 +136,12 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
 
 
 async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
-    k = _clamp_k(args.get("k"), _LIST_MAX, maximum=_LIST_MAX)
+    # Clamp to the budget-derived ceiling as well as the tool's own _LIST_MAX
+    # (#424 final re-review): a tight window lowers ``ctx.max_k`` so the listing
+    # degrades to a budgeted count instead of enumerating 50 then refusing on the
+    # next turn. ``ctx.max_k`` defaults to _LIST_MAX (50), so a roomy run is
+    # unchanged — it still lists up to 50.
+    k = _clamp_k(args.get("k"), _LIST_MAX, maximum=min(_LIST_MAX, ctx.max_k))
     matches = await ctx.retrieval.list_documents(principal=ctx.principal, k=k)
     if not matches:
         # A clean "nothing here" is an ok result, not an error — the user simply
@@ -168,7 +189,12 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     if doc is None:
         # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
         return ToolHandlerResult(content="Document not found.", summary="not found")
-    body = doc.text[: _SNIPPET_BUDGET * 4]
+    # Bound the returned body to the budget-derived snippet allowance (#424 third
+    # re-review): a document read is ~4× a passage snippet, and a tight context
+    # window lowers ``ctx.snippet_budget`` so ``get_document`` doesn't blow the
+    # remaining budget either. Capped at the tool's own ceiling; roomy = unchanged.
+    body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
+    body = doc.text[:body_budget]
     return ToolHandlerResult(
         content=f"Document: {doc.document_name}\n\n{body}",
         summary=doc.document_name,

@@ -24,6 +24,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -240,6 +241,7 @@ def _runtime(
     retrieval: object,
     backplane: InMemoryBackplane,
     default_max_tool_turns: int = 4,
+    context_config: object = None,
 ) -> ChatRuntime:
     return ChatRuntime(
         sessionmaker=ctx.sessionmaker,
@@ -249,6 +251,7 @@ def _runtime(
         request_id="req-1",
         source_ip="127.0.0.1",
         default_max_tool_turns=default_max_tool_turns,
+        context_config=context_config,  # type: ignore[arg-type]
         retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
     )
 
@@ -843,6 +846,7 @@ class _CapturingGateway:
 
     def __init__(self) -> None:
         self.system_prompt: str | None = None
+        self.first_messages: list[object] | None = None
 
     async def stream_tools(
         self,
@@ -857,6 +861,7 @@ class _CapturingGateway:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
             self.system_prompt = messages[0].content
+            self.first_messages = list(messages)
         yield StreamEvent(text="ok")
         yield StreamEvent(finish_reason="stop")
 
@@ -906,6 +911,228 @@ async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> 
         custom_instructions=None,
     )
     assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT
+
+
+async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
+    """#410: the runtime assembles under a budget — a tiny window trims old history.
+
+    Proves the assembler is actually wired into the runtime (not just unit-tested):
+    with a small injected ``ContextConfig`` fallback window and no model in the
+    map, the oldest turns are dropped before the prompt reaches the gateway, so
+    the captured ``messages`` carry only the newest history + the question.
+    """
+    from app.domain.llm import ChatMessage
+    from app.domain.llm import Role as LlmRole
+    from app.llm.context import ContextConfig
+
+    gateway = _CapturingGateway()
+    backplane = InMemoryBackplane()
+    # A moderate window (fallback 6000 − 1024 margin ⇒ ~4976 budget) that easily
+    # holds the fixed segments (grounded prompt + tool schemas + question) but is
+    # dwarfed by the two ENORMOUS ancient turns below — so the assembler trims
+    # them and keeps the tiny recent turn, rather than refusing. The unknown model
+    # id (not in the litellm map) exercises the fallback resolver (AC-3) too.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        context_config=ContextConfig(fallback_max_input_tokens=6000, output_headroom_tokens=0),
+    )
+    long_history = [
+        ChatMessage(role=LlmRole.USER, content="ancient question " * 3000),
+        ChatMessage(role=LlmRole.ASSISTANT, content="ancient answer " * 3000),
+        ChatMessage(role=LlmRole.USER, content="recent question"),
+    ]
+    await runtime.run(
+        stream_id=uuid.uuid4().hex,
+        session_id=ctx.session_id,
+        question="the new question",
+        model="some/unknown-model-not-in-map",
+        history=long_history,
+        collection_ids=None,
+    )
+    assert gateway.first_messages is not None
+    contents = [m.content for m in gateway.first_messages]  # type: ignore[attr-defined]
+    # The ancient, oversized turns were dropped; the new question is always last;
+    # the grounded system prompt still leads (segment order preserved).
+    assert "ancient question " * 3000 not in contents
+    assert "ancient answer " * 3000 not in contents
+    assert contents[-1] == "the new question"
+    assert contents[0].startswith("You are Lumen Copilot")
+
+
+class _RecordingSearchGateway:
+    """Records the FULL wire estimate of every ``messages`` + ``tools`` payload.
+
+    Drives the loop so tool results accumulate (#424 review, finding 1). Records
+    each turn's estimate via the SAME assembler metric the guard uses (message
+    wire form + tool schemas + framing) — not just content bytes — so a test can
+    prove no over-budget payload is ever sent, and would FAIL if the guard were
+    removed. Records whether the turn was a forced synthesis (tool_choice="none").
+    """
+
+    def __init__(self) -> None:
+        self.estimates: list[int] = []
+        self.synthesis_estimates: list[int] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        from app.llm.context import estimate_message_tokens
+
+        assert isinstance(messages, list)
+        assert isinstance(tools, list)
+        est = estimate_message_tokens(
+            messages, tools, counter=lambda t: len(t.encode("utf-8"))
+        )
+        self.estimates.append(est)
+        if tool_choice == "none":
+            self.synthesis_estimates.append(est)
+            yield StreamEvent(text="final")
+            yield StreamEvent(finish_reason="stop")
+            return
+        yield StreamEvent(
+            tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+            finish_reason="tool_calls",
+        )
+
+
+async def test_oversized_tool_results_never_exceed_budget(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#424 review, finding 1: with huge tool results and a tiny window, the loop
+    never sends an over-budget payload — it refuses deterministically instead."""
+    import asyncio
+    import sys
+    import types as _types
+
+    from app.llm.context import ContextConfig
+
+    # Force the assembler's counting/resolver onto their deterministic fallbacks
+    # (conservative UTF-8 bytes; the configured fallback window) by making litellm
+    # unavailable — so the token budget is measured in BYTES and the assertion
+    # below is exact rather than dependent on a real tokenizer.
+    def _raise(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer in test")
+
+    fake_litellm = _types.SimpleNamespace(token_counter=_raise, get_model_info=_raise)
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)  # type: ignore[attr-defined]
+
+    # A retrieval that returns a passage far larger than the window.
+    huge = RetrievedPassage(
+        chunk_id=ctx.chunk_id,
+        document_id=ctx.document_id,
+        document_name="big.pdf",
+        ord=0,
+        text="P" * 8000,
+        char_start=0,
+        char_end=8000,
+        score=0.9,
+    )
+    gateway = _RecordingSearchGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # fallback 5024 − 0 headroom − 1024 margin ⇒ budget 4000 bytes. The initial
+    # [system, question] + tool schemas fits, but the accumulating tool results
+    # push a later turn over budget — where the guard must refuse, not send.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([huge]),
+        backplane=backplane,
+        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="summarize the big doc",
+        model="some/unknown-model-not-in-map",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    budget = 5024 - 1024
+    # Every payload the gateway received — measured by the SAME full-wire estimate
+    # the guard uses — was within budget. Without the guard, the accumulating tool
+    # results would push a later estimate over budget and this would FAIL.
+    assert gateway.estimates  # the loop ran at least once (initial fit)
+    assert all(e <= budget for e in gateway.estimates), gateway.estimates
+    # And the guard actually fired: the run terminated with the typed refusal
+    # rather than sending an over-budget call.
+    types = [e["type"] for e in envs]
+    assert types.count("done") + types.count("error") == 1
+    terminal = envs[-1]
+    assert terminal["type"] == "error"
+    assert terminal["problem"]["code"] == "context_too_large"  # type: ignore[index]
+
+
+async def test_forced_synthesis_payload_is_budget_guarded(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#424 third re-review: with a single tool turn, the FORCED-SYNTHESIS call
+    must also be budget-guarded — a huge result gathered on the one turn cannot
+    be sent unchecked at synthesis time."""
+    import asyncio
+    import sys
+    import types as _types
+
+    from app.llm.context import ContextConfig
+
+    def _raise(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer in test")
+
+    fake = _types.SimpleNamespace(token_counter=_raise, get_model_info=_raise)
+    monkeypatch.setitem(sys.modules, "litellm", fake)  # type: ignore[arg-type]
+
+    huge = RetrievedPassage(
+        chunk_id=ctx.chunk_id,
+        document_id=ctx.document_id,
+        document_name="big.pdf",
+        ord=0,
+        text="Q" * 8000,
+        char_start=0,
+        char_end=8000,
+        score=0.9,
+    )
+    gateway = _RecordingSearchGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # max_tool_turns=1: one tool turn, then the loop is exhausted and the runtime
+    # makes the forced-synthesis call. Budget 4000 (5024 − 1024); the one huge
+    # result makes the synthesis payload oversized ⇒ must be refused, not sent.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([huge]),
+        backplane=backplane,
+        default_max_tool_turns=1,
+        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="summarize the big doc",
+        model="some/unknown-model-not-in-map",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    budget = 5024 - 1024
+    # No payload (ordinary or forced-synthesis) exceeded budget.
+    assert all(e <= budget for e in gateway.estimates), gateway.estimates
 
 
 # --- #409: token & cache usage — reported on done, recorded per answer -------

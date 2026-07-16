@@ -382,6 +382,46 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
+    # input-window used when the model is unknown to the local model map, and the
+    # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).
+    # Bounded so a bad value fails at startup, not as a silent guard bypass (#424
+    # review, finding 6): a non-positive fallback would floor the budget to a
+    # confusing 1-token refusal, and a NEGATIVE headroom would INFLATE the input
+    # budget beyond the model's real window — defeating the overflow guard.
+    context_fallback_max_input_tokens: int = Field(
+        default=100_000, gt=0, alias="CONTEXT_FALLBACK_MAX_INPUT_TOKENS"
+    )
+    context_output_headroom_tokens: int = Field(
+        default=8_000, ge=0, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
+    )
+
+    @model_validator(mode="after")
+    def _context_budget_leaves_room(self) -> Settings:
+        """The fallback window must leave positive input room after headroom + margin.
+
+        The assembler computes ``budget = fallback − headroom − safety_margin``
+        (the margin absorbs tokenizer drift). This rejects a config where that
+        derived budget is not strictly positive — e.g. fallback 1025 + headroom
+        1024, which passes the field bounds yet floors the budget to 1 and refuses
+        even an empty prompt (#424 re-review). The margin is mirrored from
+        ``app.llm.context._SAFETY_MARGIN_TOKENS`` (kept in lockstep — both are the
+        same 1024-token drift allowance).
+        """
+        _context_safety_margin = 1024
+        derived_budget = (
+            self.context_fallback_max_input_tokens
+            - self.context_output_headroom_tokens
+            - _context_safety_margin
+        )
+        if derived_budget <= 0:
+            raise ValueError(
+                "CONTEXT_FALLBACK_MAX_INPUT_TOKENS must exceed "
+                "CONTEXT_OUTPUT_HEADROOM_TOKENS by more than the 1024-token safety "
+                "margin so a positive input budget remains (issue #410)"
+            )
+        return self
+
     # How long (seconds) the app lifespan waits for in-flight answer producers to
     # cancel and drain on shutdown before it stops waiting and proceeds to engine
     # disposal (issue #156). The answer runtime runs off the request as a tracked
