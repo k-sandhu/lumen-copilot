@@ -385,6 +385,72 @@ async def test_chat_usage_cache_fields_default_to_zero(monkeypatch: pytest.Monke
     assert result.usage.cache_write_tokens == 0
 
 
+async def test_chat_usage_cached_zero_falls_back_to_anthropic_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#419 review — a present-but-zero ``cached_tokens`` falls back to the
+    Anthropic-style ``cache_read_input_tokens`` rather than masking it."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            "x", usage=_CacheUsage(100, 5, 105, cached_details=0, cache_read=77)
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cached_prompt_tokens == 77
+
+
+class _HostileUsage:
+    """A vendor usage object with malformed fields (#419 review — untrusted shape).
+
+    A stray string, a bool (``True`` IS an int in Python — the classic trap), a
+    float, and a negative must all degrade to a safe non-negative int, never
+    raise, and never reach the ``done`` envelope's ``minimum: 0`` contract.
+    """
+
+    def __init__(self) -> None:
+        self.prompt_tokens = "not-a-number"
+        self.completion_tokens = True  # noqa: FBT003 — deliberately hostile
+        self.total_tokens = -50
+        self.prompt_tokens_details = None
+        self.cache_read_input_tokens = 3.9
+        self.cache_creation_input_tokens = -1
+
+
+async def test_chat_usage_coerces_malformed_vendor_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#419 review — malformed/bool/negative usage values coerce safely, no crash."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_HostileUsage())
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    usage = (await gw.chat([ChatMessage(role=Role.USER, content="hi")])).usage
+    assert usage.prompt_tokens == 0  # unparseable string → 0
+    assert usage.completion_tokens == 0  # bool is NOT a token count
+    # total was negative → clamped 0, then the sum fallback (0+0) also 0.
+    assert usage.total_tokens == 0
+    assert usage.cached_prompt_tokens == 3  # float truncates, non-negative
+    assert usage.cache_write_tokens == 0  # negative → clamped 0
+    # Every field satisfies the envelope's minimum:0 contract.
+    assert all(
+        v >= 0
+        for v in (
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+            usage.cached_prompt_tokens,
+            usage.cache_write_tokens,
+        )
+    )
+
+
 # --- AC-2: streaming yields chunks; consumer break stops generation cleanly -
 
 

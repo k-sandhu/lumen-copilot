@@ -532,29 +532,52 @@ def _accumulate_tool_call(acc: dict[int, _ToolCallAccumulator], frag: Any) -> No
     )
 
 
+def _as_count(value: Any) -> int:
+    """Coerce a provider-reported token count to a safe non-negative int.
+
+    Vendor usage objects are untrusted shapes (#419 review): a stray string,
+    ``True``/``False`` (bools ARE ints in Python — a classic trap), a float,
+    ``None``, or a negative must never crash extraction, inflate a count, or
+    reach the ``done`` envelope (whose contract pins ``minimum: 0``). Booleans
+    and unparseable values are 0; everything else clamps non-negative — so the
+    emitted usage and the persisted row can never disagree about sign.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, count)
+
+
 def _extract_usage(response: Any) -> TokenUsage:
     """Pull token usage off a LiteLLM response, defensively.
 
     Some providers omit ``usage`` entirely; in that case return a zeroed
     :class:`TokenUsage`. ``total_tokens`` falls back to the sum when absent.
+    Every field passes through :func:`_as_count`, so malformed vendor values
+    (strings, bools, negatives) degrade to ``0`` rather than raising or
+    breaking the envelope's non-negative contract.
 
     Cache accounting (#409, ADR-0016 §2.6) is read from BOTH normalized shapes —
     OpenAI-style ``prompt_tokens_details.cached_tokens`` and Anthropic-style
     ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever the
-    provider populated (LiteLLM passes each through as-is). Absent/None fields
-    stay ``0``: a provider with no cache detail never breaks extraction.
+    provider populated (LiteLLM passes each through as-is). A zero/absent
+    ``cached_tokens`` falls back to the Anthropic-style read field; absent/None
+    fields stay ``0``: a provider with no cache detail never breaks extraction.
     """
     usage = getattr(response, "usage", None)
     if usage is None:
         return TokenUsage()
-    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion = int(getattr(usage, "completion_tokens", 0) or 0)
-    total = int(getattr(usage, "total_tokens", 0) or 0) or (prompt + completion)
+    prompt = _as_count(getattr(usage, "prompt_tokens", 0))
+    completion = _as_count(getattr(usage, "completion_tokens", 0))
+    total = _as_count(getattr(usage, "total_tokens", 0)) or (prompt + completion)
     details = getattr(usage, "prompt_tokens_details", None)
-    cached = int(getattr(details, "cached_tokens", 0) or 0) if details is not None else 0
+    cached = _as_count(getattr(details, "cached_tokens", 0)) if details is not None else 0
     if not cached:
-        cached = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        cached = _as_count(getattr(usage, "cache_read_input_tokens", 0))
+    cache_write = _as_count(getattr(usage, "cache_creation_input_tokens", 0))
     return TokenUsage(
         prompt_tokens=prompt,
         completion_tokens=completion,

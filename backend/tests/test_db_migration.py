@@ -1228,3 +1228,47 @@ def test_offline_toolinv_trace_migrations_round_trip(
     assert "drop index ix_tool_invocations_tenant_message" in down
     assert "alter table tool_invocations drop column ordinal" in down
     assert "alter table tool_invocations drop column result_summary" in down
+
+
+def test_offline_llm_usage_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0032 creates ``llm_usage`` with its structure; the downgrade reverses it (#409).
+
+    The executable reversibility + structure mechanism (backend/AGENTS.md; #419
+    review — the head-pin alone left the table's shape untested). Offline DDL
+    render (Postgres dialect) asserts every load-bearing property: the FKs +
+    ON DELETE behaviour, the non-negative CHECK, the three tenant-leading
+    indexes, the PARTIAL unique on ``(tenant_id, message_id)`` that makes "one
+    row per answer" structural, and the ENABLE/FORCE RLS policy consistent with
+    the 0007 backstop. Downgrade drops the policy, disables RLS, and drops the
+    table — no DB needed (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0031_toolinv_ordinal_msg_idx:0032_llm_usage", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table llm_usage" in up
+    # Immediate (non-deferred) message FK + SET NULL; session SET NULL; tenant CASCADE.
+    assert "references messages" in up
+    assert "references chat_sessions" in up
+    assert "references tenants" in up
+    assert "deferrable" not in up  # #419 review — no forward ref, so no deferral
+    # Non-negative token CHECK.
+    assert "ck_llm_usage_tokens_nonneg" in up
+    # The three read-path indexes + the partial-unique "one row per answer".
+    assert "ix_llm_usage_tenant_session" in up
+    assert "ix_llm_usage_tenant_created" in up
+    assert "uq_llm_usage_tenant_message" in up
+    assert "where message_id is not null" in up
+    # RLS backstop, same shape as 0007/0013.
+    assert "enable row level security" in up
+    assert "force row level security" in up
+    assert "create policy rls_llm_usage on llm_usage" in up
+
+    command.downgrade(cfg, "0032_llm_usage:0031_toolinv_ordinal_msg_idx", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_llm_usage on llm_usage" in down
+    assert "drop index uq_llm_usage_tenant_message" in down
+    assert "drop table llm_usage" in down

@@ -688,3 +688,68 @@ async def test_llm_usage_record_roundtrip_and_tenant_isolation(
     # INV-1 negative: tenant B's repository must not see tenant A's usage.
     theirs = await LlmUsageRepository(session, tenant_b).list_for_session(chat.id)
     assert theirs == []
+
+
+async def test_llm_usage_one_row_per_message_is_structural(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """#419 review — the partial unique index makes "one row per answer" structural.
+
+    A second usage record for the SAME assistant message is an IntegrityError,
+    not silent double-counting; message-less rows (headless/sub-agent) stay
+    unconstrained because the index is partial (message_id IS NOT NULL).
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.repositories import (
+        LlmUsageRepository,
+        MessageRepository,
+    )
+    from app.domain.entities import MessageRole, Role
+
+    tenant_a, _ = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="dup@a.test", password_hash="x", roles=[Role.MEMBER]
+    )
+    chat = await ChatSessionRepository(session, tenant_a).create(
+        owner_id=user.id, model="m", title="t"
+    )
+    messages = MessageRepository(session, tenant_a)
+    msg = await messages.add(
+        session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="m"
+    )
+    await session.flush()
+
+    repo = LlmUsageRepository(session, tenant_a)
+    await repo.record(
+        model="m",
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        session_id=chat.id,
+        message_id=msg.id,
+    )
+    await session.flush()
+    with pytest.raises(IntegrityError):
+        await repo.record(
+            model="m",
+            prompt_tokens=9,
+            completion_tokens=9,
+            total_tokens=18,
+            session_id=chat.id,
+            message_id=msg.id,
+        )
+        await session.flush()
+    await session.rollback()
+
+    # Message-less rows (run_id-keyed) are NOT constrained — two coexist.
+    repo2 = LlmUsageRepository(session, tenant_a)
+    for _ in range(2):
+        await repo2.record(
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+            run_id=uuid.uuid4(),
+        )
+    await session.flush()
