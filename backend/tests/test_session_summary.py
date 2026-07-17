@@ -283,12 +283,29 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
 async def test_task_second_pass_rolls_forward(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from datetime import datetime as _dt
+
+    from sqlalchemy import update as _upd
+
+    from app.db import models as _models
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
     monkeypatch.setattr(
         task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
     )
+    # Deterministic eras: the seeded 14 turns land minutes in the past so the
+    # second pass's boundary is STRICTLY newer (the same-second tie-break is a
+    # stable-but-arbitrary id order — correct for racing tasks, coin-floppy
+    # for a test that seeds everything within one wall-clock second).
+    async with ctx.sessionmaker() as session:
+        for i, mid in enumerate(ctx.message_ids):
+            await session.execute(
+                _upd(_models.Message)
+                .where(_models.Message.id == mid)
+                .values(created_at=_dt(2020, 1, 1, 0, i))
+            )
+        await session.commit()
     assert await task_module._summarize(ctx.tenant_id, ctx.session_id) == "summarized"  # noqa: SLF001
     # Four MORE turns arrive; the next pass folds the previously-kept tail.
     async with ctx.sessionmaker() as session:
@@ -388,10 +405,12 @@ async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
     assert row.summary == "racing summary"
 
 
-async def test_same_second_advance_to_new_boundary_is_accepted(ctx: _Ctx) -> None:
-    """The tie policy, pinned: a same-timestamp advance to a DIFFERENT boundary
-    id is accepted (second-resolution stamps must not wedge progress); an
-    IDENTICAL rewrite is a rejected no-op (idempotent)."""
+async def test_same_second_ties_advance_only_in_id_order(ctx: _Ctx) -> None:
+    """The ORDERED tie policy (#446 r2 blocker 3), pinned: within one second,
+    coverage advances only toward the LARGER boundary id — so the A→B→A
+    sequence can never re-accept A; an identical rewrite is a rejected no-op;
+    and the smaller-id direction is rejected outright (it converges on the
+    next strictly-newer-timestamp pass)."""
     async with ctx.sessionmaker() as session:
         repo = SessionSummaryRepository(session, ctx.tenant_id)
         rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
@@ -399,29 +418,41 @@ async def test_same_second_advance_to_new_boundary_is_accepted(ctx: _Ctx) -> Non
         )
         same_second = [m for m in rows if m.created_at == rows[0].created_at]
         assert len(same_second) >= 2  # the fixture seeds within one second
-        a, b = same_second[0], same_second[1]
+        # Sorted by STORAGE order (undashed hex ≡ sqlite CHAR(32); pg uuid).
+        small, large = sorted(same_second[:2], key=lambda m: m.id.hex)
         accepted, _ = await repo.upsert_summary(
             ctx.session_id,
-            summary="v1",
-            covers_through_message_id=a.id,
-            covered_created_at=a.created_at,
+            summary="A",
+            covers_through_message_id=small.id,
+            covered_created_at=small.created_at,
         )
         assert accepted is True
         accepted, _ = await repo.upsert_summary(
             ctx.session_id,
-            summary="v2",
-            covers_through_message_id=b.id,
-            covered_created_at=b.created_at,
+            summary="B",
+            covers_through_message_id=large.id,
+            covered_created_at=large.created_at,
         )
-        assert accepted is True  # same second, different boundary — progress
+        assert accepted is True  # tie, larger id — forward
+        # The round-2 probe: a STALE same-second write back to A must be a
+        # rejected no-op — never re-accepted, never audited.
         accepted, row = await repo.upsert_summary(
             ctx.session_id,
-            summary="v2-rewrite",
-            covers_through_message_id=b.id,
-            covered_created_at=b.created_at,
+            summary="A-stale",
+            covers_through_message_id=small.id,
+            covered_created_at=small.created_at,
         )
-        assert accepted is False  # identical boundary — idempotent no-op
-        assert row is not None and row.summary == "v2"
+        assert accepted is False
+        assert row is not None and row.summary == "B"
+        # Identical rewrite: rejected no-op (idempotent).
+        accepted, row = await repo.upsert_summary(
+            ctx.session_id,
+            summary="B-rewrite",
+            covers_through_message_id=large.id,
+            covered_created_at=large.created_at,
+        )
+        assert accepted is False
+        assert row is not None and row.summary == "B"
         await session.commit()
 
 

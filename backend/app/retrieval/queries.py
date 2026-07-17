@@ -166,6 +166,22 @@ def permitted_document_names(
     return stmt
 
 
+def valid_chunk_pairs(
+    *, tenant_id: object, chunk_ids: list[UUID]
+) -> Select[tuple[UUID, UUID]]:
+    """(chunk_id, document_id) for chunks that really exist in this tenant.
+
+    The defense-in-depth half of evidence rehydration (#446 round-2, finding
+    4): a corrupt digest pairing a permitted document with a foreign/fabricated
+    chunk id must not smuggle that id into a prompt — only chunks that belong
+    to the claimed document survive the join at the caller.
+    """
+    return select(models.Chunk.id, models.Chunk.document_id).where(
+        models.Chunk.tenant_id == tenant_id,
+        models.Chunk.id.in_(chunk_ids),
+    )
+
+
 def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT]:
     """Fold the tenant + ownership/grant predicate into a chunk/document ``SELECT``.
 

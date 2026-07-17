@@ -116,48 +116,75 @@ async def _resolve_summary_route(
     return route
 
 
-async def _cited_documents_for(
+# How many mentioned-document names one summary row may track: larger than the
+# evidence cap because the map MERGES forward across passes (#446 r2 blocker
+# 1b) — as long as a name may still live in the rolled-forward text, its id
+# must stay redactable.
+_MENTIONED_MAX = 40
+
+# The most messages one summarize pass folds (#446 r2 finding 5): a backlog
+# advances incrementally across enqueues instead of one unbudgeted prompt.
+_MAX_BATCH_MESSAGES = 40
+
+
+async def _covered_citations(
     session: object, tenant_id: UUID, covered: list[Message]
-) -> dict[UUID, str]:
-    """{document_id: name} cited by the covered assistant turns (bounded)."""
-    out: dict[UUID, str] = {}
+) -> tuple[dict[UUID, str], list[str]]:
+    """({document_id: name}, [snippet texts]) for the covered turns — ONE query.
+
+    A backlog batch must not issue per-message citation reads (#446 round-2
+    new finding); both the mention map and the redaction blocklist derive from
+    the same bounded batch.
+    """
+    message_ids = [m.id for m in covered if m.role is MessageRole.ASSISTANT]
     citations = CitationRepository(session, tenant_id)  # type: ignore[arg-type]
-    for message in covered:
-        if message.role is not MessageRole.ASSISTANT:
-            continue
-        for cit in await citations.list_for_message_hydrated(message.id):
-            if cit.document_id not in out and len(out) < 20:
-                out[cit.document_id] = cit.document_name
-    return out
-
-
-async def _cited_snippets_for(
-    session: object, tenant_id: UUID, covered: list[Message]
-) -> list[str]:
-    """The covered turns' cited snippet texts — the redaction blocklist."""
+    rows = await citations.list_for_messages_hydrated_batch(message_ids)
+    names: dict[UUID, str] = {}
     snippets: list[str] = []
-    citations = CitationRepository(session, tenant_id)  # type: ignore[arg-type]
-    for message in covered:
-        if message.role is not MessageRole.ASSISTANT:
-            continue
-        for cit in await citations.list_for_message_hydrated(message.id):
-            text = (cit.snippet or "").strip()
-            if len(text) >= 20:
-                snippets.append(text)
-    return snippets
+    for cit in rows:
+        if cit.document_id not in names and len(names) < _MENTIONED_MAX:
+            names[cit.document_id] = cit.document_name
+        text = (cit.snippet or "").strip()
+        if len(text) >= 20:
+            snippets.append(text)
+    return names, snippets
+
+
+# The smallest verbatim run the redactor hunts: windows of at least this many
+# consecutive snippet words (and ≥ 15 chars) are treated as source text.
+_REDACT_MIN_WINDOW_WORDS = 4
+_REDACT_MIN_WINDOW_CHARS = 15
 
 
 def _redact_cited_snippets(summary: str, snippets: list[str]) -> str:
-    """Remove verbatim cited-source spans from the summary (#446 finding 1).
+    """Remove verbatim cited-source SPANS from the summary (#446 r2 blocker 1).
 
-    Deterministic, not model-trusting: any cited snippet (≥20 chars, exact
-    match) that leaked into the summarizer's output is cut. Conversational
-    paraphrase survives; verbatim source text does not.
+    Deterministic, not model-trusting, and windowed: every run of ≥
+    ``_REDACT_MIN_WINDOW_WORDS`` consecutive words from any cited snippet that
+    appears verbatim (case-insensitive) in the summarizer's output is cut —
+    the whole-snippet-only match of round 1 let partial copies ("the
+    acquisition price is $42.7M") survive. Longest windows are tried first so
+    one replacement swallows its sub-windows. Honest residual (stated, not
+    hidden): a PARAPHRASE is conversational content by the ADR's definition
+    and survives; the prompt rule + this verbatim backstop are the contract.
     """
     redacted = summary
+    marker = "[cited source text removed]"
     for snippet in snippets:
-        if snippet in redacted:
-            redacted = redacted.replace(snippet, "[cited source text removed]")
+        words = snippet.split()
+        if len(words) < _REDACT_MIN_WINDOW_WORDS:
+            continue
+        for size in range(len(words), _REDACT_MIN_WINDOW_WORDS - 1, -1):
+            for start in range(0, len(words) - size + 1):
+                window = " ".join(words[start : start + size])
+                if len(window) < _REDACT_MIN_WINDOW_CHARS:
+                    continue
+                lowered = redacted.lower()
+                needle = window.lower()
+                while needle in lowered:
+                    at = lowered.index(needle)
+                    redacted = redacted[:at] + marker + redacted[at + len(window) :]
+                    lowered = redacted.lower()
     return redacted
 
 
@@ -174,25 +201,29 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
     async with tenant_session_scope(tenant_id) as session:
         summaries = SessionSummaryRepository(session, tenant_id)
         row = await summaries.get_for_session(session_id)
-        all_messages = await MessageRepository(session, tenant_id).list_for_session(
-            session_id
-        )
-        # Uncovered = everything after the current coverage boundary.
-        start = 0
-        if row is not None and row.covers_through_message_id is not None:
-            cut = next(
-                (
-                    i
-                    for i, m in enumerate(all_messages)
-                    if m.id == row.covers_through_message_id
-                ),
-                None,
+        messages_repo = MessageRepository(session, tenant_id)
+        # Uncovered = everything after the durable coverage CURSOR, fetched in
+        # SQL (#446 r2 finding 5) — valid after the boundary row is pruned,
+        # never a full-history Python scan once a cursor exists.
+        if (
+            row is not None
+            and row.covers_through_message_id is not None
+            and row.covers_through_created_at is not None
+        ):
+            uncovered = await messages_repo.list_for_session_after(
+                session_id,
+                after_created_at=row.covers_through_created_at,
+                after_message_id=row.covers_through_message_id,
             )
-            if cut is not None:
-                start = cut + 1
-        uncovered = all_messages[start:]
+        else:
+            uncovered = await messages_repo.list_for_session(session_id)
         keep = settings.chat_summary_keep_messages
         to_cover = uncovered[:-keep] if len(uncovered) > keep else []
+        # BOUNDED batch (#446 r2 finding 5): a backlog summarizes incrementally
+        # — each pass advances the cursor by at most _MAX_BATCH_MESSAGES and
+        # the next enqueue continues, so one unbudgeted mega-prompt can never
+        # wedge the summarizer on the same batch forever.
+        to_cover = to_cover[:_MAX_BATCH_MESSAGES]
         if len(to_cover) < settings.chat_summary_min_batch:
             return "skipped_below_batch"
 
@@ -227,16 +258,22 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         if not summary_text:
             return "skipped_empty_summary"
         boundary = to_cover[-1]
-        # Names the summary may mention: the covered assistant turns' cited
-        # documents (#446 finding 1) — recorded {id: name} so the READ path can
-        # redact names whose documents the requester can no longer retrieve.
-        mentioned = await _cited_documents_for(session, tenant_id, to_cover)
-        # Structural leak guard (#446 finding 1): any cited snippet text that
-        # made it into answers is REDACTED from the summary before persistence
-        # — prompt rules are guidance; this is the deterministic backstop.
-        summary_text = _redact_cited_snippets(
-            summary_text, await _cited_snippets_for(session, tenant_id, to_cover)
+        # Names the summary may mention (#446 finding 1): the covered turns'
+        # cited documents — MERGED with the previous row's map (r2 blocker 1b:
+        # the previous summary text rolls forward, so every name it may still
+        # carry must stay redactable), newest-batch entries first.
+        batch_names, batch_snippets = await _covered_citations(
+            session, tenant_id, to_cover
         )
+        mentioned = dict(batch_names)
+        if row is not None:
+            for doc_id, name in row.mentioned_documents:
+                if doc_id not in mentioned and len(mentioned) < _MENTIONED_MAX:
+                    mentioned[doc_id] = name
+        # Structural leak guard (#446 finding 1): verbatim cited spans are
+        # REDACTED from the summary before persistence — prompt rules are
+        # guidance; this windowed match is the deterministic backstop.
+        summary_text = _redact_cited_snippets(summary_text, batch_snippets)
         if not summary_text.strip():
             return "skipped_empty_summary"
         accepted, updated = await summaries.upsert_summary(

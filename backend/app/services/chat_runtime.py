@@ -744,11 +744,25 @@ class ChatRuntime:
                 principal=self._principal,
                 document_ids=[*by_doc.keys(), *mention_ids],
             )
+            # Chunk-pair membership (#446 round-2, finding 4): only chunk ids
+            # that genuinely belong to their claimed (permitted) document
+            # survive — a corrupt digest cannot inject arbitrary ids.
+            all_chunks = [c for chunks in by_doc.values() for c in chunks]
+            chunk_owner = (
+                await retrieval.valid_chunk_pairs(
+                    principal=self._principal, chunk_ids=all_chunks
+                )
+                if all_chunks
+                else {}
+            )
             for doc_id, chunk_ids in by_doc.items():
                 name = permitted.get(doc_id)
                 if name is None:
                     continue  # revoked/deleted — stripped without comment
-                chunks_note = ", ".join(str(c) for c in chunk_ids)
+                valid_chunks = [c for c in chunk_ids if chunk_owner.get(c) == doc_id]
+                if not valid_chunks:
+                    continue
+                chunks_note = ", ".join(str(c) for c in valid_chunks)
                 evidence_lines.append(
                     f"{name} (document_id {doc_id}; cited chunk(s): {chunks_note})"
                 )
@@ -769,8 +783,10 @@ class ChatRuntime:
                 request_id=self._request_id,
                 source_ip=self._source_ip,
                 metadata={
-                    "requested_documents": len(by_doc),
-                    "permitted_documents": len(evidence_lines),
+                    # The UNION of evidence + summary-mention checks — the
+                    # mention-only case must not audit as zero (#446 r2 nit).
+                    "requested_documents": len({*by_doc.keys(), *mention_ids}),
+                    "permitted_documents": len(permitted),
                 },
             )
 

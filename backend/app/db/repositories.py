@@ -24,7 +24,7 @@ from __future__ import annotations
 import uuid as uuid_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
@@ -2215,6 +2215,15 @@ class MessageRepository(_TenantScopedRepository):
         — duplication-safe, loss-unsafe never. Valid after the boundary row is
         pruned (the comparison never needs the row).
         """
+        # The tie branch uses a ±1s TOLERANCE window instead of equality:
+        # SQLite stores server-default timestamps second-resolution while
+        # bound datetime params render with microseconds, so a string
+        # equality can never match (#446 round-3). ``> cursor - 1s`` admits
+        # the cursor's own second (and, on microsecond backends, up to 1s of
+        # older rows — consistent with the documented RESEND-safe tie policy:
+        # duplication is acceptable, loss never is). The boundary row itself
+        # is excluded by id.
+        window_start = after_created_at - timedelta(seconds=1)
         stmt = (
             select(models.Message)
             .where(
@@ -2223,7 +2232,7 @@ class MessageRepository(_TenantScopedRepository):
                 or_(
                     models.Message.created_at > after_created_at,
                     and_(
-                        models.Message.created_at == after_created_at,
+                        models.Message.created_at > window_start,
                         models.Message.id != after_message_id,
                     ),
                 ),
@@ -2356,6 +2365,55 @@ class CitationRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_citation(r) for r in rows]
+
+    async def list_for_messages_hydrated_batch(
+        self, message_ids: list[UUID]
+    ) -> list[CitationView]:
+        """Hydrated citations for MANY messages in ONE query (#446 round-2).
+
+        The summarizer's capture path: a backlog batch must not issue one
+        citation query per covered message. Same shape/joins as
+        :meth:`list_for_message_hydrated`; ordering is by message then span.
+        """
+        if not message_ids:
+            return []
+        stmt = (
+            select(
+                models.Citation.id,
+                models.Citation.message_id,
+                models.Citation.chunk_id,
+                models.Citation.char_start,
+                models.Citation.char_end,
+                models.Citation.score,
+                models.Chunk.text,
+                models.Document.id,
+                models.Document.filename,
+            )
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .join(models.Document, models.Document.id == models.Chunk.document_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id.in_(message_ids),
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Document.tenant_id == self._tenant_id,
+            )
+            .order_by(models.Citation.message_id, models.Citation.char_start.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            CitationView(
+                id=row[0],
+                message_id=row[1],
+                chunk_id=row[2],
+                char_start=row[3],
+                char_end=row[4],
+                score=row[5],
+                snippet=row[6],
+                document_id=row[7],
+                document_name=row[8],
+            )
+            for row in rows
+        ]
 
     async def list_for_message_hydrated(self, message_id: UUID) -> list[CitationView]:
         """Citations for a message, joined to source document + chunk text.
@@ -4994,9 +5052,16 @@ class SessionSummaryRepository(_TenantScopedRepository):
                         models.SessionSummary.covers_through_created_at
                         == covered_created_at
                     )
+                    # ORDERED tie-break (#446 round-2 blocker 3): within one
+                    # second, coverage may only advance toward the LARGER
+                    # boundary id — an arbitrary but STABLE total order, so a
+                    # stale A can never be re-accepted after B (the A->B->A
+                    # probe). A same-second boundary with a smaller id waits
+                    # for the next pass (a strictly-newer timestamp) — progress
+                    # converges, regression cannot happen.
                     & (
                         models.SessionSummary.covers_through_message_id
-                        != covers_through_message_id
+                        < covers_through_message_id
                     )
                 )
             ),

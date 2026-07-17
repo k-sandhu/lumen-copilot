@@ -342,6 +342,25 @@ class RetrievalService:
         rows = (await self._session.execute(stmt)).all()
         return {row[0]: row[1] for row in rows}
 
+    async def valid_chunk_pairs(
+        self, *, principal: Principal, chunk_ids: list[UUID]
+    ) -> dict[UUID, UUID]:
+        """{chunk_id: document_id} for chunks that exist in the caller's tenant.
+
+        Pairs evidence-digest validation with :meth:`permitted_document_names`
+        (#446 round-2, finding 4): the caller keeps only (doc, chunk) pairs
+        whose chunk genuinely belongs to the permitted document — a corrupt row
+        cannot inject arbitrary chunk ids into a prompt.
+        """
+        if not chunk_ids:
+            return {}
+        allow_set = AllowSet.for_principal(principal)
+        stmt = queries.valid_chunk_pairs(
+            tenant_id=allow_set.tenant_id, chunk_ids=list(chunk_ids)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: row[1] for row in rows}
+
     async def get_document(
         self,
         *,

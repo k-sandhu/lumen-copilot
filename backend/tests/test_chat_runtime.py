@@ -186,6 +186,12 @@ class _FakeRetrieval:
         # revoked/deleted shape); hydrating fakes override.
         return {}
 
+    async def valid_chunk_pairs(
+        self, *, principal: object, chunk_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, uuid.UUID]:
+        # Pair-membership validation (#446 r2 finding 4); base: nothing valid.
+        return {}
+
 
 def _passage(document_id: uuid.UUID, chunk_id: uuid.UUID, doc_name: str) -> RetrievedPassage:
     return RetrievedPassage(
@@ -4056,6 +4062,11 @@ async def test_evidence_digest_rehydrates_and_targets_get_document(ctx: _Ctx) ->
             self, *, principal: object, document_ids: list[uuid.UUID]
         ) -> dict[uuid.UUID, str]:
             return {self._doc_id: "taxes.pdf"} if self._doc_id in document_ids else {}
+
+        async def valid_chunk_pairs(
+            self, *, principal: object, chunk_ids: list[uuid.UUID]
+        ) -> dict[uuid.UUID, uuid.UUID]:
+            return {c: self._doc_id for c in chunk_ids}
 
     retrieval = _HydratingRetrieval(ctx.document_id)
     gateway = _RecordingScriptedGateway(
