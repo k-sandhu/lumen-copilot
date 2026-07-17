@@ -145,6 +145,27 @@ def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
     )
 
 
+def permitted_document_names(
+    *, allow_set: AllowSet, document_ids: list[UUID]
+) -> Select[tuple[UUID, str]]:
+    """A bounded batch of permitted ``(document_id, filename)`` pairs (#446 f.4).
+
+    ONE metadata query for the evidence-rehydration path — the exact
+    tenant + owner-or-grant predicate every retrieval chokepoint uses,
+    without reassembling any document text (this path needs names only).
+    Ids outside the allow-set are simply absent (existence non-disclosure).
+    """
+    stmt = (
+        select(models.Document.id, models.Document.filename)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            models.Document.id.in_(document_ids),
+            _document_permitted(allow_set),
+        )
+    )
+    return stmt
+
+
 def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT]:
     """Fold the tenant + ownership/grant predicate into a chunk/document ``SELECT``.
 

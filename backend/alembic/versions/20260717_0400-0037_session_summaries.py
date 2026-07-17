@@ -64,22 +64,33 @@ def upgrade() -> None:
         # The rolling summary text (conversational content only). NULL until the
         # first async summarize completes — evidence may exist earlier.
         sa.Column("summary", sa.Text(), nullable=True),
-        # The newest message the summary covers; assembly sends only NEWER turns
-        # verbatim. NULL ⇒ nothing summarized yet. No FK: the covered message
-        # may be pruned later without invalidating the summary that already
-        # absorbed it.
+        # The coverage CURSOR (#446 review, finding 5): a durable TOTAL ORDER —
+        # (created_at, id) of the newest covered message — usable for SQL-side
+        # "newer than" filtering and forward-only compare-and-swap even after
+        # the boundary row is pruned. No FK on the id for that reason.
         sa.Column("covers_through_message_id", sa.Uuid(as_uuid=True), nullable=True),
+        sa.Column(
+            "covers_through_created_at", sa.DateTime(timezone=True), nullable=True
+        ),
         # The last answer's cited-evidence digest — IDs ONLY (a JSON list of
         # {"document_id": uuid, "chunk_id": uuid}); rehydrated under the
         # requester's CURRENT permissions at next-answer assembly (INV-2).
         sa.Column("evidence", _JSON, nullable=True),
+        # Documents the summary MENTIONS by name (#446 review, finding 1):
+        # {document_id: name} captured at write time from the covered turns'
+        # citations, so the read path can redact names whose documents the
+        # requester can no longer retrieve (revocation-safe memory).
+        sa.Column("mentioned_documents", _JSON, nullable=True),
         sa.Column("version", sa.Integer(), nullable=False, server_default="0"),
         sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.Column(
             "updated_at",
-            sa.DateTime(),
+            sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.func.now(),
         ),

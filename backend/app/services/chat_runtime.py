@@ -415,7 +415,8 @@ class ChatRuntime:
         simulate_writes: bool = False,
         summary: str | None = None,
         evidence: Sequence[tuple[UUID, UUID]] = (),
-    ) -> None:
+        mentioned_documents: Sequence[tuple[UUID, str]] = (),
+    ) -> bool:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
         Publishes ``start``, runs the agentic tool loop (streaming ``delta`` and
@@ -483,6 +484,7 @@ class ChatRuntime:
                     simulate_writes=simulate_writes,
                     summary=summary,
                     evidence=evidence,
+                    mentioned_documents=mentioned_documents,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -507,19 +509,19 @@ class ChatRuntime:
         except AppError as exc:
             await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
-            return
+            return False
         except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
             # Log the error *type* only (never the message — it may carry vendor
             # details / a key). The client gets an opaque 500 problem envelope.
             log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
             await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
-            return
+            return False
 
         if state.terminal_sent:
             # A terminal already fired (e.g. cancellation mid-commit raced ahead);
             # never publish a second terminal — exactly-one-terminal contract.
-            return
+            return False
         state.terminal_sent = True
         await self._publish(
             state,
@@ -546,6 +548,7 @@ class ChatRuntime:
                 },
             ),
         )
+        return True
 
     # --- the agentic loop ---------------------------------------------------
 
@@ -566,6 +569,7 @@ class ChatRuntime:
         simulate_writes: bool = False,
         summary: str | None = None,
         evidence: Sequence[tuple[UUID, UUID]] = (),
+        mentioned_documents: Sequence[tuple[UUID, str]] = (),
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
@@ -723,27 +727,37 @@ class ChatRuntime:
                 "are scoped to them. Search them before answering.]"
             )
         # Evidence carry-forward rehydration (#416, ADR-0016 §3.2): the stored
-        # digest is IDs ONLY; every id re-checks against the requester's
-        # CURRENT permissions through the public retrieval surface — a
-        # revoked/deleted document is silently stripped (INV-2: "the user saw
-        # it last turn" proves nothing about now). One get_document per
-        # distinct document (a handful at most, the last answer's citations).
+        # digest is IDs ONLY; ONE bounded, permission-filtered metadata query
+        # (#446 finding 4) re-checks every id against the requester's CURRENT
+        # permissions — a revoked/deleted document is silently stripped (INV-2:
+        # "the user saw it last turn" proves nothing about now). The SAME query
+        # also covers the summary's mentioned-document names so a no-longer-
+        # permitted name is REDACTED from the summary text before it can reach
+        # the prompt (#446 finding 1 — revocation-safe memory).
         evidence_lines: list[str] = []
-        if evidence:
-            by_doc: dict[UUID, list[UUID]] = {}
-            for doc_id, chunk_id in evidence:
-                by_doc.setdefault(doc_id, []).append(chunk_id)
+        by_doc: dict[UUID, list[UUID]] = {}
+        for doc_id, chunk_id in evidence:
+            by_doc.setdefault(doc_id, []).append(chunk_id)
+        mention_ids = [doc_id for doc_id, _name in mentioned_documents]
+        if by_doc or mention_ids:
+            permitted = await retrieval.permitted_document_names(
+                principal=self._principal,
+                document_ids=[*by_doc.keys(), *mention_ids],
+            )
             for doc_id, chunk_ids in by_doc.items():
-                doc = await retrieval.get_document(
-                    principal=self._principal, document_id=doc_id
-                )
-                if doc is None:
+                name = permitted.get(doc_id)
+                if name is None:
                     continue  # revoked/deleted — stripped without comment
                 chunks_note = ", ".join(str(c) for c in chunk_ids)
                 evidence_lines.append(
-                    f"{doc.document_name} (document_id {doc_id}; cited chunk(s): "
-                    f"{chunks_note})"
+                    f"{name} (document_id {doc_id}; cited chunk(s): {chunks_note})"
                 )
+            if summary:
+                for doc_id, name in mentioned_documents:
+                    if doc_id not in permitted and name and name in summary:
+                        summary = summary.replace(
+                            name, "[document no longer accessible]"
+                        )
             # INV-6: rehydration is an audited read-side event — how many ids
             # were requested vs still permitted (never the content).
             await audit.emit(

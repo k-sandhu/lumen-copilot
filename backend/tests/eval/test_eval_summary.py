@@ -82,7 +82,7 @@ def test_summarized_session_follow_up_stays_grounded_and_cited() -> None:
         (f"{_DOC_NAME} (document_id {_DOC_ID}; cited chunk(s): {uuid.uuid4()})",)
     )
     # The summary segment is really in the assembled prompt…
-    assert any("Conversation summary" in t for t in texts)
+    assert any("[Conversation memory" in t for t in texts)
     observed = _observed(_faithful_model_answer(texts), owner)
     assert groundedness(observed) is True
     assert (

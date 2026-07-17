@@ -748,16 +748,33 @@ async def test_send_filters_summarized_history_and_threads_the_summary(
         await summaries.upsert_evidence(created.session.id, evidence=[(doc_id, chunk_id)])
         row = await summaries.get_for_session(created.session.id)
         assert row is not None
+        # Give the covered turns DISTINCT older timestamps (SQLite stamps are
+        # second-resolution and the cursor's tie rule conservatively RESENDS
+        # same-second peers — a real session spans seconds).
+        from datetime import datetime as _dt
+
+        from sqlalchemy import update as _upd
+
+        from app.db import models as _models
+
+        for i, mid in enumerate(ids[:4]):
+            await session.execute(
+                _upd(_models.Message)
+                .where(_models.Message.id == mid)
+                .values(created_at=_dt(2000, 1, 1, 0, i))
+            )
+        await session.commit()
         # Cover the first four turns.
         boundary = ids[3]
         rows = await messages.list_for_session(created.session.id)
         by_id = {m.id: m for m in rows}
-        await summaries.upsert_summary(
+        accepted, _row = await summaries.upsert_summary(
             created.session.id,
             summary="They discussed old turns 0-3.",
             covers_through_message_id=boundary,
             covered_created_at=by_id[boundary].created_at,
         )
+        assert accepted is True
         await session.commit()
         result = await svc.send_message(
             created.session.id, content="follow-up", model=None, backplane=InMemoryBackplane()

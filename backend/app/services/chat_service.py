@@ -165,6 +165,9 @@ class SendResult:
     #: The previous answer's cited-evidence digest — ID pairs only; the runtime
     #: rehydrates them under the requester's CURRENT permissions (INV-2).
     evidence: tuple[tuple[UUID, UUID], ...] = ()
+    #: {document_id: name} the summary text mentions — the runtime redacts the
+    #: names of no-longer-permitted documents before the text reaches a prompt.
+    mentioned_documents: tuple[tuple[UUID, str], ...] = ()
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -530,25 +533,33 @@ class ChatService:
         # chat, unchanged). Resolved here where the principal + session are already held,
         # not inside the gateway.
         custom_instructions = await self._resolve_custom_instructions()
-        prior = await self._messages.list_for_session(session_id)
         # Rolling-summary window (#416, ADR-0016 §3.2): turns the summary
         # already covers are NOT resent verbatim — the runtime gets
-        # [summary] + [newer turns] and the assembler budgets the rest. A
-        # missing/unmatched boundary (row pruned, summarizer never ran)
-        # degrades to the full prior list — exactly today's behavior (AC-4).
+        # [summary] + [newer turns], filtered IN SQL by the durable coverage
+        # cursor ((created_at, id), #446 finding 5 — valid even after the
+        # boundary row is pruned, and never a full-conversation Python scan).
+        # No summary/cursor ⇒ the full prior list — today's behavior (AC-4).
         summary_row = await self._summaries.get_for_session(session_id)
         summary_text: str | None = None
         evidence: tuple[tuple[UUID, UUID], ...] = ()
+        mentioned: tuple[tuple[UUID, str], ...] = ()
         if summary_row is not None:
             summary_text = summary_row.summary
             evidence = summary_row.evidence
-            boundary_id = summary_row.covers_through_message_id
-            if summary_text and boundary_id is not None:
-                cut = next(
-                    (i for i, m in enumerate(prior) if m.id == boundary_id), None
-                )
-                if cut is not None:
-                    prior = prior[cut + 1 :]
+            mentioned = summary_row.mentioned_documents
+        if (
+            summary_row is not None
+            and summary_text
+            and summary_row.covers_through_created_at is not None
+            and summary_row.covers_through_message_id is not None
+        ):
+            prior = await self._messages.list_for_session_after(
+                session_id,
+                after_created_at=summary_row.covers_through_created_at,
+                after_message_id=summary_row.covers_through_message_id,
+            )
+        else:
+            prior = await self._messages.list_for_session(session_id)
         user_message = await self._messages.add(
             session_id=session_id,
             role=MessageRole.USER,
@@ -570,6 +581,7 @@ class ChatService:
             custom_instructions=custom_instructions,
             summary=summary_text,
             evidence=evidence,
+            mentioned_documents=mentioned,
         )
 
     async def _resolve_custom_instructions(self) -> str | None:

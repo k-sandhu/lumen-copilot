@@ -29,16 +29,24 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.db.repositories import (
     AuditEventRepository,
+    ChatSessionRepository,
+    CitationRepository,
     LlmUsageRepository,
     MessageRepository,
     SessionSummaryRepository,
 )
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Message, MessageRole
-from app.domain.llm import ChatMessage, Role
+from app.domain.entities import AuditOutcome, Message, MessageRole, Role
+from app.domain.llm import ChatMessage
+from app.domain.llm import Role as LlmRole
 from app.llm import LLMGateway
 from app.services.audit import AuditSink
+from app.services.provider_models import (
+    ModelRoute,
+    build_model_route_resolver,
+    is_provider_model_id,
+)
 from app.tasks.celery_app import celery_app
 from app.tasks.runner import run_task
 
@@ -61,13 +69,8 @@ _SUMMARIZER_PROMPT = (
 )
 
 
-def _summary_model(settings: Settings) -> str:
-    """The summarizer's model id: the pinned config, else the registry default.
-
-    Tasks run headless with config credentials — a per-tenant ``provider:`` id
-    is not routable here, which is why this is a config knob rather than the
-    session's model.
-    """
+def _config_summary_model(settings: Settings) -> str:
+    """The config-side summarizer model: the pinned knob, else the registry default."""
     if settings.chat_summary_model:
         return settings.chat_summary_model
     default = next(
@@ -75,6 +78,87 @@ def _summary_model(settings: Settings) -> str:
         settings.chat_model_registry[0],
     )
     return default.id
+
+
+async def _resolve_summary_route(
+    session: object,
+    settings: Settings,
+    *,
+    tenant_id: UUID,
+    owner_id: UUID,
+    session_model: str,
+) -> ModelRoute:
+    """The summarizer's gateway route (#446 finding 6).
+
+    A provider-only tenant must be able to summarize: the SESSION's model is
+    resolved through the SAME permissioned provider-route seam chat uses
+    (tenant-scoped, key decrypted inside services/). A config-pinned
+    ``CHAT_SUMMARY_MODEL`` overrides; an unresolvable session model degrades
+    to the config default with default credentials (the pre-#446 behavior).
+    """
+    if settings.chat_summary_model:
+        return ModelRoute(model=settings.chat_summary_model)
+    resolver = build_model_route_resolver(
+        settings=settings,
+        tenant_id=tenant_id,
+        owner_id=owner_id,
+        roles=(Role.MEMBER,),
+        request_id="summarize-task",
+        source_ip="system",
+    )
+    try:
+        route = await resolver(session, session_model)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — degrade to config default, never fail
+        return ModelRoute(model=_config_summary_model(settings))
+    if is_provider_model_id(session_model) and route.model == session_model:
+        # Unresolved passthrough (provider vanished) — config default instead.
+        return ModelRoute(model=_config_summary_model(settings))
+    return route
+
+
+async def _cited_documents_for(
+    session: object, tenant_id: UUID, covered: list[Message]
+) -> dict[UUID, str]:
+    """{document_id: name} cited by the covered assistant turns (bounded)."""
+    out: dict[UUID, str] = {}
+    citations = CitationRepository(session, tenant_id)  # type: ignore[arg-type]
+    for message in covered:
+        if message.role is not MessageRole.ASSISTANT:
+            continue
+        for cit in await citations.list_for_message_hydrated(message.id):
+            if cit.document_id not in out and len(out) < 20:
+                out[cit.document_id] = cit.document_name
+    return out
+
+
+async def _cited_snippets_for(
+    session: object, tenant_id: UUID, covered: list[Message]
+) -> list[str]:
+    """The covered turns' cited snippet texts — the redaction blocklist."""
+    snippets: list[str] = []
+    citations = CitationRepository(session, tenant_id)  # type: ignore[arg-type]
+    for message in covered:
+        if message.role is not MessageRole.ASSISTANT:
+            continue
+        for cit in await citations.list_for_message_hydrated(message.id):
+            text = (cit.snippet or "").strip()
+            if len(text) >= 20:
+                snippets.append(text)
+    return snippets
+
+
+def _redact_cited_snippets(summary: str, snippets: list[str]) -> str:
+    """Remove verbatim cited-source spans from the summary (#446 finding 1).
+
+    Deterministic, not model-trusting: any cited snippet (≥20 chars, exact
+    match) that leaked into the summarizer's output is cut. Conversational
+    paraphrase survives; verbatim source text does not.
+    """
+    redacted = summary
+    for snippet in snippets:
+        if snippet in redacted:
+            redacted = redacted.replace(snippet, "[cited source text removed]")
+    return redacted
 
 
 def _render_turns(messages: list[Message]) -> str:
@@ -118,25 +202,53 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             + "New turns to fold in:\n"
             + _render_turns(to_cover)
         )
+        chat_row = await ChatSessionRepository(session, tenant_id).get(session_id)
+        if chat_row is None:
+            return "skipped_no_session"
+        route = await _resolve_summary_route(
+            session,
+            settings,
+            tenant_id=tenant_id,
+            owner_id=chat_row.owner_id,
+            session_model=chat_row.model,
+        )
         gateway = LLMGateway(settings)
         completion = await gateway.chat(
             [
-                ChatMessage(role=Role.SYSTEM, content=_SUMMARIZER_PROMPT),
-                ChatMessage(role=Role.USER, content=user_block),
+                ChatMessage(role=LlmRole.SYSTEM, content=_SUMMARIZER_PROMPT),
+                ChatMessage(role=LlmRole.USER, content=user_block),
             ],
-            model=_summary_model(settings),
+            model=route.model,
+            api_key=route.api_key,
+            api_base=route.api_base,
             max_tokens=600,
         )
         summary_text = completion.content.strip()
         if not summary_text:
             return "skipped_empty_summary"
         boundary = to_cover[-1]
-        updated = await summaries.upsert_summary(
+        # Names the summary may mention: the covered assistant turns' cited
+        # documents (#446 finding 1) — recorded {id: name} so the READ path can
+        # redact names whose documents the requester can no longer retrieve.
+        mentioned = await _cited_documents_for(session, tenant_id, to_cover)
+        # Structural leak guard (#446 finding 1): any cited snippet text that
+        # made it into answers is REDACTED from the summary before persistence
+        # — prompt rules are guidance; this is the deterministic backstop.
+        summary_text = _redact_cited_snippets(
+            summary_text, await _cited_snippets_for(session, tenant_id, to_cover)
+        )
+        if not summary_text.strip():
+            return "skipped_empty_summary"
+        accepted, updated = await summaries.upsert_summary(
             session_id,
             summary=summary_text,
             covers_through_message_id=boundary.id,
             covered_created_at=boundary.created_at,
+            mentioned_documents=mentioned,
         )
+        if not accepted:
+            # A racing task already advanced further — nothing to audit.
+            return "skipped_stale_coverage"
         # INV-6: the summarization is an audited write of conversational state
         # (counts + version only — never the summary text in metadata).
         await AuditSink(AuditEventRepository(session, tenant_id)).emit(
@@ -156,13 +268,25 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # session groups it; ADR-0016 §2.6 posture: no invisible spend).
         if completion.usage.total_tokens or completion.usage.prompt_tokens:
             await LlmUsageRepository(session, tenant_id).record(
-                model=_summary_model(settings),
+                model=completion.model or route.model,
                 prompt_tokens=completion.usage.prompt_tokens,
                 completion_tokens=completion.usage.completion_tokens,
                 total_tokens=completion.usage.total_tokens,
                 session_id=session_id,
             )
         return "summarized"
+
+
+def enqueue_summarize(tenant_id: UUID, session_id: UUID) -> None:
+    """Best-effort enqueue of the post-answer summarize (#446 finding 7).
+
+    Owned by ``tasks/`` so ``api/`` never speaks to the Celery broker
+    directly. Synchronous + blocking (call via ``asyncio.to_thread``); raises
+    on broker failure — the caller decides that it is a nicety.
+    """
+    celery_app.send_task(
+        "summarize_session", args=[str(tenant_id), str(session_id)]
+    )
 
 
 @celery_app.task(  # type: ignore[misc]  # celery's task decorator is untyped

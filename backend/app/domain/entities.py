@@ -1410,6 +1410,9 @@ class SessionSummary:
     session_id: UUID
     summary: str | None
     covers_through_message_id: UUID | None
+    covers_through_created_at: datetime | None
     evidence: tuple[tuple[UUID, UUID], ...]  # (document_id, chunk_id) pairs
+    #: {document_id: name} the summary text mentions — read-time redaction key.
+    mentioned_documents: tuple[tuple[UUID, str], ...]
     version: int
     updated_at: datetime

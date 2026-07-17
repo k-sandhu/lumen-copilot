@@ -139,20 +139,23 @@ async def test_summary_upserts_are_forward_only(ctx: _Ctx) -> None:
             ctx.session_id
         )
         by_id = {m.id: m for m in rows}
-        first = await repo.upsert_summary(
+        accepted, first = await repo.upsert_summary(
             ctx.session_id,
             summary="v1",
             covers_through_message_id=boundary_new,
             covered_created_at=by_id[boundary_new].created_at,
         )
+        assert accepted is True
         assert first is not None and first.version == 1 and first.summary == "v1"
-        # A STALE write (older boundary) is dropped — coverage never regresses.
-        stale = await repo.upsert_summary(
+        # A STALE write (strictly older boundary) is a REJECTED no-op — the
+        # caller learns it must not audit/bump anything (#446 finding 3).
+        stale_accepted, stale = await repo.upsert_summary(
             ctx.session_id,
             summary="stale",
             covers_through_message_id=boundary_old,
             covered_created_at=by_id[boundary_old].created_at,
         )
+        assert stale_accepted is False
         assert stale is not None and stale.summary == "v1" and stale.version == 1
         await session.commit()
 
@@ -342,3 +345,172 @@ def test_wrapper_contains_every_failure(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(task_module, "run_task", boom_run_task)
     result = task_module.summarize_session(str(uuid.uuid4()), str(uuid.uuid4()))
     assert result == {"outcome": "failed", "error_type": "RuntimeError"}
+
+
+# --- #446 round-2: concurrency, tenancy, shed, redaction ---------------------
+
+
+async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
+    """#446 finding 3: an answer's evidence write racing a summarizer's claim
+    on a fresh row must never surface a unique-key error — the atomic upserts
+    converge on one row carrying both columns."""
+    import asyncio as _asyncio
+
+    doc, chunk = uuid.uuid4(), uuid.uuid4()
+
+    async def write_evidence() -> None:
+        async with ctx.sessionmaker() as session:
+            await SessionSummaryRepository(session, ctx.tenant_id).upsert_evidence(
+                ctx.session_id, evidence=[(doc, chunk)]
+            )
+            await session.commit()
+
+    async def write_summary() -> None:
+        async with ctx.sessionmaker() as session:
+            rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+                ctx.session_id
+            )
+            await SessionSummaryRepository(session, ctx.tenant_id).upsert_summary(
+                ctx.session_id,
+                summary="racing summary",
+                covers_through_message_id=rows[0].id,
+                covered_created_at=rows[0].created_at,
+            )
+            await session.commit()
+
+    await _asyncio.gather(write_evidence(), write_summary())
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
+            ctx.session_id
+        )
+    assert row is not None
+    assert row.evidence == ((doc, chunk),)
+    assert row.summary == "racing summary"
+
+
+async def test_same_second_advance_to_new_boundary_is_accepted(ctx: _Ctx) -> None:
+    """The tie policy, pinned: a same-timestamp advance to a DIFFERENT boundary
+    id is accepted (second-resolution stamps must not wedge progress); an
+    IDENTICAL rewrite is a rejected no-op (idempotent)."""
+    async with ctx.sessionmaker() as session:
+        repo = SessionSummaryRepository(session, ctx.tenant_id)
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        same_second = [m for m in rows if m.created_at == rows[0].created_at]
+        assert len(same_second) >= 2  # the fixture seeds within one second
+        a, b = same_second[0], same_second[1]
+        accepted, _ = await repo.upsert_summary(
+            ctx.session_id,
+            summary="v1",
+            covers_through_message_id=a.id,
+            covered_created_at=a.created_at,
+        )
+        assert accepted is True
+        accepted, _ = await repo.upsert_summary(
+            ctx.session_id,
+            summary="v2",
+            covers_through_message_id=b.id,
+            covered_created_at=b.created_at,
+        )
+        assert accepted is True  # same second, different boundary — progress
+        accepted, row = await repo.upsert_summary(
+            ctx.session_id,
+            summary="v2-rewrite",
+            covers_through_message_id=b.id,
+            covered_created_at=b.created_at,
+        )
+        assert accepted is False  # identical boundary — idempotent no-op
+        assert row is not None and row.summary == "v2"
+        await session.commit()
+
+
+async def test_cross_tenant_repository_sees_nothing(ctx: _Ctx) -> None:
+    """INV-1: a foreign-tenant repository neither reads nor writes this
+    session's memory row."""
+    async with ctx.sessionmaker() as session:
+        await SessionSummaryRepository(session, ctx.tenant_id).upsert_evidence(
+            ctx.session_id, evidence=[(uuid.uuid4(), uuid.uuid4())]
+        )
+        await session.commit()
+        foreign = SessionSummaryRepository(session, uuid.uuid4())
+        assert await foreign.get_for_session(ctx.session_id) is None
+
+
+async def test_evidence_and_summary_caps_hold_at_write(ctx: _Ctx) -> None:
+    """#446 finding 4: the digest caps at 20 pairs and the summary at 6000
+    chars — at the WRITE chokepoint, so no stored row can fan out unbounded."""
+    async with ctx.sessionmaker() as session:
+        repo = SessionSummaryRepository(session, ctx.tenant_id)
+        many = [(uuid.uuid4(), uuid.uuid4()) for _ in range(50)]
+        row = await repo.upsert_evidence(ctx.session_id, evidence=many)
+        assert row is not None and len(row.evidence) == 20
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        _, srow = await repo.upsert_summary(
+            ctx.session_id,
+            summary="x" * 20_000,
+            covers_through_message_id=rows[0].id,
+            covered_created_at=rows[0].created_at,
+        )
+        assert srow is not None and srow.summary is not None
+        assert len(srow.summary) == 6_000
+        await session.commit()
+
+
+def test_redaction_removes_cited_snippets() -> None:
+    """#446 finding 1: the deterministic write-side backstop — verbatim cited
+    spans are cut from the summarizer's output; paraphrase survives."""
+    from app.tasks.summarize import _redact_cited_snippets
+
+    snippet = "The 2024 standard deduction for single filers is $14,600."
+    out = _redact_cited_snippets(
+        f"They discussed taxes. The doc said: {snippet} Then they moved on.",
+        [snippet],
+    )
+    assert snippet not in out
+    assert "[cited source text removed]" in out
+    assert "They discussed taxes." in out
+
+
+async def test_summary_route_resolves_provider_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#446 finding 6: a provider-only session summarizes through the SAME
+    provider-route seam as chat; an unresolved provider degrades to the config
+    default instead of failing the task."""
+    from app.services.provider_models import ModelRoute
+    from app.tasks import summarize as task_module
+
+    settings = _summary_settings()
+
+    def fake_builder(**_kwargs: object) -> object:
+        async def resolver(_session: object, model_id: str) -> ModelRoute:
+            if model_id == "provider:abc:their/model":
+                return ModelRoute(
+                    model="their/model", api_key="tenant-key", api_base="http://p"
+                )
+            return ModelRoute(model=model_id)  # unresolved passthrough
+
+        return resolver
+
+    monkeypatch.setattr(task_module, "build_model_route_resolver", fake_builder)
+    route = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="provider:abc:their/model",
+    )
+    assert route.model == "their/model"
+    assert route.api_key == "tenant-key"
+    ghost = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="provider:ghost:gone/model",
+    )
+    assert not ghost.model.startswith("provider:")
+    assert ghost.api_key is None

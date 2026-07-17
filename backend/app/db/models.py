@@ -1701,8 +1701,19 @@ class SessionSummary(TenantScopedMixin, TimestampMixin, Base):
         nullable=False,
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The coverage cursor (#446 finding 5): (created_at, id) of the newest
+    # covered message — a durable total order for SQL-side filtering and
+    # forward-only compare-and-swap, valid even after the boundary is pruned.
     covers_through_message_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
     )
+    covers_through_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     evidence: Mapped[list[dict[str, str]] | None] = mapped_column(_JSON, nullable=True)
+    # {document_id: name} the summary mentions — captured at write time so the
+    # read path can redact names of no-longer-permitted documents (#446 f.1).
+    mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(
+        _JSON, nullable=True
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

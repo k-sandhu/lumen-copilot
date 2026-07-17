@@ -21,6 +21,7 @@ touches several repositories commits atomically.
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,7 +29,9 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -2194,6 +2197,45 @@ class MessageRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_message(row) if row is not None else None
+
+    async def list_for_session_after(
+        self,
+        session_id: UUID,
+        *,
+        after_created_at: datetime,
+        after_message_id: UUID,
+    ) -> list[Message]:
+        """Messages STRICTLY NEWER than the coverage cursor, oldest first (#416).
+
+        The cursor is the ``(created_at, id)`` total order (#446 finding 5) —
+        newer means a later timestamp, or the same timestamp with a different,
+        later-inserted id EXCLUDED conservatively: on a timestamp tie only the
+        boundary row itself is excluded (id inequality cannot order same-second
+        peers), so a tied peer is RESENT verbatim rather than silently dropped
+        — duplication-safe, loss-unsafe never. Valid after the boundary row is
+        pruned (the comparison never needs the row).
+        """
+        stmt = (
+            select(models.Message)
+            .where(
+                models.Message.tenant_id == self._tenant_id,
+                models.Message.session_id == session_id,
+                or_(
+                    models.Message.created_at > after_created_at,
+                    and_(
+                        models.Message.created_at == after_created_at,
+                        models.Message.id != after_message_id,
+                    ),
+                ),
+            )
+            # created_at only — the SAME (imperfect) tie order the unfiltered
+            # list uses: random uuids cannot order same-second peers, and a
+            # DIFFERENT tie-break here would reorder the verbatim tail relative
+            # to the main read (#439 tracks the monotonic-key fix).
+            .order_by(models.Message.created_at.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_message(r) for r in rows]
 
     async def list_for_session(self, session_id: UUID) -> list[Message]:
         stmt = (
@@ -4806,32 +4848,62 @@ class RecentSearchRepository(_TenantScopedRepository):
 
 def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
     pairs: list[tuple[UUID, UUID]] = []
-    for item in row.evidence or []:
-        # Defensive read (the column is data): only well-formed id pairs count.
+    for item in (row.evidence or [])[:_EVIDENCE_MAX_PAIRS]:
+        # Defensive read (the column is data): only well-formed id pairs count,
+        # and the cardinality cap holds on READ too — a corrupt/hostile row
+        # must not fan out into hundreds of permission checks (#446 finding 4).
         try:
             pairs.append((UUID(str(item["document_id"])), UUID(str(item["chunk_id"]))))
         except (KeyError, TypeError, ValueError):
+            continue
+    mentioned: list[tuple[UUID, str]] = []
+    raw_mentioned = (
+        row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
+    )
+    for key, name in list(raw_mentioned.items())[:_EVIDENCE_MAX_PAIRS]:
+        try:
+            mentioned.append((UUID(str(key)), str(name)))
+        except (TypeError, ValueError):
             continue
     return SessionSummary(
         id=row.id,
         tenant_id=row.tenant_id,
         session_id=row.session_id,
-        summary=row.summary,
+        summary=(row.summary[:_SUMMARY_MAX_CHARS] if row.summary else row.summary),
         covers_through_message_id=row.covers_through_message_id,
+        covers_through_created_at=row.covers_through_created_at,
         evidence=tuple(pairs),
+        mentioned_documents=tuple(mentioned),
         version=row.version,
         updated_at=row.updated_at,
     )
 
 
+# Bounds on the stored memory state (#446 finding 4): enforced at WRITE and
+# defensively re-applied at READ, so neither a growing session nor a corrupt
+# row can fan out into unbounded permission checks or a context refusal.
+_EVIDENCE_MAX_PAIRS = 20
+_SUMMARY_MAX_CHARS = 6_000
+
+
 class SessionSummaryRepository(_TenantScopedRepository):
     """The per-session rolling summary + evidence digest (#416, ADR-0016 §3.2).
 
-    Tenant-scoped (INV-1). One row per session (upserts), flushed not committed
-    — the caller owns the transaction. The EVIDENCE write rides the answer's
-    transaction (the ids are in hand at persist time); the SUMMARY write happens
-    in the async Celery task's own tenant-bound transaction.
+    Tenant-scoped (INV-1). One row per session, maintained by TWO writers with
+    different transactions: the answer path (evidence, its own transaction) and
+    the async summarizer (summary text, a Celery transaction). Every write is
+    an ATOMIC upsert (#446 finding 3): a dialect-native ``INSERT .. ON
+    CONFLICT`` claims the row, and the summary's forward-only rule is a
+    compare-and-swap on the coverage cursor — a unique-key race can neither
+    surface into the answer path nor let a stale task regress coverage.
+    Flushed, not committed — each caller owns its transaction.
     """
+
+    def _insert(self) -> object:
+        bind = self._session.bind
+        if bind is not None and bind.dialect.name == "sqlite":
+            return sqlite_upsert(models.SessionSummary)
+        return pg_upsert(models.SessionSummary)
 
     async def get_for_session(self, session_id: UUID) -> SessionSummary | None:
         stmt = select(models.SessionSummary).where(
@@ -4843,27 +4915,32 @@ class SessionSummaryRepository(_TenantScopedRepository):
 
     async def upsert_evidence(
         self, session_id: UUID, *, evidence: list[tuple[UUID, UUID]]
-    ) -> SessionSummary:
+    ) -> SessionSummary | None:
         """Replace the session's evidence digest with the LAST answer's ids.
 
-        IDs only (ADR-0016 §3.2): ``(document_id, chunk_id)`` pairs. An empty
-        list clears the digest (a zero-citation answer carries nothing
-        forward). Does not touch the summary text or its version.
+        IDs only (ADR-0016 §3.2), capped at ``_EVIDENCE_MAX_PAIRS`` (first-cited
+        wins), empty clears. ATOMIC: a dialect-native upsert — a concurrent
+        summarizer's row claim degrades this to an UPDATE of the evidence
+        column only, never a unique-key error inside the answer transaction
+        (#446 finding 3). Touches nothing the summarizer owns.
         """
-        row = await self._get_row(session_id)
-        payload = [{"document_id": str(d), "chunk_id": str(c)} for d, c in evidence]
-        if row is None:
-            row = models.SessionSummary(
-                tenant_id=self._tenant_id,
-                session_id=session_id,
-                evidence=payload,
-            )
-            self._session.add(row)
-        else:
-            row.evidence = payload
+        payload = [
+            {"document_id": str(d), "chunk_id": str(c)}
+            for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
+        ]
+        insert = self._insert().values(  # type: ignore[attr-defined]
+            id=uuid_mod.uuid4(),
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            evidence=payload,
+        )
+        stmt = insert.on_conflict_do_update(
+            index_elements=["tenant_id", "session_id"],
+            set_={"evidence": payload},
+        )
+        await self._session.execute(stmt)
         await self._session.flush()
-        await self._session.refresh(row)
-        return _to_session_summary(row)
+        return await self.get_for_session(session_id)
 
     async def upsert_summary(
         self,
@@ -4872,47 +4949,63 @@ class SessionSummaryRepository(_TenantScopedRepository):
         summary: str,
         covers_through_message_id: UUID,
         covered_created_at: datetime,
-    ) -> SessionSummary | None:
-        """Advance the rolling summary; forward-only (a stale task never regresses).
+        mentioned_documents: dict[UUID, str] | None = None,
+    ) -> tuple[bool, SessionSummary | None]:
+        """Advance the rolling summary; returns ``(accepted, row)``.
 
-        ``covered_created_at`` is the covered boundary message's timestamp; a
-        write whose boundary is not strictly NEWER than the stored one is
-        dropped (returns the stored row) — two racing summarize tasks converge
-        on the newest coverage instead of flip-flopping. ``version`` increments
-        on every accepted write (the cache-alignment signal).
+        Forward-only via compare-and-swap on the coverage cursor (#446 findings
+        3/5): the UPDATE lands only where the stored cursor is NULL or older
+        under the ``(created_at, id)`` total order — a stale/racing task's
+        write is a no-op with ``accepted=False``, so its caller neither bumps
+        ``version`` nor emits the summarized audit. Same-timestamp advances to
+        a DIFFERENT boundary id are allowed (second-resolution timestamps);
+        the id inequality keeps an identical rewrite idempotent. The summary
+        text and the mention map are size-capped here (the write chokepoint).
         """
-        row = await self._get_row(session_id)
-        if row is None:
-            row = models.SessionSummary(
-                tenant_id=self._tenant_id,
-                session_id=session_id,
-                summary=summary,
-                covers_through_message_id=covers_through_message_id,
-                version=1,
-            )
-            self._session.add(row)
-            await self._session.flush()
-            await self._session.refresh(row)
-            return _to_session_summary(row)
-        if row.covers_through_message_id is not None:
-            boundary = await self._session.get(models.Message, row.covers_through_message_id)
-            if boundary is not None and boundary.created_at > covered_created_at:
-                # STRICTLY newer stored coverage wins; a stale write is dropped.
-                # Same-second ties proceed (timestamps are second-resolution on
-                # SQLite): two racing tasks may both write, but coverage always
-                # lands on a boundary at least as new — never regresses across
-                # seconds, and the next pass converges.
-                return _to_session_summary(row)
-        row.summary = summary
-        row.covers_through_message_id = covers_through_message_id
-        row.version = row.version + 1
-        await self._session.flush()
-        await self._session.refresh(row)
-        return _to_session_summary(row)
-
-    async def _get_row(self, session_id: UUID) -> models.SessionSummary | None:
-        stmt = select(models.SessionSummary).where(
-            models.SessionSummary.tenant_id == self._tenant_id,
-            models.SessionSummary.session_id == session_id,
+        text_value = summary[:_SUMMARY_MAX_CHARS]
+        mentioned_payload = {
+            str(k): str(v)[:200]
+            for k, v in list((mentioned_documents or {}).items())[:_EVIDENCE_MAX_PAIRS]
+        }
+        insert = self._insert().values(  # type: ignore[attr-defined]
+            id=uuid_mod.uuid4(),
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            summary=text_value,
+            covers_through_message_id=covers_through_message_id,
+            covers_through_created_at=covered_created_at,
+            mentioned_documents=mentioned_payload,
+            version=1,
         )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        stmt = insert.on_conflict_do_update(
+            index_elements=["tenant_id", "session_id"],
+            set_={
+                "summary": text_value,
+                "covers_through_message_id": covers_through_message_id,
+                "covers_through_created_at": covered_created_at,
+                "mentioned_documents": mentioned_payload,
+                "version": models.SessionSummary.version + 1,
+            },
+            where=(
+                models.SessionSummary.covers_through_created_at.is_(None)
+                | (models.SessionSummary.covers_through_created_at < covered_created_at)
+                | (
+                    (
+                        models.SessionSummary.covers_through_created_at
+                        == covered_created_at
+                    )
+                    & (
+                        models.SessionSummary.covers_through_message_id
+                        != covers_through_message_id
+                    )
+                )
+            ),
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        row = await self.get_for_session(session_id)
+        accepted = bool(getattr(result, "rowcount", 0)) and (
+            row is not None
+            and row.covers_through_message_id == covers_through_message_id
+        )
+        return accepted, row
