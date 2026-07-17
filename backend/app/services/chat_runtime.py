@@ -197,6 +197,12 @@ class _Usage:
     total_tokens: int = 0
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    # The LAST answer-loop turn's prompt size — window occupancy, not billing
+    # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
+    # so the final turn wins); the suggestions nicety folds into the sums via
+    # :meth:`add` but never touches this. ``None`` ⇒ the provider reported no
+    # usage.
+    last_turn_prompt_tokens: int | None = None
 
     def add(self, usage: TokenUsage) -> None:
         self.prompt_tokens += usage.prompt_tokens
@@ -836,6 +842,7 @@ class ChatRuntime:
                 total_tokens=usage.total_tokens,
                 cached_prompt_tokens=usage.cached_prompt_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
+                context_prompt_tokens=usage.last_turn_prompt_tokens,
                 session_id=session_id,
                 message_id=assistant_message_id,
             )
@@ -954,6 +961,7 @@ class ChatRuntime:
             total_tokens=usage.total_tokens,
             cached_prompt_tokens=usage.cached_prompt_tokens,
             cache_write_tokens=usage.cache_write_tokens,
+            context_prompt_tokens=usage.last_turn_prompt_tokens,
             session_id=session_id,
             message_id=assistant_message_id,
         )
@@ -1117,6 +1125,7 @@ class ChatRuntime:
                 finish_reason = ev.finish_reason
             if ev.usage is not None:
                 usage.add(ev.usage)
+                usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
         return turn_tool_calls, finish_reason, text_chunks
 
     async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:

@@ -3385,6 +3385,7 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
         total_tokens=row.total_tokens,
         cached_prompt_tokens=row.cached_prompt_tokens,
         cache_write_tokens=row.cache_write_tokens,
+        context_prompt_tokens=row.context_prompt_tokens,
         created_at=row.created_at,
     )
 
@@ -3410,6 +3411,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         total_tokens: int,
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
+        context_prompt_tokens: int | None = None,
         session_id: UUID | None = None,
         message_id: UUID | None = None,
         run_id: UUID | None = None,
@@ -3430,6 +3432,9 @@ class LlmUsageRepository(_TenantScopedRepository):
             total_tokens=max(0, total_tokens),
             cached_prompt_tokens=max(0, cached_prompt_tokens),
             cache_write_tokens=max(0, cache_write_tokens),
+            context_prompt_tokens=(
+                max(0, context_prompt_tokens) if context_prompt_tokens is not None else None
+            ),
         )
         self._session.add(row)
         await self._session.flush()

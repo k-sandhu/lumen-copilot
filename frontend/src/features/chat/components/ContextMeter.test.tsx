@@ -20,11 +20,12 @@ const USAGE: SessionUsage = {
     cache_write_tokens: 0,
   },
   last: {
-    prompt_tokens: 19_100,
+    prompt_tokens: 47_000, // billing sum across loop turns + suggestions
     completion_tokens: 900,
-    total_tokens: 20_000,
+    total_tokens: 47_900,
     cached_prompt_tokens: 9_000,
     cache_write_tokens: 0,
+    context_prompt_tokens: 19_100, // actual final-turn window occupancy (#434 NEW-1)
   },
   input_budget_tokens: 190_976,
   window_known: true,

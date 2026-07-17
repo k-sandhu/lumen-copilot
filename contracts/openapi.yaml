@@ -3119,6 +3119,15 @@ components:
         total_tokens: { type: integer, minimum: 0 }
         cached_prompt_tokens: { type: integer, minimum: 0 }
         cache_write_tokens: { type: integer, minimum: 0 }
+        context_prompt_tokens:
+          type: integer
+          minimum: 0
+          description: >
+            The final answer-loop turn's prompt size — actual window occupancy
+            for the context meter, vs prompt_tokens' billing sum across all
+            loop turns (+ the suggestions call). Additive; absent on legacy
+            rows or when the provider reported no usage (fall back to
+            prompt_tokens).
 
     SessionUsage:
       type: object
@@ -3132,7 +3141,10 @@ components:
       properties:
         model:
           type: string
-          description: The session's model id the budget was computed for.
+          description: >
+            The model id the budget was computed for (public form): the model
+            that produced the LAST answer when one exists (per-turn overrides
+            included — #434 NEW-2), else the session default.
         totals: { $ref: "#/components/schemas/SessionUsageTotals" }
         last:
           $ref: "#/components/schemas/SessionUsageLast"

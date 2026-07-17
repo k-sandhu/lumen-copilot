@@ -1204,3 +1204,41 @@ async def test_session_usage_budget_resolves_provider_model_window(
         - 1024
     )
     assert body["input_budget_tokens"] != fallback_budget
+
+
+async def test_session_usage_budget_follows_last_answer_model(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    client: AsyncClient,
+) -> None:
+    """#434 NEW-2: with answers present, the budget/model follow the model that
+    actually produced the LAST answer (per-turn override), not the session
+    default."""
+    from app.db.repositories import LlmUsageRepository
+
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "override"}
+    )
+    session_id = created.json()["id"]
+    default_model = created.json()["model"]
+
+    # A per-turn override recorded its own model on the usage row.
+    async with sessionmaker() as db:
+        await LlmUsageRepository(db, seeded.tenant_a).record(
+            model="gpt-4o",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            context_prompt_tokens=80,
+            session_id=uuid.UUID(session_id),
+        )
+        await db.commit()
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    assert body["model"] == "gpt-4o"
+    assert body["model"] != default_model
+    assert body["window_known"] is True  # gpt-4o is in the local model map
+    assert body["last"]["context_prompt_tokens"] == 80

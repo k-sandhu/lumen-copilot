@@ -2191,3 +2191,69 @@ async def test_suggestions_skipped_for_no_sources_fallback(ctx: _Ctx) -> None:
     names = [e.get("name") for e in envs if e["type"] == "event"]
     assert "suggestions" not in names
     assert envs[-1]["type"] == "done"
+
+
+async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ctx) -> None:
+    """#434 NEW-1: llm_usage.context_prompt_tokens is the FINAL answer-loop
+    turn's prompt size (window occupancy); prompt_tokens stays the billing sum
+    across turns + the suggestions call."""
+    import asyncio
+
+    from app.db.repositories import LlmUsageRepository
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            # Turn 1 (tool turn): prompt 10.
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=1, total_tokens=11),
+                )
+            ],
+            # Turn 2 (answer turn): prompt 30 — the window's actual occupancy.
+            [
+                StreamEvent(text="Grounded."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=30, completion_tokens=4, total_tokens=34),
+                ),
+            ],
+        ],
+        # The suggestions nicety bills 5 more prompt tokens but must NOT move
+        # the recorded window occupancy.
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.prompt_tokens == 45  # 10 + 30 + 5 — the billing sum
+        assert row.context_prompt_tokens == 30  # the final loop turn only

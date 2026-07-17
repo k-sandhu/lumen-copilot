@@ -1165,6 +1165,10 @@ class LlmUsage(TenantScopedMixin, Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The LAST answer-loop turn's prompt size (suggestions excluded) — window
+    # occupancy for the context meter (#434 NEW-1); prompt_tokens stays the
+    # billing sum. NULL on legacy rows / providers reporting no usage.
+    context_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

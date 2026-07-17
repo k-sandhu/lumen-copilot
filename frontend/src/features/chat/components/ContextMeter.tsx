@@ -21,7 +21,10 @@ export function ContextMeter({ sessionId }: ContextMeterProps) {
   if (usage.isLoading || usage.isError || !usage.data?.totals) return null;
 
   const { totals, last, input_budget_tokens: budget, window_known: known } = usage.data;
-  const lastPrompt = last?.prompt_tokens ?? 0;
+  // Window occupancy, not billing (#434 NEW-1): the final answer-loop turn's
+  // prompt size when the backend recorded it; the summed prompt_tokens only as
+  // a legacy fallback.
+  const lastPrompt = last?.context_prompt_tokens ?? last?.prompt_tokens ?? 0;
   const percent = Math.min(100, Math.round((lastPrompt / Math.max(1, budget)) * 100));
   // Threshold coloring (research pass — Claude Code statusline convention):
   // calm below 50%, warn to 80%, hot above.

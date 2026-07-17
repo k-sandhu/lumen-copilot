@@ -400,6 +400,12 @@ export interface SessionUsageLast {
   total_tokens: number;
   cached_prompt_tokens: number;
   cache_write_tokens: number;
+  /**
+   * Final-turn window occupancy (#434 NEW-1) — what the model's window
+   * actually held, vs prompt_tokens' billing sum across loop turns. Absent on
+   * legacy rows / no-usage providers: fall back to prompt_tokens.
+   */
+  context_prompt_tokens?: number;
 }
 
 /**

@@ -392,13 +392,18 @@ class ChatService:
             return None
         totals = await self._usage.totals_for_session(session_id)
         last = await self._usage.last_for_session(session_id)
-        # Budget off the model id the assembler actually sees (#434 review,
-        # finding 3): a per-tenant ``provider:`` id resolves to its RAW model id
-        # before the window lookup — exactly like the runtime's route — so a
+        # The budget follows the model that ACTUALLY produced the last answer
+        # (#434 NEW-2): a per-turn model override records its id on the usage
+        # row, so the meter must budget against that — the session default only
+        # covers a fresh session with no answers yet. And it resolves a
+        # per-tenant ``provider:`` id to its RAW model id before the window
+        # lookup (#434 finding 3) — exactly like the runtime's route — so a
         # known-window provider model never falls back to the conservative
-        # window. The PUBLIC id still rides the response's ``model`` field.
-        parsed = parse_provider_model_id(session.model)
-        budget_model = parsed[1] if parsed is not None else session.model
+        # window. The response's ``model`` is the id the budget was computed
+        # for, in its public form.
+        source_model = last.model if last is not None else session.model
+        parsed = parse_provider_model_id(source_model)
+        budget_model = parsed[1] if parsed is not None else source_model
         budget, window_known = input_budget_for_model(
             budget_model,
             ContextConfig(
@@ -407,7 +412,7 @@ class ChatService:
             ),
         )
         return SessionUsageView(
-            model=session.model,
+            model=source_model,
             totals=totals,
             last=last,
             input_budget_tokens=budget,

@@ -422,3 +422,35 @@ describe('Composer ghost Escape dismissal (research pass)', () => {
     expect(await screen.findByText('Who owns the Atlas launch?')).toBeInTheDocument();
   });
 });
+
+describe('#434 NEW-3: mention picker focus semantics', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('options are outside the tab order and pinning returns focus to the input', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            suggestions: [{ kind: 'document', text: 'Budget FY26.xlsx', document_id: 'doc-1' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    const onPinDocument = vi.fn();
+    setup({ onPinDocument });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@bud');
+    const option = await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    // APG: reached via aria-activedescendant, never Tab.
+    expect(option).toHaveAttribute('tabindex', '-1');
+    expect(input).toHaveAttribute('aria-activedescendant', 'lc-mention-opt-0');
+    expect(input).toHaveAttribute('aria-expanded', 'true');
+    await user.click(option);
+    expect(onPinDocument).toHaveBeenCalledWith({ id: 'doc-1', name: 'Budget FY26.xlsx' });
+    // The picker unmounted — focus is back on the textarea, not <body>.
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+  });
+});

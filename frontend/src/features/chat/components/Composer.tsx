@@ -100,6 +100,7 @@ export function Composer({
   onUnpinDocument,
 }: ComposerProps) {
   const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Bash-style history recall (spec 0006 AC-5): the index into historyEntries
   // currently shown (null = not navigating), plus the stashed in-progress draft
   // restored when navigating back past the newest entry (or on Escape).
@@ -143,6 +144,9 @@ export function Composer({
     // Replace the @token (query included) with nothing — the pill carries it.
     setDraft((current) => current.replace(/(^|\s)@[^\s@]*$/, '$1').trimEnd());
     resetHistoryNav();
+    // A clicked option unmounts with the picker — focus must land back in the
+    // input, never on <body> (#434 NEW-3).
+    inputRef.current?.focus();
   }
 
   // The ghost renders ONLY over an empty, enabled composer — so it can never
@@ -324,6 +328,7 @@ export function Composer({
       <div className="lc-composer__box">
         <div className="lc-composer__inputwrap">
           <textarea
+            ref={inputRef}
             value={draft}
             onChange={(e) => onDraftChange(e.target.value)}
             onKeyDown={onKeyDown}
@@ -338,10 +343,15 @@ export function Composer({
             }
             aria-label="Message"
             className="lc-composer__input"
-            // Mention-picker combobox wiring (W3C APG; spec 0007 AC-4): the
-            // textarea keeps DOM focus while aria-activedescendant tracks the
-            // highlighted option. Attributes present only while the picker is
-            // relevant so ordinary typing is unaffected.
+            // Mention-picker wiring per the W3C APG editable-combobox
+            // pattern's ATTRIBUTES (spec 0007 AC-4, #434 NEW-3): DOM focus
+            // stays on the textarea while aria-activedescendant tracks the
+            // highlighted option; options are removed from the tab order.
+            // role="combobox" itself is deliberately NOT set — ARIA-in-HTML
+            // disallows it on <textarea> (a multiline composer is a textbox),
+            // and the attribute wiring below is what AT actually consumes.
+            // Attributes present only while the picker is relevant so ordinary
+            // typing is unaffected.
             aria-autocomplete={onPinDocument ? 'list' : undefined}
             aria-expanded={onPinDocument ? mentionActive : undefined}
             aria-controls={mentionActive ? 'lc-mention-listbox' : undefined}
@@ -375,6 +385,11 @@ export function Composer({
                     type="button"
                     role="option"
                     aria-selected={index === mentionIndex}
+                    // APG: options are reached via aria-activedescendant, not
+                    // Tab; mousedown is swallowed so a click never moves DOM
+                    // focus out of the input (#434 NEW-3).
+                    tabIndex={-1}
+                    onMouseDown={(e) => e.preventDefault()}
                     className={`lc-mention__opt${index === mentionIndex ? ' lc-mention__opt--active' : ''}`}
                     onMouseEnter={() => setMentionIndex(index)}
                     onClick={() => pinMention(option)}

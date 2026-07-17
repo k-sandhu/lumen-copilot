@@ -226,6 +226,10 @@ class SessionUsageLastResponse(BaseModel):
     total_tokens: int
     cached_prompt_tokens: int
     cache_write_tokens: int
+    # Final-turn window occupancy (#434 NEW-1): what the model's window
+    # actually held, vs prompt_tokens' billing sum across loop turns. Absent
+    # for legacy rows / providers that reported no usage.
+    context_prompt_tokens: int | None = None
 
 
 class SessionUsageResponse(BaseModel):
@@ -503,6 +507,7 @@ async def get_session_usage(
                 total_tokens=view.last.total_tokens,
                 cached_prompt_tokens=view.last.cached_prompt_tokens,
                 cache_write_tokens=view.last.cache_write_tokens,
+                context_prompt_tokens=view.last.context_prompt_tokens,
             )
             if view.last is not None
             else None
