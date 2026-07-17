@@ -572,6 +572,11 @@ class Tenant:
     # mark. A tenant admin uploads it (admin branding); the shell renders it via a
     # presigned GET URL delivered on ``GET /auth/me``.
     logo_key: str | None = None
+    # Ordered turn-failover model ids (ADR-0016 §4, #413): when an answer's model
+    # exhausts its bounded retry budget on transient provider faults, the runtime
+    # fails over down this list. ``None``/empty ⇒ no fallback (pre-#413 behavior).
+    # Admin-configured; each id validated like a send-path model id at write time.
+    fallback_models: list[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

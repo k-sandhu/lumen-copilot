@@ -122,6 +122,7 @@ def _to_tenant(row: models.Tenant) -> Tenant:
         updated_at=row.updated_at,
         max_tool_turns=row.max_tool_turns,
         logo_key=row.logo_key,
+        fallback_models=list(row.fallback_models) if row.fallback_models else None,
     )
 
 
@@ -755,6 +756,27 @@ class TenantRepository:
         if row is None:
             return None
         row.max_tool_turns = max_tool_turns
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant(row)
+
+    async def set_fallback_models(
+        self, tenant_id: UUID, *, fallback_models: list[str] | None
+    ) -> Tenant | None:
+        """Set (or clear) the tenant's turn-failover model list (ADR-0016 §4, #413).
+
+        ``fallback_models`` is written as given: an ordered list of model ids the
+        answer runtime fails over to when a model's retry budget is exhausted;
+        ``None`` (or empty, normalised by the service to ``None``) clears it so
+        answers fail exactly as before #413. Validation (each id allowed for this
+        tenant, bounded length) is the ADMIN SERVICE's job — this is the write
+        chokepoint only. Returns the updated entity, or ``None`` if no tenant
+        with that id exists.
+        """
+        row = await self._session.get(models.Tenant, tenant_id)
+        if row is None:
+            return None
+        row.fallback_models = fallback_models
         await self._session.flush()
         await self._session.refresh(row)
         return _to_tenant(row)

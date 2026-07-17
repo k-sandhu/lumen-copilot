@@ -114,6 +114,13 @@ class Tenant(TimestampMixin, Base):
     max_tool_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Per-tenant application logo (object-store key); NULL ⇒ the default brand mark.
     logo_key: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Ordered fallback model ids for turn-level failover (ADR-0016 §4, #413):
+    # when the answer's model exhausts its retry budget on transient provider
+    # faults, the runtime fails over down this list. NULL/empty ⇒ no fallback
+    # (fail exactly as before #413). Admin-configurable; each id is validated
+    # like a send-path model id at write time (the DB stores what admin PUT
+    # accepted — a JSON list of strings).
+    fallback_models: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
 
 
 class User(TenantScopedMixin, TimestampMixin, Base):

@@ -1041,3 +1041,83 @@ async def test_aclose_litellm_clients_closes_module_client_and_clears_cache(
     closed.clear()
     await aclose_litellm_clients()
     assert closed == ["module"]
+
+
+# --- #413 (ADR-0016 §4): retryability is classified in the gateway ----------
+
+
+def _classify(exc: Exception) -> AppError:
+    from app.llm.gateway import _map_vendor_error
+
+    return _map_vendor_error(exc)
+
+
+def test_transient_faults_classify_retryable() -> None:
+    """Timeout / connection / 429 / provider 5xx → a RETRYABLE LlmProviderError
+    (still the 503 DependencyError surface — handlers unchanged)."""
+    from app.llm import LlmProviderError
+
+    for exc in (
+        le.Timeout("m", model="x", llm_provider="p"),
+        le.APIConnectionError("m", llm_provider="p", model="x"),
+        le.RateLimitError("m", llm_provider="p", model="x"),
+        le.InternalServerError("m", llm_provider="p", model="x"),
+        le.ServiceUnavailableError("m", llm_provider="p", model="x"),
+    ):
+        mapped = _classify(exc)
+        assert isinstance(mapped, LlmProviderError), type(exc).__name__
+        assert isinstance(mapped, DependencyError)
+        assert mapped.retryable is True, type(exc).__name__
+        # Never the vendor MESSAGE (it may carry the api_key) — class name only.
+        assert "m" != mapped.detail
+        assert type(exc).__name__ in (mapped.detail or "")
+
+
+def test_auth_and_unknown_faults_classify_terminal() -> None:
+    """Auth/permission — and anything unclassifiable — must NOT retry: a retry
+    cannot fix a bad key, and hammering an unknown failure is worse than
+    failing fast (ADR-0016 §4)."""
+    from app.llm import LlmProviderError
+
+    auth = _classify(le.AuthenticationError("m", llm_provider="p", model="x"))
+    assert isinstance(auth, LlmProviderError) and auth.retryable is False
+    unknown = _classify(RuntimeError("totally unexpected"))
+    assert isinstance(unknown, LlmProviderError) and unknown.retryable is False
+
+
+def test_bad_request_still_maps_to_validation_error() -> None:
+    """The 422 lane is untouched by #413: request-shaped faults stay
+    ValidationError (never retried, never a 503)."""
+    mapped = _classify(le.BadRequestError("m", model="x", llm_provider="p"))
+    assert isinstance(mapped, ValidationError)
+
+
+def test_retry_after_hint_parsed_defensively() -> None:
+    """A numeric Retry-After rides the classified error; date-form and garbage
+    are ignored (the header is attacker-adjacent input). The CAP is the retry
+    loop's job — the gateway only reports."""
+    from app.llm import LlmProviderError
+
+    class _Headers:
+        def __init__(self, value: object) -> None:
+            self._value = value
+
+        def get(self, _name: str) -> object:
+            return self._value
+
+    class _Resp:
+        def __init__(self, value: object) -> None:
+            self.headers = _Headers(value)
+
+    def with_header(value: object) -> LlmProviderError:
+        exc = le.RateLimitError("m", llm_provider="p", model="x")
+        exc.response = _Resp(value)  # type: ignore[assignment]
+        mapped = _classify(exc)
+        assert isinstance(mapped, LlmProviderError)
+        return mapped
+
+    assert with_header("7").retry_after_seconds == 7.0
+    assert with_header(3).retry_after_seconds == 3.0
+    assert with_header("Wed, 21 Oct 2026 07:28:00 GMT").retry_after_seconds is None
+    assert with_header("-5").retry_after_seconds is None
+    assert with_header(None).retry_after_seconds is None
