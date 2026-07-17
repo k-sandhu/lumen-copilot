@@ -3984,3 +3984,200 @@ async def test_continuation_never_fails_over_and_degrades_to_the_partial(ctx: _C
         )
         assistant = [m for m in messages_rows if m.role.value == "assistant"]
         assert assistant[-1].content == "Part one."
+
+
+# --- #416: rolling summary + evidence carry-forward --------------------------
+
+
+async def test_summary_rides_the_prompt_between_system_and_history(ctx: _Ctx) -> None:
+    """AC-1 (#416): a fact that lives ONLY in the rolling summary reaches the
+    model — the summary segment is a system message between the grounding
+    prompt and the (post-coverage) history, exactly the ADR-0016 §1 order."""
+    retrieval = _FakeRetrieval([])
+    gateway = _RecordingScriptedGateway(
+        [[StreamEvent(text="Blue, as you told me."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="what color did I say?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        summary="The user said their favorite color is blue.",
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    prompt = gateway.seen[0]
+    system_texts = [m.content for m in prompt if m.role is LlmRole.SYSTEM]
+    assert len(system_texts) == 2  # the grounding prompt + the summary segment
+    assert "favorite color is blue" in system_texts[1]
+    assert "Conversation summary" in system_texts[1]
+
+
+async def test_evidence_digest_rehydrates_and_targets_get_document(ctx: _Ctx) -> None:
+    """AC-2 (#416): the previous answer's cited ids are rehydrated (names via
+    the CURRENT permission check) into the prompt, and the model can target
+    ``get_document`` by that id — observable in the tool trace."""
+
+    class _HydratingRetrieval(_FakeRetrieval):
+        def __init__(self, doc_id: uuid.UUID) -> None:
+            super().__init__([])
+            self._doc_id = doc_id
+
+        async def get_document(
+            self, *, principal: object, document_id: object
+        ) -> DocumentText | None:
+            if document_id == self._doc_id:
+                return DocumentText(
+                    document_id=self._doc_id,
+                    document_name="taxes.pdf",
+                    text="The deduction is $14,600.",
+                )
+            return None
+
+    retrieval = _HydratingRetrieval(ctx.document_id)
+    gateway = _RecordingScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(
+                            id="c1",
+                            name="get_document",
+                            arguments={"document_id": str(ctx.document_id)},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Expanded."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="expand point 2 from that doc",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        evidence=((ctx.document_id, ctx.chunk_id),),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    # The digest line (name + id) reached the prompt…
+    prompt = gateway.seen[0]
+    summary_seg = [m.content for m in prompt if m.role is LlmRole.SYSTEM][1]
+    assert "taxes.pdf" in summary_seg and str(ctx.document_id) in summary_seg
+    # …and the model's by-id fetch is in the trace (tool_invocations row).
+    from sqlalchemy import select
+
+    from app.db import models
+
+    async with ctx.sessionmaker() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(models.ToolInvocation).where(
+                        models.ToolInvocation.tenant_id == ctx.tenant_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [r.tool_name for r in rows] == ["get_document"]
+    assert rows[0].ok is True
+
+
+async def test_revoked_evidence_is_silently_stripped(ctx: _Ctx) -> None:
+    """AC-3 (#416, INV-2): an id whose document the requester can no longer
+    retrieve is stripped from the rehydrated digest — the prompt carries no
+    trace of it, and the rehydration audit records requested vs permitted."""
+    retrieval = _FakeRetrieval([])  # get_document → None: revoked/deleted
+    gateway = _RecordingScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    revoked_doc = uuid.uuid4()
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        evidence=((revoked_doc, uuid.uuid4()),),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    # No summary segment at all (nothing survived rehydration; no summary text).
+    prompt = gateway.seen[0]
+    system_texts = [m.content for m in prompt if m.role is LlmRole.SYSTEM]
+    assert len(system_texts) == 1
+    assert all(str(revoked_doc) not in t for t in system_texts)
+    # INV-6: the rehydration audit shows 1 requested, 0 permitted.
+    from app.db.repositories import AuditEventRepository
+
+    async with ctx.sessionmaker() as session:
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=30)
+    rehydrated = [e for e in recent if e.action == "retrieval.evidence_rehydrated"]
+    assert rehydrated
+    assert rehydrated[0].metadata["requested_documents"] == 1
+    assert rehydrated[0].metadata["permitted_documents"] == 0
+
+
+async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
+    """The carry-forward WRITE: a cited answer replaces the session's digest
+    with ITS citation ids (IDs only), in the answer transaction."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Cited answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    from app.db.repositories import SessionSummaryRepository
+
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
+            ctx.session_id
+        )
+    assert row is not None
+    assert row.evidence == ((ctx.document_id, ctx.chunk_id),)
+    assert row.summary is None  # the TEXT summary is the async task's job

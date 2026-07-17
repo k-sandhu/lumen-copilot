@@ -258,6 +258,8 @@ def assemble_context(
     config: ContextConfig | None = None,
     counter: TokenCounter | None = None,
     max_input_resolver: MaxInputResolver | None = None,
+    summary: str | None = None,
+    evidence_lines: Sequence[str] = (),
 ) -> ContextBudget:
     """Assemble the prompt under the model's input budget; return a :class:`ContextBudget`.
 
@@ -275,7 +277,31 @@ def assemble_context(
     cfg = config or ContextConfig()
     count = counter or litellm_token_counter(model)
     resolve = max_input_resolver or litellm_max_input_tokens
-    segments = _Segments()  # reserved-empty; memory/summary land here later
+    segments = _Segments()  # memory reserved-empty; summary fills below (#416)
+    if summary or evidence_lines:
+        # The rolling-session-summary segment (ADR-0016 §3.2, #416): one system
+        # message between [memory] and [history], so the cache prefix only
+        # changes at summary-version boundaries. The summary is conversational
+        # content only; the evidence digest lines are ID references the model
+        # can target with get_document — rehydrated by the CALLER through
+        # ``retrieval/`` under the requester's CURRENT permissions (INV-2), so
+        # nothing here grants access the requester lacks right now.
+        parts: list[str] = []
+        if summary:
+            parts.append(
+                "Conversation summary (older turns, rolled up — trust it as "
+                "context, but re-search before asserting document facts):\n"
+                f"{summary}"
+            )
+        if evidence_lines:
+            parts.append(
+                "Evidence cited in the previous answer (fetch by id with "
+                "get_document / search for details):\n"
+                + "\n".join(f"- {line}" for line in evidence_lines)
+            )
+        segments.summary.append(
+            ChatMessage(role=Role.SYSTEM, content="\n\n".join(parts))
+        )
 
     max_input = resolve(model) or cfg.fallback_max_input_tokens
     # A degenerate window (tiny model / oversized headroom) still yields a

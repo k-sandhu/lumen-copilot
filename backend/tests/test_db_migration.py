@@ -76,6 +76,8 @@ _ALL_TABLES = _MVP_TABLES | {
     "tenant_sandbox_policy",
     "tenant_autonomy_policy",
     "llm_providers",
+    # #416 (ADR-0016 §3.2): the rolling session summary + evidence digest.
+    "session_summaries",
     "run_deliveries",
     # 0032, issue #409 — per-answer token & cache usage accounting.
     "llm_usage",
@@ -119,7 +121,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0036_llm_usage_answer"]
+    assert list(script.get_heads()) == ["0037_session_summaries"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -1308,3 +1310,27 @@ def test_offline_llm_usage_answer_id_migration_round_trips(
     command.downgrade(cfg, "0036_llm_usage_answer:0035_tenant_fallbacks", sql=True)
     down = capsys.readouterr().out.lower()
     assert "alter table llm_usage drop column answer_id" in down
+
+
+def test_offline_session_summaries_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0037 creates ``session_summaries`` with the tenant FK, the one-per-session
+    unique, and the 0007-style RLS backstop; the downgrade reverses it (#416)."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0036_llm_usage_answer:0037_session_summaries", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table session_summaries" in up
+    assert "references tenants" in up
+    assert "references chat_sessions" in up
+    assert "uq_session_summaries_session" in up
+    assert "enable row level security" in up
+    assert "force row level security" in up
+    assert "create policy rls_session_summaries on session_summaries" in up
+
+    command.downgrade(cfg, "0037_session_summaries:0036_llm_usage_answer", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table session_summaries" in down
+    assert "drop policy if exists rls_session_summaries" in down

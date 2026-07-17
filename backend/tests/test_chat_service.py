@@ -714,3 +714,78 @@ async def test_invalid_cursor_is_rejected(
         svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
         with pytest.raises(ValidationError):
             await svc.list_sessions(cursor="not-a-real-cursor!!!", limit=20)
+
+
+# --- #416: the send path consumes the rolling summary ------------------------
+
+
+async def test_send_filters_summarized_history_and_threads_the_summary(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """With a summary covering the older turns, ``SendResult.history`` contains
+    only NEWER messages, and the summary text + evidence ids ride along for
+    the runtime (#416, ADR-0016 §3.2)."""
+    import uuid as _uuid
+
+    from app.db.repositories import MessageRepository, SessionSummaryRepository
+    from app.domain.entities import MessageRole as _Role
+
+    world, factory = world_and_factory
+    doc_id, chunk_id = _uuid.uuid4(), _uuid.uuid4()
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        messages = MessageRepository(session, world.tenant_a)
+        ids = []
+        for i in range(6):
+            m = await messages.add(
+                session_id=created.session.id,
+                role=_Role.USER if i % 2 == 0 else _Role.ASSISTANT,
+                content=f"old turn {i}",
+            )
+            ids.append(m.id)
+        summaries = SessionSummaryRepository(session, world.tenant_a)
+        await summaries.upsert_evidence(created.session.id, evidence=[(doc_id, chunk_id)])
+        row = await summaries.get_for_session(created.session.id)
+        assert row is not None
+        # Cover the first four turns.
+        boundary = ids[3]
+        rows = await messages.list_for_session(created.session.id)
+        by_id = {m.id: m for m in rows}
+        await summaries.upsert_summary(
+            created.session.id,
+            summary="They discussed old turns 0-3.",
+            covers_through_message_id=boundary,
+            covered_created_at=by_id[boundary].created_at,
+        )
+        await session.commit()
+        result = await svc.send_message(
+            created.session.id, content="follow-up", model=None, backplane=InMemoryBackplane()
+        )
+        await session.commit()
+    assert result is not None
+    assert result.summary == "They discussed old turns 0-3."
+    assert result.evidence == ((doc_id, chunk_id),)
+    # History = only turns AFTER the coverage boundary (4, 5) — never the
+    # summarized ones.
+    contents = [m.content for m in result.history]
+    assert contents == ["old turn 4", "old turn 5"]
+
+
+async def test_send_without_summary_row_is_unchanged(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """AC-4 shape: no summary row ⇒ full history, no summary, no evidence —
+    byte-for-byte today's behavior."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        await session.commit()
+        result = await svc.send_message(
+            created.session.id, content="hi", model=None, backplane=InMemoryBackplane()
+        )
+        await session.commit()
+    assert result is not None
+    assert result.summary is None
+    assert result.evidence == ()

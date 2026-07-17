@@ -63,6 +63,7 @@ from app.db.repositories import (
     CitationRepository,
     LlmUsageRepository,
     MessageRepository,
+    SessionSummaryRepository,
     TenantRepository,
     ToolInvocationRepository,
 )
@@ -412,6 +413,8 @@ class ChatRuntime:
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
+        summary: str | None = None,
+        evidence: Sequence[tuple[UUID, UUID]] = (),
     ) -> None:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
@@ -478,6 +481,8 @@ class ChatRuntime:
                     assistant_config=assistant_config,
                     custom_instructions=custom_instructions,
                     simulate_writes=simulate_writes,
+                    summary=summary,
+                    evidence=evidence,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -559,6 +564,8 @@ class ChatRuntime:
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
+        summary: str | None = None,
+        evidence: Sequence[tuple[UUID, UUID]] = (),
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
@@ -715,6 +722,44 @@ class ChatRuntime:
                 "document(s) to this message; document searches for this answer "
                 "are scoped to them. Search them before answering.]"
             )
+        # Evidence carry-forward rehydration (#416, ADR-0016 §3.2): the stored
+        # digest is IDs ONLY; every id re-checks against the requester's
+        # CURRENT permissions through the public retrieval surface — a
+        # revoked/deleted document is silently stripped (INV-2: "the user saw
+        # it last turn" proves nothing about now). One get_document per
+        # distinct document (a handful at most, the last answer's citations).
+        evidence_lines: list[str] = []
+        if evidence:
+            by_doc: dict[UUID, list[UUID]] = {}
+            for doc_id, chunk_id in evidence:
+                by_doc.setdefault(doc_id, []).append(chunk_id)
+            for doc_id, chunk_ids in by_doc.items():
+                doc = await retrieval.get_document(
+                    principal=self._principal, document_id=doc_id
+                )
+                if doc is None:
+                    continue  # revoked/deleted — stripped without comment
+                chunks_note = ", ".join(str(c) for c in chunk_ids)
+                evidence_lines.append(
+                    f"{doc.document_name} (document_id {doc_id}; cited chunk(s): "
+                    f"{chunks_note})"
+                )
+            # INV-6: rehydration is an audited read-side event — how many ids
+            # were requested vs still permitted (never the content).
+            await audit.emit(
+                action=AuditAction.EVIDENCE_REHYDRATED,
+                actor=AuditActor.user(self._principal.user_id),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "requested_documents": len(by_doc),
+                    "permitted_documents": len(evidence_lines),
+                },
+            )
+
         assembled = assemble_context(
             model=route_state.route.model,
             system_prompt=system_prompt,
@@ -722,6 +767,8 @@ class ChatRuntime:
             question=question_for_model,
             tools=advertised,
             config=self._context_config,
+            summary=summary,
+            evidence_lines=tuple(evidence_lines),
         )
         messages: list[ChatMessage] = assembled.messages
         await self._emit_step(state, key="prepare", label="Preparing", step_state="completed")
@@ -1121,6 +1168,14 @@ class ChatRuntime:
             model=route_state.model,
             content=answer_text,
             citations=list(cited.values()),
+        )
+        # Evidence carry-forward WRITE (#416): the NEXT answer's digest is this
+        # answer's cited ids — IDs only (ADR-0016 §3.2), replaced wholesale (a
+        # zero-citation answer clears it). Rides the answer transaction; the
+        # rolling summary TEXT updates asynchronously (the Celery task).
+        await SessionSummaryRepository(session, tenant_id).upsert_evidence(
+            session_id,
+            evidence=[(c.document_id, c.chunk_id) for c in cited.values()],
         )
         # Emit a citation event per persisted citation (now carrying its row id).
         # ``cited`` is already deduplicated by chunk_id, so each stored citation is

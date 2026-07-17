@@ -48,6 +48,7 @@ celery_app.conf.update(
         "app.tasks.scheduler",
         "app.tasks.run_digest",
         "app.tasks.run_sandbox",
+        "app.tasks.summarize",
     ),
     # Fail fast when publishing to an unreachable broker rather than looping
     # through a long reconnect cycle: a producer (the API after-commit enqueue)

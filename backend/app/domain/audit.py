@@ -47,6 +47,10 @@ class AuditAction(str, enum.Enum):
     SOURCE_DELETED = "source.deleted"
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
+    # #416 (ADR-0016 §3.2): the rolling-summary write and the next-answer
+    # evidence rehydration are audited reads/writes of conversational state.
+    SESSION_SUMMARIZED = "session.summarized"
+    EVIDENCE_REHYDRATED = "retrieval.evidence_rehydrated"
     PERMISSION_DENIED = "permission.denied"
     # Explicit ACL grants (spec 0004 §2.2 / CC-1 / issue #18). Additive to the
     # §2.4 MVP taxonomy — deny-by-default is preserved (the set only grows; no
