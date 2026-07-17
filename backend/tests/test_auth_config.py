@@ -169,3 +169,23 @@ def test_context_valid_budget_accepted() -> None:
     )
     assert s.context_fallback_max_input_tokens == 120_000
     assert s.context_output_headroom_tokens == 4000
+
+
+def test_context_compaction_knobs_reject_nonpositive() -> None:
+    """#415: a non-positive digest size or chunk size would silently disable
+    compaction (or loop forever) — both fail at startup instead."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CONTEXT_COMPACTION_DIGEST_CHARS=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CONTEXT_COMPACTION_CHUNK_SIZE=0)
+
+
+def test_context_compaction_knobs_accept_valid() -> None:
+    s = Settings(
+        _env_file=None,
+        **_BASE,
+        CONTEXT_COMPACTION_DIGEST_CHARS=800,
+        CONTEXT_COMPACTION_CHUNK_SIZE=2,
+    )
+    assert s.context_compaction_digest_chars == 800
+    assert s.context_compaction_chunk_size == 2

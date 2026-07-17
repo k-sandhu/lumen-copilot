@@ -975,6 +975,7 @@ class _RecordingSearchGateway:
     def __init__(self) -> None:
         self.estimates: list[int] = []
         self.synthesis_estimates: list[int] = []
+        self.saw_compaction = False
 
     async def stream_tools(
         self,
@@ -990,6 +991,8 @@ class _RecordingSearchGateway:
 
         assert isinstance(messages, list)
         assert isinstance(tools, list)
+        if any("truncated to fit the context window" in m.content for m in messages):
+            self.saw_compaction = True
         est = estimate_message_tokens(
             messages, tools, counter=lambda t: len(t.encode("utf-8"))
         )
@@ -1133,6 +1136,135 @@ async def test_forced_synthesis_payload_is_budget_guarded(
     budget = 5024 - 1024
     # No payload (ordinary or forced-synthesis) exceeded budget.
     assert all(e <= budget for e in gateway.estimates), gateway.estimates
+
+
+class _BigDocRetrieval(_FakeRetrieval):
+    """A retrieval whose ``get_document`` returns a large document body.
+
+    ``get_document`` results carry NO passages, so they are never auto-cited —
+    the tier-1 (uncited) compaction surface, exactly like real ``get_document`` /
+    web / code-output results (#415). Search returns nothing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def get_document(self, *, principal: object, document_id: object) -> DocumentText:
+        return DocumentText(
+            document_id=uuid.UUID(str(document_id)),
+            document_name="big.pdf",
+            text="D" * 5000,  # the tool caps the body at snippet_budget * 4
+        )
+
+
+class _RecordingGetDocGateway(_RecordingSearchGateway):
+    """Like the search recorder, but every tool turn reads the big document."""
+
+    def __init__(self, document_id: uuid.UUID) -> None:
+        super().__init__()
+        self._document_id = str(document_id)
+        self.calls_made = 0
+
+    async def stream_tools(  # type: ignore[override]
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        from app.llm.context import estimate_message_tokens
+
+        assert isinstance(messages, list)
+        assert isinstance(tools, list)
+        if any("truncated to fit the context window" in m.content for m in messages):
+            self.saw_compaction = True
+        est = estimate_message_tokens(messages, tools, counter=lambda t: len(t.encode("utf-8")))
+        self.estimates.append(est)
+        if tool_choice == "none":
+            self.synthesis_estimates.append(est)
+            yield StreamEvent(text="final")
+            yield StreamEvent(finish_reason="stop")
+            return
+        yield StreamEvent(
+            tool_calls=(
+                ToolCall(
+                    id=f"c{self.calls_made}",
+                    name="get_document",
+                    arguments={"document_id": self._document_id},
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+        self.calls_made += 1
+
+
+async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#415 AC-1 end-to-end: a long tool loop whose accumulating (UNCITED)
+    ``get_document`` results overflow the window now DIGESTS the oldest ones (in
+    chunks) and completes with a normal ``done`` answer — where pre-#415 the same
+    scenario refused with context_too_large. (Search results carrying cited
+    passages stay protected — that refusal case is pinned by
+    ``test_oversized_tool_results_never_exceed_budget`` above.)"""
+    import asyncio
+    import sys
+    import types as _types
+
+    from app.llm.context import ContextConfig
+
+    def _raise(**_kw: object) -> int:
+        raise RuntimeError("no tokenizer in test")
+
+    fake = _types.SimpleNamespace(token_counter=_raise, get_model_info=_raise)
+    monkeypatch.setitem(sys.modules, "litellm", fake)  # type: ignore[arg-type]
+
+    gateway = _RecordingGetDocGateway(ctx.document_id)
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # Measured wire costs (byte counter): base (grounded prompt + question + the
+    # 4 tool schemas) ≈ 3709; each get_document turn adds ≈ 2708 full / ≈ 573
+    # digested (digest_chars=150). Budget 9000 (fallback 10024 − 1024 margin)
+    # sits BETWEEN the 4-turn full requirement (~14541) and the digested floor
+    # with the newest result whole (~8136): the loop MUST compact to proceed,
+    # and compaction is sufficient — the pre-#415 code refused here.
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_BigDocRetrieval(),
+        backplane=backplane,
+        default_max_tool_turns=4,
+        context_config=ContextConfig(
+            fallback_max_input_tokens=10024,
+            output_headroom_tokens=0,
+            compaction_digest_chars=150,
+            compaction_chunk_size=2,
+        ),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="read the big doc",
+        model="some/unknown-model-not-in-map",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    budget = 10024 - 1024
+    # Every payload stayed within budget, compaction actually happened, and the
+    # run completed with a normal answer — no context_too_large refusal.
+    assert all(e <= budget for e in gateway.estimates), gateway.estimates
+    assert gateway.saw_compaction  # old results were digested in-flight
+    terminal = envs[-1]
+    assert terminal["type"] == "done", terminal
+    # The compacted transcript still produced answer deltas.
+    assert any(e["type"] == "delta" for e in envs)
 
 
 # --- #409: token & cache usage — reported on done, recorded per answer -------

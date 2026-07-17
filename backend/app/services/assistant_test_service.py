@@ -260,6 +260,8 @@ class AssistantTestService:
                 context_config=ContextConfig(
                     fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
                     output_headroom_tokens=self._settings.context_output_headroom_tokens,
+                    compaction_digest_chars=self._settings.context_compaction_digest_chars,
+                    compaction_chunk_size=self._settings.context_compaction_chunk_size,
                 ),
             )
             await runtime.run(

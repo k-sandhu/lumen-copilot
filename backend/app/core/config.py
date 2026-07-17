@@ -395,6 +395,16 @@ class Settings(BaseSettings):
     context_output_headroom_tokens: int = Field(
         default=8_000, ge=0, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
     )
+    # In-answer tool-result compaction knobs (ADR-0016 §3.1, issue #415): the
+    # chars of a tool result's real content the digest keeps, and how many results
+    # one compaction pass clears (a chunk, so cache invalidation is amortized).
+    # Both positive so a bad value fails at startup rather than degrading silently.
+    context_compaction_digest_chars: int = Field(
+        default=1200, gt=0, alias="CONTEXT_COMPACTION_DIGEST_CHARS"
+    )
+    context_compaction_chunk_size: int = Field(
+        default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
+    )
 
     @model_validator(mode="after")
     def _context_budget_leaves_room(self) -> Settings:
