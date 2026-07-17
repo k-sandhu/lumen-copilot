@@ -271,10 +271,23 @@ function ActiveSession({
   // never flickers out between `done` and the GET .../messages refetch (AC-2).
   const [pendingDoneId, setPendingDoneId] = useState<string | null>(null);
 
+  // Follow-up suggestions for the latest settled answer (spec 0006 #429).
+  // Captured OUT of the stream state so the chips survive the done→reload
+  // stream retirement; cleared on the next send and on session switch.
+  const [followUps, setFollowUps] = useState<string[]>([]);
+
   const stream = useChatStream({
     streamId: activeStreamId,
     onDone: () => onDoneReload(),
   });
+
+  useEffect(() => {
+    if (stream.suggestions) setFollowUps(stream.suggestions.suggestions);
+  }, [stream.suggestions]);
+
+  useEffect(() => {
+    setFollowUps([]);
+  }, [sessionId]);
 
   // Capture the done messageId once the stream settles successfully.
   useEffect(() => {
@@ -299,6 +312,8 @@ function ActiveSession({
         citations: stream.citations,
         tools: stream.tools,
         codeRuns: stream.codeRuns,
+        steps: stream.steps,
+        askUser: stream.askUser,
         problem: stream.problem,
         model: stream.start?.model ?? model,
       }
@@ -307,6 +322,8 @@ function ActiveSession({
   const doSend = useCallback(
     (req: SendMessageRequest) => {
       lastSendRef.current = req;
+      // A new question supersedes the previous turn's follow-ups (spec 0006).
+      setFollowUps([]);
       send.mutate(req, {
         onSuccess: (res) => startStream(res.stream_id),
       });
@@ -343,6 +360,17 @@ function ActiveSession({
   const streaming = live?.phase === 'streaming';
   const busy = send.isPending || streaming === true;
 
+  // Bash-style composer recall (spec 0006 AC-5): the caller's own previous
+  // messages in this conversation, newest first.
+  const historyEntries = useMemo(
+    () =>
+      (messages.data?.items ?? [])
+        .filter((m) => m.role === 'user')
+        .map((m) => m.content)
+        .reverse(),
+    [messages.data],
+  );
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="min-h-0 flex-1">
@@ -355,6 +383,9 @@ function ActiveSession({
           onRetryLoad={() => void messages.refetch()}
           live={live}
           onRetryStream={onRetryStream}
+          onSendText={onSend}
+          sendBusy={busy}
+          suggestions={followUps}
           onOpenCitation={(c) =>
             // The viewer carries only what the citation wire provides about the
             // source; the answer-time `meta` is NOT a source-provenance signal
@@ -394,6 +425,8 @@ function ActiveSession({
           modes={modes}
           onModesChange={setModes}
           modeAvailability={availability}
+          ghostSuggestion={!busy ? (followUps[0] ?? null) : null}
+          historyEntries={historyEntries}
         />
       </div>
     </div>

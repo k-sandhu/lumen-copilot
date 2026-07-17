@@ -1190,3 +1190,190 @@
     cursor: default;
   }
 }
+
+/* ---- spec 0006 (#429): steps / ask_user / suggestions / composer ghost --- */
+
+/* live run-phase timeline (pre-token void) */
+.lc-steps {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6px * var(--space));
+  margin: calc(2px * var(--space)) 0 calc(8px * var(--space));
+  padding: 0;
+  list-style: none;
+}
+.lc-step {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8px * var(--space));
+  font-size: calc(12.5px * var(--fs));
+  color: var(--text-muted);
+}
+.lc-step--running {
+  color: var(--text);
+}
+.lc-step__dot {
+  width: calc(8px * var(--fs));
+  height: calc(8px * var(--fs));
+  border-radius: var(--r-full);
+  background: var(--accent);
+  flex: none;
+}
+.lc-step__check {
+  display: inline-flex;
+  color: var(--ok, var(--accent-strong));
+  flex: none;
+}
+.lc-step__check .lc-icon {
+  width: calc(12px * var(--fs));
+  height: calc(12px * var(--fs));
+}
+@media (prefers-reduced-motion: reduce) {
+  .lc-step__dot.animate-pulse {
+    animation: none;
+  }
+}
+
+/* clarifying-question options */
+.lc-askuser {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: calc(8px * var(--space));
+  margin-top: calc(8px * var(--space));
+}
+.lc-askuser__opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(2px * var(--space));
+  max-width: 100%;
+  padding: calc(8px * var(--space)) calc(12px * var(--space));
+  border-radius: calc(10px * var(--space));
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: calc(13px * var(--fs));
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1);
+}
+.lc-askuser__opt:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--accent-line);
+}
+.lc-askuser__opt:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.lc-askuser__opt--chosen,
+.lc-askuser__opt--chosen:disabled {
+  border-color: var(--accent-line);
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  opacity: 1;
+}
+.lc-askuser__label {
+  font-weight: 560;
+}
+.lc-askuser__desc {
+  font-size: calc(12px * var(--fs));
+  color: var(--text-muted);
+}
+.lc-askuser__hint {
+  flex-basis: 100%;
+  margin: calc(2px * var(--space)) 0 0;
+  font-size: calc(12px * var(--fs));
+  color: var(--text-muted);
+}
+
+/* suggested follow-up chips */
+.lc-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8px * var(--space));
+  margin: calc(4px * var(--space)) 0 calc(8px * var(--space));
+  padding-left: calc(44px * var(--space));
+}
+.lc-suggestion-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6px * var(--space));
+  max-width: 100%;
+  padding: calc(6px * var(--space)) calc(12px * var(--space));
+  border-radius: var(--r-full);
+  border: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: calc(12.5px * var(--fs));
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-1),
+    border-color var(--dur-1),
+    color var(--dur-1);
+}
+.lc-suggestion-chip:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+.lc-suggestion-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.lc-suggestion-chip .lc-icon {
+  width: calc(13px * var(--fs));
+  height: calc(13px * var(--fs));
+  flex: none;
+  color: var(--accent);
+}
+
+/* composer ghost prefill */
+.lc-composer__inputwrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+.lc-composer__inputwrap .lc-composer__input {
+  flex: 1;
+}
+.lc-ghost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: calc(8px * var(--space));
+  padding: calc(10px * var(--space)) calc(12px * var(--space));
+  pointer-events: none;
+  overflow: hidden;
+}
+.lc-ghost__text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  opacity: 0.75;
+  font-size: calc(13.5px * var(--fs));
+}
+.lc-ghost__accept {
+  pointer-events: auto;
+  flex: none;
+  padding: 0 calc(6px * var(--space));
+  border-radius: calc(6px * var(--space));
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: calc(10.5px * var(--fs));
+  line-height: calc(18px * var(--fs));
+  cursor: pointer;
+}
+.lc-ghost__accept:hover {
+  color: var(--text);
+  border-color: var(--accent-line);
+}

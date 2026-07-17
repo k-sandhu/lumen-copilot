@@ -350,3 +350,98 @@ describe('reduceStream', () => {
     expect(s.codeRuns[0]?.status).toBe('succeeded');
   });
 });
+
+// --- Spec 0006 (#429): step / ask_user / suggestions events ------------------
+
+function stepEvent(
+  seq: number,
+  key: string,
+  state: 'started' | 'completed',
+  extra: Record<string, unknown> = {},
+): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'step',
+    data: { key, label: key === 'think' ? 'Thinking' : 'Preparing', state, ...extra },
+  };
+}
+
+describe('spec 0006 events (#429)', () => {
+  it('upserts steps by key in first-seen order (AC-1)', () => {
+    let s: StreamState = reduceStream(initialStreamState, start(0));
+    s = reduceStream(s, stepEvent(1, 'prepare', 'started'));
+    s = reduceStream(s, stepEvent(2, 'prepare', 'completed'));
+    s = reduceStream(s, stepEvent(3, 'think', 'started', { turn: 1 }));
+    s = reduceStream(s, stepEvent(4, 'think', 'completed', { turn: 1, detail: 'requested 1 tool' }));
+    s = reduceStream(s, stepEvent(5, 'think', 'started', { turn: 2 }));
+    expect(s.steps.map((x) => [x.key, x.state])).toEqual([
+      ['prepare', 'completed'],
+      ['think', 'started'],
+    ]);
+    expect(s.steps[1]?.turn).toBe(2);
+    // Malformed step payloads are dropped, stream stays healthy.
+    const bad = reduceStream(s, {
+      type: 'event',
+      streamId: SID,
+      seq: 6,
+      name: 'step',
+      data: { key: 'x' },
+    });
+    expect(bad.steps).toEqual(s.steps);
+  });
+
+  it('folds ask_user and replays idempotently by seq (AC-2/AC-N3)', () => {
+    let s: StreamState = reduceStream(initialStreamState, start(0));
+    const ask: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 1,
+      name: 'ask_user',
+      data: {
+        messageId: 'm',
+        question: 'Which quarter?',
+        options: [{ label: 'Q1' }, { label: 'Q2', description: 'Apr-Jun' }],
+        allowFreeText: true,
+      },
+    };
+    s = reduceStream(s, ask);
+    expect(s.askUser?.question).toBe('Which quarter?');
+    expect(s.askUser?.options).toHaveLength(2);
+    // A replayed (duplicate-seq) envelope is a no-op — options never re-arm twice.
+    const replayed = reduceStream(s, ask);
+    expect(replayed).toBe(s);
+    // Malformed (no options) is dropped.
+    const bad = reduceStream(s, {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'ask_user',
+      data: { messageId: 'm', question: 'x', options: [] },
+    });
+    expect(bad.askUser).toEqual(s.askUser);
+  });
+
+  it('folds suggestions, filtering non-string/empty items (AC-3)', () => {
+    let s: StreamState = reduceStream(initialStreamState, start(0));
+    s = reduceStream(s, delta(1, 'Answer.'));
+    s = reduceStream(s, {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'suggestions',
+      data: { messageId: 'm', suggestions: ['What next?', '', 42, 'Who owns it?'] },
+    });
+    expect(s.suggestions).toEqual({ messageId: 'm', suggestions: ['What next?', 'Who owns it?'] });
+    // All-empty payload is dropped entirely.
+    const bad = reduceStream(s, {
+      type: 'event',
+      streamId: SID,
+      seq: 3,
+      name: 'suggestions',
+      data: { messageId: 'm', suggestions: [''] },
+    });
+    expect(bad.suggestions).toEqual(s.suggestions);
+  });
+});

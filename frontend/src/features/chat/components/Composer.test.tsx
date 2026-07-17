@@ -129,3 +129,115 @@ describe('Composer', () => {
     expect(onModesChange).toHaveBeenCalledWith(['company', 'uploaded', 'model']);
   });
 });
+
+// --- Spec 0006 (#429): ghost prefill (AC-4) + history recall (AC-5) ----------
+
+describe('Composer ghost prefill (spec 0006 AC-4)', () => {
+  it('shows the ghost over an empty composer and accepts it with Tab', async () => {
+    const { onSend } = setup({ ghostSuggestion: 'What changed in Q2?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    expect(screen.getByText('What changed in Q2?')).toBeInTheDocument();
+    input.focus();
+    await user.keyboard('{Tab}');
+    expect(input).toHaveValue('What changed in Q2?');
+    // Accepting fills the draft — it does not send.
+    expect(onSend).not.toHaveBeenCalled();
+    // The ghost is gone once the draft is non-empty.
+    expect(
+      screen.queryByRole('button', { name: /use suggested question/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('accepts via the click affordance and dismisses on typing', async () => {
+    setup({ ghostSuggestion: 'Who owns this?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    // Typing anything dismisses the ghost — it never overwrites user text.
+    await user.type(input, 'my own question');
+    expect(
+      screen.queryByRole('button', { name: /use suggested question/i }),
+    ).not.toBeInTheDocument();
+    expect(input).toHaveValue('my own question');
+    await user.clear(input);
+    // Empty again — the ghost returns; clicking the affordance inserts it.
+    await user.click(screen.getByRole('button', { name: /use suggested question/i }));
+    expect(input).toHaveValue('Who owns this?');
+  });
+
+  it('Tab without a ghost keeps normal focus traversal', async () => {
+    setup();
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    input.focus();
+    await user.keyboard('{Tab}');
+    // No ghost: the composer must not trap Tab.
+    expect(input).toHaveValue('');
+    expect(input).not.toHaveFocus();
+  });
+});
+
+describe('Composer history recall (spec 0006 AC-5)', () => {
+  const HISTORY = ['newest question', 'older question', 'oldest question'];
+
+  it('ArrowUp walks previous messages newest-first; ArrowDown walks back and restores the draft', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'work in progress');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('older question');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('oldest question');
+    // Bounded at the oldest entry.
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('oldest question');
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('older question');
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('newest question');
+    // Past the newest: the stashed in-progress draft is restored.
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('work in progress');
+  });
+
+  it('Escape restores the stashed draft immediately', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'my draft');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.keyboard('{Escape}');
+    expect(input).toHaveValue('my draft');
+  });
+
+  it('is multiline-safe: ArrowUp only recalls from the first line', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message') as HTMLTextAreaElement;
+    await user.type(input, 'line one{Shift>}{Enter}{/Shift}line two');
+    // Caret is at the end (second line): ArrowUp is ordinary caret movement.
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('line one\nline two');
+    // Move the caret to the first line: now ArrowUp recalls.
+    input.setSelectionRange(2, 2);
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+  });
+
+  it('editing a recalled entry ends navigation (the edit is the new draft)', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.click(input);
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.type(input, ' plus edits');
+    // Down no longer walks history — navigation ended on edit.
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('newest question plus edits');
+  });
+});

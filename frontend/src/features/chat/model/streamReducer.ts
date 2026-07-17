@@ -17,9 +17,12 @@
  * reconnect) so a redelivered token never double-appends.
  */
 import type {
+  ChatAskUser,
   ChatCitation,
   ChatDoneData,
   ChatStartData,
+  ChatStep,
+  ChatSuggestions,
   ChatToolCall,
   ChatToolResult,
   CodeOutput,
@@ -88,6 +91,16 @@ export interface StreamState {
   tools: ToolActivity[];
   /** Sandbox code runs on this stream, in first-seen order (the inspector, #232). */
   codeRuns: CodeRunActivity[];
+  /**
+   * Live run-phase steps (spec 0006 #429), upserted by `key` in first-seen
+   * order — a re-`started` key (think, once per turn) updates its row in place.
+   * Transient: exists only while the stream state does.
+   */
+  steps: ChatStep[];
+  /** The clarifying question this turn ended with (event:ask_user), if any. */
+  askUser: ChatAskUser | null;
+  /** Follow-up suggestions for the settled answer (event:suggestions), if any. */
+  suggestions: ChatSuggestions | null;
   /** start.data, once the stream opens. */
   start: ChatStartData | null;
   /** done.data, on terminal success. */
@@ -104,6 +117,9 @@ export const initialStreamState: StreamState = {
   citations: [],
   tools: [],
   codeRuns: [],
+  steps: [],
+  askUser: null,
+  suggestions: null,
   start: null,
   done: null,
   problem: null,
@@ -229,6 +245,40 @@ function applyCodeResult(runs: CodeRunActivity[], res: CodeResult): CodeRunActiv
   return runs.map((r) => (r.runId === res.runId ? finalize(r) : r));
 }
 
+function asStep(data: unknown): ChatStep | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const s = data as Record<string, unknown>;
+  if (typeof s.key !== 'string' || typeof s.label !== 'string') return null;
+  if (s.state !== 'started' && s.state !== 'completed') return null;
+  return data as ChatStep;
+}
+
+function asAskUser(data: unknown): ChatAskUser | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const a = data as Record<string, unknown>;
+  if (typeof a.messageId !== 'string' || typeof a.question !== 'string') return null;
+  if (!Array.isArray(a.options) || a.options.length === 0) return null;
+  const labelled = a.options.every(
+    (o) => typeof o === 'object' && o !== null && typeof (o as { label?: unknown }).label === 'string',
+  );
+  return labelled ? (data as ChatAskUser) : null;
+}
+
+function asSuggestions(data: unknown): ChatSuggestions | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const s = data as Record<string, unknown>;
+  if (typeof s.messageId !== 'string' || !Array.isArray(s.suggestions)) return null;
+  const items = s.suggestions.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+  if (items.length === 0) return null;
+  return { messageId: s.messageId, suggestions: items };
+}
+
+/** Upsert one step by `key` (first-seen order; a restarted key updates in place). */
+function applyStep(steps: ChatStep[], step: ChatStep): ChatStep[] {
+  if (!steps.some((s) => s.key === step.key)) return [...steps, step];
+  return steps.map((s) => (s.key === step.key ? step : s));
+}
+
 function deltaText(data: unknown): string | null {
   if (typeof data !== 'object' || data === null) return null;
   const d = data as Record<string, unknown>;
@@ -306,6 +356,22 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
         const res = asCodeResult(envelope.data);
         if (!res) return base;
         return { ...base, codeRuns: applyCodeResult(base.codeRuns, res) };
+      }
+      if (envelope.name === 'step') {
+        const step = asStep(envelope.data);
+        if (!step) return base;
+        return { ...base, steps: applyStep(base.steps, step) };
+      }
+      if (envelope.name === 'ask_user') {
+        const ask = asAskUser(envelope.data);
+        if (!ask) return base;
+        // At most one per stream (spec 0006); a replayed event just re-sets it.
+        return { ...base, askUser: ask };
+      }
+      if (envelope.name === 'suggestions') {
+        const suggestions = asSuggestions(envelope.data);
+        if (!suggestions) return base;
+        return { ...base, suggestions };
       }
       // Unknown side-band event — ignore but keep the stream healthy.
       return base;
