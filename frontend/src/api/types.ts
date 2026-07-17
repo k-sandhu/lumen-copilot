@@ -374,6 +374,49 @@ export interface SendMessageRequest {
   model?: string;
   /** Restrict retrieval to these collections; omitted = all permitted docs. */
   collection_ids?: string[];
+  /**
+   * Pinned documents (spec 0007 #432): passage retrieval for this answer
+   * narrows to these ids (never widens — the allow-set still applies inside
+   * retrieval). Max 20; omitted/empty = unchanged behavior.
+   */
+  document_ids?: string[];
+}
+
+/** Summed per-answer llm_usage for one session (spec 0007 #432). */
+export interface SessionUsageTotals {
+  /** How many produced answers the sums cover (0 before the first). */
+  answers: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_prompt_tokens: number;
+  cache_write_tokens: number;
+}
+
+/** The most recent answer's usage record (spec 0007 #432). */
+export interface SessionUsageLast {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_prompt_tokens: number;
+  cache_write_tokens: number;
+}
+
+/**
+ * GET /chat/sessions/{id}/usage — the conversation context meter's data
+ * (spec 0007 #432). Window utilization = last.prompt_tokens /
+ * input_budget_tokens; `window_known=false` means the model was absent from
+ * the model map and a conservative fallback window was used.
+ */
+export interface SessionUsage {
+  /** The session's model id the budget was computed for. */
+  model: string;
+  totals: SessionUsageTotals;
+  /** Absent until the session has produced at least one answer. */
+  last?: SessionUsageLast;
+  /** Window − output headroom − safety margin (the assembler's own formula). */
+  input_budget_tokens: number;
+  window_known: boolean;
 }
 
 /** 202 from POST /chat/sessions/{id}/messages. */

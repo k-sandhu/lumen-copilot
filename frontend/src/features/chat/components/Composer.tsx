@@ -21,14 +21,18 @@
  *   restores the draft immediately. Editing a recalled entry ends navigation
  *   (the edit becomes the new draft, as in a shell).
  */
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { ChatModelInfo, KnowledgeMode } from '@/api';
 import { Icon } from '@/ui';
+import { useMentionSuggestions } from '../model/queries';
+import { mentionQueryOf, type PinnedDocument } from '../model/composerHelpers';
 import { ModelPicker } from './ModelPicker';
 import {
   KnowledgeModeControl,
   type ModeAvailability,
 } from './KnowledgeModeControl';
+
+export type { PinnedDocument } from '../model/composerHelpers';
 
 export interface ComposerProps {
   models: ChatModelInfo[];
@@ -66,6 +70,12 @@ export interface ComposerProps {
    * conversation by the parent.
    */
   historyEntries?: readonly string[];
+  /** Documents pinned into the next answer's retrieval scope (spec 0007 #432). */
+  pinnedDocuments?: readonly PinnedDocument[];
+  /** Pin a document chosen from the @-mention picker. */
+  onPinDocument?: (doc: PinnedDocument) => void;
+  /** Remove a pinned document (its pill's ×). */
+  onUnpinDocument?: (id: string) => void;
 }
 
 export function Composer({
@@ -85,6 +95,9 @@ export function Composer({
   modeAvailability,
   ghostSuggestion = null,
   historyEntries = [],
+  pinnedDocuments = [],
+  onPinDocument,
+  onUnpinDocument,
 }: ComposerProps) {
   const [draft, setDraft] = useState('');
   // Bash-style history recall (spec 0006 AC-5): the index into historyEntries
@@ -93,6 +106,45 @@ export function Composer({
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const stashRef = useRef('');
   const canSend = draft.trim().length > 0 && !busy && !disabled;
+
+  // @-mention document picker (spec 0007 #432, AC-4): active while the draft
+  // ends in an @token; suggestions come from the permission-trimmed suggest
+  // surface, filtered to documents and to not-already-pinned ids.
+  const mentionQuery = onPinDocument ? mentionQueryOf(draft) : null;
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const mentionActive = mentionQuery !== null && !mentionDismissed;
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const suggestions = useMentionSuggestions(mentionActive ? mentionQuery : '');
+  const mentionOptions = useMemo(() => {
+    if (!mentionActive) return [];
+    const pinned = new Set(pinnedDocuments.map((d) => d.id));
+    const seen = new Set<string>();
+    const out: PinnedDocument[] = [];
+    for (const s of suggestions.data?.suggestions ?? []) {
+      if (s.kind !== 'document' || !s.document_id) continue;
+      if (pinned.has(s.document_id) || seen.has(s.document_id)) continue;
+      seen.add(s.document_id);
+      out.push({ id: s.document_id, name: s.text });
+    }
+    return out;
+  }, [mentionActive, suggestions.data, pinnedDocuments]);
+
+  // Keep the highlighted row valid as options change; re-arm dismissal per token.
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mentionQuery]);
+  useEffect(() => {
+    if (mentionQuery === null) setMentionDismissed(false);
+  }, [mentionQuery]);
+
+  function pinMention(option: PinnedDocument) {
+    if (!onPinDocument) return;
+    onPinDocument(option);
+    // Replace the @token (query included) with nothing — the pill carries it.
+    setDraft((current) => current.replace(/(^|\s)@[^\s@]*$/, '$1').trimEnd());
+    resetHistoryNav();
+  }
+
   // The ghost renders ONLY over an empty, enabled composer — so it can never
   // cover or clobber user text (spec 0006 AC-4).
   const ghost = draft === '' && !disabled && ghostSuggestion ? ghostSuggestion : null;
@@ -127,6 +179,31 @@ export function Composer({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // The @-mention dropdown owns the keys while open (spec 0007 AC-4):
+    // arrows move the highlight, Enter picks, Escape dismisses for this token.
+    if (mentionActive && mentionOptions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex((i) => Math.min(i + 1, mentionOptions.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const option = mentionOptions[Math.min(mentionIndex, mentionOptions.length - 1)];
+        if (option) pinMention(option);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionDismissed(true);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (canSend) sendDraft();
@@ -192,6 +269,28 @@ export function Composer({
           availability={modeAvailability}
           disabled={disabled || streaming}
         />
+        {/* Pinned-document pills (spec 0007 #432): sticky retrieval scope for
+            subsequent sends; each × unpins. */}
+        {pinnedDocuments.length > 0 && (
+          <span className="lc-pins" role="group" aria-label="Pinned documents">
+            {pinnedDocuments.map((doc) => (
+              <span key={doc.id} className="lc-pin" title={doc.name}>
+                <Icon name="at-sign" />
+                <span className="lc-pin__name">{doc.name}</span>
+                {onUnpinDocument && (
+                  <button
+                    type="button"
+                    className="lc-pin__remove"
+                    aria-label={`Unpin ${doc.name}`}
+                    onClick={() => onUnpinDocument(doc.id)}
+                  >
+                    <Icon name="x" />
+                  </button>
+                )}
+              </span>
+            ))}
+          </span>
+        )}
       </div>
 
       <div className="lc-composer__box">
@@ -212,6 +311,35 @@ export function Composer({
             aria-label="Message"
             className="lc-composer__input"
           />
+          {/* @-mention document picker (spec 0007 AC-4): a listbox above the
+              input while the draft ends in an @token. Options are permission-
+              trimmed by the suggest surface; failure degrades to "no matches". */}
+          {mentionActive && (
+            <div className="lc-mention" role="listbox" aria-label="Pin a document">
+              {suggestions.isLoading && mentionOptions.length === 0 ? (
+                <p className="lc-mention__status">Searching documents…</p>
+              ) : mentionOptions.length === 0 ? (
+                <p className="lc-mention__status">
+                  {mentionQuery ? 'No matching documents.' : 'Type to search your documents.'}
+                </p>
+              ) : (
+                mentionOptions.map((option, index) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionIndex}
+                    className={`lc-mention__opt${index === mentionIndex ? ' lc-mention__opt--active' : ''}`}
+                    onMouseEnter={() => setMentionIndex(index)}
+                    onClick={() => pinMention(option)}
+                  >
+                    <Icon name="file-text" />
+                    <span className="lc-mention__name">{option.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
           {/* Ghost prefill (spec 0006 AC-4): visually inside the input, but
               inert — the textarea stays fully typable beneath it. The accept
               hint is the one clickable piece. */}

@@ -3,8 +3,9 @@
  * Send→Stop while streaming (cancellable), disabled empty state. The model
  * picker + knowledge-mode control (#221) are embedded.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { screen, within } from '@testing-library/react';
+import { renderWithQuery } from '@/test/renderWithQuery';
 import userEvent from '@testing-library/user-event';
 import { Composer } from './Composer';
 import type { ChatModelInfo, KnowledgeMode } from '@/api';
@@ -20,7 +21,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const onStop = vi.fn();
   const onModelChange = vi.fn();
   const onModesChange = vi.fn();
-  render(
+  renderWithQuery(
     <Composer
       models={MODELS}
       model="m1"
@@ -239,5 +240,86 @@ describe('Composer history recall (spec 0006 AC-5)', () => {
     // Down no longer walks history — navigation ended on edit.
     await user.keyboard('{ArrowDown}');
     expect(input).toHaveValue('newest question plus edits');
+  });
+});
+
+// --- Spec 0007 (#432): @-mention document pinning + pills --------------------
+
+describe('Composer @-mention picker (spec 0007 AC-4)', () => {
+  function mockSuggest(docs: { id: string; text: string }[]): void {
+    // A NEW Response per call: bodies are single-use and the picker refetches
+    // per keystroke.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            suggestions: docs.map((d) => ({
+              kind: 'document',
+              text: d.text,
+              document_id: d.id,
+            })),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('opens on @, pins via Enter, and strips the token from the draft', async () => {
+    mockSuggest([
+      { id: 'doc-1', text: 'Budget FY26.xlsx' },
+      { id: 'doc-2', text: 'Budget notes.md' },
+    ]);
+    const onPinDocument = vi.fn();
+    const { onSend } = setup({ onPinDocument, pinnedDocuments: [] });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'Summarize @bud');
+    const listbox = await screen.findByRole('listbox', { name: 'Pin a document' });
+    expect(listbox).toBeInTheDocument();
+    await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    // Arrow to the second option, Enter pins it (Enter must NOT send).
+    await user.keyboard('{ArrowDown}{Enter}');
+    expect(onPinDocument).toHaveBeenCalledWith({ id: 'doc-2', name: 'Budget notes.md' });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue('Summarize');
+  });
+
+  it('Escape dismisses the picker for the current token', async () => {
+    mockSuggest([{ id: 'doc-1', text: 'Budget FY26.xlsx' }]);
+    setup({ onPinDocument: vi.fn() });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@bud');
+    await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox', { name: 'Pin a document' })).not.toBeInTheDocument();
+  });
+
+  it('renders pinned pills and unpins via ×', async () => {
+    const onUnpinDocument = vi.fn();
+    setup({
+      pinnedDocuments: [{ id: 'doc-1', name: 'Budget FY26.xlsx' }],
+      onPinDocument: vi.fn(),
+      onUnpinDocument,
+    });
+    const user = userEvent.setup();
+    expect(screen.getByRole('group', { name: 'Pinned documents' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Unpin Budget FY26.xlsx' }));
+    expect(onUnpinDocument).toHaveBeenCalledWith('doc-1');
+  });
+
+  it('already-pinned documents are excluded from the picker', async () => {
+    mockSuggest([{ id: 'doc-1', text: 'Budget FY26.xlsx' }]);
+    setup({
+      pinnedDocuments: [{ id: 'doc-1', name: 'Budget FY26.xlsx' }],
+      onPinDocument: vi.fn(),
+      onUnpinDocument: vi.fn(),
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Message'), '@bud');
+    expect(await screen.findByText('No matching documents.')).toBeInTheDocument();
   });
 });
