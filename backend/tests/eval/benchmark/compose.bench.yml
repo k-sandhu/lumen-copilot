@@ -1,0 +1,58 @@
+# Benchmark-stack compose overlay (#430) — model + endpoint config only.
+#
+# Runs the live RAG benchmark against an ISOLATED compose project so the primary
+# dev stack (471xx, project `lumen-copilot`) keeps its data and models untouched
+# (the parallel-agent isolation pattern, ADR-0005 / WORK_TRACKING).
+#
+# Bring-up (from the repo root; bench.env supplies the 472xx ports):
+#
+#   docker compose -f docker-compose.yml -f backend/tests/eval/benchmark/compose.bench.yml \
+#     --env-file backend/tests/eval/benchmark/bench.env -p lumen-bench \
+#     up -d --build backend worker
+#
+#   # one-time on the fresh bench DB: widen the pgvector column to this
+#   # embedding model's 2048 dims (migration 0002 pins the 1024 default; its
+#   # docstring defers a dim change to a follow-up migration — this is that
+#   # change, applied bench-locally):
+#   docker compose -p lumen-bench exec postgres \
+#     psql -U lumen -d lumen -c "ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(2048);"
+#
+#   # seed the bench login:
+#   docker compose -p lumen-bench exec backend \
+#     python -m app.auth.seed --email bench@lumen.test --password lumen-bench-local --tenant Bench
+#
+# Models (#430): generation tencent/hy3:free, embeddings
+# nvidia/llama-nemotron-embed-vl-1b-v2:free (2048-dim — measured against the
+# OpenRouter embeddings endpoint), both via OpenRouter. OPENROUTER_API_KEY
+# passes through from the host environment as in the base compose file.
+
+services:
+  backend:
+    environment:
+      LLM_MODEL: openrouter/tencent/hy3:free
+      LLM_EMBEDDING_MODEL: openai/nvidia/llama-nemotron-embed-vl-1b-v2:free
+      LLM_EMBEDDING_DIMENSIONS: "2048"
+      CHAT_MODEL_REGISTRY: '[{"id":"openrouter/tencent/hy3:free","label":"Tencent HY3 (free)","provider":"tencent","tier":"oss","is_default":true,"description":"Benchmark model (#430)"}]'
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:47284
+  worker:
+    # Free-tier OpenRouter models rate-limit aggressively (429s under the default
+    # parallel ingest). Two slow workers + bigger embed batches (fewer calls) + a
+    # long exponential retry ladder (15s * 2**n, 8 attempts ≈ 30+ min of patience)
+    # let the whole ~19 MB corpus embed through a throttled free endpoint.
+    command:
+      [
+        "celery",
+        "-A",
+        "app.tasks.celery_app",
+        "worker",
+        "--loglevel=info",
+        "--concurrency=2",
+      ]
+    environment:
+      LLM_MODEL: openrouter/tencent/hy3:free
+      LLM_EMBEDDING_MODEL: openai/nvidia/llama-nemotron-embed-vl-1b-v2:free
+      LLM_EMBEDDING_DIMENSIONS: "2048"
+      INGESTION_EMBED_BATCH_SIZE: "128"
+      INGESTION_MAX_RETRIES: "8"
+      INGESTION_RETRY_BACKOFF_SECONDS: "15"
+      CHAT_MODEL_REGISTRY: '[{"id":"openrouter/tencent/hy3:free","label":"Tencent HY3 (free)","provider":"tencent","tier":"oss","is_default":true,"description":"Benchmark model (#430)"}]'

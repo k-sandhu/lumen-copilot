@@ -76,7 +76,7 @@ def offline_findings() -> list[Finding]:
     try:
         questions = load_questions()
     except (ValueError, FileNotFoundError) as exc:
-        findings.append(Finding("bank", "<bank>", f"questions.jsonl unreadable: {exc}"))
+        findings.append(Finding("bank", "<bank>", f"questions.csv unreadable: {exc}"))
         return findings
     for bank_issue in bank_issues(questions):
         findings.append(Finding("bank", bank_issue.qid, bank_issue.problem))

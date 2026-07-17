@@ -3,7 +3,10 @@
 A reproducible benchmark for measuring Lumen Copilot's RAG quality over **real
 files**, extending the tiny in-code golden set (`tests/eval/golden.py`, #29)
 with the scale, formats, and messiness the synthetic set cannot represent.
-Tracked by [#420](https://github.com/k-sandhu/lumen-copilot/issues/420).
+Tracked by [#420](https://github.com/k-sandhu/lumen-copilot/issues/420) and
+extended by [#430](https://github.com/k-sandhu/lumen-copilot/issues/430)
+(evidence-based question taxonomy, industry corpus slice, CSV bank, live
+accuracy runner).
 
 ## What's here
 
@@ -11,12 +14,15 @@ Tracked by [#420](https://github.com/k-sandhu/lumen-copilot/issues/420).
 |---|---|---|
 | Corpus manifest (URLs, licenses, expectations) | `manifest.py` | yes |
 | Checksum pins (sha256 + size per file) | `checksums.json` | yes (machine-written) |
-| Question bank | `questions.jsonl` | yes |
+| Question bank (Excel-friendly CSV) | `questions.csv` | yes |
 | Download CLI | `download.py` | yes |
 | Extraction CLI (real ingestion parsers) | `extract.py` | yes |
 | Verification CLI | `verify.py` | yes |
+| Live accuracy runner (HTTP, end-to-end) | `run_live.py` | yes |
+| Isolated bench-stack config | `compose.bench.yml` + `bench.env` | yes |
 | Executable guarantees | `../test_benchmark_dataset.py` | yes |
 | The corpus bytes | `corpus/` | **no — git-ignored, downloaded on demand** |
+| Run reports | `corpus/_results/` | no — git-ignored |
 
 ## Quick start
 
@@ -74,11 +80,39 @@ any file larger than `MAX_UPLOAD_BYTES`.
 
 ## The question bank
 
-`questions.jsonl` — 71 questions, one JSON object per line (JSONL for
-portability into external eval tooling): 35 single-hop, 5 multi-hop,
-6 aggregation, 6 keyword, 5 distractor, 2 multilingual, and 12 unanswerable
-(~17% — inside the enforced 10–25% band). Each category probes a different
-failure mode:
+`questions.csv` — 101 questions in a wide, Excel-friendly CSV (UTF-8 with BOM;
+open it directly in a spreadsheet): 41 single-hop, 5 multi-hop, 6 aggregation,
+6 keyword, 5 distractor, 2 multilingual, 4 condition, 3 set, 3 comparison,
+3 post-processing, 3 false-premise, 3 procedural, 3 navigation, and 14
+unanswerable (~14% — inside the enforced 10–25% band).
+
+**Schema** (one row per question): `qid, category, difficulty, answerable
+(yes/no), language, question, gold_answer, answer_facts, source_files,
+evidence1_file/locator/quote, evidence2_file/locator/quote, distractor_files,
+absence_probes, notes`. List cells are `|`-separated; up to two evidence spans
+per row; quotes keep their real newlines inside quoted cells.
+
+### The evidence base behind the categories
+
+The category set follows published evidence about what users actually ask
+systems like this:
+
+- **[CRAG](https://arxiv.org/abs/2406.04744)** (Meta, NeurIPS 2024) built its
+  benchmark from real user queries and found eight recurring types: simple,
+  simple-with-**condition**, **set**, **comparison**, aggregation, multi-hop,
+  **post-processing**-heavy, and **false-premise** questions. All eight are
+  represented here.
+- **[Benchmarking Deep Search over Heterogeneous Enterprise Data](https://arxiv.org/abs/2506.23139)**
+  (Salesforce, 2025): enterprise questions require multi-hop reasoning across
+  heterogeneous business artifacts and must include **unanswerable** queries.
+- Practitioner query-intent reports ([Moveworks](https://www.moveworks.com/us/en/resources/blog/what-is-enterprise-search),
+  [Slack](https://slack.com/blog/productivity/enterprise-search),
+  [Kore.ai](https://www.kore.ai/blog/enterprise-search-use-cases)): the dominant
+  workplace intents are **how-do-I** (→ `procedural`), **policy lookup**
+  (→ `single_hop`/`condition`), and **find-the-artifact** (→ `navigation`).
+  People-search is out of scope for a document-only corpus.
+- In-repo: `docs/product/user-stories.md` phrases a dozen stories as exactly
+  these intents.
 
 | Category | Probes | Scored on |
 |---|---|---|
@@ -88,6 +122,13 @@ failure mode:
 | `keyword` | rare-token lookup (CVE ids, option names, codes) — lexical retrieval must win | recall |
 | `distractor` | a named near-miss document exists; the right source must be discriminated | citation correctness |
 | `multilingual` | evidence lives in the German document | recall across languages |
+| `condition` | the answer depends on a stated condition (one table row/branch) | answer facts |
+| `set` | list answers (pillars, categories, token sets) | all facts present |
+| `comparison` | two named things compared on one attribute | both operands cited |
+| `post_processing` | computing over retrieved values (differences, growth) | operand facts |
+| `false_premise` | the question embeds a wrong assumption; sources must win over the premise | correction facts |
+| `procedural` | "how do I…" workplace intent | answer facts |
+| `navigation` | "which document covers…" artifact-finding | self-identifying evidence |
 | `unanswerable` | nothing in the corpus answers it | honest zero-citation refusal (AC-3) |
 
 Every question carries: a concise `gold_answer`; `answer_facts` (tokens an
@@ -158,6 +199,34 @@ For **manual end-to-end testing**, upload files from `corpus/` through the UI
 (they are real uploads exercising the real ingest path, including the two
 that must be rejected) and spot-check questions from the bank in chat — every
 question's `evidence.locator` tells a human where the answer lives.
+
+## Live accuracy run (#430)
+
+`run_live.py` drives the REAL stack over HTTP end-to-end — login, uploads
+(including the two files that must be rejected 415), Celery ingestion, then
+per-question `/search` retrieval scoring and chat-API answer scoring (fact
+recall, gold-file citations, refusal behaviour on unanswerables). Reports land
+under `corpus/_results/<run-id>/` (per-question CSV + summary markdown/JSON).
+
+Run it against an **isolated** compose project so the primary dev stack keeps
+its data and models (`compose.bench.yml` + `bench.env`, 472xx ports, project
+`lumen-bench` — bring-up commands in the overlay's header). The bench overlay
+pins the #430 models: generation `tencent/hy3:free`, embeddings
+`nvidia/llama-nemotron-embed-vl-1b-v2:free` (2048-dim → the overlay's header
+documents the one-time bench-local `vector(2048)` column change; pgvector's
+HNSW index caps at 2000 dims and is dropped there — retrieval reads OpenSearch,
+ADR-0010, so only transitional storage is affected).
+
+Free-tier `:free` models rate-limit hard: the overlay runs ingestion at
+concurrency 2 with large embed batches and a long retry ladder. Expect the
+full corpus to take tens of minutes to embed and the 101-question chat pass
+about an hour.
+
+```powershell
+# after bring-up + seed (see compose.bench.yml header), from backend/:
+uv run --extra dev python -m tests.eval.benchmark.run_live `
+  --api http://localhost:47281 --email bench@lumen.test --password lumen-bench-local
+```
 
 ## Maintenance
 
