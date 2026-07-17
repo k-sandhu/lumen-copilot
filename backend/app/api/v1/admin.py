@@ -165,6 +165,8 @@ class TenantSettingsResponse(BaseModel):
 
     max_tool_turns: int
     max_tool_turns_is_default: bool
+    # Ordered turn-failover model list (ADR-0016 §4, #413); empty = none.
+    fallback_models: list[str] = []
 
 
 class TenantSettingsUpdateRequest(BaseModel):
@@ -173,11 +175,17 @@ class TenantSettingsUpdateRequest(BaseModel):
     ``max_tool_turns`` is required so the intent is explicit: an int (1–50) sets
     the per-tenant override; ``null`` clears it so the system default applies. An
     out-of-band value is rejected here as a **422** (INV-8) before the service.
+
+    ``fallback_models`` (#413) is PATCH-shaped so existing clients keep working:
+    omitted/``null`` leaves the stored list unchanged; ``[]`` clears it; a list
+    (≤ 3 entries) replaces it — the service validates every id against the same
+    allow-list the chat send path uses and 422s on an unknown one.
     """
 
     model_config = {"extra": "forbid"}
 
     max_tool_turns: int | None = Field(ge=1, le=50)
+    fallback_models: list[str] | None = Field(default=None, max_length=3)
 
 
 class ToolPolicyEntryResponse(BaseModel):
@@ -384,6 +392,7 @@ def _to_tenant_settings(view: TenantSettingsView) -> TenantSettingsResponse:
     return TenantSettingsResponse(
         max_tool_turns=view.max_tool_turns,
         max_tool_turns_is_default=view.max_tool_turns_is_default,
+        fallback_models=list(view.fallback_models),
     )
 
 
@@ -541,6 +550,7 @@ async def update_tenant_settings(
     service = AdminService(session, tenant_id=tenant_id, settings=settings)
     view = await service.update_tenant_settings(
         max_tool_turns=body.max_tool_turns,
+        fallback_models=body.fallback_models,
         actor_id=principal.user_id,
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",

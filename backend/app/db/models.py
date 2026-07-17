@@ -114,6 +114,13 @@ class Tenant(TimestampMixin, Base):
     max_tool_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Per-tenant application logo (object-store key); NULL ⇒ the default brand mark.
     logo_key: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Ordered fallback model ids for turn-level failover (ADR-0016 §4, #413):
+    # when the answer's model exhausts its retry budget on transient provider
+    # faults, the runtime fails over down this list. NULL/empty ⇒ no fallback
+    # (fail exactly as before #413). Admin-configurable; each id is validated
+    # like a send-path model id at write time (the DB stores what admin PUT
+    # accepted — a JSON list of strings).
+    fallback_models: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
 
 
 class User(TenantScopedMixin, TimestampMixin, Base):
@@ -1143,6 +1150,12 @@ class LlmUsage(TenantScopedMixin, Base):
         ForeignKey("chat_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The answer this scope belongs to (#413 / #440 NEW-1): the pre-minted
+    # assistant message id, set on EVERY route scope of an answer — including
+    # message-less failed/superseded scopes and error-path salvage rows (which
+    # may have no message row, hence no FK). Groups (answer, route-scope)
+    # durably so the ledger can reconstruct multi-route answers.
+    answer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     # The assistant message the answer persisted as. An ORDINARY immediate FK
     # (#419 review): unlike ``tool_invocations`` (written DURING the loop,
     # before the message insert), the usage row is recorded strictly AFTER

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
@@ -50,6 +51,62 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable
 
 
+class LlmProviderError(DependencyError):
+    """A provider fault, classified for turn-level resilience (ADR-0016 §4, #413).
+
+    The gateway is the ONLY reader of vendor exceptions, so retryability is
+    decided here, once, and carried as typed state — the runtime never inspects
+    a vendor error. ``retryable`` is True for transient weather (timeout,
+    connection fault, 429 rate limit, provider 5xx) where a short backoff + a
+    bounded retry is sound; False for faults a retry cannot fix (auth /
+    permission / configuration — and anything unexpected, conservatively:
+    hammering an unknown failure is worse than failing fast).
+    ``retry_after_seconds`` is the provider's ``Retry-After`` hint when one was
+    present on a 429 (parsed defensively, capped by the caller) — ``None``
+    otherwise. Status/code stay exactly the pre-#413 ``DependencyError``
+    surface, so every existing handler and the terminal envelope are unchanged.
+    """
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: str = "llm_unavailable",
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(detail, code=code)
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _retry_after_hint(exc: Exception) -> float | None:
+    """The 429's ``Retry-After`` seconds, if the vendor response carried one.
+
+    Parsed defensively (the header is attacker-adjacent input): only a plain
+    non-negative number is honored; date-form and garbage values are ignored.
+    The CAP is applied by the retry loop, not here — the gateway only reports.
+    Never touches the exception MESSAGE (which may carry the api_key).
+    """
+    try:
+        # The WHOLE extraction sits under one broad guard: ``response`` /
+        # ``headers`` may be hostile property objects, ``get`` may raise, and
+        # the value's ``__str__`` may raise — none of that may escape this
+        # boundary (a 429 must stay the typed retryable 503, never an opaque
+        # 500). Only finite, non-negative numerics are honored.
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        raw = headers.get("retry-after")
+        if raw is None:
+            return None
+        seconds = float(str(raw).strip())
+    except Exception:  # noqa: BLE001 — attacker-adjacent input; contain everything
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
 def _map_vendor_error(exc: Exception) -> AppError:
     """Map a LiteLLM/provider exception to a typed :class:`AppError`.
 
@@ -59,8 +116,11 @@ def _map_vendor_error(exc: Exception) -> AppError:
     * caller-correctable request faults (bad request, unknown model, oversize
       context, unsupported params) -> :class:`ValidationError` (422);
     * everything else — auth/permission, rate limit, timeout, connection,
-      provider 5xx — is a downstream-dependency fault -> :class:`DependencyError`
-      (503).
+      provider 5xx — is a downstream-dependency fault -> :class:`LlmProviderError`
+      (a 503 :class:`DependencyError`), classified retryable/terminal for the
+      #413 turn-resilience loop (ADR-0016 §4): timeout / connection / 429 /
+      provider 5xx are retryable; auth / permission / config are terminal;
+      anything unexpected is terminal (conservative).
 
     Only the vendor exception's **class name** is carried into the mapped
     error's detail — never its message, which LiteLLM is known to populate with
@@ -71,6 +131,7 @@ def _map_vendor_error(exc: Exception) -> AppError:
     import litellm.exceptions as le  # lazy: keep litellm import inside llm/
 
     vendor = type(exc).__name__
+    detail = f"The model provider is unavailable ({vendor})."
 
     # Request-shaped faults the caller could fix -> 422. ContextWindowExceeded
     # and UnsupportedParams subclass BadRequestError, so the base catches them.
@@ -80,19 +141,23 @@ def _map_vendor_error(exc: Exception) -> AppError:
             code="llm_bad_request",
         )
 
-    # Auth/permission, rate-limit, timeout, connection, and provider 5xx are all
-    # "the dependency is unavailable / not usable right now" -> 503.
-    if isinstance(exc, le.APIError):
-        return DependencyError(
-            f"The model provider is unavailable ({vendor}).",
-            code="llm_unavailable",
+    # Transient provider weather — a bounded retry is sound (ADR-0016 §4).
+    if isinstance(exc, le.RateLimitError):
+        return LlmProviderError(
+            detail, retryable=True, retry_after_seconds=_retry_after_hint(exc)
         )
+    if isinstance(exc, le.Timeout | le.APIConnectionError):
+        return LlmProviderError(detail, retryable=True)
+    if isinstance(exc, le.InternalServerError | le.ServiceUnavailableError):
+        return LlmProviderError(detail, retryable=True)
 
-    # Anything else from the call path (unexpected) — stay opaque, do not leak.
-    return DependencyError(
-        f"The model provider is unavailable ({vendor}).",
-        code="llm_unavailable",
-    )
+    # Auth / permission / anything else API-shaped: a retry cannot fix it.
+    if isinstance(exc, le.APIError):
+        return LlmProviderError(detail, retryable=False)
+
+    # Anything else from the call path (unexpected) — stay opaque, do not leak,
+    # and do not retry what we cannot classify.
+    return LlmProviderError(detail, retryable=False)
 
 
 # --- query-embedding cache (#395) -------------------------------------------

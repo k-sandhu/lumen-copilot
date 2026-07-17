@@ -3541,13 +3541,28 @@ components:
         max_tool_turns_is_default:
           type: boolean
           description: True when no per-tenant override is set and the system default is in force.
+        fallback_models:
+          type: array
+          items: { type: string }
+          maxItems: 3
+          description: >
+            The tenant's ordered turn-failover model list (ADR-0016 §4, #413):
+            when an answer's model exhausts its bounded retry budget on
+            transient provider faults, the runtime fails over down this list.
+            Empty = no fallback configured (an exhausted answer errors, the
+            pre-#413 behavior).
+      # fallback_models is additive-optional in responses (older servers omit it).
 
     TenantSettingsUpdate:
       type: object
       additionalProperties: false
       description: >
         Set or clear the per-tenant chat tool-turn budget override (issue #148).
-        `max_tool_turns` is required so the intent is explicit.
+        `max_tool_turns` is required so the intent is explicit. `fallback_models`
+        (#413) is PATCH-shaped: omitted/null leaves the stored list unchanged
+        (pre-#413 clients keep working); [] clears it; a list (each id validated
+        against the same allow-list the chat send path uses — the config
+        registry or the tenant's enabled provider models) replaces it.
       required: [max_tool_turns]
       properties:
         max_tool_turns:
@@ -3558,6 +3573,14 @@ components:
             An integer in 1–50 sets the per-tenant override; `null` clears it so
             the system default applies again (the system default is configured
             server-side, `CHAT_MAX_TOOL_TURNS`).
+        fallback_models:
+          type: [array, "null"]
+          items: { type: string }
+          maxItems: 3
+          description: >
+            Ordered turn-failover model ids (#413). Omitted/null = unchanged;
+            [] = clear; at most 3 entries; an unknown/unavailable id is a 422
+            and nothing is written.
 
     # --- Per-tenant application logo (admin branding) -----------------------
     TenantBranding:

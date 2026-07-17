@@ -1223,8 +1223,17 @@ async def test_session_usage_budget_follows_last_answer_model(
     session_id = created.json()["id"]
     default_model = created.json()["model"]
 
-    # A per-turn override recorded its own model on the usage row.
+    # A per-turn override recorded its own model on the usage row. Since #413
+    # the "last answer" read considers only MESSAGE-BEARING rows (a failed
+    # route scope must never describe the most recent answer), so the seeded
+    # row is attached to a real assistant message like production writes are.
     async with sessionmaker() as db:
+        from app.db.repositories import MessageRepository
+        from app.domain.entities import MessageRole
+
+        msg = await MessageRepository(db, seeded.tenant_a).add(
+            session_id=uuid.UUID(session_id), role=MessageRole.ASSISTANT, content="a"
+        )
         await LlmUsageRepository(db, seeded.tenant_a).record(
             model="gpt-4o",
             prompt_tokens=100,
@@ -1232,6 +1241,8 @@ async def test_session_usage_budget_follows_last_answer_model(
             total_tokens=110,
             context_prompt_tokens=80,
             session_id=uuid.UUID(session_id),
+            answer_id=msg.id,
+            message_id=msg.id,
         )
         await db.commit()
 

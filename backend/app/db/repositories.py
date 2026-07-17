@@ -122,6 +122,14 @@ def _to_tenant(row: models.Tenant) -> Tenant:
         updated_at=row.updated_at,
         max_tool_turns=row.max_tool_turns,
         logo_key=row.logo_key,
+        # Container-shape guard (#440 NEW-4): only a JSON LIST is config; a
+        # scalar/object smuggled into the column must neither crash tenant
+        # loading (500ing every answer) nor be reinterpreted as candidates.
+        fallback_models=(
+            list(row.fallback_models)
+            if isinstance(row.fallback_models, list) and row.fallback_models
+            else None
+        ),
     )
 
 
@@ -755,6 +763,27 @@ class TenantRepository:
         if row is None:
             return None
         row.max_tool_turns = max_tool_turns
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_tenant(row)
+
+    async def set_fallback_models(
+        self, tenant_id: UUID, *, fallback_models: list[str] | None
+    ) -> Tenant | None:
+        """Set (or clear) the tenant's turn-failover model list (ADR-0016 §4, #413).
+
+        ``fallback_models`` is written as given: an ordered list of model ids the
+        answer runtime fails over to when a model's retry budget is exhausted;
+        ``None`` (or empty, normalised by the service to ``None``) clears it so
+        answers fail exactly as before #413. Validation (each id allowed for this
+        tenant, bounded length) is the ADMIN SERVICE's job — this is the write
+        chokepoint only. Returns the updated entity, or ``None`` if no tenant
+        with that id exists.
+        """
+        row = await self._session.get(models.Tenant, tenant_id)
+        if row is None:
+            return None
+        row.fallback_models = fallback_models
         await self._session.flush()
         await self._session.refresh(row)
         return _to_tenant(row)
@@ -3377,6 +3406,7 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
         id=row.id,
         tenant_id=row.tenant_id,
         session_id=row.session_id,
+        answer_id=row.answer_id,
         message_id=row.message_id,
         run_id=row.run_id,
         model=row.model,
@@ -3413,6 +3443,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         cache_write_tokens: int = 0,
         context_prompt_tokens: int | None = None,
         session_id: UUID | None = None,
+        answer_id: UUID | None = None,
         message_id: UUID | None = None,
         run_id: UUID | None = None,
     ) -> LlmUsageRecord:
@@ -3424,6 +3455,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         row = models.LlmUsage(
             tenant_id=self._tenant_id,
             session_id=session_id,
+            answer_id=answer_id,
             message_id=message_id,
             run_id=run_id,
             model=model,
@@ -3464,7 +3496,11 @@ class LlmUsageRepository(_TenantScopedRepository):
         O(1) rows regardless of conversation length.
         """
         stmt = select(
-            func.count(models.LlmUsage.id),
+            # COUNT(message_id) skips NULLs: answers = PRODUCED answers (the
+            # contract's wording) — message-less route scopes (#413 failovers,
+            # error-path salvage) contribute to the token sums but are not
+            # extra "answers".
+            func.count(models.LlmUsage.message_id),
             func.coalesce(func.sum(models.LlmUsage.prompt_tokens), 0),
             func.coalesce(func.sum(models.LlmUsage.completion_tokens), 0),
             func.coalesce(func.sum(models.LlmUsage.total_tokens), 0),
@@ -3494,6 +3530,10 @@ class LlmUsageRepository(_TenantScopedRepository):
             .where(
                 models.LlmUsage.tenant_id == self._tenant_id,
                 models.LlmUsage.session_id == session_id,
+                # Only the message-bearing (winning) scope describes "the most
+                # recent answer" — a failed/superseded route scope (#413) must
+                # never win this read (its window occupancy is meaningless).
+                models.LlmUsage.message_id.is_not(None),
             )
             .order_by(models.LlmUsage.created_at.desc(), models.LlmUsage.id.desc())
             .limit(1)

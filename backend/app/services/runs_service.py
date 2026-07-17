@@ -73,7 +73,8 @@ from app.services.assistant_runtime import AssistantRunConfig, assemble_run_conf
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
 from app.services.mcp_servers_service import build_mcp_servers_service
-from app.services.models_service import is_allowed_model
+from app.services.models_service import ChatModelService, is_allowed_model
+from app.services.provider_models import build_model_route_resolver
 from app.services.run_delivery_service import deliver_run
 from app.services.run_sink import RunTranscriptSink
 from app.services.tools.types import ToolDefinition
@@ -347,6 +348,22 @@ async def execute_run(
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
         tool_concurrency=settings.chat_tool_concurrency,
+        fallback_model_validator=lambda vsession, mid: ChatModelService(
+            settings, session=vsession, tenant_id=principal.tenant_id
+        ).is_allowed_model_async(mid),
+        # Per-tenant provider routing for the primary AND #413 fallbacks — a
+        # headless run must resolve a ``provider:`` fallback exactly like
+        # interactive chat (#440 round-2 NEW-3: without a resolver every
+        # provider: candidate is an unresolved passthrough the failover guard
+        # skips, so a configured fallback could never rescue a run).
+        model_route_resolver=build_model_route_resolver(
+            settings=settings,
+            tenant_id=principal.tenant_id,
+            owner_id=principal.user_id,
+            roles=principal.roles,
+            request_id=request_id,
+            source_ip=source_ip,
+        ),
         context_config=ContextConfig(
             fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
             output_headroom_tokens=settings.context_output_headroom_tokens,

@@ -59,6 +59,7 @@ from app.services.chat_service import (
     SessionView,
 )
 from app.services.mcp_servers_service import build_mcp_servers_service
+from app.services.models_service import ChatModelService
 from app.services.provider_models import ModelRouteResolver, build_model_route_resolver
 from app.services.tools.types import SandboxToolRunner, ToolDefinition
 from app.storage import ObjectStore
@@ -684,6 +685,9 @@ def _schedule_answer(
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
         tool_concurrency=settings.chat_tool_concurrency,
+        fallback_model_validator=lambda vsession, mid: ChatModelService(
+            settings, session=vsession, tenant_id=principal.tenant_id
+        ).is_allowed_model_async(mid),
         context_config=ContextConfig(
             fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
             output_headroom_tokens=settings.context_output_headroom_tokens,

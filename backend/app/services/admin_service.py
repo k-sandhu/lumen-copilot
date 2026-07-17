@@ -197,10 +197,13 @@ class TenantSettingsView:
     ``max_tool_turns`` is the **effective** chat tool-turn budget — the tenant's
     override if set, else the system default; ``max_tool_turns_is_default`` says
     which, so the admin console can show "default (20)" vs an explicit override.
+    ``fallback_models`` is the ordered turn-failover list (ADR-0016 §4, #413) —
+    empty ⇒ no fallback configured.
     """
 
     max_tool_turns: int
     max_tool_turns_is_default: bool
+    fallback_models: tuple[str, ...] = ()
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -410,7 +413,8 @@ class AdminService:
         """
         tenant = await TenantRepository(self._session).get(self._tenant_id)
         override = tenant.max_tool_turns if tenant is not None else None
-        return self._settings_view(override)
+        fallbacks = tenant.fallback_models if tenant is not None else None
+        return self._settings_view(override, fallbacks)
 
     async def update_tenant_settings(
         self,
@@ -419,6 +423,7 @@ class AdminService:
         actor_id: UUID,
         request_id: str,
         source_ip: str,
+        fallback_models: list[str] | None = None,
     ) -> TenantSettingsView:
         """Set (or clear) the tenant's chat tool-turn budget override (issue #148).
 
@@ -428,10 +433,27 @@ class AdminService:
         ``None`` clears it so the system default applies again. The wire schema +
         the DB ``ck_tenants_max_tool_turns_range`` check bound it to 1–50 (INV-8).
         Returns the resulting effective settings (a read-back of what was stored).
+
+        ``fallback_models`` (ADR-0016 §4, #413) is PATCH-shaped: ``None`` leaves
+        the stored list unchanged (existing callers keep working); ``[]`` clears
+        it; a non-empty list replaces it after validation — each id must pass the
+        SAME allow-list check the chat send path applies (config registry or the
+        tenant's enabled ``provider:`` models), the list is deduplicated
+        preserving order, and its length is bounded (INV-8). An invalid id is a
+        422 naming the offender; nothing is written on rejection.
         """
-        updated = await TenantRepository(self._session).update(
-            self._tenant_id, max_tool_turns=max_tool_turns
-        )
+        repo = TenantRepository(self._session)
+        stored_fallbacks: list[str] | None
+        if fallback_models is None:
+            tenant = await repo.get(self._tenant_id)
+            stored_fallbacks = tenant.fallback_models if tenant is not None else None
+        else:
+            stored_fallbacks = await self._validated_fallbacks(fallback_models)
+            if await repo.set_fallback_models(
+                self._tenant_id, fallback_models=stored_fallbacks
+            ) is None:
+                raise NotFoundError("Tenant not found.")
+        updated = await repo.update(self._tenant_id, max_tool_turns=max_tool_turns)
         if updated is None:
             # Unreachable in practice (the caller's own tenant, resolved from the
             # token, exists); guard so a vanished tenant is a clean 404, not a 500.
@@ -447,9 +469,51 @@ class AdminService:
             outcome=AuditOutcome.ALLOWED,
             request_id=request_id,
             source_ip=source_ip,
-            metadata={"max_tool_turns": max_tool_turns},
+            metadata={
+                "max_tool_turns": max_tool_turns,
+                # Only when this PATCH changed the list (None = untouched).
+                **(
+                    {"fallback_models": stored_fallbacks or []}
+                    if fallback_models is not None
+                    else {}
+                ),
+            },
         )
-        return self._settings_view(updated.max_tool_turns)
+        return self._settings_view(updated.max_tool_turns, stored_fallbacks)
+
+    # How many fallback models a tenant may chain (INV-8: a bounded, validated
+    # configuration — a long chain would multiply worst-case answer latency).
+    _MAX_FALLBACK_MODELS = 3
+
+    async def _validated_fallbacks(self, requested: list[str]) -> list[str] | None:
+        """Validate + normalise a fallback list; 422 on any invalid entry (#413).
+
+        Each id must pass the same allow-list check as a send-path model (the
+        config registry, or a ``provider:`` id owned+enabled by THIS tenant —
+        cross-tenant ids fail closed, INV-1/INV-2). Order is preserved,
+        duplicates collapse to first occurrence, and an empty result stores
+        ``None`` (no fallback).
+        """
+        deduped: list[str] = []
+        for raw in requested:
+            model_id = raw.strip()
+            if not model_id:
+                raise ValidationError("Fallback model ids must be non-empty strings.")
+            if model_id not in deduped:
+                deduped.append(model_id)
+        if len(deduped) > self._MAX_FALLBACK_MODELS:
+            raise ValidationError(
+                f"At most {self._MAX_FALLBACK_MODELS} fallback models may be configured."
+            )
+        models_service = ChatModelService(
+            self._settings, session=self._session, tenant_id=self._tenant_id
+        )
+        for model_id in deduped:
+            if not await models_service.is_allowed_model_async(model_id):
+                raise ValidationError(
+                    f"Unknown or unavailable fallback model: {model_id!r}."
+                )
+        return deduped or None
 
     # --- Per-tenant application logo (admin branding) -----------------------
 
@@ -553,11 +617,19 @@ class AdminService:
             metadata={"has_logo": has_logo},
         )
 
-    def _settings_view(self, override: int | None) -> TenantSettingsView:
-        """Project a stored override into the effective settings view (issue #148)."""
+    def _settings_view(
+        self, override: int | None, fallback_models: list[str] | None = None
+    ) -> TenantSettingsView:
+        """Project stored overrides into the effective settings view (issue #148, #413)."""
+        fallbacks = tuple(fallback_models or ())
         if override is None:
             return TenantSettingsView(
                 max_tool_turns=self._settings.chat_max_tool_turns,
                 max_tool_turns_is_default=True,
+                fallback_models=fallbacks,
             )
-        return TenantSettingsView(max_tool_turns=override, max_tool_turns_is_default=False)
+        return TenantSettingsView(
+            max_tool_turns=override,
+            max_tool_turns_is_default=False,
+            fallback_models=fallbacks,
+        )

@@ -54,7 +54,8 @@ from app.services.assistant_runtime import AssistantRunConfig, assemble_run_conf
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
-from app.services.models_service import is_allowed_model
+from app.services.models_service import ChatModelService, is_allowed_model
+from app.services.provider_models import build_model_route_resolver
 from app.services.run_sink import DebugTraceSink
 
 log = get_logger(__name__)
@@ -268,6 +269,19 @@ class AssistantTestService:
                 # is a correctness requirement of the preview harness, not a
                 # tuning choice.
                 tool_concurrency=1,
+                fallback_model_validator=lambda vsession, mid: ChatModelService(
+                    self._settings, session=vsession, tenant_id=self._tenant_id
+                ).is_allowed_model_async(mid),
+                # Provider routing for #413 fallbacks in previews too (#440
+                # round-2 NEW-3) — same resolver the interactive path wires.
+                model_route_resolver=build_model_route_resolver(
+                    settings=self._settings,
+                    tenant_id=self._tenant_id,
+                    owner_id=self._principal.user_id,
+                    roles=self._principal.roles,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                ),
                 context_config=ContextConfig(
                     fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
                     output_headroom_tokens=self._settings.context_output_headroom_tokens,

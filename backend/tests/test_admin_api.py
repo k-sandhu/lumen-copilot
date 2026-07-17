@@ -371,7 +371,7 @@ async def test_get_tenant_settings_returns_system_default(
     resp = await client.get("/api/v1/admin/settings", headers=_auth(token))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert set(body) == {"max_tool_turns", "max_tool_turns_is_default"}
+    assert set(body) == {"max_tool_turns", "max_tool_turns_is_default", "fallback_models"}
     # A fresh tenant has no override → the configured system default, flagged.
     assert body["max_tool_turns"] == get_settings().chat_max_tool_turns
     assert body["max_tool_turns_is_default"] is True
@@ -385,10 +385,18 @@ async def test_patch_tenant_settings_sets_and_reads_back(
         "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 12}
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"max_tool_turns": 12, "max_tool_turns_is_default": False}
+    assert resp.json() == {
+        "max_tool_turns": 12,
+        "max_tool_turns_is_default": False,
+        "fallback_models": [],
+    }
     # The override persists and reads back via GET (round-trip).
     got = await client.get("/api/v1/admin/settings", headers=_auth(token))
-    assert got.json() == {"max_tool_turns": 12, "max_tool_turns_is_default": False}
+    assert got.json() == {
+        "max_tool_turns": 12,
+        "max_tool_turns_is_default": False,
+        "fallback_models": [],
+    }
 
 
 async def test_patch_tenant_settings_null_resets_to_default(
@@ -406,6 +414,7 @@ async def test_patch_tenant_settings_null_resets_to_default(
     assert resp.json() == {
         "max_tool_turns": get_settings().chat_max_tool_turns,
         "max_tool_turns_is_default": True,
+        "fallback_models": [],
     }
 
 
@@ -1169,3 +1178,124 @@ async def test_put_branding_emits_audit_event(
     assert ev.metadata["has_logo"] is True
     assert ev.resource_type == "tenant"
     assert ev.resource_id == str(seeded.tenant_a)
+
+
+# --- #413: fallback-model configuration (validated like the send path) -------
+
+
+async def test_patch_fallback_models_sets_validates_and_clears(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """The fallback list round-trips; unknown ids are a 422 naming the offender;
+    ``[]`` clears; an omitted field leaves the stored list untouched (#413)."""
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    valid = [m.id for m in get_settings().chat_model_registry[:2]]
+
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={"max_tool_turns": None, "fallback_models": valid},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["fallback_models"] == valid
+    # Omitting the field leaves the stored list unchanged (PATCH semantics).
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 9}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["fallback_models"] == valid
+    # An unknown id is rejected wholesale — nothing about the list changes.
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={"max_tool_turns": None, "fallback_models": ["not/a-model"]},
+    )
+    assert resp.status_code == 422
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.json()["fallback_models"] == valid
+    # An empty list clears the configuration.
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={"max_tool_turns": None, "fallback_models": []},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["fallback_models"] == []
+
+
+async def test_patch_fallback_models_rejects_more_than_three(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """INV-8: the chain is bounded at the wire — 4 entries is a 422 before the
+    service (a long chain would multiply worst-case answer latency)."""
+    from app.core.config import get_settings
+
+    token = await _login(client, seeded.admin_a_email)
+    ids = [m.id for m in get_settings().chat_model_registry[:4]]
+    assert len(ids) == 4
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={"max_tool_turns": None, "fallback_models": ids},
+    )
+    assert resp.status_code == 422
+
+
+async def test_patch_fallback_models_rejects_unknown_provider_id(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """A ``provider:`` fallback id resolves through the TENANT-SCOPED provider
+    repository — an id for a provider this tenant does not own (unknown,
+    deleted, or another tenant's: the same invisible-row path, INV-1/INV-2)
+    fails closed as a 422 and nothing is written (#413 / #440 finding 4)."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={
+            "max_tool_turns": None,
+            "fallback_models": [f"provider:{uuid.uuid4()}:some/model"],
+        },
+    )
+    assert resp.status_code == 422
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.json()["fallback_models"] == []
+
+
+async def test_tenant_settings_wire_shapes_validate_against_openapi(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """#440 round-2 coverage debt: the REAL GET/PATCH tenant-settings bodies
+    validate against the canonical ``contracts/openapi.yaml`` schemas — REST
+    drift now fails a test like the WS payload does."""
+    from pathlib import Path
+
+    import jsonschema
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent.parent
+    spec = yaml.safe_load((root / "contracts" / "openapi.yaml").read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    def validate(payload: object, name: str) -> None:
+        jsonschema.validate(
+            payload, {**schemas[name], "components": {"schemas": schemas}}
+        )
+
+    token = await _login(client, seeded.admin_a_email)
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.status_code == 200
+    validate(got.json(), "TenantSettings")
+
+    from app.core.config import get_settings
+
+    valid = [m.id for m in get_settings().chat_model_registry[:1]]
+    patch_body = {"max_tool_turns": 5, "fallback_models": valid}
+    validate(patch_body, "TenantSettingsUpdate")
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json=patch_body
+    )
+    assert resp.status_code == 200, resp.text
+    validate(resp.json(), "TenantSettings")

@@ -1925,14 +1925,25 @@ def test_ask_user_parse_bounds() -> None:
 
 
 async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
-    """AC-1: totals sum every answer's row; last is the newest; empty is zeroes."""
+    """AC-1 (spec 0007, updated for #413): totals SUM every row — including a
+    message-less failed-route scope — but ``answers`` counts only PRODUCED
+    (message-bearing) answers, and ``last`` is the newest message-bearing row
+    (a dead route's scope must never describe 'the most recent answer')."""
     from app.db.repositories import LlmUsageRepository
+    from app.domain.entities import MessageRole
 
     async with ctx.sessionmaker() as session:
         repo = LlmUsageRepository(session, ctx.tenant_id)
         empty = await repo.totals_for_session(ctx.session_id)
         assert (empty.answers, empty.total_tokens) == (0, 0)
         assert await repo.last_for_session(ctx.session_id) is None
+        msg_repo = MessageRepository(session, ctx.tenant_id)
+        msg1 = await msg_repo.add(
+            session_id=ctx.session_id, role=MessageRole.ASSISTANT, content="a1"
+        )
+        msg2 = await msg_repo.add(
+            session_id=ctx.session_id, role=MessageRole.ASSISTANT, content="a2"
+        )
         await repo.record(
             model="m",
             prompt_tokens=100,
@@ -1940,6 +1951,8 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             total_tokens=120,
             cached_prompt_tokens=10,
             session_id=ctx.session_id,
+            answer_id=msg1.id,
+            message_id=msg1.id,
         )
         await repo.record(
             model="m",
@@ -1948,6 +1961,18 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             total_tokens=330,
             cache_write_tokens=5,
             session_id=ctx.session_id,
+            answer_id=msg2.id,
+            message_id=msg2.id,
+        )
+        # A failed-route scope (#413): sums include it; answers/last ignore it.
+        await repo.record(
+            model="dead-route",
+            prompt_tokens=50,
+            completion_tokens=0,
+            total_tokens=50,
+            session_id=ctx.session_id,
+            answer_id=msg2.id,
+            message_id=None,
         )
         await session.commit()
         # Deterministic "last": both records land in the same second (SQLite's
@@ -1969,14 +1994,20 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
         )
         await session.commit()
         totals = await repo.totals_for_session(ctx.session_id)
+        # answers counts the two PRODUCED (message-bearing) answers — the dead
+        # route's scope is not a third answer…
         assert totals.answers == 2
-        assert totals.prompt_tokens == 400
+        # …but the token sums include ALL THREE rows (billing truth).
+        assert totals.prompt_tokens == 400 + 50
         assert totals.completion_tokens == 50
-        assert totals.total_tokens == 450
+        assert totals.total_tokens == 450 + 50
         assert totals.cached_prompt_tokens == 10
         assert totals.cache_write_tokens == 5
         last = await repo.last_for_session(ctx.session_id)
+        # "last" is the newest MESSAGE-BEARING row — never the dead scope, even
+        # though it was inserted latest.
         assert last is not None and last.prompt_tokens == 300
+        assert last.model == "m" and last.message_id is not None
         # INV-1: a foreign-tenant repository sees nothing.
         foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(
             ctx.session_id
@@ -3093,3 +3124,863 @@ async def test_mid_batch_cancellation_aborts_atomically_with_one_terminal(ctx: _
         if t not in tasks_before and t is not asyncio.current_task() and not t.done()
     ]
     assert lingering == []
+
+
+# --- #413 (ADR-0016 §4): turn retry, model fallback, length continuation ----
+
+
+class _ModelRoutedGateway(_ScriptedGateway):
+    """A scripted gateway whose FAILURES are keyed by model id (#413).
+
+    ``failures[model]`` is a list of exceptions to raise, one per call, before
+    that model starts succeeding (an empty/exhausted list ⇒ scripted turns).
+    ``models_called`` records the model of every ``stream_tools`` call so a
+    test can assert exactly which routes were attempted, in order.
+    """
+
+    def __init__(
+        self,
+        turns: list[list[StreamEvent]],
+        *,
+        failures: dict[str, list[Exception]] | None = None,
+        synthesis: list[StreamEvent] | None = None,
+    ) -> None:
+        super().__init__(turns, synthesis=synthesis)
+        self._failures = failures or {}
+        self.models_called: list[str] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.models_called.append(str(model))
+        pending = self._failures.get(str(model))
+        if pending:
+            raise pending.pop(0)
+        async for ev in super().stream_tools(
+            messages,
+            tools=tools,
+            model=model,
+            tool_choice=tool_choice,
+            api_key=api_key,
+            api_base=api_base,
+        ):
+            yield ev
+
+
+def _retryable() -> Exception:
+    from app.llm import LlmProviderError
+
+    return LlmProviderError("The model provider is unavailable (Timeout).", retryable=True)
+
+
+def _terminal() -> Exception:
+    from app.llm import LlmProviderError
+
+    return LlmProviderError(
+        "The model provider is unavailable (AuthenticationError).", retryable=False
+    )
+
+
+_PRIMARY = "anthropic/claude-opus-4.8"
+
+
+def _sleep_recorder() -> tuple[list[float], object]:
+    sleeps: list[float] = []
+
+    async def record(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    return sleeps, record
+
+
+async def _run_answer(
+    ctx: _Ctx,
+    gateway: object,
+    retrieval: object,
+    *,
+    retry_sleep: object,
+) -> list[dict[str, object]]:
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = ChatRuntime(
+        sessionmaker=ctx.sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        retry_sleep=retry_sleep,  # type: ignore[arg-type]
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    return await asyncio.wait_for(consumer, timeout=2.0)
+
+
+async def _set_fallbacks(ctx: _Ctx, fallbacks: list[str]) -> None:
+    async with ctx.sessionmaker() as session:
+        await TenantRepository(session).set_fallback_models(
+            ctx.tenant_id, fallback_models=fallbacks
+        )
+        await session.commit()
+
+
+async def test_transient_fault_retries_and_answers_normally(ctx: _Ctx) -> None:
+    """AC-1 (#413): the gateway fails ONCE with a retryable fault, the turn
+    retries on the same route after one backoff, and the answer is completely
+    normal — single ``done``, the text exactly once, zero error envelopes."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ModelRoutedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")],
+        ],
+        failures={_PRIMARY: [_retryable()]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1 and "error" not in types
+    text = "".join(
+        cast("dict[str, object]", e["data"])["text"]  # type: ignore[misc]
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert text == "The answer."
+    assert sleeps == [0.5]  # exactly one backoff, the first rung
+    # The failed call + the retry + the answer turn — all on the primary.
+    assert set(gateway.models_called) == {_PRIMARY}
+
+
+async def test_exhausted_primary_fails_over_and_records_actual_model(ctx: _Ctx) -> None:
+    """AC-2 (#413): the primary answers a tool turn (spending tokens), THEN
+    hard-fails; the configured fallback answers. ``done``, the message row, the
+    per-route ``llm_usage`` rows, and the ``answer.generated`` audit all record
+    honest attribution: the primary's spend stays on a message-less primary row
+    (ADR-0016 §2.6), the fallback's on the row attached to the message."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ModelRoutedGateway(
+        [
+            # Turn 1 (primary): a successful tool turn WITH reported usage.
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+                    finish_reason="tool_calls",
+                )
+            ],
+            # Turn 2 would be the primary's answer — but the primary dies first
+            # (failures below), so this script plays on the FALLBACK.
+            [
+                StreamEvent(text="Fallback answer."),
+                StreamEvent(
+                    usage=TokenUsage(prompt_tokens=30, completion_tokens=5, total_tokens=35)
+                ),
+                StreamEvent(finish_reason="stop"),
+            ],
+        ],
+        # After its successful turn 1, the primary NEVER recovers: the next
+        # three attempts (1 + 2 retries) all fail. _ModelRoutedGateway pops a
+        # failure per call, so turn 1 must come from an empty failure window:
+        # seed failures AFTER the first call via the list below being consumed
+        # only from call 2 on — arranged by prefixing a no-failure marker is
+        # not supported, so instead the failures list is attached lazily.
+        failures={},
+    )
+    # Arm the primary's failures only after its successful first turn.
+    original_stream = gateway.stream_tools
+    armed = {"done": False}
+
+    async def stream_with_arming(messages: object, **kwargs: object) -> AsyncIterator[StreamEvent]:
+        if not armed["done"] and kwargs.get("model") == _PRIMARY:
+            armed["done"] = True
+        elif kwargs.get("model") == _PRIMARY:
+            gateway._failures.setdefault(_PRIMARY, []).append(_retryable())  # noqa: SLF001
+        async for ev in original_stream(messages, **kwargs):  # type: ignore[arg-type]
+            yield ev
+
+    gateway.stream_tools = stream_with_arming  # type: ignore[method-assign]
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1 and "error" not in types
+    done = envs[-1]
+    done_data = cast("dict[str, object]", done["data"])
+    assert done_data["model"] == fallback
+    # The answer-total usage sums BOTH scopes (billing view on the wire)…
+    usage_data = cast("dict[str, object]", done_data["usage"])
+    assert usage_data["totalTokens"] == 12 + 35
+    assert sleeps == [0.5, 2.0]  # the primary's two backoffs; failover is immediate
+
+    from app.db.repositories import AuditEventRepository, LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        messages_rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages_rows if m.role.value == "assistant"]
+        assert assistant[-1].model == fallback
+        # …while the ROWS attribute per route: the primary's 12 tokens on a
+        # message-less row, the fallback's 35 on the message-attached row.
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        by_model = {r.model: r for r in rows}
+        assert set(by_model) == {_PRIMARY, fallback}
+        assert by_model[_PRIMARY].total_tokens == 12
+        assert by_model[_PRIMARY].message_id is None
+        assert by_model[fallback].total_tokens == 35
+        assert by_model[fallback].message_id == assistant[-1].id
+        # The answer audit records the model that ACTUALLY answered.
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=50)
+        answered = [e for e in recent if e.action == "answer.generated"]
+        assert answered and answered[0].metadata["model"] == fallback
+        # The ledger READ contract survives multi-row answers (#440 NEW-1):
+        # one produced answer, sums across both scopes, "last" = the winner.
+        totals = await LlmUsageRepository(session, ctx.tenant_id).totals_for_session(
+            ctx.session_id
+        )
+        assert totals.answers == 1
+        assert totals.total_tokens == 12 + 35
+        last = await LlmUsageRepository(session, ctx.tenant_id).last_for_session(
+            ctx.session_id
+        )
+        assert last is not None and last.model == fallback
+        # Every scope row carries the durable answer correlation.
+        assert all(r.answer_id == assistant[-1].id for r in rows)
+
+
+async def test_all_routes_exhausted_is_one_typed_terminal(ctx: _Ctx) -> None:
+    """AC-3 (#413, negative): primary AND fallback exhaust their retry budgets
+    → exactly one terminal ``error`` (the typed 503), zero ``delta``s leaked
+    from any failed turn, no ``done``."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="never streamed"), StreamEvent(finish_reason="stop")]],
+        failures={
+            _PRIMARY: [_retryable(), _retryable(), _retryable()],
+            fallback: [_retryable(), _retryable(), _retryable()],
+        },
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+    assert types.count("delta") == 0
+    problem = cast("dict[str, object]", envs[-1]["problem"])
+    assert problem["status"] == 503
+    assert sleeps == [0.5, 2.0, 0.5, 2.0]  # both routes' full backoff ladders
+
+
+async def test_terminal_fault_fails_fast_no_retry_no_fallback(ctx: _Ctx) -> None:
+    """A gateway-classified TERMINAL fault (auth/config) neither retries nor
+    fails over — even with a fallback configured (ADR-0016 §4: fail fast,
+    surface the configuration problem)."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_terminal()]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == []  # no backoff — the fault was not retried
+    assert gateway.models_called == [_PRIMARY]  # the fallback was never consulted
+
+
+async def test_retry_after_hint_stretches_and_caps_the_backoff(ctx: _Ctx) -> None:
+    """A 429's Retry-After hint stretches the backoff rung (7 > 0.5) but a
+    hostile/lazy hint is capped (60 → 10) — the answer never stalls at the
+    provider's whim."""
+    from app.llm import LlmProviderError
+
+    hinted = LlmProviderError(
+        "The model provider is unavailable (RateLimitError).",
+        retryable=True,
+        retry_after_seconds=7.0,
+    )
+    hostile = LlmProviderError(
+        "The model provider is unavailable (RateLimitError).",
+        retryable=True,
+        retry_after_seconds=60.0,
+    )
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [hinted, hostile]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    assert envs[-1]["type"] == "done"
+    assert sleeps == [7.0, 10.0]  # hint honored, then capped
+
+
+async def test_length_truncated_answer_gets_one_continuation(ctx: _Ctx) -> None:
+    """Length continuation (#413): the answer turn ends ``length``; the partial
+    is appended to the transcript as the assistant turn and exactly ONE
+    tool-free continuation streams after it — the wire and the stored message
+    are both the concatenation, and ``done`` reports the continuation's finish."""
+    retrieval = _FakeRetrieval([])
+    gateway = _RecordingScriptedGateway(
+        [[StreamEvent(text="Part one, "), StreamEvent(finish_reason="length")]],
+        synthesis=[StreamEvent(text="part two."), StreamEvent(finish_reason="stop")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    assert cast("dict[str, object]", envs[-1]["data"])["finishReason"] == "stop"
+    text = "".join(
+        cast("dict[str, object]", e["data"])["text"]  # type: ignore[misc]
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert text == "Part one, part two."
+    # The continuation call saw the buffered partial as the assistant turn and
+    # ran with tools DISABLED (the synthesis script == tool_choice="none").
+    assert gateway.synthesis_calls == 1
+    cont_transcript = gateway.seen[-1]
+    partials = [
+        m for m in cont_transcript if m.role is LlmRole.ASSISTANT and m.content == "Part one, "
+    ]
+    assert len(partials) == 1
+    async with ctx.sessionmaker() as session:
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in messages if m.role.value == "assistant"]
+        assert assistant[-1].content == "Part one, part two."
+
+
+async def test_still_truncated_continuation_is_accepted_once(ctx: _Ctx) -> None:
+    """ONE continuation, no loops: a continuation that is itself length-capped
+    is accepted and ``done`` honestly reports ``length``."""
+    retrieval = _FakeRetrieval([])
+    gateway = _RecordingScriptedGateway(
+        [[StreamEvent(text="Part one, "), StreamEvent(finish_reason="length")]],
+        synthesis=[StreamEvent(text="part two…"), StreamEvent(finish_reason="length")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    assert cast("dict[str, object]", envs[-1]["data"])["finishReason"] == "length"
+    assert gateway.synthesis_calls == 1  # exactly one continuation, never two
+
+
+class _MidStreamFaultGateway(_ScriptedGateway):
+    """First call: yields PARTIAL text + usage, THEN faults (retryable).
+
+    The nastiest retry shape (#440 review, finding 7): the turn buffer already
+    holds fragments and the usage accumulator already counted tokens when the
+    fault lands. The retry must discard the buffered fragments (nothing leaks
+    to the wire) while the spend stays counted (billing-honest).
+    """
+
+    def __init__(self, turns: list[list[StreamEvent]]) -> None:
+        super().__init__(turns)
+        self._faulted = False
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if not self._faulted:
+            self._faulted = True
+            yield StreamEvent(text="PARTIAL-NEVER-ON-WIRE ")
+            yield StreamEvent(
+                usage=TokenUsage(prompt_tokens=11, completion_tokens=3, total_tokens=14)
+            )
+            raise cast(Exception, _retryable())
+        async for ev in super().stream_tools(
+            messages,
+            tools=tools,
+            model=model,
+            tool_choice=tool_choice,
+            api_key=api_key,
+            api_base=api_base,
+        ):
+            yield ev
+
+
+async def test_midstream_fault_discards_partial_and_retries_cleanly(ctx: _Ctx) -> None:
+    """A fault AFTER partial text + usage were buffered: the retry leaks nothing
+    (no delta carries the partial), the think-step is not double-emitted, and
+    the partial attempt's spend stays counted in the (single-route) usage row."""
+    retrieval = _FakeRetrieval([])
+    gateway = _MidStreamFaultGateway(
+        [[
+            StreamEvent(text="Clean answer."),
+            StreamEvent(usage=TokenUsage(prompt_tokens=20, completion_tokens=5, total_tokens=25)),
+            StreamEvent(finish_reason="stop"),
+        ]]
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    assert envs[-1]["type"] == "done"
+    deltas = [
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "delta"
+    ]
+    assert "".join(deltas) == "Clean answer."
+    assert not any("PARTIAL" in d for d in deltas)
+    assert sleeps == [0.5]
+    # The think step for the answer turn started exactly once — a retry never
+    # re-emits the step events around its turn.
+    steps = [
+        cast("dict[str, object]", e["data"])
+        for e in envs
+        if e["type"] == "event" and e.get("name") == "step"
+    ]
+    think_started = [
+        s for s in steps if s.get("key") == "think" and s.get("state") == "started"
+    ]
+    assert len(think_started) == 1
+    # Billing-honest: the failed attempt's 14 tokens + the retry's 25 all landed
+    # in the ONE (single-route) usage row.
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+    assert len(rows) == 1
+    assert rows[0].total_tokens == 14 + 25
+
+
+async def test_fallback_first_call_gets_refit_transcript(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3 (#440): the FIRST call on a fallback route is refit to the
+    fallback's tokenizer/window — fit_transcript is re-invoked with the NEW
+    route's model before the failed-over attempt, not only on the next outer
+    turn."""
+    from app.services import chat_runtime as chat_runtime_module
+
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    fitted_models: list[str] = []
+    real_fit = chat_runtime_module.fit_transcript
+
+    def spying_fit(messages: object, **kwargs: object) -> object:
+        fitted_models.append(cast(str, kwargs.get("model")))
+        return real_fit(messages, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(chat_runtime_module, "fit_transcript", spying_fit)
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="From fallback."), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    assert envs[-1]["type"] == "done"
+    # The failover refit ran with the FALLBACK model before its first attempt.
+    assert fallback in fitted_models
+
+
+async def test_zero_text_length_turn_still_gets_continuation(ctx: _Ctx) -> None:
+    """Finding 6 (#440): a ``length`` turn with ZERO visible text (budget burned
+    on non-text content) still triggers the one continuation — the answer is
+    the continuation's text, not the NO_SOURCES fallback."""
+    retrieval = _FakeRetrieval([])
+    gateway = _RecordingScriptedGateway(
+        [[StreamEvent(finish_reason="length")]],
+        synthesis=[StreamEvent(text="Recovered answer."), StreamEvent(finish_reason="stop")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    assert cast("dict[str, object]", envs[-1]["data"])["finishReason"] == "stop"
+    text = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert text == "Recovered answer."
+    assert gateway.synthesis_calls == 1
+
+
+async def test_raw_config_bypass_is_capped_and_revalidated_at_runtime(ctx: _Ctx) -> None:
+    """Finding 4 (#440): fallbacks smuggled past the admin service (raw repo
+    write: 5 entries, one invalid) are structurally capped at 3 AND revalidated
+    fail-closed at answer start — the runtime attempts only the surviving
+    validated candidates, never the smuggled tail."""
+    fb1 = "openrouter/openai/gpt-5.5"
+    fb2 = "openrouter/google/gemini-3.5-flash"
+    smuggled = ["not/allowed", fb1, fb2, "tail/one", "tail/two"]
+    await _set_fallbacks(ctx, smuggled)  # raw repo write — no service validation
+
+    async def validator(_session: AsyncSession, model_id: str) -> bool:
+        return model_id in (fb1, fb2)
+
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        failures={
+            _PRIMARY: [_retryable(), _retryable(), _retryable()],
+            fb1: [_retryable(), _retryable(), _retryable()],
+        },
+    )
+    sleeps, recorder = _sleep_recorder()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = ChatRuntime(
+        sessionmaker=ctx.sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        retry_sleep=recorder,  # type: ignore[arg-type]
+        fallback_model_validator=validator,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    assert cast("dict[str, object]", envs[-1]["data"])["model"] == fb2
+    tried = set(gateway.models_called)
+    # The invalid head was dropped by revalidation; the >3 tail never existed
+    # (structural cap); fb1 exhausted; fb2 answered.
+    assert "not/allowed" not in tried
+    assert "tail/one" not in tried and "tail/two" not in tried
+    assert tried == {_PRIMARY, fb1, fb2}
+
+
+def _ws_schema() -> dict[str, object]:
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent.parent
+    return cast(
+        "dict[str, object]",
+        json.loads((root / "contracts" / "websocket-envelopes.schema.json").read_text()),
+    )
+
+
+async def test_done_payload_validates_against_the_canonical_contract(ctx: _Ctx) -> None:
+    """#440 blocker 1 regression: the RUNTIME-EMITTED ``done.data`` (with the
+    new #413 ``model`` field) validates against the canonical
+    ``ChatDoneData`` schema in ``contracts/`` — backend-only wire drift fails
+    here."""
+    import jsonschema
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    done = envs[-1]
+    assert done["type"] == "done"
+    schema = _ws_schema()
+    jsonschema.validate(
+        done["data"],
+        {"$ref": "#/$defs/ChatDoneData", "$defs": schema["$defs"]},  # type: ignore[index]
+    )
+
+
+async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-2: the primary SPENDS on a successful tool turn, then
+    primary AND fallback exhaust — the answer errors, the answer transaction
+    rolls back, yet the spent scopes persist via the independent salvage
+    transaction: message-less rows under their own models, grouped by
+    answer_id, answers == 0 (nothing was produced), sums = the real spend."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ModelRoutedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+                    finish_reason="tool_calls",
+                )
+            ],
+        ],
+        failures={},
+    )
+    original_stream = gateway.stream_tools
+    armed = {"done": False}
+
+    async def stream_with_arming(messages: object, **kwargs: object) -> AsyncIterator[StreamEvent]:
+        model = kwargs.get("model")
+        if not armed["done"] and model == _PRIMARY:
+            armed["done"] = True
+        elif model in (_PRIMARY, fallback):
+            gateway._failures.setdefault(str(model), []).append(_retryable())  # noqa: SLF001
+        async for ev in original_stream(messages, **kwargs):  # type: ignore[arg-type]
+            yield ev
+
+    gateway.stream_tools = stream_with_arming  # type: ignore[method-assign]
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        # The primary's 12 tokens survived the rollback (salvaged, message-less).
+        assert len(rows) == 1
+        assert rows[0].model == _PRIMARY
+        assert rows[0].total_tokens == 12
+        assert rows[0].message_id is None
+        assert rows[0].answer_id is not None
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 0  # nothing was produced
+        assert totals.total_tokens == 12  # but the spend is not lost
+
+
+async def test_anonymous_provider_fallback_is_not_skipped(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-3: a RESOLVED anonymous provider fallback (api_base
+    set, no key — a legitimate config) fails over fine; an UNRESOLVED
+    ``provider:`` candidate (no resolver / provider vanished) is skipped."""
+    from app.services.provider_models import ModelRoute
+
+    anon = "provider:00000000-0000-0000-0000-000000000001:local/model"
+    ghost = "provider:00000000-0000-0000-0000-000000000002:gone/model"
+    await _set_fallbacks(ctx, [ghost, anon])
+
+    async def resolver(_session: AsyncSession, model_id: str) -> ModelRoute:
+        if model_id == anon:
+            # A resolved ANONYMOUS provider: raw model id + base URL, no key.
+            return ModelRoute(model="local/model", api_base="http://llm.internal", api_key=None)
+        # The ghost provider is gone: the resolver degrades to passthrough
+        # (exactly what build_model_route_resolver does for an unknown id).
+        return ModelRoute(model=model_id)
+
+    async def validator(_session: AsyncSession, _model_id: str) -> bool:
+        return True  # both stored candidates pass the allow-list snapshot
+
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Anon answer."), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = ChatRuntime(
+        sessionmaker=ctx.sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        retry_sleep=recorder,  # type: ignore[arg-type]
+        fallback_model_validator=validator,
+        model_route_resolver=resolver,  # type: ignore[arg-type]
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    # The ghost was skipped (unresolved passthrough guard); the anonymous
+    # provider answered under its RAW model id.
+    assert cast("dict[str, object]", envs[-1]["data"])["model"] == anon
+    assert "local/model" in gateway.models_called
+    assert ghost not in gateway.models_called
+
+
+async def test_malformed_fallback_container_does_not_break_answers(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-4: a scalar smuggled into ``tenants.fallback_models``
+    (raw storage) neither 500s the answer nor becomes candidates — the
+    container guard treats non-lists as no-config."""
+    from sqlalchemy import update as _sql_update
+
+    from app.db import models as _models
+
+    async with ctx.sessionmaker() as session:
+        await session.execute(
+            _sql_update(_models.Tenant)
+            .where(_models.Tenant.id == ctx.tenant_id)
+            .values(fallback_models=7)
+        )
+        await session.commit()
+
+    retrieval = _FakeRetrieval([])
+    gateway = _ScriptedGateway([[StreamEvent(text="Fine."), StreamEvent(finish_reason="stop")]])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+
+async def test_continuation_never_fails_over_and_degrades_to_the_partial(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-5: once the partial is on the wire, the continuation
+    may retry but NEVER fails over (a second model must not finish the
+    sentence); if it cannot run, the published partial IS the answer —
+    finish_reason stays ``length`` and wire == stored."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Part one."), StreamEvent(finish_reason="length")]],
+        failures={},
+    )
+    # The continuation (tool_choice="none" → synthesis path) always faults.
+    original_stream = gateway.stream_tools
+
+    async def stream_faulting_synthesis(
+        messages: object, **kwargs: object
+    ) -> AsyncIterator[StreamEvent]:
+        if kwargs.get("tool_choice") == "none":
+            raise cast(Exception, _retryable())
+        async for ev in original_stream(messages, **kwargs):  # type: ignore[arg-type]
+            yield ev
+
+    gateway.stream_tools = stream_faulting_synthesis  # type: ignore[method-assign]
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    assert envs[-1]["type"] == "done"
+    done_data = cast("dict[str, object]", envs[-1]["data"])
+    assert done_data["finishReason"] == "length"
+    assert done_data["model"] == _PRIMARY  # no failover happened
+    assert fallback not in gateway.models_called
+    text = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert text == "Part one."
+    async with ctx.sessionmaker() as session:
+        messages_rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages_rows if m.role.value == "assistant"]
+        assert assistant[-1].content == "Part one."
