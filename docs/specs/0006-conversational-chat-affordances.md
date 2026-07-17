@@ -75,7 +75,11 @@ its composer — that together turn a static Q&A into a guided conversation:
   (the options *are* the suggestions). Config-gated
   (`CHAT_SUGGESTIONS_ENABLED`, default on; count + timeout also config). The
   call's token usage folds into the answer's single `llm_usage` row (#409) — the
-  cost is real, so it is accounted.
+  cost is real, so it is accounted. Also skipped for the honest "couldn't find
+  it" fallback answer (suppress suggestions on refusal/low-confidence answers —
+  HAX guideline 10), and the client promotes chips/ghost only after a successful
+  terminal `done` (a `suggestions` event followed by a terminal `error` renders
+  nothing).
 - **Prefill is a ghost, never a write.** The top suggestion renders as ghost text
   in the *empty* composer with an explicit accept affordance (Tab or click);
   typing anything dismisses it. The composer's draft is never overwritten —

@@ -63,7 +63,11 @@ from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.models_service import is_allowed_model
-from app.services.provider_models import is_allowed_provider_model, is_provider_model_id
+from app.services.provider_models import (
+    is_allowed_provider_model,
+    is_provider_model_id,
+    parse_provider_model_id,
+)
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
@@ -388,8 +392,15 @@ class ChatService:
             return None
         totals = await self._usage.totals_for_session(session_id)
         last = await self._usage.last_for_session(session_id)
+        # Budget off the model id the assembler actually sees (#434 review,
+        # finding 3): a per-tenant ``provider:`` id resolves to its RAW model id
+        # before the window lookup — exactly like the runtime's route — so a
+        # known-window provider model never falls back to the conservative
+        # window. The PUBLIC id still rides the response's ``model`` field.
+        parsed = parse_provider_model_id(session.model)
+        budget_model = parsed[1] if parsed is not None else session.model
         budget, window_known = input_budget_for_model(
-            session.model,
+            budget_model,
             ContextConfig(
                 fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
                 output_headroom_tokens=self._settings.context_output_headroom_tokens,

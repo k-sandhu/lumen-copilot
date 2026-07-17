@@ -697,7 +697,15 @@ class ChatRuntime:
             # whose handler rejects it with a typed ``tool_bad_args`` result the
             # model reads and recovers from (#429 AC-N1). Non-interactive
             # consumers never intercept: the runner's handler refuses instead.
-            ask_question = _select_ask_user(turn_tool_calls) if self._interactive else None
+            # Interception also requires the tool to be in the run's ALLOW-LIST
+            # (#434 review, finding 2): a hallucinated call from an assistant
+            # that excluded ask_user reaches the runner and gets the ordinary
+            # ``tool_not_permitted`` result — governance, not control flow.
+            ask_question = (
+                _select_ask_user(turn_tool_calls)
+                if self._interactive and ASK_USER_TOOL_NAME in allowed
+                else None
+            )
             if ask_question is not None:
                 finish_reason = "ask_user"
                 budget_exhausted = False
@@ -904,7 +912,10 @@ class ChatRuntime:
         # INV-2 surface. Any failure / parse miss ⇒ no event, never an error. Its
         # token usage folds into ``usage`` BEFORE the answer's single llm_usage
         # row records below, so the nicety's real cost is accounted (#409).
-        if self._suggestions_enabled:
+        # Skipped for the honest "couldn't find it" fallback (HAX guideline 10:
+        # suppress suggestions on low-confidence/refusal answers — follow-ups to
+        # a failed answer read as engagement bait).
+        if self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK:
             await self._emit_step(
                 state, key="suggest", label="Suggesting follow-ups", step_state="started"
             )
@@ -1527,6 +1538,14 @@ def _parse_suggestions(text: str, *, limit: int) -> list[str]:
             parsed = json.loads(attempt)
         except ValueError:
             continue
+        if isinstance(parsed, dict):
+            # Tolerate the common object envelope ({"follow_ups": [...]} — the
+            # Open-WebUI-style contract) alongside the instructed bare array.
+            for key in ("follow_ups", "suggestions", "questions"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    parsed = value
+                    break
         if isinstance(parsed, list):
             candidates = parsed
             break

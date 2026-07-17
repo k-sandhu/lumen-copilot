@@ -1677,3 +1677,24 @@
 .lc-pin__remove:hover {
   background: var(--surface-3);
 }
+
+/* ---- #434 round-1 remediation + research pass ---------------------------- */
+.lc-ctx-meter__fill--warn {
+  background: var(--warn, #d97706);
+}
+.lc-ctx-meter__fill--hot {
+  background: var(--danger);
+}
+.lc-ctxpanel__retry {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-strong);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.lc-ctxpanel__retry:hover {
+  color: var(--text);
+}

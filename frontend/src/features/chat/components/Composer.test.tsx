@@ -4,7 +4,8 @@
  * picker + knowledge-mode control (#221) are embedded.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import userEvent from '@testing-library/user-event';
 import { Composer } from './Composer';
@@ -321,5 +322,103 @@ describe('Composer @-mention picker (spec 0007 AC-4)', () => {
     const user = userEvent.setup();
     await user.type(screen.getByLabelText('Message'), '@bud');
     expect(await screen.findByText('No matching documents.')).toBeInTheDocument();
+  });
+});
+
+// A rerender-capable variant of setup for prop-transition tests.
+function setupControlled(initial: Partial<React.ComponentProps<typeof Composer>>) {
+  const base = {
+    models: MODELS,
+    model: 'm1',
+    onModelChange: vi.fn(),
+    busy: false,
+    streaming: false,
+    onSend: vi.fn(),
+    onStop: vi.fn(),
+    modes: DEFAULT_MODES,
+    onModesChange: vi.fn(),
+  };
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrap = (over: Partial<React.ComponentProps<typeof Composer>>) => (
+    <QueryClientProvider client={qc}>
+      <Composer {...base} {...initial} {...over} />
+    </QueryClientProvider>
+  );
+  const view = render(wrap({}));
+  return {
+    rerender: (over: Partial<React.ComponentProps<typeof Composer>>) =>
+      view.rerender(wrap(over)),
+  };
+}
+
+// --- #434 round-1 remediation: picker key precedence + ghost Escape ----------
+
+describe('Composer mention picker key precedence (#434 finding 4)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('consumes Enter/arrows while the picker is empty — no literal @ send, no history recall', async () => {
+    // Suggest returns NO documents: the picker is active but option-less.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ suggestions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    const { onSend } = setup({
+      onPinDocument: vi.fn(),
+      historyEntries: ['older question'],
+    });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@nomatch');
+    expect(await screen.findByText('No matching documents.')).toBeInTheDocument();
+    // Enter must NOT send the literal "@nomatch" — it dismisses the picker.
+    await user.keyboard('{Enter}');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole('listbox', { name: 'Pin a document' }),
+    ).not.toBeInTheDocument();
+    // A second Enter (picker closed) sends the draft as usual.
+    await user.keyboard('{Enter}');
+    expect(onSend).toHaveBeenCalledWith('@nomatch');
+  });
+
+  it('ArrowUp over an option-less picker does not recall history', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ suggestions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    setup({ onPinDocument: vi.fn(), historyEntries: ['older question'] });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@zzz');
+    await screen.findByText('No matching documents.');
+    await user.keyboard('{ArrowUp}');
+    // The draft is untouched — history recall did not fire under the picker.
+    expect(input).toHaveValue('@zzz');
+  });
+});
+
+describe('Composer ghost Escape dismissal (research pass)', () => {
+  it('Escape hides the ghost until a new suggestion arrives', async () => {
+    const { rerender } = setupControlled({ ghostSuggestion: 'What changed in Q2?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    expect(screen.getByText('What changed in Q2?')).toBeInTheDocument();
+    input.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('What changed in Q2?')).not.toBeInTheDocument();
+    // Same suggestion stays dismissed…
+    rerender({ ghostSuggestion: 'What changed in Q2?' });
+    expect(screen.queryByText('What changed in Q2?')).not.toBeInTheDocument();
+    // …a NEW suggestion re-arms the ghost.
+    rerender({ ghostSuggestion: 'Who owns the Atlas launch?' });
+    expect(await screen.findByText('Who owns the Atlas launch?')).toBeInTheDocument();
   });
 });

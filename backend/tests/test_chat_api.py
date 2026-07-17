@@ -1161,3 +1161,46 @@ async def test_send_accepts_pinned_document_ids(client: AsyncClient, seeded: _Se
         json={"content": "x", "document_ids": [str(uuid.uuid4()) for _ in range(21)]},
     )
     assert too_many.status_code == 422
+
+
+async def test_session_usage_budget_resolves_provider_model_window(
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    client: AsyncClient,
+) -> None:
+    """#434 review finding 3: a ``provider:{id}:{raw}`` session model resolves to
+    its RAW id before the window lookup, so a known-window provider model never
+    reports the conservative fallback budget."""
+    raw_model = "gpt-4o"  # present in LiteLLM's local model map (known window)
+    pid = await _seed_enabled_provider(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_id=seeded.alice_id,
+        base_url="https://provider-a.example.com/v1",
+        raw_model_id=raw_model,
+        api_key="sk-provider-secret-value-abcdef",
+    )
+    provider_model = make_provider_model_id(pid, raw_model)
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/chat/sessions",
+        headers=_auth(token),
+        json={"title": "provider budget", "model": provider_model},
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    # The PUBLIC id still rides the response; the budget came from the RAW id.
+    assert body["model"] == provider_model
+    assert body["window_known"] is True
+    settings = get_settings()
+    fallback_budget = (
+        settings.context_fallback_max_input_tokens
+        - settings.context_output_headroom_tokens
+        - 1024
+    )
+    assert body["input_budget_tokens"] != fallback_budget

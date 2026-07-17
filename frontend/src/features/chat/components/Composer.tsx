@@ -146,8 +146,14 @@ export function Composer({
   }
 
   // The ghost renders ONLY over an empty, enabled composer — so it can never
-  // cover or clobber user text (spec 0006 AC-4).
-  const ghost = draft === '' && !disabled && ghostSuggestion ? ghostSuggestion : null;
+  // cover or clobber user text (spec 0006 AC-4). Escape dismisses it until a
+  // NEW suggestion arrives (research pass).
+  const [ghostDismissed, setGhostDismissed] = useState(false);
+  useEffect(() => {
+    setGhostDismissed(false);
+  }, [ghostSuggestion]);
+  const ghost =
+    draft === '' && !disabled && !ghostDismissed && ghostSuggestion ? ghostSuggestion : null;
 
   // A new conversation's history invalidates any in-flight navigation.
   useEffect(() => {
@@ -179,27 +185,42 @@ export function Composer({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // The @-mention dropdown owns the keys while open (spec 0007 AC-4):
-    // arrows move the highlight, Enter picks, Escape dismisses for this token.
-    if (mentionActive && mentionOptions.length > 0) {
-      if (e.key === 'ArrowDown') {
+    // IME safety (research pass): while composing (CJK etc.), every key —
+    // including Enter and arrows — belongs to the composition, never to send,
+    // recall, ghost, or the mention picker.
+    if (e.nativeEvent.isComposing) return;
+    // The @-mention dropdown owns its keys WHENEVER active (#434 review,
+    // finding 4) — including the loading/empty states, so Enter can never send
+    // the literal "@query" and arrows can never recall history under the open
+    // picker. Enter with no option to pick dismisses instead of sending;
+    // Escape always dismisses; Tab closes without trapping focus (APG).
+    if (mentionActive) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        setMentionIndex((i) => Math.min(i + 1, mentionOptions.length - 1));
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setMentionIndex((i) => Math.max(i - 1, 0));
+        if (mentionOptions.length > 0) {
+          setMentionIndex((i) =>
+            e.key === 'ArrowDown' ? Math.min(i + 1, mentionOptions.length - 1) : Math.max(i - 1, 0),
+          );
+        }
         return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const option = mentionOptions[Math.min(mentionIndex, mentionOptions.length - 1)];
-        if (option) pinMention(option);
+        if (option) {
+          pinMention(option);
+        } else {
+          setMentionDismissed(true);
+        }
         return;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
+        setMentionDismissed(true);
+        return;
+      }
+      if (e.key === 'Tab') {
+        // Close the picker and let focus move on — never a keyboard trap.
         setMentionDismissed(true);
         return;
       }
@@ -214,6 +235,13 @@ export function Composer({
       // a ghost is visible — normal focus traversal is otherwise untouched.
       e.preventDefault();
       acceptGhost();
+      return;
+    }
+    if (e.key === 'Escape' && ghost) {
+      // Dismiss the ghost without other side effects (research pass — Copilot
+      // convention); it returns only with the NEXT suggestion.
+      e.preventDefault();
+      setGhostDismissed(true);
       return;
     }
     const el = e.currentTarget;
@@ -310,12 +338,29 @@ export function Composer({
             }
             aria-label="Message"
             className="lc-composer__input"
+            // Mention-picker combobox wiring (W3C APG; spec 0007 AC-4): the
+            // textarea keeps DOM focus while aria-activedescendant tracks the
+            // highlighted option. Attributes present only while the picker is
+            // relevant so ordinary typing is unaffected.
+            aria-autocomplete={onPinDocument ? 'list' : undefined}
+            aria-expanded={onPinDocument ? mentionActive : undefined}
+            aria-controls={mentionActive ? 'lc-mention-listbox' : undefined}
+            aria-activedescendant={
+              mentionActive && mentionOptions.length > 0
+                ? `lc-mention-opt-${Math.min(mentionIndex, mentionOptions.length - 1)}`
+                : undefined
+            }
           />
           {/* @-mention document picker (spec 0007 AC-4): a listbox above the
               input while the draft ends in an @token. Options are permission-
               trimmed by the suggest surface; failure degrades to "no matches". */}
           {mentionActive && (
-            <div className="lc-mention" role="listbox" aria-label="Pin a document">
+            <div
+              className="lc-mention"
+              id="lc-mention-listbox"
+              role="listbox"
+              aria-label="Pin a document"
+            >
               {suggestions.isLoading && mentionOptions.length === 0 ? (
                 <p className="lc-mention__status">Searching documents…</p>
               ) : mentionOptions.length === 0 ? (
@@ -326,6 +371,7 @@ export function Composer({
                 mentionOptions.map((option, index) => (
                   <button
                     key={option.id}
+                    id={`lc-mention-opt-${index}`}
                     type="button"
                     role="option"
                     aria-selected={index === mentionIndex}
@@ -345,6 +391,11 @@ export function Composer({
               hint is the one clickable piece. */}
           {ghost && (
             <div className="lc-ghost" aria-hidden={false}>
+              {/* SR affordance for the phantom text (research pass — Smart
+                  Compose convention): announce once, politely. */}
+              <span className="sr-only" role="status">
+                Suggested question: {ghost}. Press Tab to use it, Escape to dismiss.
+              </span>
               <span className="lc-ghost__text" aria-hidden="true">
                 {ghost}
               </span>

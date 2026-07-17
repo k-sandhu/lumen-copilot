@@ -23,6 +23,9 @@ export function ContextMeter({ sessionId }: ContextMeterProps) {
   const { totals, last, input_budget_tokens: budget, window_known: known } = usage.data;
   const lastPrompt = last?.prompt_tokens ?? 0;
   const percent = Math.min(100, Math.round((lastPrompt / Math.max(1, budget)) * 100));
+  // Threshold coloring (research pass — Claude Code statusline convention):
+  // calm below 50%, warn to 80%, hot above.
+  const tone = percent >= 80 ? 'lc-ctx-meter__fill--hot' : percent >= 50 ? 'lc-ctx-meter__fill--warn' : '';
   const label =
     totals.answers === 0
       ? `Context ${formatTokens(budget)} available`
@@ -43,7 +46,7 @@ export function ContextMeter({ sessionId }: ContextMeterProps) {
       title={title}
     >
       <span className="lc-ctx-meter__bar" aria-hidden="true">
-        <span className="lc-ctx-meter__fill" style={{ width: `${percent}%` }} />
+        <span className={`lc-ctx-meter__fill ${tone}`.trim()} style={{ width: `${percent}%` }} />
       </span>
       <span className="lc-ctx-meter__label">
         {label}

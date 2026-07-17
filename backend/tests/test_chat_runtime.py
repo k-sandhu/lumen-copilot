@@ -2073,3 +2073,121 @@ def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
         k=5,
     )
     assert expected not in unpinned["query"]["hybrid"]["queries"][0]["bool"]["filter"]
+
+
+async def test_ask_user_not_intercepted_when_not_in_allowlist(ctx: _Ctx) -> None:
+    """#434 review finding 2: an assistant that EXCLUDED ask_user never has a
+    hallucinated call intercepted — it reaches the governed runner and comes
+    back tool_not_permitted; the loop continues to a normal answer."""
+    import asyncio
+
+    from app.services.assistant_runtime import AssistantRunConfig
+
+    gateway = _ScriptedGateway(
+        [
+            [StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")],
+            [StreamEvent(text="Assistant answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        # An assistant config whose allow-list deliberately excludes ask_user.
+        assistant_config=AssistantRunConfig(
+            system_prompt="You are scoped.",
+            allowed=frozenset({"search_text"}),
+            collection_ids=None,
+            model=None,
+        ),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "ask_user" not in names
+    results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["ok"] is False  # type: ignore[index]
+    assert results[0]["data"]["error"] == "tool_not_permitted"  # type: ignore[index]
+    assert envs[-1]["data"]["finishReason"] == "stop"  # type: ignore[index]
+
+
+def test_ask_user_parse_hardening_round2() -> None:
+    """#434 review finding 6: truncation happens BEFORE dedupe (over-long labels
+    sharing a head collapse and fail the distinct-count rule instead of
+    persisting ambiguous duplicates), and allow_free_text must be a real bool."""
+    from app.domain.chat import (
+        ASK_USER_MAX_LABEL_CHARS,
+        AskUserQuestion,
+        AskUserValidationError,
+    )
+
+    shared_head = "X" * ASK_USER_MAX_LABEL_CHARS
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse(
+            {"question": "Pick", "options": [shared_head + " alpha", shared_head + " beta"]}
+        )
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse(
+            {"question": "Pick", "options": ["A", "B"], "allow_free_text": "false"}
+        )
+    # A real boolean still parses.
+    ok = AskUserQuestion.parse(
+        {"question": "Pick", "options": ["A", "B"], "allow_free_text": False}
+    )
+    assert ok.allow_free_text is False
+
+
+def test_parse_suggestions_accepts_object_envelope() -> None:
+    """Research alignment: tolerate the {"follow_ups": [...]} object contract."""
+    from app.services.chat_runtime import _parse_suggestions
+
+    assert _parse_suggestions('{"follow_ups": ["A?", "B?"]}', limit=3) == ["A?", "B?"]
+    assert _parse_suggestions('{"suggestions": ["C?"]}', limit=3) == ["C?"]
+    assert _parse_suggestions('{"unrelated": 1}', limit=3) == []
+
+
+async def test_suggestions_skipped_for_no_sources_fallback(ctx: _Ctx) -> None:
+    """Research alignment (HAX guideline 10): the honest "couldn't find it"
+    fallback answer gets NO follow-up suggestions — and pays for no extra call."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        # The model returns an empty tool-free turn; the runtime falls back to
+        # NO_SOURCES_FALLBACK as the persisted answer.
+        [[StreamEvent(text=""), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(content='["never used"]', model="m"),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert gateway.chat_calls == 0
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "suggestions" not in names
+    assert envs[-1]["type"] == "done"

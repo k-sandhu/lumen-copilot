@@ -106,7 +106,18 @@ export function ContextPanel({
         <section aria-label="Token usage" className="lc-ctxpanel__section">
           <h3 className="lc-ctxpanel__label">Usage</h3>
           {usage.isLoading && <p className="lc-ctxpanel__muted">Loading usage…</p>}
-          {usage.isError && <p className="lc-ctxpanel__muted">Usage unavailable.</p>}
+          {usage.isError && (
+            <p className="lc-ctxpanel__muted">
+              Usage unavailable.{' '}
+              <button
+                type="button"
+                className="lc-ctxpanel__retry"
+                onClick={() => void usage.refetch()}
+              >
+                Retry
+              </button>
+            </p>
+          )}
           {usage.data && (
             <ul className="lc-ctxpanel__stats">
               <li>
@@ -130,7 +141,18 @@ export function ContextPanel({
         <section aria-label="Documents used" className="lc-ctxpanel__section">
           <h3 className="lc-ctxpanel__label">Documents cited</h3>
           {messages.isLoading && <p className="lc-ctxpanel__muted">Loading…</p>}
-          {messages.isError && <p className="lc-ctxpanel__muted">Could not load messages.</p>}
+          {messages.isError && (
+            <p className="lc-ctxpanel__muted">
+              Could not load messages.{' '}
+              <button
+                type="button"
+                className="lc-ctxpanel__retry"
+                onClick={() => void messages.refetch()}
+              >
+                Retry
+              </button>
+            </p>
+          )}
           {!messages.isLoading && !messages.isError && documents.length === 0 && (
             <p className="lc-ctxpanel__muted">No documents cited yet.</p>
           )}
@@ -158,7 +180,10 @@ export function ContextPanel({
 
         <section aria-label="Tools used" className="lc-ctxpanel__section">
           <h3 className="lc-ctxpanel__label">Tools</h3>
-          {!messages.isLoading && tools.length === 0 && (
+          {/* A failed messages load must read as an error, never as "no tools"
+              (#434 review, finding 5) — the retry lives in the section above. */}
+          {messages.isError && <p className="lc-ctxpanel__muted">Could not load messages.</p>}
+          {!messages.isLoading && !messages.isError && tools.length === 0 && (
             <p className="lc-ctxpanel__muted">No tools invoked yet.</p>
           )}
           <ul className="lc-ctxpanel__list">
@@ -177,7 +202,18 @@ export function ContextPanel({
         <section aria-label="Artifacts produced" className="lc-ctxpanel__section">
           <h3 className="lc-ctxpanel__label">Artifacts</h3>
           {artifacts.isLoading && <p className="lc-ctxpanel__muted">Loading artifacts…</p>}
-          {artifacts.isError && <p className="lc-ctxpanel__muted">Could not load artifacts.</p>}
+          {artifacts.isError && (
+            <p className="lc-ctxpanel__muted">
+              Could not load artifacts.{' '}
+              <button
+                type="button"
+                className="lc-ctxpanel__retry"
+                onClick={() => void artifacts.refetch()}
+              >
+                Retry
+              </button>
+            </p>
+          )}
           {artifacts.data && artifacts.data.items.length === 0 && (
             <p className="lc-ctxpanel__muted">No artifacts produced in this conversation.</p>
           )}

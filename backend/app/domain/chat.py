@@ -164,14 +164,17 @@ class AskUserQuestion:
                 label, description = raw.strip(), None
             else:
                 continue
+            # Truncate BEFORE deduplication (#434 review, finding 6): two
+            # distinct over-long labels that share a 120-char head would
+            # otherwise collapse into identical rendered choices — dedupe must
+            # see exactly what the user will see.
+            label = label[:ASK_USER_MAX_LABEL_CHARS].strip()
             if not label or label.casefold() in seen_labels:
                 continue
             seen_labels.add(label.casefold())
             if description is not None:
                 description = description[:ASK_USER_MAX_DESCRIPTION_CHARS]
-            options.append(
-                AskUserOption(label=label[:ASK_USER_MAX_LABEL_CHARS], description=description)
-            )
+            options.append(AskUserOption(label=label, description=description))
         if not ASK_USER_MIN_OPTIONS <= len(options) <= ASK_USER_MAX_OPTIONS:
             raise AskUserValidationError(
                 "ask_user requires between "
@@ -179,10 +182,19 @@ class AskUserQuestion:
                 f"non-empty options (got {len(options)})."
             )
 
+        # A non-boolean allow_free_text is malformed input, contained under
+        # INV-8 (#434 review, finding 6): the string "false" must never
+        # silently become True. Absent ⇒ the default (free text allowed).
+        allow_free_text_raw = arguments.get("allow_free_text", True)
+        if not isinstance(allow_free_text_raw, bool):
+            raise AskUserValidationError(
+                "ask_user 'allow_free_text' must be a boolean when provided."
+            )
+
         return cls(
             question=question,
             options=tuple(options),
-            allow_free_text=bool(arguments.get("allow_free_text", True)),
+            allow_free_text=allow_free_text_raw,
         )
 
     def to_payload(self) -> dict[str, object]:

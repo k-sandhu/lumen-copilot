@@ -23,6 +23,8 @@ follow-up questions the user could ask next. Rules:
 - Ground them in this conversation: drill into a detail of the answer, a natural
   next step, or a closely related aspect. Never invent facts, names, or
   documents that were not mentioned.
+- Use the conversation's own language (match the user's language; default to
+  English only if it is mixed).
 - No numbering, no commentary, no duplicates of what was already asked.
 
 Respond with ONLY a JSON array of strings, e.g. ["...", "..."].

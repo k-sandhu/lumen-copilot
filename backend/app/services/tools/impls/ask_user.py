@@ -77,11 +77,14 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "the answer would materially change your response (e.g. which quarter, "
             "which of two projects with the same name). Do not use it for "
             "preferences you can infer, to confirm you understood, or after you "
-            f"already asked once. Provide {ASK_USER_MIN_OPTIONS}–"
-            f"{ASK_USER_MAX_OPTIONS} short, mutually exclusive options that each "
-            "read as a complete answer; the user may also type a free-text reply. "
-            "Calling this ends your turn — the user's choice arrives as their next "
-            "message."
+            "already asked once; never re-ask something the user's message already "
+            f"answers. Provide {ASK_USER_MIN_OPTIONS}–"
+            f"{ASK_USER_MAX_OPTIONS} short, mutually exclusive options (labels of "
+            "1-5 words) that each read as a complete answer. If one option is the "
+            "sensible default, put it FIRST and append ' (Recommended)' to its "
+            "label. Do NOT add an 'Other'/'Something else' option — the UI always "
+            "offers a free-text reply. Calling this ends your turn — the user's "
+            "choice arrives as their next message."
         ),
         json_schema={
             "type": "object",

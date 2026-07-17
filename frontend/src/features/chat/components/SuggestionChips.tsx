@@ -23,10 +23,13 @@ export function SuggestionChips({ suggestions, disabled = false, onPick }: Sugge
           type="button"
           className="lc-suggestion-chip"
           disabled={disabled}
+          // AT context (research pass): announce the ROLE of the chip, not
+          // just its text, so "send this as my next question" is unambiguous.
+          aria-label={`Suggested follow-up: ${text}`}
           onClick={() => onPick(text)}
         >
           <Icon name="sparkles" />
-          <span>{text}</span>
+          <span aria-hidden="true">{text}</span>
         </button>
       ))}
     </div>

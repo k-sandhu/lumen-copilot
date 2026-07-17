@@ -180,3 +180,48 @@ describe('ContextPanel', () => {
     ).toBeInTheDocument();
   });
 });
+
+describe('#434 round-1: retryable failures', () => {
+  it('failed loads show Retry (and tools never fake an empty state)', async () => {
+    let failMessages = true;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      const fail = url.includes('/artifacts') || (url.includes('/messages') && failMessages);
+      const body = url.includes('/usage')
+        ? USAGE
+        : url.includes('/artifacts')
+          ? ARTIFACTS
+          : MESSAGES;
+      return Promise.resolve(
+        new Response(JSON.stringify(fail ? { title: 'boom', status: 500 } : body), {
+          status: fail ? 500 : 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <ContextPanel
+        sessionId="s1"
+        onOpenCitation={vi.fn()}
+        onOpenArtifact={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    // Messages failed: the documents section shows Retry AND the tools section
+    // reads as an error too (two occurrences), NOT "No tools invoked yet".
+    expect(await screen.findAllByText('Could not load messages.', { exact: false })).toHaveLength(
+      2,
+    );
+    expect(screen.queryByText('No tools invoked yet.')).not.toBeInTheDocument();
+    expect(await screen.findByText('Could not load artifacts.', { exact: false })).toBeInTheDocument();
+    const retries = screen.getAllByRole('button', { name: 'Retry' });
+    expect(retries.length).toBeGreaterThanOrEqual(2);
+    // Retrying messages after the backend recovers renders the documents list.
+    failMessages = false;
+    await user.click(retries[0]!);
+    expect(
+      await screen.findByRole('button', { name: 'Open Budget FY26.xlsx' }),
+    ).toBeInTheDocument();
+  });
+});

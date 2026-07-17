@@ -372,8 +372,16 @@ function ActiveSession({
   });
 
   useEffect(() => {
-    if (stream.suggestions) setFollowUps(stream.suggestions.suggestions);
-  }, [stream.suggestions]);
+    // Promote suggestions only once the stream settled successfully (#434
+    // review, finding 1): the event arrives before the backend transaction
+    // commits, so a suggestions → terminal-error sequence must leave neither
+    // chips nor ghost. An error clears anything already promoted.
+    if (stream.phase === 'done' && stream.suggestions) {
+      setFollowUps(stream.suggestions.suggestions);
+    } else if (stream.phase === 'error') {
+      setFollowUps([]);
+    }
+  }, [stream.phase, stream.suggestions]);
 
   useEffect(() => {
     setFollowUps([]);
@@ -456,15 +464,16 @@ function ActiveSession({
   const busy = send.isPending || streaming === true;
 
   // Bash-style composer recall (spec 0006 AC-5): the caller's own previous
-  // messages in this conversation, newest first.
-  const historyEntries = useMemo(
-    () =>
-      (messages.data?.items ?? [])
-        .filter((m) => m.role === 'user')
-        .map((m) => m.content)
-        .reverse(),
-    [messages.data],
-  );
+  // messages in this conversation, newest first, with consecutive duplicates
+  // collapsed (readline convention — research pass) so Up never shows the
+  // same entry twice in a row.
+  const historyEntries = useMemo(() => {
+    const newestFirst = (messages.data?.items ?? [])
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content)
+      .reverse();
+    return newestFirst.filter((entry, i) => i === 0 || entry !== newestFirst[i - 1]);
+  }, [messages.data]);
 
   const openPanel = useChatStore((s) => s.openPanel);
 
