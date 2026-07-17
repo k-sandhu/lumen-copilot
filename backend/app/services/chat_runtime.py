@@ -341,6 +341,11 @@ class ChatRuntime:
         # The #413 retry backoff sleeper — injectable so tests observe/skip the
         # waits; production uses asyncio.sleep.
         self._retry_sleep: Callable[[float], Awaitable[None]] = retry_sleep or asyncio.sleep
+        # Failure-path usage salvage (#440 round-2 NEW-2): set once the answer
+        # has a route state + accumulator; read by ``run``'s error arms to
+        # persist spent scopes in an INDEPENDENT transaction when the answer
+        # transaction rolls back (error/cancel) — providers billed those calls.
+        self._salvage: tuple[_RouteState, _Usage] | None = None
         # The #413 fallback revalidator: the SAME allow-list check the send path
         # applies (config registry / the tenant's enabled providers), re-run at
         # answer start so stored config that went stale is dropped fail-closed.
@@ -485,6 +490,7 @@ class ChatRuntime:
             # on forever. Emit one RETRYABLE terminal (503; the contract has the
             # client treat ``error`` as retryable) then RE-RAISE so the task still
             # stops — never swallow cancellation.
+            await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(
                 state,
                 503,
@@ -494,12 +500,14 @@ class ChatRuntime:
             )
             raise
         except AppError as exc:
+            await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
             return
         except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
             # Log the error *type* only (never the message — it may carry vendor
             # details / a key). The client gets an opaque 500 problem envelope.
             log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
+            await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
             return
 
@@ -738,6 +746,10 @@ class ChatRuntime:
         # narration-as-answer bug for clients that render the stream.
         answer_chunks: list[str] = []
         usage = _Usage()
+        # Arm the failure-path salvage (#440 NEW-2): from here on, an error or
+        # cancellation that rolls the answer transaction back still persists
+        # any spent route scopes via ``run``'s error arms.
+        self._salvage = (route_state, usage)
         finish_reason = "stop"
         total_hits = 0
         # Set iff a turn ended with a valid ``ask_user`` call (spec 0006 #429):
@@ -1057,16 +1069,33 @@ class ChatRuntime:
                 config=self._context_config,
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
-            _, finish_reason, extra_chunks = await self._stream_turn_resilient(
-                session=session,
-                route_state=route_state,
-                messages=messages,
-                usage=usage,
-                tools=advertised,
-                tool_choice="none",
-                refit=_refit,
-            )
-            await self._publish_text(state, extra_chunks)
+            try:
+                _, finish_reason, extra_chunks = await self._stream_turn_resilient(
+                    session=session,
+                    route_state=route_state,
+                    messages=messages,
+                    usage=usage,
+                    tools=advertised,
+                    tool_choice="none",
+                    refit=_refit,
+                    # No failover mid-continuation (#440 round-2 NEW-5): the
+                    # partial is already visible from THIS route; a different
+                    # model finishing the sentence would falsify every
+                    # single-model attribution surface (done.model, the
+                    # message row, the audit).
+                    allow_failover=False,
+                )
+            except AppError as exc:
+                # Best-effort continuation: if it cannot run (retries
+                # exhausted, or a terminal fault), the already-published
+                # partial IS the answer — honestly finish_reason="length" —
+                # rather than erroring a stream that showed real content.
+                # Nothing was published by the failed attempts (buffered
+                # turns), so wire == stored still holds.
+                log.warning("llm.length_continuation_failed", code=exc.code)
+                extra_chunks = []
+            else:
+                await self._publish_text(state, extra_chunks)
             answer_chunks = [*answer_chunks, *extra_chunks]
 
         answer_text = "".join(answer_chunks).strip()
@@ -1232,6 +1261,47 @@ class ChatRuntime:
             )
         )
 
+    async def _salvage_usage_after_failure(
+        self, session_id: UUID, assistant_message_id: UUID
+    ) -> None:
+        """Persist spent route scopes after an errored/cancelled answer (#413).
+
+        The answer transaction rolled back — but the provider still billed
+        every completed call. Best-effort, in a FRESH independent transaction:
+        each scope that actually spent tokens records as a message-less row
+        (there is no message) under its own model, grouped by ``answer_id``.
+        Empty scopes are skipped (a 422 refused before any provider call must
+        not pollute the ledger with zero rows). Never raises — a salvage
+        failure is logged (type only) and the original fault stays the story.
+        """
+        if self._salvage is None:
+            return
+        route_state, usage = self._salvage
+        scopes = [*route_state.spent, (route_state.model, usage)]
+        spent = [(m, s) for m, s in scopes if s.total_tokens > 0 or s.prompt_tokens > 0]
+        if not spent:
+            return
+        try:
+            async with self._sessionmaker() as session:
+                await bind_tenant(session, self._principal.tenant_id)
+                repo = LlmUsageRepository(session, self._principal.tenant_id)
+                for model, scope in spent:
+                    await repo.record(
+                        model=model,
+                        prompt_tokens=scope.prompt_tokens,
+                        completion_tokens=scope.completion_tokens,
+                        total_tokens=scope.total_tokens,
+                        cached_prompt_tokens=scope.cached_prompt_tokens,
+                        cache_write_tokens=scope.cache_write_tokens,
+                        context_prompt_tokens=scope.last_turn_prompt_tokens,
+                        session_id=session_id,
+                        answer_id=assistant_message_id,
+                        message_id=None,
+                    )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 — best-effort; never mask the fault
+            log.warning("llm.usage_salvage_failed", error_type=type(exc).__name__)
+
     async def _record_usage_scopes(
         self,
         *,
@@ -1263,6 +1333,7 @@ class ChatRuntime:
                 cache_write_tokens=scope.cache_write_tokens,
                 context_prompt_tokens=scope.last_turn_prompt_tokens,
                 session_id=session_id,
+                answer_id=assistant_message_id,
                 message_id=None,
             )
         await repo.record(
@@ -1274,6 +1345,7 @@ class ChatRuntime:
             cache_write_tokens=usage.cache_write_tokens,
             context_prompt_tokens=usage.last_turn_prompt_tokens,
             session_id=session_id,
+            answer_id=assistant_message_id,
             message_id=assistant_message_id,
         )
 
@@ -1287,6 +1359,7 @@ class ChatRuntime:
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
         refit: Callable[[str], list[ChatMessage]] | None = None,
+        allow_failover: bool = True,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
 
@@ -1349,6 +1422,13 @@ class ChatRuntime:
             if last is None:  # pragma: no cover — the loop always sets it
                 raise RuntimeError("retry loop exited without a fault")
             dying_model = route_state.model
+            if not allow_failover:
+                # The length-continuation turn (#440 round-2 NEW-5): visible
+                # answer text is already on the wire from the CURRENT route, so
+                # switching models mid-answer would make ``done.model`` (and
+                # every attribution surface) name a model that produced only
+                # part of the visible content. Retries stay; failover does not.
+                raise last
             if not await self._advance_to_fallback(session, route_state):
                 raise last
             route_state.spent.append((dying_model, usage.snapshot_and_reset()))
@@ -1376,12 +1456,15 @@ class ChatRuntime:
                     "llm.fallback_unresolvable", model=candidate, code=exc.code
                 )
                 continue
-            if is_provider_model_id(candidate) and route.api_key is None:
-                # The resolver degrades an unknown ``provider:`` id to a
-                # default-credential passthrough (safe for the SEND path, which
-                # pre-validates). For a stored fallback that would silently
-                # route a tenant-provider model through the GLOBAL key — skip
-                # it instead (#440 review, finding 4).
+            if is_provider_model_id(candidate) and route.model == candidate:
+                # UNRESOLVED passthrough: a resolved ``provider:`` route always
+                # rewrites ``model`` to the provider's raw id, so a route still
+                # carrying the prefixed candidate means no resolver was wired
+                # or the provider vanished. Sending it would hit the GLOBAL
+                # gateway credentials with a bogus id — skip instead (#440
+                # finding 4). A resolved ANONYMOUS provider (api_base set, no
+                # key — a legitimate config) rewrites the model and passes
+                # (#440 round-2 NEW-3).
                 log.warning(
                     "llm.fallback_unresolvable", model=candidate, code="provider_unresolved"
                 )

@@ -1478,7 +1478,7 @@ export interface ChatStartData {
   sessionId: string;
   /** Id the in-progress assistant message will be persisted under. */
   messageId: string;
-  /** Model id producing this answer. */
+  /** The REQUESTED model id (#413): done.model is authoritative for what actually answered. */
   model: string;
 }
 

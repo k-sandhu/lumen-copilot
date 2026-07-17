@@ -1150,6 +1150,12 @@ class LlmUsage(TenantScopedMixin, Base):
         ForeignKey("chat_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The answer this scope belongs to (#413 / #440 NEW-1): the pre-minted
+    # assistant message id, set on EVERY route scope of an answer — including
+    # message-less failed/superseded scopes and error-path salvage rows (which
+    # may have no message row, hence no FK). Groups (answer, route-scope)
+    # durably so the ledger can reconstruct multi-route answers.
+    answer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     # The assistant message the answer persisted as. An ORDINARY immediate FK
     # (#419 review): unlike ``tool_invocations`` (written DURING the loop,
     # before the message insert), the usage row is recorded strictly AFTER

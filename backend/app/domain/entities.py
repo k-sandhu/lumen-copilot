@@ -1083,6 +1083,9 @@ class LlmUsageRecord:
     id: UUID
     tenant_id: UUID
     session_id: UUID | None
+    # The answer this route scope belongs to (#413): the pre-minted assistant
+    # message id, set on every scope — message-bearing or not. Not an FK.
+    answer_id: UUID | None
     message_id: UUID | None
     model: str
     prompt_tokens: int

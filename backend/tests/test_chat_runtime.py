@@ -1925,14 +1925,25 @@ def test_ask_user_parse_bounds() -> None:
 
 
 async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
-    """AC-1: totals sum every answer's row; last is the newest; empty is zeroes."""
+    """AC-1 (spec 0007, updated for #413): totals SUM every row — including a
+    message-less failed-route scope — but ``answers`` counts only PRODUCED
+    (message-bearing) answers, and ``last`` is the newest message-bearing row
+    (a dead route's scope must never describe 'the most recent answer')."""
     from app.db.repositories import LlmUsageRepository
+    from app.domain.entities import MessageRole
 
     async with ctx.sessionmaker() as session:
         repo = LlmUsageRepository(session, ctx.tenant_id)
         empty = await repo.totals_for_session(ctx.session_id)
         assert (empty.answers, empty.total_tokens) == (0, 0)
         assert await repo.last_for_session(ctx.session_id) is None
+        msg_repo = MessageRepository(session, ctx.tenant_id)
+        msg1 = await msg_repo.add(
+            session_id=ctx.session_id, role=MessageRole.ASSISTANT, content="a1"
+        )
+        msg2 = await msg_repo.add(
+            session_id=ctx.session_id, role=MessageRole.ASSISTANT, content="a2"
+        )
         await repo.record(
             model="m",
             prompt_tokens=100,
@@ -1940,6 +1951,8 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             total_tokens=120,
             cached_prompt_tokens=10,
             session_id=ctx.session_id,
+            answer_id=msg1.id,
+            message_id=msg1.id,
         )
         await repo.record(
             model="m",
@@ -1948,6 +1961,18 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             total_tokens=330,
             cache_write_tokens=5,
             session_id=ctx.session_id,
+            answer_id=msg2.id,
+            message_id=msg2.id,
+        )
+        # A failed-route scope (#413): sums include it; answers/last ignore it.
+        await repo.record(
+            model="dead-route",
+            prompt_tokens=50,
+            completion_tokens=0,
+            total_tokens=50,
+            session_id=ctx.session_id,
+            answer_id=msg2.id,
+            message_id=None,
         )
         await session.commit()
         # Deterministic "last": both records land in the same second (SQLite's
@@ -1969,14 +1994,20 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
         )
         await session.commit()
         totals = await repo.totals_for_session(ctx.session_id)
+        # answers counts the two PRODUCED (message-bearing) answers — the dead
+        # route's scope is not a third answer…
         assert totals.answers == 2
-        assert totals.prompt_tokens == 400
+        # …but the token sums include ALL THREE rows (billing truth).
+        assert totals.prompt_tokens == 400 + 50
         assert totals.completion_tokens == 50
-        assert totals.total_tokens == 450
+        assert totals.total_tokens == 450 + 50
         assert totals.cached_prompt_tokens == 10
         assert totals.cache_write_tokens == 5
         last = await repo.last_for_session(ctx.session_id)
+        # "last" is the newest MESSAGE-BEARING row — never the dead scope, even
+        # though it was inserted latest.
         assert last is not None and last.prompt_tokens == 300
+        assert last.model == "m" and last.message_id is not None
         # INV-1: a foreign-tenant repository sees nothing.
         foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(
             ctx.session_id
@@ -3329,6 +3360,19 @@ async def test_exhausted_primary_fails_over_and_records_actual_model(ctx: _Ctx) 
         recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=50)
         answered = [e for e in recent if e.action == "answer.generated"]
         assert answered and answered[0].metadata["model"] == fallback
+        # The ledger READ contract survives multi-row answers (#440 NEW-1):
+        # one produced answer, sums across both scopes, "last" = the winner.
+        totals = await LlmUsageRepository(session, ctx.tenant_id).totals_for_session(
+            ctx.session_id
+        )
+        assert totals.answers == 1
+        assert totals.total_tokens == 12 + 35
+        last = await LlmUsageRepository(session, ctx.tenant_id).last_for_session(
+            ctx.session_id
+        )
+        assert last is not None and last.model == fallback
+        # Every scope row carries the durable answer correlation.
+        assert all(r.answer_id == assistant[-1].id for r in rows)
 
 
 async def test_all_routes_exhausted_is_one_typed_terminal(ctx: _Ctx) -> None:
@@ -3740,3 +3784,203 @@ async def test_done_payload_validates_against_the_canonical_contract(ctx: _Ctx) 
         done["data"],
         {"$ref": "#/$defs/ChatDoneData", "$defs": schema["$defs"]},  # type: ignore[index]
     )
+
+
+async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-2: the primary SPENDS on a successful tool turn, then
+    primary AND fallback exhaust — the answer errors, the answer transaction
+    rolls back, yet the spent scopes persist via the independent salvage
+    transaction: message-less rows under their own models, grouped by
+    answer_id, answers == 0 (nothing was produced), sums = the real spend."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ModelRoutedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+                    finish_reason="tool_calls",
+                )
+            ],
+        ],
+        failures={},
+    )
+    original_stream = gateway.stream_tools
+    armed = {"done": False}
+
+    async def stream_with_arming(messages: object, **kwargs: object) -> AsyncIterator[StreamEvent]:
+        model = kwargs.get("model")
+        if not armed["done"] and model == _PRIMARY:
+            armed["done"] = True
+        elif model in (_PRIMARY, fallback):
+            gateway._failures.setdefault(str(model), []).append(_retryable())  # noqa: SLF001
+        async for ev in original_stream(messages, **kwargs):  # type: ignore[arg-type]
+            yield ev
+
+    gateway.stream_tools = stream_with_arming  # type: ignore[method-assign]
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        # The primary's 12 tokens survived the rollback (salvaged, message-less).
+        assert len(rows) == 1
+        assert rows[0].model == _PRIMARY
+        assert rows[0].total_tokens == 12
+        assert rows[0].message_id is None
+        assert rows[0].answer_id is not None
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 0  # nothing was produced
+        assert totals.total_tokens == 12  # but the spend is not lost
+
+
+async def test_anonymous_provider_fallback_is_not_skipped(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-3: a RESOLVED anonymous provider fallback (api_base
+    set, no key — a legitimate config) fails over fine; an UNRESOLVED
+    ``provider:`` candidate (no resolver / provider vanished) is skipped."""
+    from app.services.provider_models import ModelRoute
+
+    anon = "provider:00000000-0000-0000-0000-000000000001:local/model"
+    ghost = "provider:00000000-0000-0000-0000-000000000002:gone/model"
+    await _set_fallbacks(ctx, [ghost, anon])
+
+    async def resolver(_session: AsyncSession, model_id: str) -> ModelRoute:
+        if model_id == anon:
+            # A resolved ANONYMOUS provider: raw model id + base URL, no key.
+            return ModelRoute(model="local/model", api_base="http://llm.internal", api_key=None)
+        # The ghost provider is gone: the resolver degrades to passthrough
+        # (exactly what build_model_route_resolver does for an unknown id).
+        return ModelRoute(model=model_id)
+
+    async def validator(_session: AsyncSession, _model_id: str) -> bool:
+        return True  # both stored candidates pass the allow-list snapshot
+
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Anon answer."), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]},
+    )
+    sleeps, recorder = _sleep_recorder()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = ChatRuntime(
+        sessionmaker=ctx.sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        retry_sleep=recorder,  # type: ignore[arg-type]
+        fallback_model_validator=validator,
+        model_route_resolver=resolver,  # type: ignore[arg-type]
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    # The ghost was skipped (unresolved passthrough guard); the anonymous
+    # provider answered under its RAW model id.
+    assert cast("dict[str, object]", envs[-1]["data"])["model"] == anon
+    assert "local/model" in gateway.models_called
+    assert ghost not in gateway.models_called
+
+
+async def test_malformed_fallback_container_does_not_break_answers(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-4: a scalar smuggled into ``tenants.fallback_models``
+    (raw storage) neither 500s the answer nor becomes candidates — the
+    container guard treats non-lists as no-config."""
+    from sqlalchemy import update as _sql_update
+
+    from app.db import models as _models
+
+    async with ctx.sessionmaker() as session:
+        await session.execute(
+            _sql_update(_models.Tenant)
+            .where(_models.Tenant.id == ctx.tenant_id)
+            .values(fallback_models=7)
+        )
+        await session.commit()
+
+    retrieval = _FakeRetrieval([])
+    gateway = _ScriptedGateway([[StreamEvent(text="Fine."), StreamEvent(finish_reason="stop")]])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+
+async def test_continuation_never_fails_over_and_degrades_to_the_partial(ctx: _Ctx) -> None:
+    """#440 round-2 NEW-5: once the partial is on the wire, the continuation
+    may retry but NEVER fails over (a second model must not finish the
+    sentence); if it cannot run, the published partial IS the answer —
+    finish_reason stays ``length`` and wire == stored."""
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="Part one."), StreamEvent(finish_reason="length")]],
+        failures={},
+    )
+    # The continuation (tool_choice="none" → synthesis path) always faults.
+    original_stream = gateway.stream_tools
+
+    async def stream_faulting_synthesis(
+        messages: object, **kwargs: object
+    ) -> AsyncIterator[StreamEvent]:
+        if kwargs.get("tool_choice") == "none":
+            raise cast(Exception, _retryable())
+        async for ev in original_stream(messages, **kwargs):  # type: ignore[arg-type]
+            yield ev
+
+    gateway.stream_tools = stream_faulting_synthesis  # type: ignore[method-assign]
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    assert envs[-1]["type"] == "done"
+    done_data = cast("dict[str, object]", envs[-1]["data"])
+    assert done_data["finishReason"] == "length"
+    assert done_data["model"] == _PRIMARY  # no failover happened
+    assert fallback not in gateway.models_called
+    text = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert text == "Part one."
+    async with ctx.sessionmaker() as session:
+        messages_rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages_rows if m.role.value == "assistant"]
+        assert assistant[-1].content == "Part one."

@@ -119,7 +119,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0035_tenant_fallbacks"]
+    assert list(script.get_heads()) == ["0036_llm_usage_answer"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -1290,3 +1290,21 @@ def test_offline_tenant_fallback_models_migration_round_trips(
     command.downgrade(cfg, "0035_tenant_fallbacks:0034_llm_usage_ctx", sql=True)
     down = capsys.readouterr().out.lower()
     assert "alter table tenants drop column fallback_models" in down
+
+
+def test_offline_llm_usage_answer_id_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0036 adds ``llm_usage.answer_id`` (nullable uuid, no FK — the answer may
+    have produced no message); the downgrade drops it (#413 / #440 NEW-1)."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0035_tenant_fallbacks:0036_llm_usage_answer", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table llm_usage add column answer_id" in up
+    assert "references" not in up  # deliberately NOT an FK
+
+    command.downgrade(cfg, "0036_llm_usage_answer:0035_tenant_fallbacks", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table llm_usage drop column answer_id" in down

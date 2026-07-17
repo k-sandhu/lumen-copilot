@@ -1262,3 +1262,40 @@ async def test_patch_fallback_models_rejects_unknown_provider_id(
     assert resp.status_code == 422
     got = await client.get("/api/v1/admin/settings", headers=_auth(token))
     assert got.json()["fallback_models"] == []
+
+
+async def test_tenant_settings_wire_shapes_validate_against_openapi(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """#440 round-2 coverage debt: the REAL GET/PATCH tenant-settings bodies
+    validate against the canonical ``contracts/openapi.yaml`` schemas — REST
+    drift now fails a test like the WS payload does."""
+    from pathlib import Path
+
+    import jsonschema
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent.parent
+    spec = yaml.safe_load((root / "contracts" / "openapi.yaml").read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    def validate(payload: object, name: str) -> None:
+        jsonschema.validate(
+            payload, {**schemas[name], "components": {"schemas": schemas}}
+        )
+
+    token = await _login(client, seeded.admin_a_email)
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.status_code == 200
+    validate(got.json(), "TenantSettings")
+
+    from app.core.config import get_settings
+
+    valid = [m.id for m in get_settings().chat_model_registry[:1]]
+    patch_body = {"max_tool_turns": 5, "fallback_models": valid}
+    validate(patch_body, "TenantSettingsUpdate")
+    resp = await client.patch(
+        "/api/v1/admin/settings", headers=_auth(token), json=patch_body
+    )
+    assert resp.status_code == 200, resp.text
+    validate(resp.json(), "TenantSettings")
