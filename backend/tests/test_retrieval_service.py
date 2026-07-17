@@ -350,6 +350,7 @@ class _FakeSearchStore:
         allow: SearchAllowFilter,
         k: int,
         collection_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[SearchHit]:
         if self.fail:
             raise DependencyError("engine down", code="search_unavailable")

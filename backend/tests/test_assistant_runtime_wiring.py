@@ -158,7 +158,13 @@ class _RecordingRetrieval:
         self.seen_collection_ids: list[list[uuid.UUID] | None] = []
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.seen_collection_ids.append(
             list(collection_ids) if collection_ids is not None else None  # type: ignore[arg-type]

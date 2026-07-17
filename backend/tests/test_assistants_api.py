@@ -409,7 +409,9 @@ def _wire_test_harness(monkeypatch: pytest.MonkeyPatch, factory: object) -> None
     real_cls = svc.ChatRuntime
 
     class _Retrieval:
-        async def search_text(self, *, principal, query, k, collection_ids=None):  # noqa: ANN001
+        async def search_text(
+            self, *, principal, query, k, collection_ids=None, document_ids=None  # noqa: ANN001
+        ):
             return []
 
         async def search_documents(self, *, principal, name_or_query, k=10):  # noqa: ANN001
