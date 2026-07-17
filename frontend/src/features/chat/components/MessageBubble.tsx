@@ -21,11 +21,13 @@
 import { memo } from 'react';
 import { MarkdownView } from '@/lib/markdown';
 import { FreshnessPill, Icon, PermissionPill, RetrievalTrace, type TraceStep } from '@/ui';
-import type { MessageRole } from '@/api';
+import type { AskUserQuestion, ChatStep, MessageRole } from '@/api';
 import { hostOf, isSafeHttpUrl, type UiCitation } from '../model/citation';
 import { groupCitationsByDocument, partitionCitations } from '../model/presentation';
 import { ToolActivity } from './ToolActivity';
 import { AnswerFooter } from './AnswerFooter';
+import { AskUserOptions } from './AskUserOptions';
+import { StepTimeline } from './StepTimeline';
 import { CodeRunPanel } from '@/features/codeRuns';
 import { artifactHref } from '@/features/artifacts';
 import type {
@@ -67,6 +69,20 @@ export interface MessageBubbleProps {
   /** True while this assistant turn is still streaming (shows a caret). */
   streaming?: boolean;
   /**
+   * Live run-phase steps (spec 0006 #429) — the streaming turn only. Rendered
+   * as a timeline while no answer text has arrived (the pre-token void), then
+   * dropped: flowing text is its own progress signal.
+   */
+  steps?: ChatStep[];
+  /** The clarifying question this turn ended with, if any (spec 0006 #429). */
+  question?: AskUserQuestion | undefined;
+  /** Whether the question's options are clickable (last message, nothing in flight). */
+  questionActive?: boolean;
+  /** The following user turn's text — highlights the chosen option on answered questions. */
+  chosenAnswer?: string | undefined;
+  /** Send an option label as the next user message (spec 0006 #429). */
+  onChooseOption?: ((label: string) => void) | undefined;
+  /**
    * When the answer was produced (e.g. "2d ago"), for the footer's
    * "answered <ago>" signal. Derived from the message timestamp; omitted if none.
    * This is the ANSWER time, not source freshness/last-indexed (#120 GUARD).
@@ -96,6 +112,11 @@ function MessageBubbleComponent({
   tools = [],
   codeRuns = [],
   streaming = false,
+  steps = [],
+  question,
+  questionActive = false,
+  chosenAnswer,
+  onChooseOption,
   answeredAt,
   showNoCitationsNotice = false,
   webUsed = false,
@@ -139,6 +160,12 @@ function MessageBubbleComponent({
           <div className="lc-turn__text">{content}</div>
         ) : (
           <>
+            {/* Live run-phase timeline (spec 0006): only in the pre-token void —
+                once answer text flows, the text itself shows progress. */}
+            {streaming && content.length === 0 && steps.length > 0 && (
+              <StepTimeline steps={steps} />
+            )}
+
             {tools.length > 0 && <ToolActivity tools={tools} />}
 
             {traceSummary && (
@@ -166,6 +193,17 @@ function MessageBubbleComponent({
               <MarkdownView className="lc-answer">{content}</MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>
+
+            {/* Clarifying-question options (spec 0006 #429): clickable while this
+                is the conversation's last turn, inert (chosen highlighted) after. */}
+            {question && (
+              <AskUserOptions
+                question={question}
+                active={questionActive}
+                chosenAnswer={chosenAnswer}
+                onChoose={onChooseOption}
+              />
+            )}
 
             {/* Sandbox code runs (#232, E3-7): computed results separated from the
                 narrative, each inspectable (code + streamed output + result +
@@ -249,7 +287,9 @@ function MessageBubbleComponent({
               </p>
             )}
 
-            {showNoCitationsNotice && (
+            {/* A clarifying question makes no claims — the zero-citation notice
+                would be noise under it (spec 0006 INV-3 posture). */}
+            {showNoCitationsNotice && !question && (
               <p className="lc-no-sources">No sources were cited for this answer.</p>
             )}
 
@@ -259,7 +299,9 @@ function MessageBubbleComponent({
               shows when the answer is grounded in ≥1 cited source (honest: never a
               bare claim).
             */}
-            {!streaming && content.length > 0 && (
+            {/* No footer under a clarifying question — thumbs/copy on a question
+                the user is about to answer reads as clutter (spec 0006). */}
+            {!streaming && content.length > 0 && !question && (
               <AnswerFooter
                 answerText={content}
                 permissionChecked={citations.length > 0}

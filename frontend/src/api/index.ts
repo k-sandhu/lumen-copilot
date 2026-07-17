@@ -27,6 +27,7 @@ export {
   deleteChatSession,
   listMessages,
   sendMessage,
+  getSessionUsage,
 } from './chat';
 export type { PageParams } from './chat';
 export { listModels } from './models';

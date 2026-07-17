@@ -551,6 +551,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /chat/sessions/{sessionId}/usage:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    get:
+      operationId: getChatSessionUsage
+      summary: Token/context accounting for a session (spec 0007 #429).
+      description: >
+        Powers the conversation context meter: summed per-answer llm_usage
+        (#409), the most recent answer's record, and the input-token budget the
+        context assembler grants the session's model (window − output headroom −
+        safety margin — the same formula answers are assembled under). A session
+        with no answers yet returns all-zero totals and no `last`.
+      tags: [chat]
+      responses:
+        "200":
+          description: The session's usage accounting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionUsage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /chat/sessions/{sessionId}/messages:
     parameters:
       - { $ref: "#/components/parameters/SessionId" }
@@ -3003,7 +3025,47 @@ components:
             Governed tool calls behind an assistant message, oldest first
             (empty for user messages) (#377).
           items: { $ref: "#/components/schemas/MessageToolInvocation" }
+        question:
+          $ref: "#/components/schemas/AskUserQuestion"
+          description: >
+            Present only on an assistant turn that ended by asking the user a
+            clarifying question (spec 0006 #429, finishReason=ask_user). The UI
+            re-renders the options from here after reload; they stay active only
+            while this is the conversation's last message. The reply is an
+            ordinary SendMessageRequest.
         created_at: { type: string, format: date-time }
+
+    AskUserQuestion:
+      type: object
+      additionalProperties: false
+      description: >
+        A clarifying question the model asked instead of answering (spec 0006
+        #429). Mirrors the WS ChatAskUser payload (minus messageId — it rides
+        the owning Message). The question text is also the message content.
+      required: [question, options, allow_free_text]
+      properties:
+        question: { type: string }
+        options:
+          type: array
+          minItems: 2
+          maxItems: 4
+          description: >
+            Mutually exclusive choices; clicking one sends its label verbatim
+            as the next user message.
+          items: { $ref: "#/components/schemas/AskUserOption" }
+        allow_free_text:
+          type: boolean
+          description: Whether a typed custom reply is a sanctioned answer path.
+
+    AskUserOption:
+      type: object
+      additionalProperties: false
+      required: [label]
+      properties:
+        label: { type: string }
+        description:
+          type: string
+          description: Optional one-line elaboration shown under the label.
 
     MessageList:
       type: object
@@ -3016,6 +3078,86 @@ components:
         next_cursor:
           type: [string, "null"]
 
+    SessionUsageTotals:
+      type: object
+      additionalProperties: false
+      description: >
+        Summed per-answer llm_usage for one session (spec 0007 #429). `answers`
+        is how many produced answers the sums cover; all zero before the first.
+      required:
+        [
+          answers,
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cached_prompt_tokens,
+          cache_write_tokens,
+        ]
+      properties:
+        answers: { type: integer, minimum: 0 }
+        prompt_tokens: { type: integer, minimum: 0 }
+        completion_tokens: { type: integer, minimum: 0 }
+        total_tokens: { type: integer, minimum: 0 }
+        cached_prompt_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0 }
+
+    SessionUsageLast:
+      type: object
+      additionalProperties: false
+      description: The most recent answer's usage record (spec 0007 #429).
+      required:
+        [
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cached_prompt_tokens,
+          cache_write_tokens,
+        ]
+      properties:
+        prompt_tokens: { type: integer, minimum: 0 }
+        completion_tokens: { type: integer, minimum: 0 }
+        total_tokens: { type: integer, minimum: 0 }
+        cached_prompt_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0 }
+        context_prompt_tokens:
+          type: integer
+          minimum: 0
+          description: >
+            The final answer-loop turn's prompt size — actual window occupancy
+            for the context meter, vs prompt_tokens' billing sum across all
+            loop turns (+ the suggestions call). Additive; absent on legacy
+            rows or when the provider reported no usage (fall back to
+            prompt_tokens).
+
+    SessionUsage:
+      type: object
+      additionalProperties: false
+      description: >
+        A session's token/context accounting (spec 0007 #429). The context meter
+        reads `last.prompt_tokens / input_budget_tokens` as window utilization;
+        `window_known=false` means the model was absent from the model map and
+        the configured conservative fallback window was used.
+      required: [model, totals, input_budget_tokens, window_known]
+      properties:
+        model:
+          type: string
+          description: >
+            The model id the budget was computed for (public form): the model
+            that produced the LAST answer when one exists (per-turn overrides
+            included — #434 NEW-2), else the session default.
+        totals: { $ref: "#/components/schemas/SessionUsageTotals" }
+        last:
+          $ref: "#/components/schemas/SessionUsageLast"
+          description: Absent until the session has produced at least one answer.
+        input_budget_tokens:
+          type: integer
+          minimum: 1
+          description: >
+            The input-token budget the context assembler grants this model
+            (window − output headroom − safety margin — the same formula answers
+            are assembled under).
+        window_known: { type: boolean }
+
     SendMessageRequest:
       type: object
       additionalProperties: false
@@ -3025,6 +3167,17 @@ components:
         model:
           type: string
           description: Override the session model for this turn (a GET /models id).
+        document_ids:
+          type: array
+          maxItems: 20
+          description: >
+            Pinned documents (spec 0007 #429): passage retrieval for THIS answer
+            narrows to these ids — an additional filter over the caller's
+            allow-set (INV-2 still applies inside retrieval; an id the caller
+            cannot access contributes nothing and discloses nothing, so ids are
+            deliberately not validated at send time). Additive; omitted/empty ⇒
+            unchanged behavior.
+          items: { type: string, format: uuid }
         collection_ids:
           type: array
           description: Restrict retrieval to these collections; omitted = all permitted docs.

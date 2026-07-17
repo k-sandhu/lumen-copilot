@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429). Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
@@ -168,7 +168,7 @@
       "required": ["messageId", "finishReason", "citationCount"],
       "properties": {
         "messageId": { "type": "string", "format": "uuid" },
-        "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter." },
+        "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter, ask_user (the turn ended with a clarifying question — spec 0006 #429)." },
         "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",
@@ -192,6 +192,61 @@
       }
     },
 
+    "ChatStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=step — live run-phase progress (spec 0006 #429). Transient run-visibility state (ADR-0016 §6 posture): never persisted, absent after reload, replayed idempotently by seq. Keys fixed by spec 0006: prepare (context assembly), think (one model turn; `turn` ordinal), finalize (persist + citations), suggest (follow-up generation). Additive keys may appear later — clients render unknown keys generically off the server-supplied `label`. A re-`started` key restarts that step row (e.g. think per turn). Does NOT duplicate per-tool detail; tool_call/tool_result events carry that.",
+      "required": ["key", "label", "state"],
+      "properties": {
+        "key": { "type": "string", "description": "Stable machine key of the phase (spec 0006: prepare | think | finalize | suggest; open-ended)." },
+        "label": { "type": "string", "description": "Human-readable phase label to render (server-supplied; client never needs a key→label map)." },
+        "state": { "type": "string", "enum": ["started", "completed"], "description": "Phase transition. A stream that errors may leave a step started — the terminal error supersedes it." },
+        "detail": { "type": "string", "description": "Optional short human-readable annotation (e.g. 'requested 2 tools')." },
+        "turn": { "type": "integer", "minimum": 1, "description": "1-based model-turn ordinal for repeating keys (think)." }
+      }
+    },
+    "ChatAskUser": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=ask_user — the model asked the user a clarifying question instead of answering (spec 0006 #429). At most one per stream; the stream then ends with done(finishReason=ask_user) and NO suggestions event. The question is ALSO persisted on the assistant message (REST Message.question) so it stays answerable after reload; this event carries the same payload for live rendering. The user's choice is sent as an ordinary POST /chat/sessions/{id}/messages — there is no inbound WS path.",
+      "required": ["messageId", "question", "options", "allowFreeText"],
+      "properties": {
+        "messageId": { "type": "string", "format": "uuid", "description": "The assistant message the question persists under (same id as start.messageId)." },
+        "question": { "type": "string", "description": "The clarifying question text (also the persisted message content)." },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "description": "Mutually exclusive choices, rendered as clickable buttons; clicking sends the label as the next user message.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label"],
+            "properties": {
+              "label": { "type": "string", "description": "The choice text sent verbatim as the user's reply when clicked." },
+              "description": { "type": "string", "description": "Optional one-line elaboration shown under the label." }
+            }
+          }
+        },
+        "allowFreeText": { "type": "boolean", "description": "Whether typing a custom reply (the composer) is a sanctioned answer path (always true in practice; the composer is never disabled)." }
+      }
+    },
+    "ChatSuggestions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream, emitted after the final delta/citation and before done; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
+      "required": ["messageId", "suggestions"],
+      "properties": {
+        "messageId": { "type": "string", "format": "uuid", "description": "The settled assistant message these follow-ups attach under." },
+        "suggestions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "description": "Short user-perspective questions, best first. The first is the composer's ghost-prefill candidate.",
+          "items": { "type": "string" }
+        }
+      }
+    },
     "CodeOutput": {
       "type": "object",
       "additionalProperties": false,
@@ -258,7 +313,7 @@
 
   "x-chatStream": {
     "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via the run_python tool (CC-A #207, ADR-0013 #229), the sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) )* -> done(ChatDoneData) | error(Problem)",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
     "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full, output-size-capped run record (code, stdout/stderr, resource_usage) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
@@ -269,6 +324,9 @@
       "event.data[name=tool_result]": "#/$defs/ChatToolResult",
       "event.data[name=code_output]": "#/$defs/CodeOutput",
       "event.data[name=code_result]": "#/$defs/CodeResult",
+      "event.data[name=step]": "#/$defs/ChatStep",
+      "event.data[name=ask_user]": "#/$defs/ChatAskUser",
+      "event.data[name=suggestions]": "#/$defs/ChatSuggestions",
       "done.data": "#/$defs/ChatDoneData"
     }
   },

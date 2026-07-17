@@ -45,15 +45,29 @@ from app.db.repositories import (
     CitationRepository,
     CitationView,
     LlmProviderRepository,
+    LlmUsageRepository,
     MessageRepository,
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
-from app.domain.entities import AssistantStatus, ChatSession, Message, MessageRole, ToolInvocation
+from app.domain.entities import (
+    AssistantStatus,
+    ChatSession,
+    LlmUsageRecord,
+    LlmUsageTotals,
+    Message,
+    MessageRole,
+    ToolInvocation,
+)
+from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.models_service import is_allowed_model
-from app.services.provider_models import is_allowed_provider_model, is_provider_model_id
+from app.services.provider_models import (
+    is_allowed_provider_model,
+    is_provider_model_id,
+    parse_provider_model_id,
+)
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
@@ -104,6 +118,24 @@ class MessagePage:
 
     items: list[MessageView]
     next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUsageView:
+    """A session's token/context accounting for the wire (spec 0007 #429).
+
+    ``totals`` sums every produced answer's usage; ``last`` is the most recent
+    answer's record (``None`` before the first answer); ``input_budget_tokens``
+    is the assembler's input budget for the session's model (window − output
+    headroom − safety margin) with ``window_known=False`` when the model was
+    absent from the model map and the configured fallback window was used.
+    """
+
+    model: str
+    totals: LlmUsageTotals
+    last: LlmUsageRecord | None
+    input_budget_tokens: int
+    window_known: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +216,7 @@ class ChatService:
         # ``provider:`` model id is valid only if it resolves to an enabled provider
         # in this tenant with the raw id in its discovered snapshot (PR 2a, INV-1).
         self._providers = LlmProviderRepository(session, tenant_id)
+        self._usage = LlmUsageRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
@@ -343,6 +376,48 @@ class ChatService:
         if session is None or not self._owns(session):
             return None
         return await self._view(session)
+
+    async def session_usage(self, session_id: UUID) -> SessionUsageView | None:
+        """The session's token/context accounting (spec 0007 #429), or ``None`` (→ 404).
+
+        Sums the session's ``llm_usage`` rows (#409) and reports the input-token
+        budget the assembler would grant the session's model — the SAME formula
+        answers are actually assembled under (``input_budget_for_model``), so the
+        meter can show "last prompt vs window" without a parallel approximation.
+        Visibility first (tenant + ownership → 404, INV-1/INV-2); a session with
+        no answers yields all-zero totals, never an error.
+        """
+        session = await self._sessions.get(session_id)
+        if session is None or not self._owns(session):
+            return None
+        totals = await self._usage.totals_for_session(session_id)
+        last = await self._usage.last_for_session(session_id)
+        # The budget follows the model that ACTUALLY produced the last answer
+        # (#434 NEW-2): a per-turn model override records its id on the usage
+        # row, so the meter must budget against that — the session default only
+        # covers a fresh session with no answers yet. And it resolves a
+        # per-tenant ``provider:`` id to its RAW model id before the window
+        # lookup (#434 finding 3) — exactly like the runtime's route — so a
+        # known-window provider model never falls back to the conservative
+        # window. The response's ``model`` is the id the budget was computed
+        # for, in its public form.
+        source_model = last.model if last is not None else session.model
+        parsed = parse_provider_model_id(source_model)
+        budget_model = parsed[1] if parsed is not None else source_model
+        budget, window_known = input_budget_for_model(
+            budget_model,
+            ContextConfig(
+                fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
+                output_headroom_tokens=self._settings.context_output_headroom_tokens,
+            ),
+        )
+        return SessionUsageView(
+            model=source_model,
+            totals=totals,
+            last=last,
+            input_budget_tokens=budget,
+            window_known=window_known,
+        )
 
     async def update_session(
         self, session_id: UUID, *, title: str | None, model: str | None

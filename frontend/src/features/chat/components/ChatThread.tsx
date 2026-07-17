@@ -15,9 +15,17 @@
  */
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, Message, WsProblem } from '@/api';
+import type {
+  AskUserQuestion,
+  ChatAskUser,
+  ChatModelInfo,
+  ChatStep,
+  Message,
+  WsProblem,
+} from '@/api';
 import { ScrollArea } from '@/components/ScrollArea';
 import { MessageBubble, type SourceMeta } from './MessageBubble';
+import { SuggestionChips } from './SuggestionChips';
 import { fromRestCitation, fromWsCitation, type UiCitation } from '../model/citation';
 import {
   buildRetrievalSummary,
@@ -37,8 +45,21 @@ export interface LiveAnswer {
   tools: ToolActivity[];
   /** Sandbox code runs on the in-flight turn (#232), with live stdout/stderr. */
   codeRuns: CodeRunActivity[];
+  /** Live run-phase steps (spec 0006 #429) — transient, stream-only. */
+  steps: ChatStep[];
+  /** The clarifying question the turn ended with (spec 0006 #429), if any. */
+  askUser: ChatAskUser | null;
   problem: WsProblem | null;
   model?: string | undefined;
+}
+
+/** The WS ask_user payload as the REST question shape the bubble renders. */
+function questionFromAskUser(ask: ChatAskUser): AskUserQuestion {
+  return {
+    question: ask.question,
+    options: ask.options,
+    allow_free_text: ask.allowFreeText,
+  };
 }
 
 export interface ChatThreadProps {
@@ -54,6 +75,16 @@ export interface ChatThreadProps {
   /** Retry the last send after a stream error / disconnect (AC-5). */
   onRetryStream: () => void;
   onOpenCitation: (citation: UiCitation, meta?: SourceMeta) => void;
+  /**
+   * Send arbitrary text as a new user message (spec 0006 #429) — the reuse seam
+   * for clarifying-question options and suggestion chips. Absent ⇒ both render
+   * inert (e.g. read-only contexts).
+   */
+  onSendText?: ((text: string) => void) | undefined;
+  /** True while a send/stream is in flight — options/chips render but can't fire. */
+  sendBusy?: boolean;
+  /** Follow-up suggestions for the latest settled answer (spec 0006 #429). */
+  suggestions?: string[];
 }
 
 /** Friendly model label from the registry, falling back to the id's tail. */
@@ -92,6 +123,9 @@ export function ChatThread({
   live,
   onRetryStream,
   onOpenCitation,
+  onSendText,
+  sendBusy = false,
+  suggestions = [],
 }: ChatThreadProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +166,10 @@ export function ChatThread({
     live?.codeRuns.length,
     codeOutputLen,
     live?.phase,
+    // Spec 0006 surfaces: follow step updates, a question's options, and chips.
+    live?.steps,
+    live?.askUser,
+    suggestions.length,
   ]);
 
   // Reset stickiness whenever a fresh stream starts.
@@ -168,9 +206,17 @@ export function ChatThread({
           </p>
         )}
 
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           const citations = (message.citations ?? []).map(fromRestCitation);
           const isAssistant = message.role === 'assistant';
+          // Clarifying-question wiring (spec 0006 #429): options are clickable
+          // only on the conversation's LAST message with nothing in flight; an
+          // answered question highlights the choice from the following user turn.
+          const nextMessage = messages[index + 1];
+          const isLast = index === messages.length - 1;
+          const questionActive = isLast && live === null && !sendBusy && onSendText !== undefined;
+          const chosenAnswer =
+            message.question && nextMessage?.role === 'user' ? nextMessage.content : undefined;
           // The persisted governed tool trace (#377), rendered through the SAME
           // ToolActivity badges as a live turn — an answer's tool activity stays
           // visible after reload, not only in the audit log.
@@ -197,6 +243,10 @@ export function ChatThread({
               traceSummary={isAssistant && trace.hasContent ? trace.summary : undefined}
               traceSteps={trace.steps}
               tools={tools}
+              question={message.question}
+              questionActive={questionActive}
+              chosenAnswer={chosenAnswer}
+              onChooseOption={onSendText}
               answeredAt={answeredAt}
               showNoCitationsNotice={isAssistant && citations.length === 0}
               // Web usage on a persisted turn is derived from citations only — the
@@ -213,11 +263,18 @@ export function ChatThread({
           (() => {
             const liveCitations = live.citations.map(fromWsCitation);
             const trace = buildRetrievalSummary(liveCitations, live.tools);
+            // Once the runtime reports the answer settled (finalize/suggest
+            // phases, spec 0006), the text is final: drop the caret + live
+            // region even though suggestion generation still runs.
+            const answerSettled = live.steps.some((s) => s.key === 'finalize');
+            const liveQuestion = live.askUser ? questionFromAskUser(live.askUser) : undefined;
             return (
               <>
                 <MessageBubble
                   role="assistant"
-                  content={live.text}
+                  // A question turn streams no deltas — the question text IS the
+                  // turn's content (matches what persists, spec 0006).
+                  content={live.text || (live.askUser?.question ?? '')}
                   model={live.model}
                   modelLabel={labelForModel(live.model, models)}
                   citations={liveCitations}
@@ -225,10 +282,20 @@ export function ChatThread({
                   traceSteps={trace.steps}
                   tools={live.tools}
                   codeRuns={live.codeRuns}
-                  streaming={live.phase === 'streaming'}
+                  steps={live.steps}
+                  question={liveQuestion}
+                  // The just-asked question is answerable the moment the stream
+                  // settles; the composer stays available as the free-text path.
+                  questionActive={
+                    live.phase === 'done' && live.askUser !== null && onSendText !== undefined
+                  }
+                  onChooseOption={onSendText}
+                  streaming={live.phase === 'streaming' && !answerSettled}
                   // A just-settled live answer was produced now → "answered Just now".
                   answeredAt={live.phase === 'done' ? 'Just now' : undefined}
-                  showNoCitationsNotice={live.phase === 'done' && live.citations.length === 0}
+                  showNoCitationsNotice={
+                    live.phase === 'done' && live.citations.length === 0 && !live.askUser
+                  }
                   // The disclosure only shows on a settled turn (E3-12) — while
                   // streaming, a web lookup may still be in flight.
                   webUsed={live.phase === 'done' && usedWebSearch(liveCitations, live.tools)}
@@ -251,6 +318,12 @@ export function ChatThread({
               </>
             );
           })()}
+
+        {/* Follow-up chips (spec 0006 #429): under the latest settled answer;
+            clicking sends the question. Never shown mid-stream. */}
+        {onSendText && suggestions.length > 0 && live?.phase !== 'streaming' && (
+          <SuggestionChips suggestions={suggestions} disabled={sendBusy} onPick={onSendText} />
+        )}
 
         <div ref={endRef} />
       </div>

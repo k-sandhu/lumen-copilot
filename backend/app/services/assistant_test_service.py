@@ -263,6 +263,10 @@ class AssistantTestService:
                     compaction_digest_chars=self._settings.context_compaction_digest_chars,
                     compaction_chunk_size=self._settings.context_compaction_chunk_size,
                 ),
+                # A preview has no live user to answer a clarifying question
+                # (spec 0006 #429): ask_user is not intercepted (the handler
+                # tells the model to proceed) and no suggestions are generated.
+                interactive=False,
             )
             await runtime.run(
                 stream_id=sink.stream_id,

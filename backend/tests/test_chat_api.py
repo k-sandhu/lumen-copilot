@@ -151,7 +151,13 @@ class _FakeRetrieval:
         self._passage = passage
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         return [self._passage]
 
@@ -1095,3 +1101,144 @@ def test_chat_shutdown_grace_must_be_positive(bad: float) -> None:
 def test_chat_shutdown_grace_default_is_positive() -> None:
     s = Settings(_env_file=None, **_SETTINGS_BASE)
     assert s.chat_shutdown_grace_seconds > 0
+
+
+# --- Spec 0007 (#432): session usage endpoint --------------------------------
+
+
+async def test_session_usage_empty_then_404_foreign(client: AsyncClient, seeded: _Seeded) -> None:
+    """AC-1/AC-N1: a fresh session reports zero totals and no `last`; a foreign
+    (other-tenant) session id is a 404 (INV-1/INV-2 non-disclosure)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "usage"}
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    assert body["totals"] == {
+        "answers": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert "last" not in body  # response_model_exclude_none drops the null
+    assert body["input_budget_tokens"] > 0
+    assert isinstance(body["window_known"], bool)
+    assert body["model"]
+
+    # Another tenant's caller sees 404, never 403 (existence non-disclosure).
+    carol = await _login(client, seeded.carol_email)
+    foreign = await client.get(
+        f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(carol)
+    )
+    assert foreign.status_code == 404
+
+
+async def test_send_accepts_pinned_document_ids(client: AsyncClient, seeded: _Seeded) -> None:
+    """Spec 0007 AC-4: document_ids is additive on send (202) and over-limit → 422."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "pins"}
+    )
+    session_id = resp.json()["id"]
+
+    ok = await client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=_auth(token),
+        json={"content": "scoped?", "document_ids": [str(seeded.alice_doc)]},
+    )
+    assert ok.status_code == 202, ok.text
+
+    too_many = await client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=_auth(token),
+        json={"content": "x", "document_ids": [str(uuid.uuid4()) for _ in range(21)]},
+    )
+    assert too_many.status_code == 422
+
+
+async def test_session_usage_budget_resolves_provider_model_window(
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    client: AsyncClient,
+) -> None:
+    """#434 review finding 3: a ``provider:{id}:{raw}`` session model resolves to
+    its RAW id before the window lookup, so a known-window provider model never
+    reports the conservative fallback budget."""
+    raw_model = "gpt-4o"  # present in LiteLLM's local model map (known window)
+    pid = await _seed_enabled_provider(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_id=seeded.alice_id,
+        base_url="https://provider-a.example.com/v1",
+        raw_model_id=raw_model,
+        api_key="sk-provider-secret-value-abcdef",
+    )
+    provider_model = make_provider_model_id(pid, raw_model)
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/chat/sessions",
+        headers=_auth(token),
+        json={"title": "provider budget", "model": provider_model},
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    # The PUBLIC id still rides the response; the budget came from the RAW id.
+    assert body["model"] == provider_model
+    assert body["window_known"] is True
+    settings = get_settings()
+    fallback_budget = (
+        settings.context_fallback_max_input_tokens
+        - settings.context_output_headroom_tokens
+        - 1024
+    )
+    assert body["input_budget_tokens"] != fallback_budget
+
+
+async def test_session_usage_budget_follows_last_answer_model(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    client: AsyncClient,
+) -> None:
+    """#434 NEW-2: with answers present, the budget/model follow the model that
+    actually produced the LAST answer (per-turn override), not the session
+    default."""
+    from app.db.repositories import LlmUsageRepository
+
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "override"}
+    )
+    session_id = created.json()["id"]
+    default_model = created.json()["model"]
+
+    # A per-turn override recorded its own model on the usage row.
+    async with sessionmaker() as db:
+        await LlmUsageRepository(db, seeded.tenant_a).record(
+            model="gpt-4o",
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            context_prompt_tokens=80,
+            session_id=uuid.UUID(session_id),
+        )
+        await db.commit()
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    assert body["model"] == "gpt-4o"
+    assert body["model"] != default_model
+    assert body["window_known"] is True  # gpt-4o is in the local model map
+    assert body["last"]["context_prompt_tokens"] == 80

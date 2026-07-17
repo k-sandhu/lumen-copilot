@@ -149,6 +149,7 @@ def _hybrid_body(
     allow: SearchAllowFilter,
     k: int,
     collection_ids: Sequence[UUID] | None = None,
+    document_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
     """The hybrid query body with the permission filter in BOTH legs.
 
@@ -156,13 +157,18 @@ def _hybrid_body(
     so each leg must be individually incapable of surfacing an out-of-allow-set
     candidate (INV-1/INV-2 hold per leg, not just post-merge). The optional
     ``collection_ids`` narrowing is ANDed alongside the permission clauses in
-    both legs — narrowing can only ever shrink the permitted set, never widen it.
+    both legs — narrowing can only ever shrink the permitted set, never widen
+    it. ``document_ids`` (pinned documents, spec 0007 #429) is the same
+    narrow-only semantics one level finer: ANDed with everything else, so an id
+    outside the allow-set contributes nothing.
     """
     filters: list[dict[str, Any]] = list(allow.to_engine_filter())
     if collection_ids:
         filters.append(
             {"terms": {"collection_id": sorted(str(c) for c in collection_ids)}}
         )
+    if document_ids:
+        filters.append({"terms": {"document_id": sorted(str(d) for d in document_ids)}})
     return {
         "size": k,
         "_source": ["chunk_id", "document_id"],
@@ -438,15 +444,17 @@ class OpenSearchStore:
         allow: SearchAllowFilter,
         k: int,
         collection_ids: Sequence[UUID] | None = None,
+        document_ids: Sequence[UUID] | None = None,
     ) -> list[SearchHit]:
         """Run the permission-filtered hybrid query (BM25 ⊕ kNN), best first.
 
         ``allow`` is required — there is no engine read without the INV-1/INV-2
         filter, and the filter is applied inside **both** legs (see
         :func:`_hybrid_body`). ``collection_ids`` optionally narrows within the
-        allow-set (never widens). Only the ``retrieval/`` chokepoint calls this
-        (ADR-0010 §3); results are hydrated + re-checked against Postgres there
-        (defense in depth).
+        allow-set (never widens); ``document_ids`` (pinned documents, spec 0007
+        #429) narrows one level finer with the same semantics. Only the
+        ``retrieval/`` chokepoint calls this (ADR-0010 §3); results are hydrated
+        + re-checked against Postgres there (defense in depth).
         """
         result = await self._request(
             "POST",
@@ -457,6 +465,7 @@ class OpenSearchStore:
                 allow=allow,
                 k=k,
                 collection_ids=collection_ids,
+                document_ids=document_ids,
             ),
             params={
                 "search_pipeline": self._pipeline,

@@ -422,3 +422,48 @@ describe('ChatView (critical flow)', () => {
     expect(screen.getByText(/web sources were used/i)).toBeInTheDocument();
   });
 });
+
+describe('#434 round-1: suggestions must not survive a terminal error', () => {
+  it('suggestions event followed by error leaves no chips and no ghost', async () => {
+    installFetch(() => EMPTY_MESSAGES);
+    const user = userEvent.setup();
+    renderView();
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    await user.type(screen.getByLabelText('Message'), 'flaky question');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(liveSocket).not.toBeNull());
+
+    act(() => {
+      liveSocket!.emit({
+        type: 'start',
+        streamId: 'stream-1',
+        seq: 0,
+        data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+      });
+      liveSocket!.emit({ type: 'delta', streamId: 'stream-1', seq: 1, data: { text: 'Part.' } });
+      // The nicety arrives… then persistence fails and the stream errors.
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 2,
+        name: 'suggestions',
+        data: { messageId: 'am-1', suggestions: ['Should not appear?'] },
+      });
+      liveSocket!.emit({
+        type: 'error',
+        streamId: 'stream-1',
+        seq: 3,
+        problem: { title: 'Internal Server Error', status: 500 },
+      });
+    });
+
+    // Terminal error banner shows; no chips, no ghost accept affordance.
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('group', { name: 'Suggested follow-up questions' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /use suggested question/i }),
+    ).not.toBeInTheDocument();
+  });
+});

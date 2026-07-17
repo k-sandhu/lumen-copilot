@@ -24,6 +24,7 @@ import type {
   ChatSessionUpdate,
   MessageList,
   SendMessageRequest,
+  SessionUsage,
   SendMessageResponse,
 } from './types';
 
@@ -87,7 +88,8 @@ export function listMessages(
  * Send a user message. The persisted user message + a `stream_id` come back
  * (202); the caller then subscribes to that id on the WS envelope stream for the
  * assistant answer. `model` overrides the session default for this turn;
- * `collection_ids` scopes retrieval (omitted = all permitted docs).
+ * `collection_ids` scopes retrieval (omitted = all permitted docs);
+ * `document_ids` pins retrieval to specific documents (spec 0007 #432).
  */
 export function sendMessage(
   sessionId: string,
@@ -97,4 +99,9 @@ export function sendMessage(
     method: 'POST',
     json: body,
   });
+}
+
+/** Token/context accounting for a session — the context meter (spec 0007 #432). */
+export function getSessionUsage(sessionId: string, signal?: AbortSignal): Promise<SessionUsage> {
+  return request<SessionUsage>(`/chat/sessions/${sessionId}/usage`, { signal });
 }

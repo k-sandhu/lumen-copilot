@@ -43,6 +43,8 @@ function live(text: string): LiveAnswer {
     citations: [],
     tools: [],
     codeRuns: [],
+    steps: [],
+    askUser: null,
     problem: null,
     model: 'frontier/opus',
   };

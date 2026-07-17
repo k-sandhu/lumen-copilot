@@ -41,6 +41,7 @@ from app.core.config import Settings
 from app.core.errors import NotFoundError
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
+from app.domain.chat import AskUserQuestion
 from app.domain.entities import Message, MessageRole, ToolInvocation
 from app.domain.llm import ChatMessage, Role
 from app.llm.context import ContextConfig
@@ -153,6 +154,30 @@ class MessageToolInvocationResponse(BaseModel):
     created_at: datetime
 
 
+class AskUserOptionResponse(BaseModel):
+    """``#/components/schemas/AskUserOption`` (spec 0006 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    label: str
+    description: str | None = None
+
+
+class AskUserQuestionResponse(BaseModel):
+    """``#/components/schemas/AskUserQuestion`` (spec 0006 #429).
+
+    The clarifying question an assistant turn ended with; the UI re-renders the
+    clickable options from here after reload (active only while it is the
+    conversation's last message).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    question: str
+    options: list[AskUserOptionResponse]
+    allow_free_text: bool
+
+
 class MessageResponse(BaseModel):
     """``#/components/schemas/Message``."""
 
@@ -165,6 +190,7 @@ class MessageResponse(BaseModel):
     model: str | None = None
     citations: list[CitationResponse]
     tool_invocations: list[MessageToolInvocationResponse]
+    question: AskUserQuestionResponse | None = None
     created_at: datetime
 
 
@@ -177,6 +203,47 @@ class MessageListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class SessionUsageTotalsResponse(BaseModel):
+    """``#/components/schemas/SessionUsageTotals`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    answers: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
+
+
+class SessionUsageLastResponse(BaseModel):
+    """``#/components/schemas/SessionUsageLast`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
+    # Final-turn window occupancy (#434 NEW-1): what the model's window
+    # actually held, vs prompt_tokens' billing sum across loop turns. Absent
+    # for legacy rows / providers that reported no usage.
+    context_prompt_tokens: int | None = None
+
+
+class SessionUsageResponse(BaseModel):
+    """``#/components/schemas/SessionUsage`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    model: str
+    totals: SessionUsageTotalsResponse
+    last: SessionUsageLastResponse | None = None
+    input_budget_tokens: int
+    window_known: bool
+
+
 class SendMessageRequest(BaseModel):
     """``#/components/schemas/SendMessageRequest``."""
 
@@ -185,6 +252,11 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
     model: str | None = None
     collection_ids: list[UUID] | None = None
+    # Pinned documents (spec 0007 #429): retrieval for THIS answer narrows to
+    # these ids (an additional filter over the caller's allow-set — INV-2 still
+    # applies inside retrieval/; an id the caller can't access contributes
+    # nothing and discloses nothing). Additive; None/[] ⇒ unchanged behavior.
+    document_ids: list[UUID] | None = Field(default=None, max_length=20)
 
 
 class SendMessageResponse(BaseModel):
@@ -244,6 +316,21 @@ def _tool_invocation_to_response(inv: ToolInvocation) -> MessageToolInvocationRe
     )
 
 
+def _question_to_response(
+    question: AskUserQuestion | None,
+) -> AskUserQuestionResponse | None:
+    if question is None:
+        return None
+    return AskUserQuestionResponse(
+        question=question.question,
+        options=[
+            AskUserOptionResponse(label=o.label, description=o.description)
+            for o in question.options
+        ],
+        allow_free_text=question.allow_free_text,
+    )
+
+
 def _message_to_response(view: MessageView) -> MessageResponse:
     m = view.message
     return MessageResponse(
@@ -254,6 +341,7 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         model=m.model,
         citations=[_citation_to_response(c) for c in view.citations],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
+        question=_question_to_response(m.question),
         created_at=m.created_at,
     )
 
@@ -275,6 +363,7 @@ def _bare_message_to_response(message: Message) -> MessageResponse:
         model=message.model,
         citations=[],
         tool_invocations=[],
+        question=_question_to_response(message.question),
         created_at=message.created_at,
     )
 
@@ -374,6 +463,58 @@ async def get_session(
     if view is None:
         raise NotFoundError("Chat session not found.")
     return _session_to_response(view)
+
+
+@router.get(
+    "/sessions/{session_id}/usage",
+    response_model=SessionUsageResponse,
+    response_model_exclude_none=True,
+)
+async def get_session_usage(
+    session_id: UUID,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SessionUsageResponse:
+    """The session's token/context accounting (spec 0007 #429); not visible → 404.
+
+    Powers the conversation context meter: summed llm_usage (#409) + the last
+    answer's record + the input-token budget the assembler grants the session's
+    model (the same formula answers are assembled under — never a parallel
+    approximation).
+    """
+    service = _build_service(
+        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+    )
+    view = await service.session_usage(session_id)
+    if view is None:
+        raise NotFoundError("Chat session not found.")
+    return SessionUsageResponse(
+        model=view.model,
+        totals=SessionUsageTotalsResponse(
+            answers=view.totals.answers,
+            prompt_tokens=view.totals.prompt_tokens,
+            completion_tokens=view.totals.completion_tokens,
+            total_tokens=view.totals.total_tokens,
+            cached_prompt_tokens=view.totals.cached_prompt_tokens,
+            cache_write_tokens=view.totals.cache_write_tokens,
+        ),
+        last=(
+            SessionUsageLastResponse(
+                prompt_tokens=view.last.prompt_tokens,
+                completion_tokens=view.last.completion_tokens,
+                total_tokens=view.last.total_tokens,
+                cached_prompt_tokens=view.last.cached_prompt_tokens,
+                cache_write_tokens=view.last.cache_write_tokens,
+                context_prompt_tokens=view.last.context_prompt_tokens,
+            )
+            if view.last is not None
+            else None
+        ),
+        input_budget_tokens=view.input_budget_tokens,
+        window_known=view.window_known,
+    )
 
 
 @router.patch(
@@ -490,6 +631,7 @@ async def send_message(
         session_id=session_id,
         result=result,
         collection_ids=body.collection_ids,
+        document_ids=body.document_ids,
         settings=settings,
     )
     return SendMessageResponse(
@@ -506,6 +648,7 @@ def _schedule_answer(
     session_id: UUID,
     result: SendResult,
     collection_ids: list[UUID] | None,
+    document_ids: list[UUID] | None = None,
     settings: Settings,
 ) -> None:
     """Launch the answer runtime as a tracked task detached from the response.
@@ -565,6 +708,10 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
+        # Follow-up suggestions knobs (spec 0006 #429).
+        suggestions_enabled=settings.chat_suggestions_enabled,
+        suggestions_count=settings.chat_suggestions_count,
+        suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
     )
     history = _to_chat_messages(result.history)
 
@@ -576,6 +723,7 @@ def _schedule_answer(
             model=result.model,
             history=history,
             collection_ids=collection_ids,
+            document_ids=document_ids,
             assistant_config=result.assistant_config,
             custom_instructions=result.custom_instructions,
         )

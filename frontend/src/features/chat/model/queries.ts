@@ -10,12 +10,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createChatSession,
   deleteChatSession,
+  getSessionUsage,
   listChatSessions,
   listMessages,
   listModels,
   sendMessage,
   updateChatSession,
 } from '@/api';
+import { suggestSearch } from '@/api/suggest';
 import type {
   ChatSession,
   ChatSessionCreate,
@@ -25,14 +27,48 @@ import type {
   ModelList,
   SendMessageRequest,
   SendMessageResponse,
+  SessionUsage,
+  SuggestResponse,
 } from '@/api';
 
 export const chatKeys = {
   all: ['chat'] as const,
   sessions: () => [...chatKeys.all, 'sessions'] as const,
   messages: (sessionId: string) => [...chatKeys.all, 'messages', sessionId] as const,
+  usage: (sessionId: string) => [...chatKeys.all, 'usage', sessionId] as const,
+  mentionSuggest: (q: string) => [...chatKeys.all, 'mention-suggest', q] as const,
   models: () => ['models'] as const,
 };
+
+/**
+ * The session's token/context accounting — the context meter (spec 0007 #432).
+ * Invalidated on stream `done` (a new answer moved the numbers).
+ */
+export function useSessionUsage(sessionId: string | null) {
+  return useQuery<SessionUsage>({
+    queryKey: chatKeys.usage(sessionId ?? '∅'),
+    queryFn: ({ signal }) => getSessionUsage(sessionId as string, signal),
+    enabled: sessionId !== null,
+    staleTime: 5_000,
+  });
+}
+
+/**
+ * Permission-trimmed document suggestions for the composer's @-mention picker
+ * (spec 0007 #432). Reuses GET /search/suggest (the INV-2-trimmed surface —
+ * a title the caller can't open is never suggested); the picker filters to
+ * kind=document client-side. Failure degrades to "no matches" (AC-N2).
+ */
+export function useMentionSuggestions(query: string) {
+  const trimmed = query.trim();
+  return useQuery<SuggestResponse>({
+    queryKey: chatKeys.mentionSuggest(trimmed),
+    queryFn: ({ signal }) => suggestSearch(trimmed, 8, signal),
+    enabled: trimmed.length > 0,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
 
 /** The chat-history sidebar list (AC-4). */
 export function useChatSessions() {

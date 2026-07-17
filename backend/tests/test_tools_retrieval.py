@@ -176,15 +176,16 @@ def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
 
 
 def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
-    # Ad-hoc chat's default allow-list = the read-only retrieval tools, now four:
-    # list_documents (T0/read-only/default_offered) auto-joins on discovery (#371).
-    assert default_allowlist() == _RETRIEVAL_TOOLS
+    # Ad-hoc chat's default allow-list = the read-only default-offered tools:
+    # the four retrieval tools (list_documents auto-joined on discovery, #371)
+    # plus ask_user, the interactive clarifying-question tool (spec 0006 #429).
+    assert default_allowlist() == _RETRIEVAL_TOOLS | {"ask_user"}
 
 
 def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
     specs = tool_specs(default_allowlist())
     names = {s.name for s in specs}
-    assert names == _RETRIEVAL_TOOLS
+    assert names == _RETRIEVAL_TOOLS | {"ask_user"}
     # Each spec carries the JSON-Schema parameters the model fills in.
     by_name = {s.name: s for s in specs}
     assert by_name["search_text"].parameters["required"] == ["query"]
@@ -331,7 +332,13 @@ class _RecordingRetrieval:
         self.list_k: int | None = None
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list:
         self.text_k = k
         return []

@@ -451,6 +451,10 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # The model that produced an assistant message; null for user/system turns.
     model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The clarifying question an assistant turn ended with (spec 0006 #429):
+    # the REST AskUserQuestion payload verbatim, so the UI can re-render the
+    # options after reload. NULL for every other turn.
+    question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
     citations: Mapped[list[Citation]] = relationship(
@@ -1161,6 +1165,10 @@ class LlmUsage(TenantScopedMixin, Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The LAST answer-loop turn's prompt size (suggestions excluded) — window
+    # occupancy for the context meter (#434 NEW-1); prompt_tokens stays the
+    # billing sum. NULL on legacy rows / providers reporting no usage.
+    context_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -358,6 +358,10 @@ async def execute_run(
             request_id=request_id,
             source_ip=source_ip,
         ),
+        # Headless: nobody is watching the stream (spec 0006 #429). ask_user is
+        # not intercepted (its handler tells the model to proceed with its best
+        # interpretation) and no follow-up suggestions are generated.
+        interactive=False,
     )
     try:
         await runtime.run(

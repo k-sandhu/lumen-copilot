@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.chat import AskUserQuestion
 from app.domain.scheduling import Cadence
 
 
@@ -920,6 +921,9 @@ class Message:
     content: str
     model: str | None
     created_at: datetime
+    # The clarifying question this assistant turn ended with, if any
+    # (spec 0006 #429); None for every other turn.
+    question: AskUserQuestion | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1081,8 +1085,28 @@ class LlmUsageRecord:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    # Final-turn window occupancy (#434 NEW-1); None ⇒ unknown (legacy row /
+    # provider reported no usage) — readers fall back to prompt_tokens.
+    context_prompt_tokens: int | None = None
     run_id: UUID | None = None
     created_at: datetime = field(default_factory=lambda: datetime.min)
+
+
+@dataclass(frozen=True, slots=True)
+class LlmUsageTotals:
+    """Summed ``llm_usage`` accounting for one chat session (spec 0007 #429).
+
+    ``answers`` is how many usage rows (produced answers) the sums cover. All
+    zero for a session with no answers yet — an honest empty meter, never an
+    error.
+    """
+
+    answers: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
 
 
 @dataclass(frozen=True, slots=True)

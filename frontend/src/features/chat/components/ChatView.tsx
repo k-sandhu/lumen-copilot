@@ -28,9 +28,12 @@ import {
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
+import { ArtifactPanel } from '@/features/artifacts';
 import { HistorySidebar } from './HistorySidebar';
 import { ChatThread, type LiveAnswer } from './ChatThread';
-import { Composer } from './Composer';
+import { Composer, type PinnedDocument } from './Composer';
+import { ContextMeter } from './ContextMeter';
+import { ContextPanel } from './ContextPanel';
 import { DocumentViewer } from './DocumentViewer';
 import { WebSourceView } from './WebSourceView';
 
@@ -50,6 +53,12 @@ export function ChatView() {
   const openViewer = useChatStore((s) => s.openViewer);
   const closeViewer = useChatStore((s) => s.closeViewer);
   const sessionScope = useChatStore((s) => s.sessionScope);
+  const panel = useChatStore((s) => s.panel);
+  const openPanel = useChatStore((s) => s.openPanel);
+  const closePanel = useChatStore((s) => s.closePanel);
+  // The artifact the artifacts pane focuses when opened from the context panel
+  // (spec 0007 AC-3); null = the pane's own list default.
+  const [artifactFocus, setArtifactFocus] = useState<string | null>(null);
 
   const models = useModels();
   const queryClient = useQueryClient();
@@ -122,11 +131,15 @@ export function ChatView() {
               startStream={startStream}
               endStream={endStream}
               openViewer={openViewer}
-              onDoneReload={() =>
+              onDoneReload={() => {
                 void queryClient.invalidateQueries({
                   queryKey: chatKeys.messages(activeSessionId),
-                })
-              }
+                });
+                // A settled answer moved the token accounting (spec 0007 AC-1).
+                void queryClient.invalidateQueries({
+                  queryKey: chatKeys.usage(activeSessionId),
+                });
+              }}
             />
           </ErrorBoundary>
         ) : (
@@ -150,6 +163,70 @@ export function ChatView() {
           aria-label="Close source"
           onClick={closeViewer}
         />
+      )}
+
+      {/* Context / artifacts panes (spec 0007 #432) — same aside slot as the
+          citation inspector (the store keeps them mutually exclusive). */}
+      {panel && activeSessionId && (
+        <button
+          type="button"
+          className="lc-chat__scrim"
+          aria-label="Close panel"
+          onClick={closePanel}
+        />
+      )}
+      {panel === 'context' && activeSessionId && (
+        <aside className="lc-chat__inspector">
+          <ErrorBoundary label="Context panel">
+            <ContextPanel
+              sessionId={activeSessionId}
+              onOpenCitation={(c) =>
+                openViewer({
+                  documentId: c.document_id,
+                  documentName: c.document_name,
+                  charStart: c.char_start,
+                  charEnd: c.char_end,
+                  snippet: c.snippet,
+                })
+              }
+              onOpenArtifact={(id) => {
+                setArtifactFocus(id);
+                openPanel('artifacts');
+              }}
+              onClose={closePanel}
+            />
+          </ErrorBoundary>
+        </aside>
+      )}
+      {panel === 'artifacts' && activeSessionId && (
+        <aside className="lc-chat__inspector lc-chat__inspector--artifacts">
+          <ErrorBoundary label="Artifacts">
+            <div className="lc-ctxpanel__head">
+              <h2 className="lc-ctxpanel__title" id="chat-artifacts-heading">
+                <Icon name="package" />
+                Conversation artifacts
+              </h2>
+              <button
+                type="button"
+                className="lc-ctxpanel__close"
+                aria-label="Close artifacts"
+                onClick={() => {
+                  setArtifactFocus(null);
+                  closePanel();
+                }}
+              >
+                <Icon name="x" />
+              </button>
+            </div>
+            <div className="lc-chat__artifactsbody">
+              <ArtifactPanel
+                sessionId={activeSessionId}
+                headingId="chat-artifacts-heading"
+                {...(artifactFocus ? { initialArtifactId: artifactFocus } : {})}
+              />
+            </div>
+          </ErrorBoundary>
+        </aside>
       )}
 
       {viewer && (
@@ -271,10 +348,44 @@ function ActiveSession({
   // never flickers out between `done` and the GET .../messages refetch (AC-2).
   const [pendingDoneId, setPendingDoneId] = useState<string | null>(null);
 
+  // Follow-up suggestions for the latest settled answer (spec 0006 #429).
+  // Captured OUT of the stream state so the chips survive the done→reload
+  // stream retirement; cleared on the next send and on session switch.
+  const [followUps, setFollowUps] = useState<string[]>([]);
+
+  // Documents pinned into retrieval scope via @-mentions (spec 0007 #432).
+  // Sticky for the conversation until unpinned; ActiveSession remounts per
+  // session (key=sessionId), so pins never leak across sessions.
+  const [pinnedDocs, setPinnedDocs] = useState<PinnedDocument[]>([]);
+  const pinDocument = useCallback((doc: PinnedDocument) => {
+    setPinnedDocs((current) =>
+      current.some((d) => d.id === doc.id) ? current : [...current, doc],
+    );
+  }, []);
+  const unpinDocument = useCallback((id: string) => {
+    setPinnedDocs((current) => current.filter((d) => d.id !== id));
+  }, []);
+
   const stream = useChatStream({
     streamId: activeStreamId,
     onDone: () => onDoneReload(),
   });
+
+  useEffect(() => {
+    // Promote suggestions only once the stream settled successfully (#434
+    // review, finding 1): the event arrives before the backend transaction
+    // commits, so a suggestions → terminal-error sequence must leave neither
+    // chips nor ghost. An error clears anything already promoted.
+    if (stream.phase === 'done' && stream.suggestions) {
+      setFollowUps(stream.suggestions.suggestions);
+    } else if (stream.phase === 'error') {
+      setFollowUps([]);
+    }
+  }, [stream.phase, stream.suggestions]);
+
+  useEffect(() => {
+    setFollowUps([]);
+  }, [sessionId]);
 
   // Capture the done messageId once the stream settles successfully.
   useEffect(() => {
@@ -299,6 +410,8 @@ function ActiveSession({
         citations: stream.citations,
         tools: stream.tools,
         codeRuns: stream.codeRuns,
+        steps: stream.steps,
+        askUser: stream.askUser,
         problem: stream.problem,
         model: stream.start?.model ?? model,
       }
@@ -307,6 +420,8 @@ function ActiveSession({
   const doSend = useCallback(
     (req: SendMessageRequest) => {
       lastSendRef.current = req;
+      // A new question supersedes the previous turn's follow-ups (spec 0006).
+      setFollowUps([]);
       send.mutate(req, {
         onSuccess: (res) => startStream(res.stream_id),
       });
@@ -316,10 +431,15 @@ function ActiveSession({
 
   const onSend = useCallback(
     (content: string) => {
-      const req: SendMessageRequest = model ? { content, model } : { content };
+      const req: SendMessageRequest = {
+        content,
+        ...(model ? { model } : {}),
+        // Pinned documents ride every send while present (spec 0007 #432).
+        ...(pinnedDocs.length > 0 ? { document_ids: pinnedDocs.map((d) => d.id) } : {}),
+      };
       doSend(req);
     },
-    [doSend, model],
+    [doSend, model, pinnedDocs],
   );
 
   const onRetryStream = useCallback(() => {
@@ -343,8 +463,45 @@ function ActiveSession({
   const streaming = live?.phase === 'streaming';
   const busy = send.isPending || streaming === true;
 
+  // Bash-style composer recall (spec 0006 AC-5): the caller's own previous
+  // messages in this conversation, newest first, with consecutive duplicates
+  // collapsed (readline convention — research pass) so Up never shows the
+  // same entry twice in a row.
+  const historyEntries = useMemo(() => {
+    const newestFirst = (messages.data?.items ?? [])
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content)
+      .reverse();
+    return newestFirst.filter((entry, i) => i === 0 || entry !== newestFirst[i - 1]);
+  }, [messages.data]);
+
+  const openPanel = useChatStore((s) => s.openPanel);
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Conversation toolbar (spec 0007): the context meter + panel toggles. */}
+      <div className="lc-chat__toolbar">
+        <ContextMeter sessionId={sessionId} />
+        <div className="lc-chat__toolbar-spacer" />
+        <button
+          type="button"
+          className="lc-chat__toolbtn"
+          onClick={() => openPanel('context')}
+          aria-label="Open conversation context"
+        >
+          <Icon name="list" />
+          Context
+        </button>
+        <button
+          type="button"
+          className="lc-chat__toolbtn"
+          onClick={() => openPanel('artifacts')}
+          aria-label="Open conversation artifacts"
+        >
+          <Icon name="package" />
+          Artifacts
+        </button>
+      </div>
       <div className="min-h-0 flex-1">
         <ChatThread
           messages={messages.data?.items ?? []}
@@ -355,6 +512,9 @@ function ActiveSession({
           onRetryLoad={() => void messages.refetch()}
           live={live}
           onRetryStream={onRetryStream}
+          onSendText={onSend}
+          sendBusy={busy}
+          suggestions={followUps}
           onOpenCitation={(c) =>
             // The viewer carries only what the citation wire provides about the
             // source; the answer-time `meta` is NOT a source-provenance signal
@@ -394,6 +554,11 @@ function ActiveSession({
           modes={modes}
           onModesChange={setModes}
           modeAvailability={availability}
+          ghostSuggestion={!busy ? (followUps[0] ?? null) : null}
+          historyEntries={historyEntries}
+          pinnedDocuments={pinnedDocs}
+          onPinDocument={pinDocument}
+          onUnpinDocument={unpinDocument}
         />
       </div>
     </div>

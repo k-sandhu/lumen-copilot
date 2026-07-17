@@ -3,8 +3,10 @@
  * Send→Stop while streaming (cancellable), disabled empty state. The model
  * picker + knowledge-mode control (#221) are embedded.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { renderWithQuery } from '@/test/renderWithQuery';
 import userEvent from '@testing-library/user-event';
 import { Composer } from './Composer';
 import type { ChatModelInfo, KnowledgeMode } from '@/api';
@@ -20,7 +22,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const onStop = vi.fn();
   const onModelChange = vi.fn();
   const onModesChange = vi.fn();
-  render(
+  renderWithQuery(
     <Composer
       models={MODELS}
       model="m1"
@@ -127,5 +129,328 @@ describe('Composer', () => {
     // Toggling "Model" on adds it to the active set, preserving canonical order.
     await user.click(screen.getByRole('button', { name: /model/i }));
     expect(onModesChange).toHaveBeenCalledWith(['company', 'uploaded', 'model']);
+  });
+});
+
+// --- Spec 0006 (#429): ghost prefill (AC-4) + history recall (AC-5) ----------
+
+describe('Composer ghost prefill (spec 0006 AC-4)', () => {
+  it('shows the ghost over an empty composer and accepts it with Tab', async () => {
+    const { onSend } = setup({ ghostSuggestion: 'What changed in Q2?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    expect(screen.getByText('What changed in Q2?')).toBeInTheDocument();
+    input.focus();
+    await user.keyboard('{Tab}');
+    expect(input).toHaveValue('What changed in Q2?');
+    // Accepting fills the draft — it does not send.
+    expect(onSend).not.toHaveBeenCalled();
+    // The ghost is gone once the draft is non-empty.
+    expect(
+      screen.queryByRole('button', { name: /use suggested question/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('accepts via the click affordance and dismisses on typing', async () => {
+    setup({ ghostSuggestion: 'Who owns this?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    // Typing anything dismisses the ghost — it never overwrites user text.
+    await user.type(input, 'my own question');
+    expect(
+      screen.queryByRole('button', { name: /use suggested question/i }),
+    ).not.toBeInTheDocument();
+    expect(input).toHaveValue('my own question');
+    await user.clear(input);
+    // Empty again — the ghost returns; clicking the affordance inserts it.
+    await user.click(screen.getByRole('button', { name: /use suggested question/i }));
+    expect(input).toHaveValue('Who owns this?');
+  });
+
+  it('Tab without a ghost keeps normal focus traversal', async () => {
+    setup();
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    input.focus();
+    await user.keyboard('{Tab}');
+    // No ghost: the composer must not trap Tab.
+    expect(input).toHaveValue('');
+    expect(input).not.toHaveFocus();
+  });
+});
+
+describe('Composer history recall (spec 0006 AC-5)', () => {
+  const HISTORY = ['newest question', 'older question', 'oldest question'];
+
+  it('ArrowUp walks previous messages newest-first; ArrowDown walks back and restores the draft', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'work in progress');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('older question');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('oldest question');
+    // Bounded at the oldest entry.
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('oldest question');
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('older question');
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('newest question');
+    // Past the newest: the stashed in-progress draft is restored.
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('work in progress');
+  });
+
+  it('Escape restores the stashed draft immediately', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'my draft');
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.keyboard('{Escape}');
+    expect(input).toHaveValue('my draft');
+  });
+
+  it('is multiline-safe: ArrowUp only recalls from the first line', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message') as HTMLTextAreaElement;
+    await user.type(input, 'line one{Shift>}{Enter}{/Shift}line two');
+    // Caret is at the end (second line): ArrowUp is ordinary caret movement.
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('line one\nline two');
+    // Move the caret to the first line: now ArrowUp recalls.
+    input.setSelectionRange(2, 2);
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+  });
+
+  it('editing a recalled entry ends navigation (the edit is the new draft)', async () => {
+    setup({ historyEntries: HISTORY });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.click(input);
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveValue('newest question');
+    await user.type(input, ' plus edits');
+    // Down no longer walks history — navigation ended on edit.
+    await user.keyboard('{ArrowDown}');
+    expect(input).toHaveValue('newest question plus edits');
+  });
+});
+
+// --- Spec 0007 (#432): @-mention document pinning + pills --------------------
+
+describe('Composer @-mention picker (spec 0007 AC-4)', () => {
+  function mockSuggest(docs: { id: string; text: string }[]): void {
+    // A NEW Response per call: bodies are single-use and the picker refetches
+    // per keystroke.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            suggestions: docs.map((d) => ({
+              kind: 'document',
+              text: d.text,
+              document_id: d.id,
+            })),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('opens on @, pins via Enter, and strips the token from the draft', async () => {
+    mockSuggest([
+      { id: 'doc-1', text: 'Budget FY26.xlsx' },
+      { id: 'doc-2', text: 'Budget notes.md' },
+    ]);
+    const onPinDocument = vi.fn();
+    const { onSend } = setup({ onPinDocument, pinnedDocuments: [] });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, 'Summarize @bud');
+    const listbox = await screen.findByRole('listbox', { name: 'Pin a document' });
+    expect(listbox).toBeInTheDocument();
+    await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    // Arrow to the second option, Enter pins it (Enter must NOT send).
+    await user.keyboard('{ArrowDown}{Enter}');
+    expect(onPinDocument).toHaveBeenCalledWith({ id: 'doc-2', name: 'Budget notes.md' });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue('Summarize');
+  });
+
+  it('Escape dismisses the picker for the current token', async () => {
+    mockSuggest([{ id: 'doc-1', text: 'Budget FY26.xlsx' }]);
+    setup({ onPinDocument: vi.fn() });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@bud');
+    await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox', { name: 'Pin a document' })).not.toBeInTheDocument();
+  });
+
+  it('renders pinned pills and unpins via ×', async () => {
+    const onUnpinDocument = vi.fn();
+    setup({
+      pinnedDocuments: [{ id: 'doc-1', name: 'Budget FY26.xlsx' }],
+      onPinDocument: vi.fn(),
+      onUnpinDocument,
+    });
+    const user = userEvent.setup();
+    expect(screen.getByRole('group', { name: 'Pinned documents' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Unpin Budget FY26.xlsx' }));
+    expect(onUnpinDocument).toHaveBeenCalledWith('doc-1');
+  });
+
+  it('already-pinned documents are excluded from the picker', async () => {
+    mockSuggest([{ id: 'doc-1', text: 'Budget FY26.xlsx' }]);
+    setup({
+      pinnedDocuments: [{ id: 'doc-1', name: 'Budget FY26.xlsx' }],
+      onPinDocument: vi.fn(),
+      onUnpinDocument: vi.fn(),
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Message'), '@bud');
+    expect(await screen.findByText('No matching documents.')).toBeInTheDocument();
+  });
+});
+
+// A rerender-capable variant of setup for prop-transition tests.
+function setupControlled(initial: Partial<React.ComponentProps<typeof Composer>>) {
+  const base = {
+    models: MODELS,
+    model: 'm1',
+    onModelChange: vi.fn(),
+    busy: false,
+    streaming: false,
+    onSend: vi.fn(),
+    onStop: vi.fn(),
+    modes: DEFAULT_MODES,
+    onModesChange: vi.fn(),
+  };
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrap = (over: Partial<React.ComponentProps<typeof Composer>>) => (
+    <QueryClientProvider client={qc}>
+      <Composer {...base} {...initial} {...over} />
+    </QueryClientProvider>
+  );
+  const view = render(wrap({}));
+  return {
+    rerender: (over: Partial<React.ComponentProps<typeof Composer>>) =>
+      view.rerender(wrap(over)),
+  };
+}
+
+// --- #434 round-1 remediation: picker key precedence + ghost Escape ----------
+
+describe('Composer mention picker key precedence (#434 finding 4)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('consumes Enter/arrows while the picker is empty — no literal @ send, no history recall', async () => {
+    // Suggest returns NO documents: the picker is active but option-less.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ suggestions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    const { onSend } = setup({
+      onPinDocument: vi.fn(),
+      historyEntries: ['older question'],
+    });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@nomatch');
+    expect(await screen.findByText('No matching documents.')).toBeInTheDocument();
+    // Enter must NOT send the literal "@nomatch" — it dismisses the picker.
+    await user.keyboard('{Enter}');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole('listbox', { name: 'Pin a document' }),
+    ).not.toBeInTheDocument();
+    // A second Enter (picker closed) sends the draft as usual.
+    await user.keyboard('{Enter}');
+    expect(onSend).toHaveBeenCalledWith('@nomatch');
+  });
+
+  it('ArrowUp over an option-less picker does not recall history', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ suggestions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    setup({ onPinDocument: vi.fn(), historyEntries: ['older question'] });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@zzz');
+    await screen.findByText('No matching documents.');
+    await user.keyboard('{ArrowUp}');
+    // The draft is untouched — history recall did not fire under the picker.
+    expect(input).toHaveValue('@zzz');
+  });
+});
+
+describe('Composer ghost Escape dismissal (research pass)', () => {
+  it('Escape hides the ghost until a new suggestion arrives', async () => {
+    const { rerender } = setupControlled({ ghostSuggestion: 'What changed in Q2?' });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    expect(screen.getByText('What changed in Q2?')).toBeInTheDocument();
+    input.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('What changed in Q2?')).not.toBeInTheDocument();
+    // Same suggestion stays dismissed…
+    rerender({ ghostSuggestion: 'What changed in Q2?' });
+    expect(screen.queryByText('What changed in Q2?')).not.toBeInTheDocument();
+    // …a NEW suggestion re-arms the ghost.
+    rerender({ ghostSuggestion: 'Who owns the Atlas launch?' });
+    expect(await screen.findByText('Who owns the Atlas launch?')).toBeInTheDocument();
+  });
+});
+
+describe('#434 NEW-3: mention picker focus semantics', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('options are outside the tab order and pinning returns focus to the input', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            suggestions: [{ kind: 'document', text: 'Budget FY26.xlsx', document_id: 'doc-1' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    const onPinDocument = vi.fn();
+    setup({ onPinDocument });
+    const user = userEvent.setup();
+    const input = screen.getByLabelText('Message');
+    await user.type(input, '@bud');
+    const option = await screen.findByRole('option', { name: /Budget FY26\.xlsx/ });
+    // APG: reached via aria-activedescendant, never Tab.
+    expect(option).toHaveAttribute('tabindex', '-1');
+    expect(input).toHaveAttribute('aria-activedescendant', 'lc-mention-opt-0');
+    expect(input).toHaveAttribute('aria-expanded', 'true');
+    await user.click(option);
+    expect(onPinDocument).toHaveBeenCalledWith({ id: 'doc-1', name: 'Budget FY26.xlsx' });
+    // The picker unmounted — focus is back on the textarea, not <body>.
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
   });
 });

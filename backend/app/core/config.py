@@ -382,6 +382,19 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
+    # completion on the session's resolved route, emitted as event:suggestions.
+    # A nicety, so it is config-gated and time-bounded; any failure is a silent
+    # skip — an answer never degrades because suggestions did. Count is capped
+    # at the contract's ChatSuggestions maxItems (5).
+    chat_suggestions_enabled: bool = Field(default=True, alias="CHAT_SUGGESTIONS_ENABLED")
+    chat_suggestions_count: int = Field(
+        default=3, ge=1, le=5, alias="CHAT_SUGGESTIONS_COUNT"
+    )
+    chat_suggestions_timeout_seconds: float = Field(
+        default=8.0, gt=0, le=60, alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS"
+    )
+
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the
     # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).

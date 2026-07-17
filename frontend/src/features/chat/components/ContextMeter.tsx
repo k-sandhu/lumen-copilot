@@ -1,0 +1,60 @@
+/**
+ * The conversation context meter (spec 0007 #432, AC-1 — Cursor-style): how
+ * full the model's input window was last turn, plus session token totals in the
+ * tooltip. Reads GET /chat/sessions/{id}/usage — the assembler's own budget
+ * arithmetic — and is invalidated on stream `done`, so it moves as answers
+ * settle. A fresh session renders an honest empty meter; a failed read renders
+ * nothing (the meter is a nicety, never a blocker).
+ */
+import { useSessionUsage } from '../model/queries';
+import { formatTokens } from '../model/composerHelpers';
+
+export interface ContextMeterProps {
+  sessionId: string;
+}
+
+
+export function ContextMeter({ sessionId }: ContextMeterProps) {
+  const usage = useSessionUsage(sessionId);
+  // Silent on loading/error AND on a malformed payload — the meter is a
+  // nicety; it must never take the conversation down with it.
+  if (usage.isLoading || usage.isError || !usage.data?.totals) return null;
+
+  const { totals, last, input_budget_tokens: budget, window_known: known } = usage.data;
+  // Window occupancy, not billing (#434 NEW-1): the final answer-loop turn's
+  // prompt size when the backend recorded it; the summed prompt_tokens only as
+  // a legacy fallback.
+  const lastPrompt = last?.context_prompt_tokens ?? last?.prompt_tokens ?? 0;
+  const percent = Math.min(100, Math.round((lastPrompt / Math.max(1, budget)) * 100));
+  // Threshold coloring (research pass — Claude Code statusline convention):
+  // calm below 50%, warn to 80%, hot above.
+  const tone = percent >= 80 ? 'lc-ctx-meter__fill--hot' : percent >= 50 ? 'lc-ctx-meter__fill--warn' : '';
+  const label =
+    totals.answers === 0
+      ? `Context ${formatTokens(budget)} available`
+      : `Context ${percent}% · ${formatTokens(lastPrompt)}/${formatTokens(budget)}`;
+  const title =
+    `This conversation: ${totals.answers} answer${totals.answers === 1 ? '' : 's'}, ` +
+    `${formatTokens(totals.total_tokens)} tokens total ` +
+    `(${formatTokens(totals.prompt_tokens)} in / ${formatTokens(totals.completion_tokens)} out, ` +
+    `${formatTokens(totals.cached_prompt_tokens)} cached). ` +
+    `Last turn used ${formatTokens(lastPrompt)} of the ${formatTokens(budget)}-token input budget` +
+    (known ? '.' : ' (conservative estimate — unknown model window).');
+
+  return (
+    <span
+      className="lc-ctx-meter"
+      role="status"
+      aria-label={`Context usage: ${label}`}
+      title={title}
+    >
+      <span className="lc-ctx-meter__bar" aria-hidden="true">
+        <span className={`lc-ctx-meter__fill ${tone}`.trim()} style={{ width: `${percent}%` }} />
+      </span>
+      <span className="lc-ctx-meter__label">
+        {label}
+        {!known && <span aria-hidden="true">*</span>}
+      </span>
+    </span>
+  );
+}

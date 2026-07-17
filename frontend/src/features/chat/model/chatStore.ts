@@ -60,6 +60,12 @@ interface ChatUiState {
    * a different session opens so it never leaks across sessions.
    */
   sessionScope: SessionScope | null;
+  /**
+   * The open side panel (spec 0007 #432): the conversation's context summary
+   * or its artifacts viewer. Mutually exclusive with the citation viewer (one
+   * aside slot); null when closed.
+   */
+  panel: 'context' | 'artifacts' | null;
 
   /** Open a session, optionally seeding it with an assistant's knowledge modes. */
   openSession: (sessionId: string, scope?: KnowledgeMode[]) => void;
@@ -69,6 +75,8 @@ interface ChatUiState {
   setPendingModel: (model: string | null) => void;
   openViewer: (target: ViewerTarget) => void;
   closeViewer: () => void;
+  openPanel: (panel: 'context' | 'artifacts') => void;
+  closePanel: () => void;
 }
 
 export const useChatStore = create<ChatUiState>((set) => ({
@@ -77,6 +85,7 @@ export const useChatStore = create<ChatUiState>((set) => ({
   pendingModel: null,
   viewer: null,
   sessionScope: null,
+  panel: null,
 
   // Opening a session ends any in-flight stream and clears the viewer. When a
   // scope (the launching assistant's modes) is supplied, stash it against this
@@ -86,13 +95,23 @@ export const useChatStore = create<ChatUiState>((set) => ({
       activeSessionId: sessionId,
       activeStreamId: null,
       viewer: null,
+      panel: null,
       sessionScope: scope ? { sessionId, modes: scope } : null,
     }),
   closeSession: () =>
-    set({ activeSessionId: null, activeStreamId: null, viewer: null, sessionScope: null }),
+    set({
+      activeSessionId: null,
+      activeStreamId: null,
+      viewer: null,
+      panel: null,
+      sessionScope: null,
+    }),
   startStream: (streamId) => set({ activeStreamId: streamId }),
   endStream: () => set({ activeStreamId: null }),
   setPendingModel: (model) => set({ pendingModel: model }),
-  openViewer: (target) => set({ viewer: target }),
+  // Viewer and panel share the single aside slot — opening one closes the other.
+  openViewer: (target) => set({ viewer: target, panel: null }),
   closeViewer: () => set({ viewer: null }),
+  openPanel: (panel) => set({ panel, viewer: null }),
+  closePanel: () => set({ panel: null }),
 }));

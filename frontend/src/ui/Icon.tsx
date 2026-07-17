@@ -45,9 +45,13 @@ export type IconName =
   | 'calendar'
   | 'inbox'
   | 'globe'
-  | 'link';
+  | 'link'
+  | 'package'
+  | 'at-sign';
 
 const PATHS: Record<IconName, string> = {
+  package: 'M21 8 12 3 3 8v8l9 5 9-5V8ZM3 8l9 5m0 0 9-5m-9 5v8',
+  'at-sign': 'M12 16a4 4 0 1 1 4-4v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1',
   'shield-check': 'M12 3 4 6v6c0 4.5 3.3 7.5 8 9 4.7-1.5 8-4.5 8-9V6l-8-3ZM9 12l2 2 4-4',
   lock: 'M6 10V8a6 6 0 0 1 12 0v2M5 10h14v10H5V10Z',
   'shield-x': 'M12 3 4 6v6c0 4.5 3.3 7.5 8 9 4.7-1.5 8-4.5 8-9V6l-8-3ZM9.5 9.5l5 5m0-5-5 5',

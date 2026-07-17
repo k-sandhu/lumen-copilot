@@ -290,6 +290,25 @@ export interface MessageToolInvocation {
   created_at: string;
 }
 
+/** One clickable choice of a clarifying question (spec 0006 #429). */
+export interface AskUserOption {
+  /** Sent back verbatim as the user's reply when clicked. */
+  label: string;
+  /** Optional one-line elaboration shown under the label. */
+  description?: string;
+}
+
+/**
+ * A clarifying question the model asked instead of answering (spec 0006 #429).
+ * Present only on an assistant turn that ended with finishReason=ask_user; the
+ * options stay clickable only while that turn is the conversation's last.
+ */
+export interface AskUserQuestion {
+  question: string;
+  options: AskUserOption[];
+  allow_free_text: boolean;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -301,6 +320,8 @@ export interface Message {
   citations?: Citation[];
   /** Governed tool calls behind an assistant message, oldest first (#377). */
   tool_invocations?: MessageToolInvocation[];
+  /** The clarifying question this turn ended with, if any (spec 0006 #429). */
+  question?: AskUserQuestion;
   created_at: string;
 }
 
@@ -353,6 +374,55 @@ export interface SendMessageRequest {
   model?: string;
   /** Restrict retrieval to these collections; omitted = all permitted docs. */
   collection_ids?: string[];
+  /**
+   * Pinned documents (spec 0007 #432): passage retrieval for this answer
+   * narrows to these ids (never widens — the allow-set still applies inside
+   * retrieval). Max 20; omitted/empty = unchanged behavior.
+   */
+  document_ids?: string[];
+}
+
+/** Summed per-answer llm_usage for one session (spec 0007 #432). */
+export interface SessionUsageTotals {
+  /** How many produced answers the sums cover (0 before the first). */
+  answers: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_prompt_tokens: number;
+  cache_write_tokens: number;
+}
+
+/** The most recent answer's usage record (spec 0007 #432). */
+export interface SessionUsageLast {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_prompt_tokens: number;
+  cache_write_tokens: number;
+  /**
+   * Final-turn window occupancy (#434 NEW-1) — what the model's window
+   * actually held, vs prompt_tokens' billing sum across loop turns. Absent on
+   * legacy rows / no-usage providers: fall back to prompt_tokens.
+   */
+  context_prompt_tokens?: number;
+}
+
+/**
+ * GET /chat/sessions/{id}/usage — the conversation context meter's data
+ * (spec 0007 #432). Window utilization = last.prompt_tokens /
+ * input_budget_tokens; `window_known=false` means the model was absent from
+ * the model map and a conservative fallback window was used.
+ */
+export interface SessionUsage {
+  /** The session's model id the budget was computed for. */
+  model: string;
+  totals: SessionUsageTotals;
+  /** Absent until the session has produced at least one answer. */
+  last?: SessionUsageLast;
+  /** Window − output headroom − safety margin (the assembler's own formula). */
+  input_budget_tokens: number;
+  window_known: boolean;
 }
 
 /** 202 from POST /chat/sessions/{id}/messages. */
@@ -1467,10 +1537,55 @@ export interface ChatToolResult {
   error?: string;
 }
 
+/**
+ * `event.data` for name=step — live run-phase progress (spec 0006 #429).
+ * Transient run-visibility state: never persisted, absent after reload. Keys
+ * fixed by the spec today: prepare | think | finalize | suggest — but the set
+ * is open-ended; render unknown keys generically off the server `label`.
+ */
+export interface ChatStep {
+  key: string;
+  /** Human-readable phase label (server-supplied). */
+  label: string;
+  /** A re-`started` key restarts that step (e.g. think, once per model turn). */
+  state: 'started' | 'completed';
+  /** Optional short annotation, e.g. "requested 2 tools". */
+  detail?: string;
+  /** 1-based model-turn ordinal for repeating keys (think). */
+  turn?: number;
+}
+
+/**
+ * `event.data` for name=ask_user (spec 0006 #429) — the model asked a clarifying
+ * question; the stream then ends with done(finishReason=ask_user). The same
+ * payload persists on the message (REST Message.question, snake_cased); the
+ * user's choice is sent as an ordinary next message.
+ */
+export interface ChatAskUser {
+  /** The assistant message the question persists under (== start.messageId). */
+  messageId: string;
+  question: string;
+  options: AskUserOption[];
+  allowFreeText: boolean;
+}
+
+/**
+ * `event.data` for name=suggestions (spec 0006 #429) — follow-up questions the
+ * user could ask next. At most one per stream, after the final delta/citation;
+ * transient (gone after reload). The first item is the composer's ghost-prefill
+ * candidate.
+ */
+export interface ChatSuggestions {
+  /** The settled assistant message these follow-ups attach under. */
+  messageId: string;
+  /** Short user-perspective questions, best first. */
+  suggestions: string[];
+}
+
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
   messageId: string;
-  /** e.g. stop, length, content_filter. */
+  /** e.g. stop, length, content_filter, ask_user (spec 0006 #429). */
   finishReason: string;
   citationCount: number;
   usage?: {

@@ -32,6 +32,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
+from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
     Artifact,
     ArtifactProducedBy,
@@ -59,6 +60,7 @@ from app.domain.entities import (
     LlmProvider,
     LlmProviderStatus,
     LlmUsageRecord,
+    LlmUsageTotals,
     McpServer,
     McpServerStatus,
     Message,
@@ -280,6 +282,9 @@ def _to_message(row: models.Message) -> Message:
         content=row.content,
         model=row.model,
         created_at=row.created_at,
+        # Lenient rehydration (spec 0006): a malformed stored payload yields
+        # None and the message still renders as plain content — never a 500.
+        question=AskUserQuestion.from_payload(row.question),
     )
 
 
@@ -2127,6 +2132,7 @@ class MessageRepository(_TenantScopedRepository):
         role: MessageRole,
         content: str,
         model: str | None = None,
+        question: AskUserQuestion | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -2143,6 +2149,9 @@ class MessageRepository(_TenantScopedRepository):
             role=role.value,
             content=content,
             model=model,
+            # The clarifying question this turn ended with, if any (spec 0006):
+            # stored as the REST payload verbatim (AskUserQuestion.to_payload).
+            question=question.to_payload() if question is not None else None,
         )
         self._session.add(row)
         await self._session.flush()
@@ -3376,6 +3385,7 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
         total_tokens=row.total_tokens,
         cached_prompt_tokens=row.cached_prompt_tokens,
         cache_write_tokens=row.cache_write_tokens,
+        context_prompt_tokens=row.context_prompt_tokens,
         created_at=row.created_at,
     )
 
@@ -3401,6 +3411,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         total_tokens: int,
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
+        context_prompt_tokens: int | None = None,
         session_id: UUID | None = None,
         message_id: UUID | None = None,
         run_id: UUID | None = None,
@@ -3421,6 +3432,9 @@ class LlmUsageRepository(_TenantScopedRepository):
             total_tokens=max(0, total_tokens),
             cached_prompt_tokens=max(0, cached_prompt_tokens),
             cache_write_tokens=max(0, cache_write_tokens),
+            context_prompt_tokens=(
+                max(0, context_prompt_tokens) if context_prompt_tokens is not None else None
+            ),
         )
         self._session.add(row)
         await self._session.flush()
@@ -3441,6 +3455,51 @@ class LlmUsageRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_llm_usage(r) for r in rows]
+
+    async def totals_for_session(self, session_id: UUID) -> LlmUsageTotals:
+        """Summed accounting for one session (spec 0007 #429) — one GROUP-less SUM.
+
+        Tenant-scoped (INV-1). A session with no usage rows yields all-zero
+        totals (an empty meter, not an error). Computed in SQL so the read stays
+        O(1) rows regardless of conversation length.
+        """
+        stmt = select(
+            func.count(models.LlmUsage.id),
+            func.coalesce(func.sum(models.LlmUsage.prompt_tokens), 0),
+            func.coalesce(func.sum(models.LlmUsage.completion_tokens), 0),
+            func.coalesce(func.sum(models.LlmUsage.total_tokens), 0),
+            func.coalesce(func.sum(models.LlmUsage.cached_prompt_tokens), 0),
+            func.coalesce(func.sum(models.LlmUsage.cache_write_tokens), 0),
+        ).where(
+            models.LlmUsage.tenant_id == self._tenant_id,
+            models.LlmUsage.session_id == session_id,
+        )
+        row = (await self._session.execute(stmt)).one()
+        return LlmUsageTotals(
+            answers=int(row[0]),
+            prompt_tokens=int(row[1]),
+            completion_tokens=int(row[2]),
+            total_tokens=int(row[3]),
+            cached_prompt_tokens=int(row[4]),
+            cache_write_tokens=int(row[5]),
+        )
+
+    async def last_for_session(self, session_id: UUID) -> LlmUsageRecord | None:
+        """The most recent usage record for one session, or ``None`` (spec 0007).
+
+        The "how full was the window last turn" input of the context meter.
+        """
+        stmt = (
+            select(models.LlmUsage)
+            .where(
+                models.LlmUsage.tenant_id == self._tenant_id,
+                models.LlmUsage.session_id == session_id,
+            )
+            .order_by(models.LlmUsage.created_at.desc(), models.LlmUsage.id.desc())
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_llm_usage(row) if row is not None else None
 
 
 class AssistantRepository(_TenantScopedRepository):

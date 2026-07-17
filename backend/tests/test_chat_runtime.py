@@ -39,7 +39,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import CodeRunStatus, Role
-from app.domain.llm import StreamEvent, ToolCall
+from app.domain.llm import Completion, StreamEvent, TokenUsage, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.realtime.backplane import InMemoryBackplane
 from app.services.chat_runtime import ChatRuntime
@@ -72,12 +72,32 @@ class _ScriptedGateway:
         turns: list[list[StreamEvent]],
         *,
         synthesis: list[StreamEvent] | None = None,
+        chat_completion: Completion | None = None,
     ) -> None:
         self._turns = turns
         self._synthesis = synthesis
+        # The non-streamed ``chat()`` script (the spec 0006 suggestions call).
+        # ``None`` (the default) makes ``chat()`` raise — modelling "no
+        # completion available", which the runtime must swallow silently.
+        self._chat_completion = chat_completion
         self.calls = 0
         self.auto_calls = 0
         self.synthesis_calls = 0
+        self.chat_calls = 0
+
+    async def chat(
+        self,
+        messages: object,
+        *,
+        model: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        max_tokens: object = None,
+    ) -> Completion:
+        self.chat_calls += 1
+        if self._chat_completion is None:
+            raise RuntimeError("no scripted chat completion")
+        return self._chat_completion
 
     async def stream_tools(
         self,
@@ -127,7 +147,13 @@ class _FakeRetrieval:
         self.queries: list[str] = []
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.queries.append(query)
         return list(self._passages)
@@ -242,6 +268,8 @@ def _runtime(
     backplane: InMemoryBackplane,
     default_max_tool_turns: int = 4,
     context_config: object = None,
+    interactive: bool = True,
+    suggestions_enabled: bool = False,
 ) -> ChatRuntime:
     return ChatRuntime(
         sessionmaker=ctx.sessionmaker,
@@ -253,6 +281,9 @@ def _runtime(
         default_max_tool_turns=default_max_tool_turns,
         context_config=context_config,  # type: ignore[arg-type]
         retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        interactive=interactive,
+        suggestions_enabled=suggestions_enabled,
+        suggestions_timeout_seconds=2.0,
     )
 
 
@@ -1043,15 +1074,16 @@ async def test_oversized_tool_results_never_exceed_budget(
     gateway = _RecordingSearchGateway()
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
-    # fallback 5024 − 0 headroom − 1024 margin ⇒ budget 4000 bytes. The initial
-    # [system, question] + tool schemas fits, but the accumulating tool results
-    # push a later turn over budget — where the guard must refuse, not send.
+    # fallback 9072 − 0 headroom − 1024 margin ⇒ budget 8048 bytes. The initial
+    # [system, question] + tool schemas (incl. ask_user since spec 0006/#429)
+    # fits, but the accumulating tool results push a later turn over budget —
+    # where the guard must refuse, not send.
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([huge]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+        context_config=ContextConfig(fallback_max_input_tokens=9072, output_headroom_tokens=0),
     )
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -1065,7 +1097,7 @@ async def test_oversized_tool_results_never_exceed_budget(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
-    budget = 5024 - 1024
+    budget = 9072 - 1024
     # Every payload the gateway received — measured by the SAME full-wire estimate
     # the guard uses — was within budget. Without the guard, the accumulating tool
     # results would push a later estimate over budget and this would FAIL.
@@ -1395,3 +1427,833 @@ async def test_usage_row_zeroed_when_provider_omits_usage_and_is_tenant_scoped(
         # INV-1: a repository bound to another tenant must see nothing.
         foreign = await LlmUsageRepository(session, uuid.uuid4()).list_for_session(ctx.session_id)
         assert foreign == []
+
+
+# --- Spec 0006 (#429): steps, ask_user, suggestions --------------------------
+
+
+def _steps(envs: list[dict[str, object]]) -> list[tuple[object, object]]:
+    """The (key, state) sequence of the stream's step events."""
+    return [
+        (e["data"]["key"], e["data"]["state"])  # type: ignore[index]
+        for e in envs
+        if e["type"] == "event" and e.get("name") == "step"
+    ]
+
+
+def _ask_user_call(call_id: str = "a1", **overrides: object) -> ToolCall:
+    arguments: dict[str, object] = {
+        "question": "Which quarter did you mean?",
+        "options": [
+            {"label": "Q1 2026", "description": "January through March"},
+            {"label": "Q2 2026"},
+        ],
+        "allow_free_text": False,
+    }
+    arguments.update(overrides)
+    return ToolCall(id=call_id, name="ask_user", arguments=arguments)
+
+
+async def test_step_events_bracket_the_run(ctx: _Ctx) -> None:
+    """AC-1: prepare/think/finalize phases bracket a grounded answer, in order."""
+    import asyncio
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "deduction"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]), backplane=backplane
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert _steps(envs) == [
+        ("prepare", "started"),
+        ("prepare", "completed"),
+        ("think", "started"),
+        ("think", "completed"),
+        ("think", "started"),
+        ("think", "completed"),
+        ("finalize", "started"),
+        ("finalize", "completed"),
+    ]
+    # Suggestions are OPT-IN: none generated, no suggest step, no chat() call.
+    assert gateway.chat_calls == 0
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "suggestions" not in names
+    # The tool turn's think step reports what it requested; turns are ordinal.
+    step_data = [
+        e["data"]
+        for e in envs
+        if e["type"] == "event" and e.get("name") == "step"
+    ]
+    think_started = [
+        d for d in step_data if d["key"] == "think" and d["state"] == "started"  # type: ignore[index]
+    ]
+    assert [d["turn"] for d in think_started] == [1, 2]  # type: ignore[index]
+    completed_details = [
+        d.get("detail")  # type: ignore[union-attr]
+        for d in step_data
+        if d["key"] == "think" and d["state"] == "completed"  # type: ignore[index]
+    ]
+    assert completed_details == ["requested 1 tool", None]
+
+
+async def test_ask_user_ends_turn_as_question(ctx: _Ctx) -> None:
+    """AC-2: a valid ask_user persists the question (zero citations) and ends
+    the stream with event:ask_user + done(finishReason=ask_user)."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="How did we do?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # Exactly one ask_user event, carrying the contract payload.
+    asks = [e for e in envs if e["type"] == "event" and e.get("name") == "ask_user"]
+    assert len(asks) == 1
+    data = asks[0]["data"]
+    assert data["question"] == "Which quarter did you mean?"  # type: ignore[index]
+    assert data["allowFreeText"] is False  # type: ignore[index]
+    assert data["options"] == [  # type: ignore[index]
+        {"label": "Q1 2026", "description": "January through March"},
+        {"label": "Q2 2026"},
+    ]
+    # The turn ended as a question: no answer deltas, no tool execution events,
+    # no citations, and the terminal reports finishReason=ask_user.
+    assert not [e for e in envs if e["type"] == "delta"]
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "tool_call" not in names and "tool_result" not in names and "citation" not in names
+    done = envs[-1]
+    assert done["type"] == "done"
+    assert done["data"]["finishReason"] == "ask_user"  # type: ignore[index]
+    assert done["data"]["citationCount"] == 0  # type: ignore[index]
+    assert data["messageId"] == done["data"]["messageId"]  # type: ignore[index]
+
+    # Persisted: the question text IS the message; the structured payload
+    # round-trips through the repository for the reload path (Message.question).
+    async with ctx.sessionmaker() as session:
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages if m.role.value == "assistant"]
+        assert len(assistant) == 1
+        stored = assistant[0]
+        assert stored.content == "Which quarter did you mean?"
+        assert stored.question is not None
+        assert [o.label for o in stored.question.options] == ["Q1 2026", "Q2 2026"]
+        assert stored.question.options[0].description == "January through March"
+        assert stored.question.allow_free_text is False
+        citations = await CitationRepository(session, ctx.tenant_id).list_for_message_hydrated(
+            stored.id
+        )
+        assert citations == []
+
+
+async def test_ask_user_mixed_batch_executes_nothing(ctx: _Ctx) -> None:
+    """Spec 0006 §2: a valid ask_user in a batch wins — no other call executes."""
+    import asyncio
+
+    retrieval = _FakeRetrieval([_passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "x"}),
+                        _ask_user_call("a2"),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ]
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert retrieval.queries == []  # the search in the same batch never ran
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "tool_call" not in names
+    assert "ask_user" in names
+    assert envs[-1]["data"]["finishReason"] == "ask_user"  # type: ignore[index]
+
+
+async def test_ask_user_malformed_recovers_to_normal_answer(ctx: _Ctx) -> None:
+    """AC-N1: malformed ask_user becomes a typed tool_bad_args result the model
+    reads; the loop continues to a normal answer with no question persisted."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [
+            # Turn 1: ask_user with a single option -- structurally invalid.
+            [
+                StreamEvent(
+                    tool_calls=(_ask_user_call("bad", options=[{"label": "Only one"}]),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            # Turn 2: the model recovers with a normal answer.
+            [StreamEvent(text="Recovered answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # The rejected call surfaced as an ordinary governed tool result (ok=False,
+    # tool_bad_args) -- never as an ask_user event or a broken stream.
+    results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["ok"] is False  # type: ignore[index]
+    assert results[0]["data"]["error"] == "tool_bad_args"  # type: ignore[index]
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "ask_user" not in names
+    done = envs[-1]
+    assert done["type"] == "done"
+    assert done["data"]["finishReason"] == "stop"  # type: ignore[index]
+    text = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert text == "Recovered answer."
+    async with ctx.sessionmaker() as session:
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages if m.role.value == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0].content == "Recovered answer."
+        assert assistant[0].question is None
+
+
+async def test_ask_user_not_intercepted_when_non_interactive(ctx: _Ctx) -> None:
+    """Headless/preview posture: a VALID ask_user is not intercepted -- the
+    governed handler refuses and the model proceeds to an answer."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [
+            [StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")],
+            [StreamEvent(text="Best-guess answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane, interactive=False
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "ask_user" not in names
+    results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["ok"] is False  # type: ignore[index]
+    assert envs[-1]["data"]["finishReason"] == "stop"  # type: ignore[index]
+    async with ctx.sessionmaker() as session:
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        assistant = [m for m in messages if m.role.value == "assistant"]
+        assert assistant[0].content == "Best-guess answer."
+        assert assistant[0].question is None
+
+
+async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
+    """AC-3: one suggestions event after the final delta, before done; its
+    usage folds into the answer's llm_usage row (#409)."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed vs Q1?", "Who owns this?", "What changed vs Q1?"]',
+            model="anthropic/claude-opus-4.8",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=7, total_tokens=12),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert gateway.chat_calls == 1
+    sugg = [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
+    assert len(sugg) == 1
+    # Deduped (case-insensitive), order-preserving, capped by config.
+    assert sugg[0]["data"]["suggestions"] == [  # type: ignore[index]
+        "What changed vs Q1?",
+        "Who owns this?",
+    ]
+    done = envs[-1]
+    assert done["type"] == "done"
+    assert sugg[0]["data"]["messageId"] == done["data"]["messageId"]  # type: ignore[index]
+    # Ordering: after the last delta, before the terminal.
+    last_delta = max(i for i, e in enumerate(envs) if e["type"] == "delta")
+    assert envs.index(sugg[0]) > last_delta
+    # suggest step bracketed the call.
+    assert ("suggest", "started") in _steps(envs)
+    assert ("suggest", "completed") in _steps(envs)
+    # The nicety's tokens are accounted in the done usage (and the llm_usage row).
+    assert done["data"]["usage"]["totalTokens"] == 27  # type: ignore[index]
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert len(rows) == 1
+        assert rows[0].total_tokens == 27
+
+
+async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:
+    """AC-N2: a failing suggestions call changes nothing -- no event, no error."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=None,  # chat() raises -- the nicety must be swallowed
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert gateway.chat_calls == 1
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "suggestions" not in names
+    assert envs[-1]["type"] == "done"  # the answer was untouched by the failure
+    # The suggest step still closed -- no orphaned spinner.
+    assert ("suggest", "completed") in _steps(envs)
+
+
+async def test_ask_user_turn_skips_suggestions(ctx: _Ctx) -> None:
+    """Spec 0006: a question turn generates no follow-ups (the options ARE the
+    suggestions)."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")]],
+        chat_completion=Completion(content='["never used"]', model="m"),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert gateway.chat_calls == 0
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "suggestions" not in names
+    assert "ask_user" in names
+
+
+def test_parse_suggestions_accepts_fenced_and_prose_json() -> None:
+    from app.services.chat_runtime import _parse_suggestions
+
+    fenced = '```json\n["A?", "B?"]\n```'
+    assert _parse_suggestions(fenced, limit=3) == ["A?", "B?"]
+    prose = 'Here you go: ["One?", {"question": "Two?"}] -- enjoy.'
+    assert _parse_suggestions(prose, limit=3) == ["One?", "Two?"]
+    assert _parse_suggestions("no json here", limit=3) == []
+    assert _parse_suggestions('["a?", "A?", "b?", "c?", "d?"]', limit=3) == ["a?", "b?", "c?"]
+
+
+def test_ask_user_parse_bounds() -> None:
+    from app.domain.chat import AskUserQuestion, AskUserValidationError
+
+    # String shorthand + dict options both accepted; labels deduped case-insensitively.
+    q = AskUserQuestion.parse(
+        {"question": "Pick one", "options": ["Alpha", {"label": "alpha"}, {"label": "Beta"}]}
+    )
+    assert [o.label for o in q.options] == ["Alpha", "Beta"]
+    assert q.allow_free_text is True
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse({"question": "", "options": ["A", "B"]})
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse({"question": "Pick", "options": ["Only"]})
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse({"question": "Pick", "options": ["A", "B", "C", "D", "E"]})
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse({"question": "Pick", "options": "not a list"})
+
+
+# --- Spec 0007 (#432): usage endpoint math + pinned-document narrowing -------
+
+
+async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
+    """AC-1: totals sum every answer's row; last is the newest; empty is zeroes."""
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        empty = await repo.totals_for_session(ctx.session_id)
+        assert (empty.answers, empty.total_tokens) == (0, 0)
+        assert await repo.last_for_session(ctx.session_id) is None
+        await repo.record(
+            model="m",
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            cached_prompt_tokens=10,
+            session_id=ctx.session_id,
+        )
+        await repo.record(
+            model="m",
+            prompt_tokens=300,
+            completion_tokens=30,
+            total_tokens=330,
+            cache_write_tokens=5,
+            session_id=ctx.session_id,
+        )
+        await session.commit()
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 2
+        assert totals.prompt_tokens == 400
+        assert totals.completion_tokens == 50
+        assert totals.total_tokens == 450
+        assert totals.cached_prompt_tokens == 10
+        assert totals.cache_write_tokens == 5
+        last = await repo.last_for_session(ctx.session_id)
+        assert last is not None and last.prompt_tokens == 300
+        # INV-1: a foreign-tenant repository sees nothing.
+        foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(
+            ctx.session_id
+        )
+        assert foreign.answers == 0
+
+
+def test_input_budget_for_model_matches_assembler_formula() -> None:
+    """The meter reports the assembler's own arithmetic (spec 0007 §2)."""
+    from app.llm.context import ContextConfig, input_budget_for_model
+
+    cfg = ContextConfig(fallback_max_input_tokens=50_000, output_headroom_tokens=8_000)
+    budget, known = input_budget_for_model("m", cfg, resolver=lambda _m: 200_000)
+    assert (budget, known) == (200_000 - 8_000 - 1_024, True)
+    fallback_budget, fallback_known = input_budget_for_model(
+        "unknown", cfg, resolver=lambda _m: None
+    )
+    assert (fallback_budget, fallback_known) == (50_000 - 8_000 - 1_024, False)
+
+
+async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
+    """AC-4: run(document_ids=...) threads through ToolContext into search_text,
+    and the model-visible question carries the count-only pinned note."""
+    import asyncio
+
+    class _PinRecordingRetrieval(_FakeRetrieval):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.document_ids: list[object] = []
+
+        async def search_text(
+            self,
+            *,
+            principal: object,
+            query: str,
+            k: int,
+            collection_ids: object = None,
+            document_ids: object = None,
+        ) -> list[RetrievedPassage]:
+            self.document_ids.append(document_ids)
+            return []
+
+    class _PromptRecordingGateway(_ScriptedGateway):
+        def __init__(self, turns: list[list[StreamEvent]]) -> None:
+            super().__init__(turns)
+            self.first_prompt: object = None
+
+        async def stream_tools(  # type: ignore[override]
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+        ):
+            if self.first_prompt is None:
+                self.first_prompt = list(messages)  # type: ignore[call-overload]
+            async for ev in super().stream_tools(
+                messages,
+                tools=tools,
+                model=model,
+                tool_choice=tool_choice,
+                api_key=api_key,
+                api_base=api_base,
+            ):
+                yield ev
+
+    pinned = [uuid.uuid4(), uuid.uuid4()]
+    retrieval = _PinRecordingRetrieval()
+    gateway = _PromptRecordingGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Scoped answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="what does it say?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        document_ids=list(pinned),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    # The pinned ids reached the retrieval chokepoint via the ToolContext.
+    assert retrieval.document_ids == [list(pinned)]
+    # The ASSEMBLED question carries the count-only note; the persisted user
+    # content and the audit hash use the raw question (asserted via prompt only
+    # here — persistence of user turns is the send path, not the runtime).
+    prompt = gateway.first_prompt
+    assert prompt is not None
+    question_msg = prompt[-1]
+    assert "attached 2 specific document(s)" in question_msg.content
+    assert question_msg.content.startswith("what does it say?")
+
+
+def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
+    """AC-4/AC-N1: the pinned filter is ANDed into BOTH hybrid legs."""
+    from app.search.filters import SearchAllowFilter
+    from app.search.store import _hybrid_body
+
+    tenant = uuid.uuid4()
+    doc = uuid.uuid4()
+    body = _hybrid_body(
+        query_text="q",
+        embedding=[0.1, 0.2],
+        allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
+        k=5,
+        document_ids=[doc],
+    )
+    legs = body["query"]["hybrid"]["queries"]
+    bm25_filters = legs[0]["bool"]["filter"]
+    knn_filters = legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"]
+    expected = {"terms": {"document_id": [str(doc)]}}
+    assert expected in bm25_filters
+    assert expected in knn_filters
+    # And absent when not pinned (no behavior change).
+    unpinned = _hybrid_body(
+        query_text="q",
+        embedding=[0.1, 0.2],
+        allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
+        k=5,
+    )
+    assert expected not in unpinned["query"]["hybrid"]["queries"][0]["bool"]["filter"]
+
+
+async def test_ask_user_not_intercepted_when_not_in_allowlist(ctx: _Ctx) -> None:
+    """#434 review finding 2: an assistant that EXCLUDED ask_user never has a
+    hallucinated call intercepted — it reaches the governed runner and comes
+    back tool_not_permitted; the loop continues to a normal answer."""
+    import asyncio
+
+    from app.services.assistant_runtime import AssistantRunConfig
+
+    gateway = _ScriptedGateway(
+        [
+            [StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")],
+            [StreamEvent(text="Assistant answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        # An assistant config whose allow-list deliberately excludes ask_user.
+        assistant_config=AssistantRunConfig(
+            system_prompt="You are scoped.",
+            allowed=frozenset({"search_text"}),
+            collection_ids=None,
+            model=None,
+        ),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "ask_user" not in names
+    results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["ok"] is False  # type: ignore[index]
+    assert results[0]["data"]["error"] == "tool_not_permitted"  # type: ignore[index]
+    assert envs[-1]["data"]["finishReason"] == "stop"  # type: ignore[index]
+
+
+def test_ask_user_parse_hardening_round2() -> None:
+    """#434 review finding 6: truncation happens BEFORE dedupe (over-long labels
+    sharing a head collapse and fail the distinct-count rule instead of
+    persisting ambiguous duplicates), and allow_free_text must be a real bool."""
+    from app.domain.chat import (
+        ASK_USER_MAX_LABEL_CHARS,
+        AskUserQuestion,
+        AskUserValidationError,
+    )
+
+    shared_head = "X" * ASK_USER_MAX_LABEL_CHARS
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse(
+            {"question": "Pick", "options": [shared_head + " alpha", shared_head + " beta"]}
+        )
+    with pytest.raises(AskUserValidationError):
+        AskUserQuestion.parse(
+            {"question": "Pick", "options": ["A", "B"], "allow_free_text": "false"}
+        )
+    # A real boolean still parses.
+    ok = AskUserQuestion.parse(
+        {"question": "Pick", "options": ["A", "B"], "allow_free_text": False}
+    )
+    assert ok.allow_free_text is False
+
+
+def test_parse_suggestions_accepts_object_envelope() -> None:
+    """Research alignment: tolerate the {"follow_ups": [...]} object contract."""
+    from app.services.chat_runtime import _parse_suggestions
+
+    assert _parse_suggestions('{"follow_ups": ["A?", "B?"]}', limit=3) == ["A?", "B?"]
+    assert _parse_suggestions('{"suggestions": ["C?"]}', limit=3) == ["C?"]
+    assert _parse_suggestions('{"unrelated": 1}', limit=3) == []
+
+
+async def test_suggestions_skipped_for_no_sources_fallback(ctx: _Ctx) -> None:
+    """Research alignment (HAX guideline 10): the honest "couldn't find it"
+    fallback answer gets NO follow-up suggestions — and pays for no extra call."""
+    import asyncio
+
+    gateway = _ScriptedGateway(
+        # The model returns an empty tool-free turn; the runtime falls back to
+        # NO_SOURCES_FALLBACK as the persisted answer.
+        [[StreamEvent(text=""), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(content='["never used"]', model="m"),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert gateway.chat_calls == 0
+    names = [e.get("name") for e in envs if e["type"] == "event"]
+    assert "suggestions" not in names
+    assert envs[-1]["type"] == "done"
+
+
+async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ctx) -> None:
+    """#434 NEW-1: llm_usage.context_prompt_tokens is the FINAL answer-loop
+    turn's prompt size (window occupancy); prompt_tokens stays the billing sum
+    across turns + the suggestions call."""
+    import asyncio
+
+    from app.db.repositories import LlmUsageRepository
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            # Turn 1 (tool turn): prompt 10.
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=1, total_tokens=11),
+                )
+            ],
+            # Turn 2 (answer turn): prompt 30 — the window's actual occupancy.
+            [
+                StreamEvent(text="Grounded."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=30, completion_tokens=4, total_tokens=34),
+                ),
+            ],
+        ],
+        # The suggestions nicety bills 5 more prompt tokens but must NOT move
+        # the recorded window occupancy.
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.prompt_tokens == 45  # 10 + 30 + 5 — the billing sum
+        assert row.context_prompt_tokens == 30  # the final loop turn only

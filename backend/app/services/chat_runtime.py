@@ -25,16 +25,28 @@ that retrieved nothing yields a zero-citation answer, shown honestly as such —
 the runtime prefers "I couldn't find it" over a confident, uncited answer.
 
 **Lifecycle.** It publishes exactly the contract envelope sequence with a
-monotonic ``seq``: ``start`` → ( ``delta`` | ``event:tool_call`` |
-``event:tool_result`` | ``event:citation`` )* → exactly one terminal ``done`` |
+monotonic ``seq``: ``start`` → ( ``delta`` | ``event:step`` |
+``event:tool_call`` | ``event:tool_result`` | ``event:citation`` |
+``event:ask_user`` | ``event:suggestions`` )* → exactly one terminal ``done`` |
 ``error``. Cancellation (client gone / shutdown) and any error both end the
 stream with one terminal envelope and never leak a vendor error.
+
+**Spec 0006 (#429) affordances.** ``event:step`` marks run phases (``prepare`` /
+``think`` / ``finalize`` / ``suggest``) — transient run-visibility state, never
+persisted. A valid ``ask_user`` tool call ends the turn as a clarifying
+question: the question persists as the assistant message (zero citations — a
+question makes no claims), ``event:ask_user`` carries the options, and the
+stream ends ``done(finishReason="ask_user")``; the user's choice arrives as an
+ordinary next message. After a normal answer, one config-gated, time-bounded
+completion proposes follow-up questions (``event:suggestions``); any failure is
+a silent skip.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -55,7 +67,7 @@ from app.db.repositories import (
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.chat import GroundedCitation
+from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
@@ -67,10 +79,16 @@ from app.retrieval import RetrievalService
 from app.services.assistant_runtime import AssistantRunConfig, prepend_user_instructions
 from app.services.audit import AuditSink
 from app.services.autonomy_policy_service import AutonomyPolicyReader
-from app.services.prompts import GROUNDED_SYSTEM_PROMPT, NO_SOURCES_FALLBACK
+from app.services.prompts import (
+    FOLLOW_UP_SYSTEM_PROMPT,
+    GROUNDED_SYSTEM_PROMPT,
+    NO_SOURCES_FALLBACK,
+    render_follow_up_request,
+)
 from app.services.provider_models import ModelRoute, ModelRouteResolver
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
+from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
 from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, tool_specs
@@ -130,6 +148,21 @@ _DEFAULT_MAX_TOOL_TURNS = 20
 # 6 when the window is roomy, fewer when it is tight — so the knob is derived
 # from the input budget rather than a fixed constant here.
 
+# Follow-up suggestions (spec 0006 #429) module defaults. Suggestions are
+# OPT-IN at the constructor: only the interactive chat API turns them on (from
+# ``Settings.chat_suggestions_enabled``), so the runtime's other consumers —
+# headless runs, the assistant preview harness, offline tests — never pay for a
+# nicety completion nobody reads. The prompt sees only the tail of a long
+# answer (the part follow-ups anchor to) and a bounded question, so the nicety
+# call stays cheap on any conversation.
+_DEFAULT_SUGGESTIONS_ENABLED = False
+_DEFAULT_SUGGESTIONS_COUNT = 3
+_DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS = 8.0
+_SUGGESTIONS_ANSWER_TAIL_CHARS = 4000
+_SUGGESTIONS_QUESTION_HEAD_CHARS = 1000
+_SUGGESTIONS_MAX_TOKENS = 400
+_SUGGESTION_MAX_CHARS = 200
+
 
 @dataclass(slots=True)
 class _StreamState:
@@ -164,6 +197,12 @@ class _Usage:
     total_tokens: int = 0
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    # The LAST answer-loop turn's prompt size — window occupancy, not billing
+    # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
+    # so the final turn wins); the suggestions nicety folds into the sums via
+    # :meth:`add` but never touches this. ``None`` ⇒ the provider reported no
+    # usage.
+    last_turn_prompt_tokens: int | None = None
 
     def add(self, usage: TokenUsage) -> None:
         self.prompt_tokens += usage.prompt_tokens
@@ -197,6 +236,10 @@ class ChatRuntime:
         sandbox_factory: SandboxFactory | None = None,
         mcp_tools_factory: McpToolsFactory | None = None,
         model_route_resolver: ModelRouteResolver | None = None,
+        interactive: bool = True,
+        suggestions_enabled: bool = _DEFAULT_SUGGESTIONS_ENABLED,
+        suggestions_count: int = _DEFAULT_SUGGESTIONS_COUNT,
+        suggestions_timeout_seconds: float = _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -240,6 +283,19 @@ class ChatRuntime:
         # as-is with default credentials (a config-only runtime). The API wires the
         # live resolver (per-tenant, holding the CC-C secrets vault).
         self._model_route_resolver = model_route_resolver
+        # Whether a live user is on the other end of the stream (spec 0006
+        # #429). Interactive (the chat API, the default): a valid ``ask_user``
+        # call ends the turn as a clarifying question. Non-interactive (headless
+        # runs, the assistant preview harness): interception is OFF — the call
+        # falls through to the governed runner, whose handler refuses with
+        # "proceed with your best interpretation", so a background run can never
+        # end on a question nobody will answer.
+        self._interactive = interactive
+        # Follow-up suggestions knobs (spec 0006 #429): config-gated, bounded
+        # count, hard timeout. The API wires ``Settings.chat_suggestions_*``.
+        self._suggestions_enabled = suggestions_enabled
+        self._suggestions_count = suggestions_count
+        self._suggestions_timeout_seconds = suggestions_timeout_seconds
 
     async def run(
         self,
@@ -250,6 +306,7 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        document_ids: list[UUID] | None = None,
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
@@ -315,6 +372,7 @@ class ChatRuntime:
                     model=model,
                     history=history,
                     collection_ids=collection_ids,
+                    document_ids=document_ids,
                     assistant_config=assistant_config,
                     custom_instructions=custom_instructions,
                     simulate_writes=simulate_writes,
@@ -389,6 +447,7 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        document_ids: list[UUID] | None = None,
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
@@ -397,6 +456,11 @@ class ChatRuntime:
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
         audit = AuditSink(AuditEventRepository(session, tenant_id))
+        # Live run-phase progress (spec 0006 #429): transient ``event:step``
+        # envelopes bracketing the phases. Nothing else streams while a model
+        # turn is in flight (turns are buffered, #148), so these are what keeps
+        # the pane honest between ``start`` and the first delta.
+        await self._emit_step(state, key="prepare", label="Preparing", step_state="started")
         # Resolve the chosen model's gateway route ONCE for the whole answer (PR 2a):
         # for a per-tenant ``provider:`` id this loads the provider + decrypts its key
         # a single time and yields the raw model id + api_key/base_url; for a config
@@ -492,15 +556,30 @@ class ChatRuntime:
         # id the provider actually sees). The derived ``retrieval_k`` flows into
         # the ``ToolContext`` below so a search issued after assembly respects the
         # same window.
+        # Pinned documents (spec 0007 #429): the model-visible question carries a
+        # short note so the model knows retrieval is scoped and searches rather
+        # than answering unaided. Only the ASSEMBLED prompt sees it — the
+        # persisted user message, the audit query hash, and the suggestions
+        # prompt all use the raw question. Deliberately count-only: resolving
+        # names here would need a permission-checked lookup surface this feature
+        # doesn't otherwise require (the user already sees the names as pills).
+        question_for_model = question
+        if document_ids:
+            question_for_model = (
+                f"{question}\n\n[The user attached {len(document_ids)} specific "
+                "document(s) to this message; document searches for this answer "
+                "are scoped to them. Search them before answering.]"
+            )
         assembled = assemble_context(
             model=route.model,
             system_prompt=system_prompt,
             history=history,
-            question=question,
+            question=question_for_model,
             tools=advertised,
             config=self._context_config,
         )
         messages: list[ChatMessage] = assembled.messages
+        await self._emit_step(state, key="prepare", label="Preparing", step_state="completed")
 
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
@@ -524,6 +603,10 @@ class ChatRuntime:
         usage = _Usage()
         finish_reason = "stop"
         total_hits = 0
+        # Set iff a turn ended with a valid ``ask_user`` call (spec 0006 #429):
+        # the loop breaks and the turn persists as a clarifying question.
+        # (Named ask_question: ``question`` is this method's user-question param.)
+        ask_question: AskUserQuestion | None = None
 
         # Run the agentic tool loop. ``budget_exhausted`` stays True only if every
         # turn within the budget requested tools — i.e. the model never reached a
@@ -550,6 +633,11 @@ class ChatRuntime:
             principal=self._principal,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
+            # Pinned documents (spec 0007 #429): passage search narrows to these
+            # ids — an ADDITIONAL filter over the caller's allow-set, applied
+            # inside retrieval/ (INV-2 unchanged: an id the caller cannot access
+            # contributes nothing and discloses nothing).
+            document_ids=document_ids,
             # The retrieval knobs the assembler derived from the input budget
             # (ADR-0016 §1 degrade order): the DEFAULT ``k`` (used when the model
             # omits it) plus the enforceable ceiling ``max_k`` that clamps even an
@@ -570,7 +658,7 @@ class ChatRuntime:
         )
 
         budget_exhausted = True
-        for _turn in range(max_tool_turns):
+        for turn_index in range(max_tool_turns):
             # Re-fit the GROWN transcript to the input budget before every turn
             # (#424 review, finding 1): the loop appends each turn's tool-call +
             # tool-result messages, so a one-shot assembly at the top does not
@@ -586,17 +674,68 @@ class ChatRuntime:
                 config=self._context_config,
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
+            await self._emit_step(
+                state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
+            )
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
                 # to be answer content (not narration), so stream it now and stop.
+                await self._emit_step(
+                    state,
+                    key="think",
+                    label="Thinking",
+                    step_state="completed",
+                    turn=turn_index + 1,
+                )
                 await self._publish_text(state, turn_text)
                 answer_chunks = turn_text
                 budget_exhausted = False
                 break
 
+            # A valid ``ask_user`` ends the turn as a clarifying question (spec
+            # 0006 §2): the FIRST valid call wins and NOTHING in this batch
+            # executes (the in-run transcript is discarded at turn end, so no
+            # dangling tool protocol). An ask_user with malformed arguments is
+            # NOT selected here — it falls through to the governed runner below,
+            # whose handler rejects it with a typed ``tool_bad_args`` result the
+            # model reads and recovers from (#429 AC-N1). Non-interactive
+            # consumers never intercept: the runner's handler refuses instead.
+            # Interception also requires the tool to be in the run's ALLOW-LIST
+            # (#434 review, finding 2): a hallucinated call from an assistant
+            # that excluded ask_user reaches the runner and gets the ordinary
+            # ``tool_not_permitted`` result — governance, not control flow.
+            ask_question = (
+                _select_ask_user(turn_tool_calls)
+                if self._interactive and ASK_USER_TOOL_NAME in allowed
+                else None
+            )
+            if ask_question is not None:
+                finish_reason = "ask_user"
+                budget_exhausted = False
+                await self._emit_step(
+                    state,
+                    key="think",
+                    label="Thinking",
+                    step_state="completed",
+                    detail="needs your input",
+                    turn=turn_index + 1,
+                )
+                break
+
+            await self._emit_step(
+                state,
+                key="think",
+                label="Thinking",
+                step_state="completed",
+                detail=(
+                    f"requested {len(turn_tool_calls)} tool"
+                    f"{'' if len(turn_tool_calls) == 1 else 's'}"
+                ),
+                turn=turn_index + 1,
+            )
             # The assistant turn that requested tools must be in the transcript
             # before its tool results (provider protocol). Its narration text is
             # dropped — neither streamed nor persisted.
@@ -657,11 +796,77 @@ class ChatRuntime:
                 config=self._context_config,
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
+            await self._emit_step(
+                state,
+                key="think",
+                label="Thinking",
+                step_state="started",
+                detail="wrapping up",
+                turn=max_tool_turns + 1,
+            )
             _, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised, tool_choice="none"
             )
+            await self._emit_step(
+                state,
+                key="think",
+                label="Thinking",
+                step_state="completed",
+                turn=max_tool_turns + 1,
+            )
             await self._publish_text(state, turn_text)
             answer_chunks = turn_text
+
+        if ask_question is not None:
+            # The clarifying-question turn (spec 0006 #429). The question text IS
+            # the assistant message; it persists with the structured payload so
+            # the options re-render after reload, and with ZERO citations — a
+            # question makes no claims (INV-3), so passages retrieved before the
+            # model chose to ask are deliberately not attached. No suggestions
+            # (the options are the suggestions). The stream then ends
+            # ``done(finishReason="ask_user")``.
+            await self._persist(
+                session=session,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                model=model,
+                content=ask_question.question,
+                citations=[],
+                question=ask_question,
+            )
+            await LlmUsageRepository(session, tenant_id).record(
+                model=model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                cached_prompt_tokens=usage.cached_prompt_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                context_prompt_tokens=usage.last_turn_prompt_tokens,
+                session_id=session_id,
+                message_id=assistant_message_id,
+            )
+            await self._audit_answer(
+                audit=audit,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                question=question,
+                model=model,
+                citation_count=0,
+                retrieved_hits=total_hits,
+                cited_document_ids=[],
+            )
+            await self._emit_ask_user(state, assistant_message_id, ask_question)
+            return _RunResult(
+                finish_reason="ask_user",
+                citation_count=0,
+                citations=(),
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                cached_prompt_tokens=usage.cached_prompt_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+            )
 
         answer_text = "".join(answer_chunks).strip()
 
@@ -677,6 +882,7 @@ class ChatRuntime:
                 envelopes.delta(state.stream_id, state.next_seq(), {"text": answer_text}),
             )
 
+        await self._emit_step(state, key="finalize", label="Finalizing", step_state="started")
         stored_citations = await self._persist(
             session=session,
             tenant_id=tenant_id,
@@ -685,22 +891,6 @@ class ChatRuntime:
             model=model,
             content=answer_text,
             citations=list(cited.values()),
-        )
-        # Record the answer's summed token/cache usage (#409) — one row per
-        # answer, in the SAME transaction as the message it accounts for (the
-        # deferred FK validates at commit). ``model`` is the requested id so a
-        # per-tenant ``provider:`` id stays attributable, matching the message
-        # row. Zeroed fields (a provider that omitted usage) still record: the
-        # answer happened, and "no usage reported" must be visible, not a gap.
-        await LlmUsageRepository(session, tenant_id).record(
-            model=model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens,
-            cached_prompt_tokens=usage.cached_prompt_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            session_id=session_id,
-            message_id=assistant_message_id,
         )
         # Emit a citation event per persisted citation (now carrying its row id).
         # ``cited`` is already deduplicated by chunk_id, so each stored citation is
@@ -721,6 +911,59 @@ class ChatRuntime:
             cited_document_ids=list(
                 dict.fromkeys(str(c.document_id) for c in stored_citations)
             ),
+        )
+        await self._emit_step(state, key="finalize", label="Finalizing", step_state="completed")
+
+        # Follow-up suggestions (spec 0006 #429): one config-gated, time-bounded
+        # completion over the visible conversation tail — no retrieval, so no new
+        # INV-2 surface. Any failure / parse miss ⇒ no event, never an error. Its
+        # token usage folds into ``usage`` BEFORE the answer's single llm_usage
+        # row records below, so the nicety's real cost is accounted (#409).
+        # Skipped for the honest "couldn't find it" fallback (HAX guideline 10:
+        # suppress suggestions on low-confidence/refusal answers — follow-ups to
+        # a failed answer read as engagement bait).
+        if self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK:
+            await self._emit_step(
+                state, key="suggest", label="Suggesting follow-ups", step_state="started"
+            )
+            suggestions = await self._generate_suggestions(
+                question=question, answer=answer_text, route=route, usage=usage
+            )
+            await self._emit_step(
+                state, key="suggest", label="Suggesting follow-ups", step_state="completed"
+            )
+            if suggestions:
+                await self._publish(
+                    state,
+                    envelopes.event(
+                        state.stream_id,
+                        state.next_seq(),
+                        name="suggestions",
+                        data={
+                            "messageId": str(assistant_message_id),
+                            "suggestions": suggestions,
+                        },
+                    ),
+                )
+
+        # Record the answer's summed token/cache usage (#409) — one row per
+        # answer, in the SAME transaction as the message it accounts for. Runs
+        # AFTER suggestion generation so the row carries the whole answer's cost
+        # (turn loop + the suggestions nicety, spec 0006 #429). ``model`` is the
+        # requested id so a per-tenant ``provider:`` id stays attributable,
+        # matching the message row. Zeroed fields (a provider that omitted
+        # usage) still record: the answer happened, and "no usage reported"
+        # must be visible, not a gap.
+        await LlmUsageRepository(session, tenant_id).record(
+            model=model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            context_prompt_tokens=usage.last_turn_prompt_tokens,
+            session_id=session_id,
+            message_id=assistant_message_id,
         )
 
         return _RunResult(
@@ -882,6 +1125,7 @@ class ChatRuntime:
                 finish_reason = ev.finish_reason
             if ev.usage is not None:
                 usage.add(ev.usage)
+                usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
         return turn_tool_calls, finish_reason, text_chunks
 
     async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
@@ -962,6 +1206,7 @@ class ChatRuntime:
         model: str,
         content: str,
         citations: list[GroundedCitation],
+        question: AskUserQuestion | None = None,
     ) -> list[GroundedCitation]:
         """Persist the assistant message + its citations; return citations w/ ids.
 
@@ -969,6 +1214,8 @@ class ChatRuntime:
         that rode ``start``) so the WS ``messageId`` and the stored row agree. Each
         citation persists with the **source** char span (deep-link to the document,
         CC-11) and reloads carrying its row id for the citation events.
+        ``question`` is set only for a clarifying-question turn (spec 0006 #429),
+        persisting the structured payload the UI re-renders options from.
         """
         message_repo = MessageRepository(session, tenant_id)
         citation_repo = CitationRepository(session, tenant_id)
@@ -978,6 +1225,7 @@ class ChatRuntime:
             role=MessageRole.ASSISTANT,
             content=content,
             model=model,
+            question=question,
         )
         stored: list[GroundedCitation] = []
         for citation in citations:
@@ -1057,6 +1305,102 @@ class ChatRuntime:
                 "document_ids": list(cited_document_ids),
             },
         )
+
+    # --- spec 0006 (#429) helpers -------------------------------------------
+
+    async def _emit_step(
+        self,
+        state: _StreamState,
+        *,
+        key: str,
+        label: str,
+        step_state: str,
+        detail: str | None = None,
+        turn: int | None = None,
+    ) -> None:
+        """Publish one ``event:step`` phase envelope (contract ChatStep).
+
+        Transient run-visibility state (never persisted; replayed idempotently
+        by ``seq`` like every envelope). ``turn`` disambiguates repeating keys
+        (``think`` restarts per model turn).
+        """
+        data: dict[str, object] = {"key": key, "label": label, "state": step_state}
+        if detail:
+            data["detail"] = detail
+        if turn is not None:
+            data["turn"] = turn
+        await self._publish(
+            state,
+            envelopes.event(state.stream_id, state.next_seq(), name="step", data=data),
+        )
+
+    async def _emit_ask_user(
+        self, state: _StreamState, message_id: UUID, ask: AskUserQuestion
+    ) -> None:
+        """Publish the ``event:ask_user`` clarifying-question envelope (ChatAskUser)."""
+        await self._publish(
+            state,
+            envelopes.event(
+                state.stream_id,
+                state.next_seq(),
+                name="ask_user",
+                data={
+                    "messageId": str(message_id),
+                    "question": ask.question,
+                    "options": [
+                        {
+                            "label": o.label,
+                            **({"description": o.description} if o.description else {}),
+                        }
+                        for o in ask.options
+                    ],
+                    "allowFreeText": ask.allow_free_text,
+                },
+            ),
+        )
+
+    async def _generate_suggestions(
+        self, *, question: str, answer: str, route: ModelRoute, usage: _Usage
+    ) -> list[str]:
+        """Propose follow-up questions for the settled answer, or ``[]``.
+
+        One non-streamed completion on the answer's already-resolved route,
+        hard-bounded by the configured timeout. Sees ONLY the visible
+        conversation tail (bounded question head + answer tail) — never
+        retrieved passages or tool output — so it cannot surface anything the
+        caller wasn't already shown (spec 0006 §5). Every failure mode (gateway
+        error, timeout, unparseable output) returns ``[]``: the nicety must
+        never degrade the answer. Its token usage folds into ``usage`` so the
+        answer's llm_usage row accounts for it (#409).
+        """
+        request = render_follow_up_request(
+            question=question[:_SUGGESTIONS_QUESTION_HEAD_CHARS],
+            answer=answer[-_SUGGESTIONS_ANSWER_TAIL_CHARS:],
+            count=self._suggestions_count,
+        )
+        prompt = [
+            ChatMessage(role=Role.SYSTEM, content=FOLLOW_UP_SYSTEM_PROMPT),
+            ChatMessage(role=Role.USER, content=request),
+        ]
+        try:
+            completion = await asyncio.wait_for(
+                self._gateway.chat(
+                    prompt,
+                    model=route.model,
+                    api_key=route.api_key,
+                    api_base=route.api_base,
+                    max_tokens=_SUGGESTIONS_MAX_TOKENS,
+                ),
+                timeout=self._suggestions_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 — a nicety must never break the stream
+            # Type only — the message may carry vendor detail (same discipline
+            # as the run()-level handler). CancelledError is a BaseException in
+            # 3.12, so shutdown cancellation still propagates.
+            log.debug("chat_runtime.suggestions_failed", error_type=type(exc).__name__)
+            return []
+        usage.add(completion.usage)
+        return _parse_suggestions(completion.content, limit=self._suggestions_count)
 
     # --- envelope helpers ---------------------------------------------------
 
@@ -1158,6 +1502,85 @@ def _narrow_collection_ids(
         return list(assistant_ids)
     allowed = set(assistant_ids)
     return [cid for cid in send_ids if cid in allowed]
+
+
+def _select_ask_user(calls: Sequence[ToolCall]) -> AskUserQuestion | None:
+    """The FIRST valid ``ask_user`` call of a turn's batch, parsed — or ``None``.
+
+    Spec 0006 §2: a valid clarifying question ends the turn and nothing else in
+    the batch executes. A malformed ``ask_user`` is NOT selected — it stays in
+    the batch for the governed runner, whose handler rejects it with a typed
+    ``tool_bad_args`` result the model recovers from (#429 AC-N1).
+    """
+    for call in calls:
+        if call.name != ASK_USER_TOOL_NAME:
+            continue
+        try:
+            return AskUserQuestion.parse(call.arguments)
+        except AskUserValidationError:
+            continue
+    return None
+
+
+def _parse_suggestions(text: str, *, limit: int) -> list[str]:
+    """Parse the follow-up completion into clean suggestion strings (or ``[]``).
+
+    Strict-ish by design (spec 0006 §2 — unparseable ⇒ silent skip): accepts the
+    instructed JSON array (optionally fenced or embedded in prose — the bracket
+    slice) but does NOT scrape free text, which would risk rendering prose as
+    chips. Items are trimmed, deduped case-insensitively, length-capped, and
+    bounded to ``limit``.
+    """
+    raw = text.strip()
+    if raw.startswith("```"):
+        # Drop a ```json fence: cut the fence lines, keep the body.
+        first_newline = raw.find("\n")
+        raw = raw[first_newline + 1 :] if first_newline != -1 else ""
+        stripped = raw.rstrip()
+        if stripped.endswith("```"):
+            raw = stripped[:-3]
+    candidates: list[object] = []
+    for attempt in (raw, _bracket_slice(raw)):
+        if not attempt:
+            continue
+        try:
+            parsed = json.loads(attempt)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            # Tolerate the common object envelope ({"follow_ups": [...]} — the
+            # Open-WebUI-style contract) alongside the instructed bare array.
+            for key in ("follow_ups", "suggestions", "questions"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    parsed = value
+                    break
+        if isinstance(parsed, list):
+            candidates = parsed
+            break
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if isinstance(item, dict):
+            # Tolerate [{"question": "..."}] — the intent is unambiguous.
+            item = item.get("question") or item.get("text") or ""
+        suggestion = str(item).strip()[:_SUGGESTION_MAX_CHARS]
+        key = suggestion.casefold()
+        if not suggestion or key in seen:
+            continue
+        seen.add(key)
+        out.append(suggestion)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _bracket_slice(raw: str) -> str | None:
+    """The outermost ``[...]`` slice of ``raw``, or ``None`` (JSON-in-prose rescue)."""
+    start, end = raw.find("["), raw.rfind("]")
+    if start == -1 or end <= start:
+        return None
+    return raw[start : end + 1]
 
 
 def _hash_query(query: str) -> str:
