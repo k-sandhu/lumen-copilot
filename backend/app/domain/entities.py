@@ -1090,6 +1090,23 @@ class LlmUsageRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmUsageTotals:
+    """Summed ``llm_usage`` accounting for one chat session (spec 0007 #429).
+
+    ``answers`` is how many usage rows (produced answers) the sums cover. All
+    zero for a session with no answers yet — an honest empty meter, never an
+    error.
+    """
+
+    answers: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunError:
     """A typed run failure / escalation reason — the ``runs.error`` jsonb (ADR-0015 §2).
 

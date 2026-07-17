@@ -125,6 +125,7 @@ class RetrievalService:
         query: str,
         k: int,
         collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
@@ -144,6 +145,10 @@ class RetrievalService:
             collection_ids: optional narrowing to specific collections (ANDed
                 inside the permission filter — narrowing never widens; a foreign
                 collection contributes nothing).
+            document_ids: optional narrowing to specific pinned documents (spec
+                0007 #429) — same narrow-only semantics, ANDed with the
+                allow-set and any collection filter; an id the caller cannot
+                access contributes nothing and discloses nothing (INV-2).
 
         Returns:
             Up to ``k`` ranked passages the principal is permitted to see, best
@@ -181,6 +186,7 @@ class RetrievalService:
             allow=allow,
             k=k,
             collection_ids=collection_ids,
+            document_ids=document_ids,
         )
         if not hits:
             return []
@@ -220,16 +226,23 @@ class RetrievalService:
         query: str,
         k: int,
         collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Agent tool ``search_text``: hybrid passage search (delegates to :meth:`search`).
 
         The LLM-callable form of the core search. Identical permission guarantee
         (INV-2): a call as user A returns only user A's permitted passages, with
         source + offsets for citation. Same signature shape as the ``ChatToolCall``
-        ``args`` (``query``, ``k``, optional ``collection_ids``).
+        ``args`` (``query``, ``k``, optional ``collection_ids``). ``document_ids``
+        is the runtime-threaded pinned-document narrowing (spec 0007 #429) — it
+        rides the ``ToolContext``, never model arguments.
         """
         return await self.search(
-            principal=principal, query=query, k=k, collection_ids=collection_ids
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
 
     async def search_documents(

@@ -147,7 +147,13 @@ class _FakeRetrieval:
         self.queries: list[str] = []
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.queries.append(query)
         return list(self._passages)
@@ -1888,3 +1894,182 @@ def test_ask_user_parse_bounds() -> None:
         AskUserQuestion.parse({"question": "Pick", "options": ["A", "B", "C", "D", "E"]})
     with pytest.raises(AskUserValidationError):
         AskUserQuestion.parse({"question": "Pick", "options": "not a list"})
+
+
+# --- Spec 0007 (#432): usage endpoint math + pinned-document narrowing -------
+
+
+async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
+    """AC-1: totals sum every answer's row; last is the newest; empty is zeroes."""
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        empty = await repo.totals_for_session(ctx.session_id)
+        assert (empty.answers, empty.total_tokens) == (0, 0)
+        assert await repo.last_for_session(ctx.session_id) is None
+        await repo.record(
+            model="m",
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            cached_prompt_tokens=10,
+            session_id=ctx.session_id,
+        )
+        await repo.record(
+            model="m",
+            prompt_tokens=300,
+            completion_tokens=30,
+            total_tokens=330,
+            cache_write_tokens=5,
+            session_id=ctx.session_id,
+        )
+        await session.commit()
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 2
+        assert totals.prompt_tokens == 400
+        assert totals.completion_tokens == 50
+        assert totals.total_tokens == 450
+        assert totals.cached_prompt_tokens == 10
+        assert totals.cache_write_tokens == 5
+        last = await repo.last_for_session(ctx.session_id)
+        assert last is not None and last.prompt_tokens == 300
+        # INV-1: a foreign-tenant repository sees nothing.
+        foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(
+            ctx.session_id
+        )
+        assert foreign.answers == 0
+
+
+def test_input_budget_for_model_matches_assembler_formula() -> None:
+    """The meter reports the assembler's own arithmetic (spec 0007 §2)."""
+    from app.llm.context import ContextConfig, input_budget_for_model
+
+    cfg = ContextConfig(fallback_max_input_tokens=50_000, output_headroom_tokens=8_000)
+    budget, known = input_budget_for_model("m", cfg, resolver=lambda _m: 200_000)
+    assert (budget, known) == (200_000 - 8_000 - 1_024, True)
+    fallback_budget, fallback_known = input_budget_for_model(
+        "unknown", cfg, resolver=lambda _m: None
+    )
+    assert (fallback_budget, fallback_known) == (50_000 - 8_000 - 1_024, False)
+
+
+async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
+    """AC-4: run(document_ids=...) threads through ToolContext into search_text,
+    and the model-visible question carries the count-only pinned note."""
+    import asyncio
+
+    class _PinRecordingRetrieval(_FakeRetrieval):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.document_ids: list[object] = []
+
+        async def search_text(
+            self,
+            *,
+            principal: object,
+            query: str,
+            k: int,
+            collection_ids: object = None,
+            document_ids: object = None,
+        ) -> list[RetrievedPassage]:
+            self.document_ids.append(document_ids)
+            return []
+
+    class _PromptRecordingGateway(_ScriptedGateway):
+        def __init__(self, turns: list[list[StreamEvent]]) -> None:
+            super().__init__(turns)
+            self.first_prompt: object = None
+
+        async def stream_tools(  # type: ignore[override]
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+        ):
+            if self.first_prompt is None:
+                self.first_prompt = list(messages)  # type: ignore[call-overload]
+            async for ev in super().stream_tools(
+                messages,
+                tools=tools,
+                model=model,
+                tool_choice=tool_choice,
+                api_key=api_key,
+                api_base=api_base,
+            ):
+                yield ev
+
+    pinned = [uuid.uuid4(), uuid.uuid4()]
+    retrieval = _PinRecordingRetrieval()
+    gateway = _PromptRecordingGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamEvent(text="Scoped answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="what does it say?",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        document_ids=list(pinned),
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    # The pinned ids reached the retrieval chokepoint via the ToolContext.
+    assert retrieval.document_ids == [list(pinned)]
+    # The ASSEMBLED question carries the count-only note; the persisted user
+    # content and the audit hash use the raw question (asserted via prompt only
+    # here — persistence of user turns is the send path, not the runtime).
+    prompt = gateway.first_prompt
+    assert prompt is not None
+    question_msg = prompt[-1]
+    assert "attached 2 specific document(s)" in question_msg.content
+    assert question_msg.content.startswith("what does it say?")
+
+
+def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
+    """AC-4/AC-N1: the pinned filter is ANDed into BOTH hybrid legs."""
+    from app.search.filters import SearchAllowFilter
+    from app.search.store import _hybrid_body
+
+    tenant = uuid.uuid4()
+    doc = uuid.uuid4()
+    body = _hybrid_body(
+        query_text="q",
+        embedding=[0.1, 0.2],
+        allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
+        k=5,
+        document_ids=[doc],
+    )
+    legs = body["query"]["hybrid"]["queries"]
+    bm25_filters = legs[0]["bool"]["filter"]
+    knn_filters = legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"]
+    expected = {"terms": {"document_id": [str(doc)]}}
+    assert expected in bm25_filters
+    assert expected in knn_filters
+    # And absent when not pinned (no behavior change).
+    unpinned = _hybrid_body(
+        query_text="q",
+        embedding=[0.1, 0.2],
+        allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
+        k=5,
+    )
+    assert expected not in unpinned["query"]["hybrid"]["queries"][0]["bool"]["filter"]

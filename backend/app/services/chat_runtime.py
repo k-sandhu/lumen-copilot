@@ -300,6 +300,7 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        document_ids: list[UUID] | None = None,
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
@@ -365,6 +366,7 @@ class ChatRuntime:
                     model=model,
                     history=history,
                     collection_ids=collection_ids,
+                    document_ids=document_ids,
                     assistant_config=assistant_config,
                     custom_instructions=custom_instructions,
                     simulate_writes=simulate_writes,
@@ -439,6 +441,7 @@ class ChatRuntime:
         model: str,
         history: Sequence[ChatMessage],
         collection_ids: list[UUID] | None,
+        document_ids: list[UUID] | None = None,
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
@@ -547,11 +550,25 @@ class ChatRuntime:
         # id the provider actually sees). The derived ``retrieval_k`` flows into
         # the ``ToolContext`` below so a search issued after assembly respects the
         # same window.
+        # Pinned documents (spec 0007 #429): the model-visible question carries a
+        # short note so the model knows retrieval is scoped and searches rather
+        # than answering unaided. Only the ASSEMBLED prompt sees it — the
+        # persisted user message, the audit query hash, and the suggestions
+        # prompt all use the raw question. Deliberately count-only: resolving
+        # names here would need a permission-checked lookup surface this feature
+        # doesn't otherwise require (the user already sees the names as pills).
+        question_for_model = question
+        if document_ids:
+            question_for_model = (
+                f"{question}\n\n[The user attached {len(document_ids)} specific "
+                "document(s) to this message; document searches for this answer "
+                "are scoped to them. Search them before answering.]"
+            )
         assembled = assemble_context(
             model=route.model,
             system_prompt=system_prompt,
             history=history,
-            question=question,
+            question=question_for_model,
             tools=advertised,
             config=self._context_config,
         )
@@ -610,6 +627,11 @@ class ChatRuntime:
             principal=self._principal,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
+            # Pinned documents (spec 0007 #429): passage search narrows to these
+            # ids — an ADDITIONAL filter over the caller's allow-set, applied
+            # inside retrieval/ (INV-2 unchanged: an id the caller cannot access
+            # contributes nothing and discloses nothing).
+            document_ids=document_ids,
             # The retrieval knobs the assembler derived from the input budget
             # (ADR-0016 §1 degrade order): the DEFAULT ``k`` (used when the model
             # omits it) plus the enforceable ceiling ``max_k`` that clamps even an

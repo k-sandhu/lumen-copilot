@@ -203,6 +203,43 @@ class MessageListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class SessionUsageTotalsResponse(BaseModel):
+    """``#/components/schemas/SessionUsageTotals`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    answers: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
+
+
+class SessionUsageLastResponse(BaseModel):
+    """``#/components/schemas/SessionUsageLast`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_prompt_tokens: int
+    cache_write_tokens: int
+
+
+class SessionUsageResponse(BaseModel):
+    """``#/components/schemas/SessionUsage`` (spec 0007 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    model: str
+    totals: SessionUsageTotalsResponse
+    last: SessionUsageLastResponse | None = None
+    input_budget_tokens: int
+    window_known: bool
+
+
 class SendMessageRequest(BaseModel):
     """``#/components/schemas/SendMessageRequest``."""
 
@@ -211,6 +248,11 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
     model: str | None = None
     collection_ids: list[UUID] | None = None
+    # Pinned documents (spec 0007 #429): retrieval for THIS answer narrows to
+    # these ids (an additional filter over the caller's allow-set — INV-2 still
+    # applies inside retrieval/; an id the caller can't access contributes
+    # nothing and discloses nothing). Additive; None/[] ⇒ unchanged behavior.
+    document_ids: list[UUID] | None = Field(default=None, max_length=20)
 
 
 class SendMessageResponse(BaseModel):
@@ -419,6 +461,57 @@ async def get_session(
     return _session_to_response(view)
 
 
+@router.get(
+    "/sessions/{session_id}/usage",
+    response_model=SessionUsageResponse,
+    response_model_exclude_none=True,
+)
+async def get_session_usage(
+    session_id: UUID,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SessionUsageResponse:
+    """The session's token/context accounting (spec 0007 #429); not visible → 404.
+
+    Powers the conversation context meter: summed llm_usage (#409) + the last
+    answer's record + the input-token budget the assembler grants the session's
+    model (the same formula answers are assembled under — never a parallel
+    approximation).
+    """
+    service = _build_service(
+        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+    )
+    view = await service.session_usage(session_id)
+    if view is None:
+        raise NotFoundError("Chat session not found.")
+    return SessionUsageResponse(
+        model=view.model,
+        totals=SessionUsageTotalsResponse(
+            answers=view.totals.answers,
+            prompt_tokens=view.totals.prompt_tokens,
+            completion_tokens=view.totals.completion_tokens,
+            total_tokens=view.totals.total_tokens,
+            cached_prompt_tokens=view.totals.cached_prompt_tokens,
+            cache_write_tokens=view.totals.cache_write_tokens,
+        ),
+        last=(
+            SessionUsageLastResponse(
+                prompt_tokens=view.last.prompt_tokens,
+                completion_tokens=view.last.completion_tokens,
+                total_tokens=view.last.total_tokens,
+                cached_prompt_tokens=view.last.cached_prompt_tokens,
+                cache_write_tokens=view.last.cache_write_tokens,
+            )
+            if view.last is not None
+            else None
+        ),
+        input_budget_tokens=view.input_budget_tokens,
+        window_known=view.window_known,
+    )
+
+
 @router.patch(
     "/sessions/{session_id}",
     response_model=ChatSessionResponse,
@@ -533,6 +626,7 @@ async def send_message(
         session_id=session_id,
         result=result,
         collection_ids=body.collection_ids,
+        document_ids=body.document_ids,
         settings=settings,
     )
     return SendMessageResponse(
@@ -549,6 +643,7 @@ def _schedule_answer(
     session_id: UUID,
     result: SendResult,
     collection_ids: list[UUID] | None,
+    document_ids: list[UUID] | None = None,
     settings: Settings,
 ) -> None:
     """Launch the answer runtime as a tracked task detached from the response.
@@ -623,6 +718,7 @@ def _schedule_answer(
             model=result.model,
             history=history,
             collection_ids=collection_ids,
+            document_ids=document_ids,
             assistant_config=result.assistant_config,
             custom_instructions=result.custom_instructions,
         )

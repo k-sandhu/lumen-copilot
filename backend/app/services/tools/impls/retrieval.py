@@ -108,7 +108,11 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
     # so a roomy run is unchanged.
     k = _clamp_k(args.get("k"), ctx.default_k, maximum=min(_MAX_K, ctx.max_k))
     passages = await ctx.retrieval.search_text(
-        principal=ctx.principal, query=query, k=k, collection_ids=ctx.collection_ids
+        principal=ctx.principal,
+        query=query,
+        k=k,
+        collection_ids=ctx.collection_ids,
+        document_ids=ctx.document_ids,
     )
     if not passages:
         return ToolHandlerResult(

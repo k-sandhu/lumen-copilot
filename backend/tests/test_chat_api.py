@@ -1095,3 +1095,63 @@ def test_chat_shutdown_grace_must_be_positive(bad: float) -> None:
 def test_chat_shutdown_grace_default_is_positive() -> None:
     s = Settings(_env_file=None, **_SETTINGS_BASE)
     assert s.chat_shutdown_grace_seconds > 0
+
+
+# --- Spec 0007 (#432): session usage endpoint --------------------------------
+
+
+async def test_session_usage_empty_then_404_foreign(client: AsyncClient, seeded: _Seeded) -> None:
+    """AC-1/AC-N1: a fresh session reports zero totals and no `last`; a foreign
+    (other-tenant) session id is a 404 (INV-1/INV-2 non-disclosure)."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "usage"}
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+
+    usage = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(token))
+    assert usage.status_code == 200, usage.text
+    body = usage.json()
+    assert body["totals"] == {
+        "answers": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert "last" not in body  # response_model_exclude_none drops the null
+    assert body["input_budget_tokens"] > 0
+    assert isinstance(body["window_known"], bool)
+    assert body["model"]
+
+    # Another tenant's caller sees 404, never 403 (existence non-disclosure).
+    carol = await _login(client, seeded.carol_email)
+    foreign = await client.get(
+        f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(carol)
+    )
+    assert foreign.status_code == 404
+
+
+async def test_send_accepts_pinned_document_ids(client: AsyncClient, seeded: _Seeded) -> None:
+    """Spec 0007 AC-4: document_ids is additive on send (202) and over-limit → 422."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "pins"}
+    )
+    session_id = resp.json()["id"]
+
+    ok = await client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=_auth(token),
+        json={"content": "scoped?", "document_ids": [str(seeded.alice_doc)]},
+    )
+    assert ok.status_code == 202, ok.text
+
+    too_many = await client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=_auth(token),
+        json={"content": "x", "document_ids": [str(uuid.uuid4()) for _ in range(21)]},
+    )
+    assert too_many.status_code == 422

@@ -142,6 +142,11 @@ class ToolContext:
     principal: Principal
     retrieval: RetrievalService
     collection_ids: list[UUID] | None = None
+    #: Pinned documents (spec 0007 #429): when set, passage search narrows to
+    #: these ids — an ADDITIONAL filter over the caller's allow-set, applied
+    #: inside ``retrieval/`` (INV-2 unchanged; an inaccessible id contributes
+    #: nothing and discloses nothing). ``None`` ⇒ unchanged behavior.
+    document_ids: list[UUID] | None = None
     default_k: int = 6
     #: The enforceable CEILING on a single search's ``k`` (ADR-0016 §1 / #410):
     #: the context assembler derives it from the input budget and a retrieval tool

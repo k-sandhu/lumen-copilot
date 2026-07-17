@@ -200,6 +200,28 @@ def _conservative_tokens(text: str) -> int:
     return max(1, len(text.encode("utf-8")))
 
 
+def input_budget_for_model(
+    model: str,
+    config: ContextConfig | None = None,
+    *,
+    resolver: MaxInputResolver | None = None,
+) -> tuple[int, bool]:
+    """The input-token budget the assembler would grant ``model`` — ``(budget, known)``.
+
+    The SAME formula ``assemble_context`` applies (window − output headroom −
+    safety margin), exposed so read surfaces (the spec-0007 context-usage meter)
+    report the exact budget answers are actually assembled under, never a
+    parallel approximation. ``known`` is False when the model is absent from the
+    model map and the configured conservative fallback window was used.
+    """
+    cfg = config or ContextConfig()
+    resolve = resolver or litellm_max_input_tokens
+    resolved = resolve(model)
+    window = resolved if resolved is not None else cfg.fallback_max_input_tokens
+    budget = window - cfg.output_headroom_tokens - _SAFETY_MARGIN_TOKENS
+    return max(1, budget), resolved is not None
+
+
 def litellm_max_input_tokens(model: str) -> int | None:
     """The default resolver seam: LiteLLM's model map, lazily; ``None`` if unknown.
 
