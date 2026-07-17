@@ -37,7 +37,7 @@ to a heuristic, never a crashed answer.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from app.core.errors import ValidationError
@@ -403,7 +403,7 @@ def fit_transcript(
     config: ContextConfig | None = None,
     counter: TokenCounter | None = None,
     max_input_resolver: MaxInputResolver | None = None,
-    protected_tool_call_ids: frozenset[str] = frozenset(),
+    cited_snippets: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[ChatMessage]:
     """Re-fit an already-grown transcript to the model's input budget (#424, finding 1).
 
@@ -423,11 +423,14 @@ def fit_transcript(
     2. **Compact the live tail's oldest tool results** (ADR-0016 §3.1 / #415).
        Rather than refuse, replace the OLDEST tool results' contents with a
        bounded, content-bearing digest (:func:`_context_digest`), cleared in
-       CHUNKS so cache invalidation is amortized. A result whose passages the
-       answer **already cited** (its ``tool_call_id`` in ``protected_tool_call_ids``)
-       is kept verbatim, so grounding for existing citations survives (INV-3 also
-       holds structurally: citations are recorded at retrieval time, independent
-       of the transcript).
+       CHUNKS so cache invalidation is amortized. ``cited_snippets`` maps a tool
+       ``call.id`` to the snippet texts the answer has already cited from that
+       result: those results compact LAST, and when they do, each cited snippet
+       is re-embedded **verbatim** in the digest (the ADR's constraint) — so the
+       evidence behind an existing citation never leaves the model's view (and
+       INV-3 also holds structurally: citations are recorded at retrieval time,
+       independent of the transcript). Every mutation must strictly reduce the
+       counted cost, or it is skipped.
     3. **Refuse.** Only if the system + question + protected/compacted tail still
        cannot fit does it raise the typed ``context_too_large`` — a deterministic
        refusal, never an over-budget call.
@@ -481,8 +484,9 @@ def fit_transcript(
 
     # (2) Compact the live tail's oldest tool results (ADR-0016 §3.1 / #415) —
     # digest them rather than refuse. Only reached if shedding history was not
-    # enough. Chunked so cache invalidation is paid rarely; cited results are
-    # protected. Mutates ``working``/``costs``/``total`` in place.
+    # enough. Chunked so cache invalidation is paid rarely; cited results compact
+    # last, with their cited snippets re-embedded verbatim in the digest.
+    # Mutates ``working``/``costs``/``total`` in place.
     if total > budget:
         total, compacted = _compact_oldest_tool_results(
             working,
@@ -493,7 +497,7 @@ def fit_transcript(
             count=count,
             digest_chars=cfg.compaction_digest_chars,
             chunk_size=max(1, cfg.compaction_chunk_size),
-            protected=protected_tool_call_ids,
+            cited_snippets=cited_snippets or {},
         )
         if compacted:
             log.info(
@@ -563,21 +567,41 @@ def _oldest_sheddable_span(
     return (start, start + 1)
 
 
-def _context_digest(content: str, digest_chars: int) -> str:
+def _context_digest(
+    content: str, digest_chars: int, cited_snippets: tuple[str, ...] = ()
+) -> str:
     """A bounded, content-bearing digest of a tool result's content (ADR-0016 §3.1).
 
     Keeps the first ``digest_chars`` of the ACTUAL content — for a rendered
     retrieval result that is the first labelled passages (document + chunk id +
     the start of each snippet), so the model retains real, attributable evidence,
-    just less of it — then appends a marker noting the truncation. This is
+    just less of it — then, for a result whose passages the answer has **cited**,
+    re-embeds each cited snippet **verbatim** (the ADR's constraint: cited
+    evidence must remain visible to the synthesizing model even when its result
+    is compacted), and finally appends the truncation marker. This is
     deliberately NOT the ≤300-char user-facing ``ToolResult.summary`` (a count
-    like "3 passages" is not evidence). Content already within budget is returned
-    unchanged (nothing to gain by digesting it).
+    like "3 passages" is not evidence).
+
+    Note the digest is *not guaranteed shorter* than the input — the marker and
+    the verbatim snippets have their own cost — so the caller applies it only
+    when it strictly reduces the counted wire cost (#431 review, finding 3).
     """
-    trimmed = content[: max(1, digest_chars)].rstrip()
-    if len(trimmed) >= len(content.rstrip()):
+    if len(content) <= max(1, digest_chars):
+        # Nothing to truncate — the digest of already-short content is itself
+        # (the compactor's cost guard would skip it anyway; this keeps the
+        # builder's semantics honest for direct callers).
         return content
-    return trimmed + _COMPACTION_MARKER
+    head = content[: max(1, digest_chars)].rstrip()
+    parts = [head]
+    # Cited snippets already fully visible in the retained head need no re-embed;
+    # every other cited snippet rides verbatim so compaction never removes the
+    # evidence behind an existing citation from the model's view.
+    retained = [s for s in dict.fromkeys(cited_snippets) if s and s not in head]
+    if retained:
+        parts.append("\n[cited evidence retained verbatim:]")
+        parts.extend(f"\n• {s}" for s in retained)
+    parts.append(_COMPACTION_MARKER)
+    return "".join(parts)
 
 
 def _compact_oldest_tool_results(
@@ -590,44 +614,55 @@ def _compact_oldest_tool_results(
     count: TokenCounter,
     digest_chars: int,
     chunk_size: int,
-    protected: frozenset[str],
+    cited_snippets: Mapping[str, tuple[str, ...]],
 ) -> tuple[int, int]:
     """Digest the OLDEST live-tail tool results in chunks until it fits (#415).
 
     Operates only on the live tail ``[tail_start, len)`` — this answer's tool
-    activity — never on history (already shed) or the system/question. A candidate
-    is a ``tool``-result message whose content is longer than the digest (already-
-    short ones gain nothing).
+    activity — never on history (already shed) or the system/question.
 
-    Two tiers, so cited evidence is preferentially preserved: **uncited** results
-    (``tool_call_id`` not in ``protected``) are compacted first; only if the budget
-    STILL cannot be met are the ``protected`` (cited) results compacted too — a
-    degraded-but-answered turn beats a refusal. Within each tier, oldest-first in
+    Two DISJOINT tiers (#431 review, finding 4), so cited evidence is
+    preferentially preserved: tier 1 compacts **uncited** results
+    (``tool_call_id`` not in ``cited_snippets``); only if the budget STILL cannot
+    be met does tier 2 compact the **cited** ones — and a cited result's digest
+    re-embeds its cited snippets verbatim (ADR-0016 §3.1), so a degraded answer
+    never loses the evidence behind an existing citation. If even that cannot
+    fit, the caller refuses.
+
+    Every candidate mutation is guarded (#431 review, finding 3): the digest and
+    its wire cost are computed FIRST and applied only when **strictly smaller**
+    than the current cost — so marker-dominated content, already-digested
+    results, and snippet-heavy protected results are skipped, never worsened,
+    and never double-counted. Within each tier candidates go oldest-first in
     **chunks** of ``chunk_size`` (even when fewer would suffice) so the prefix
     changes once per chunk, not per turn (amortized cache invalidation). Mutates
-    ``working``/``costs`` in place; returns ``(new_total, compacted_count)``.
+    ``working``/``costs`` in place; returns ``(new_total, compacted_count)``
+    where the count is the number of results actually mutated.
     """
     compacted = 0
-    for include_cited in (False, True):
+    for tier_cited in (False, True):
         if total <= budget:
             break
-        # Tier 1 compacts uncited results; tier 2 then re-scans and — since the
-        # just-compacted uncited results are now short (excluded by the length
-        # filter) — targets the remaining cited ones.
         candidates = [
             i
             for i in range(tail_start, len(working))
             if working[i].role is Role.TOOL
-            and len(working[i].content) > digest_chars
-            and (include_cited or working[i].tool_call_id not in protected)
+            and (
+                (working[i].tool_call_id in cited_snippets) is tier_cited
+            )
+            and not working[i].content.endswith(_COMPACTION_MARKER)
         ]
         pos = 0
         while total > budget and pos < len(candidates):
             for i in candidates[pos : pos + chunk_size]:
-                digested = replace(
-                    working[i], content=_context_digest(working[i].content, digest_chars)
-                )
+                call_id = working[i].tool_call_id
+                snippets = cited_snippets.get(call_id, ()) if call_id is not None else ()
+                candidate = _context_digest(working[i].content, digest_chars, snippets)
+                digested = replace(working[i], content=candidate)
                 new_cost = count(_message_wire_text(digested)) + _MESSAGE_FRAMING_TOKENS
+                if new_cost >= costs[i]:
+                    # No strict gain (marker-/snippet-dominated) — leave verbatim.
+                    continue
                 total += new_cost - costs[i]
                 working[i] = digested
                 costs[i] = new_cost

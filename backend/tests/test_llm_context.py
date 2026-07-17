@@ -183,7 +183,7 @@ def _fit(
     headroom: int = 0,
     digest_chars: int = 100,
     chunk_size: int = 2,
-    protected: frozenset[str] = frozenset(),
+    cited_snippets: dict[str, tuple[str, ...]] | None = None,
 ) -> list[ChatMessage]:
     return fit_transcript(
         messages,
@@ -197,7 +197,7 @@ def _fit(
         ),
         counter=_CHAR_COUNTER,
         max_input_resolver=lambda _m: max_input,
-        protected_tool_call_ids=protected,
+        cited_snippets=cited_snippets,
     )
 
 
@@ -483,27 +483,129 @@ def test_compaction_is_chunked_not_one_at_a_time() -> None:
     assert digested >= 4
 
 
-def test_compaction_prefers_uncited_then_falls_back_to_cited() -> None:
-    """#415: uncited results are digested first (cited evidence preserved); only if
-    that is not enough are cited results compacted too — better degraded than refused."""
+def test_compaction_prefers_uncited_then_falls_back_to_cited_with_snippets() -> None:
+    """#431 review, blocker 1: uncited results digest first; when a CITED result
+    must compact as the last resort, its digest re-embeds the cited snippets
+    VERBATIM — the evidence behind an existing citation never leaves the model."""
     system = _msg(Role.SYSTEM, "SYS")
     question = _msg(Role.USER, "q")
-    cited_call = _tool_call("cited")
-    cited_result = _tool_result("cited", "C" * 1000)
-    uncited_call = _tool_call("unc")
-    uncited_result = _tool_result("unc", "U" * 1000)
-    messages = [system, question, cited_call, cited_result, uncited_call, uncited_result]
+    snippet = "THE-KEY-CITED-EVIDENCE-SENTENCE"
+    # The cited snippet sits at the END of the content — beyond the 100-char head,
+    # so a naive head-truncation would lose it.
+    cited_result = _tool_result("cited", "C" * 900 + snippet)
+    messages = [
+        system,
+        question,
+        _tool_call("cited"),
+        cited_result,
+        _tool_call("unc"),
+        _tool_result("unc", "U" * 1000),
+    ]
+    snips = {"cited": (snippet,)}
 
-    prot = frozenset({"cited"})
-    # budget ~1600: compacting ONLY the uncited result (→ ~1550 total) is enough,
-    # so the cited result is kept verbatim.
-    fitted = _fit(messages, max_input=1024 + 1800, digest_chars=100, chunk_size=1, protected=prot)
+    # Roomier budget: compacting ONLY the uncited result suffices → cited verbatim.
+    fitted = _fit(
+        messages, max_input=1024 + 1800, digest_chars=100, chunk_size=1, cited_snippets=snips
+    )
     by_id = {m.tool_call_id: m for m in fitted if m.role is Role.TOOL}
     assert "truncated to fit" in by_id["unc"].content  # uncited digested
-    assert by_id["cited"].content == "C" * 1000  # cited kept verbatim
+    assert by_id["cited"].content == "C" * 900 + snippet  # cited kept whole
 
-    # budget ~800: even after digesting the uncited result it is still over, so the
-    # cited result is compacted too (last resort) rather than the answer refused.
-    fitted2 = _fit(messages, max_input=1024 + 1200, digest_chars=100, chunk_size=1, protected=prot)
+    # Tighter budget: the cited result compacts too (last resort) — and its digest
+    # STILL carries the cited snippet verbatim, though it lay beyond the head.
+    fitted2 = _fit(
+        messages, max_input=1024 + 1200, digest_chars=100, chunk_size=1, cited_snippets=snips
+    )
     by_id2 = {m.tool_call_id: m for m in fitted2 if m.role is Role.TOOL}
-    assert "truncated to fit" in by_id2["cited"].content  # cited compacted as last resort
+    assert "truncated to fit" in by_id2["cited"].content  # compacted…
+    assert snippet in by_id2["cited"].content  # …but the cited evidence survives
+
+
+def test_cited_digest_carries_multiple_snippets_beyond_the_head() -> None:
+    """#431 review, blocker 1 (the requested regression): a multi-passage cited
+    result whose supporting passages lie BEYOND digest_chars keeps every cited
+    snippet verbatim in its digest."""
+    snip_a = "ALPHA-EVIDENCE-PASSAGE"
+    snip_b = "BRAVO-EVIDENCE-PASSAGE"
+    # Both snippets sit past the 100-char head.
+    content = "x" * 400 + snip_a + "y" * 400 + snip_b
+    messages = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "q"),
+        _tool_call("c1"),
+        _tool_result("c1", content),
+    ]
+    fitted = _fit(
+        messages,
+        max_input=1024 + 750,
+        digest_chars=100,
+        chunk_size=1,
+        cited_snippets={"c1": (snip_a, snip_b)},
+    )
+    result = fitted[-1]
+    assert "truncated to fit" in result.content  # it WAS compacted
+    assert snip_a in result.content and snip_b in result.content  # both verbatim
+    assert len(result.content) < len(content)  # and it genuinely shrank
+
+
+def test_compaction_never_applies_a_non_reducing_digest() -> None:
+    """#431 review, finding 3: a marker-dominated candidate (content barely over
+    digest_chars) would GROW under digestion — it is skipped, and with nothing
+    else to shed the typed refusal fires rather than a worsened overflow."""
+    just_over = _tool_result("c1", "z" * 101)  # digest would be 100 + 123-char marker
+    messages = [_msg(Role.SYSTEM, "SYS"), _msg(Role.USER, "q"), _tool_call("c1"), just_over]
+    with pytest.raises(ValidationError) as excinfo:
+        _fit(messages, max_input=1024 + 150, digest_chars=100, chunk_size=1)
+    assert excinfo.value.code == "context_too_large"
+
+
+def test_compaction_shrinks_trailing_whitespace_heavy_content() -> None:
+    """#431 review, finding 3: whitespace-heavy content IS compacted when the
+    digest strictly reduces cost (the old rstrip shortcut returned it unchanged)."""
+    padded = _tool_result("c1", "x" * 50 + " " * 500)
+    messages = [_msg(Role.SYSTEM, "SYS"), _msg(Role.USER, "q"), _tool_call("c1"), padded]
+    fitted = _fit(messages, max_input=1024 + 550, digest_chars=100, chunk_size=1)
+    result = fitted[-1]
+    assert "truncated to fit" in result.content
+    assert len(result.content) < 550
+
+
+def test_already_digested_results_are_not_recompacted_or_recounted() -> None:
+    """#431 review, finding 4: a result already ending with the compaction marker
+    is not a candidate again — no re-compaction, no count inflation."""
+    import app.llm.context as ctx_mod
+
+    already = ctx_mod._context_digest("w" * 1000, 100)
+    msgs = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "q"),
+        _tool_call("c1"),
+        _tool_result("c1", already),
+    ]
+    costs = [len(ctx_mod._message_wire_text(m)) + 4 for m in msgs]
+    total = sum(costs) + 2
+    new_total, compacted = ctx_mod._compact_oldest_tool_results(
+        msgs,
+        costs,
+        tail_start=1,
+        budget=1,  # hopelessly over — would compact anything eligible
+        total=total,
+        count=len,
+        digest_chars=100,
+        chunk_size=4,
+        cited_snippets={},
+    )
+    assert compacted == 0  # nothing eligible — no re-digest, no double count
+    assert new_total == total
+
+
+def test_chunk_size_larger_than_candidate_count_is_safe() -> None:
+    """chunk_size > candidates: one pass compacts what exists and terminates."""
+    messages = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "q"),
+        _tool_call("c1"),
+        _tool_result("c1", "a" * 800),
+    ]
+    fitted = _fit(messages, max_input=1024 + 650, digest_chars=100, chunk_size=10)
+    assert "truncated to fit" in fitted[-1].content

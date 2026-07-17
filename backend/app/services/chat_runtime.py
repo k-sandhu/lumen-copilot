@@ -505,11 +505,15 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
-        # Which tool CALL produced which passage chunk_ids (#415): lets the
-        # in-answer compactor protect a tool result whose passages have been cited
-        # — it keeps that result verbatim, preferring to digest UNCITED results
-        # first so grounding for existing citations survives.
-        result_chunk_ids: dict[str, frozenset[UUID]] = {}
+        # Which tool CALL carried which passages — (chunk_id, RENDERED snippet)
+        # pairs in passage order (#415). The rendered snippet (trimmed to the
+        # run's snippet budget, exactly as ``_render_passages`` showed it) is what
+        # the model actually saw, so it is the "verbatim" unit the compactor must
+        # preserve: uncited results digest first, and when a cited result must
+        # compact as the last resort its digest re-embeds these snippets verbatim
+        # (ADR-0016 §3.1) — the evidence behind an existing citation never leaves
+        # the model's view.
+        result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]] = {}
         # The answer is the text of exactly ONE turn: the tool-free turn the model
         # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
         # text is pre-tool narration ("I'll search…"), not answer content — it is
@@ -580,7 +584,7 @@ class ChatRuntime:
                 model=route.model,
                 tools=advertised,
                 config=self._context_config,
-                protected_tool_call_ids=_cited_tool_call_ids(result_chunk_ids, cited),
+                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised
@@ -617,10 +621,13 @@ class ChatRuntime:
                         name=call.name,
                     )
                 )
-                # Remember which chunk_ids this call's result carried, so the
-                # compactor can protect it once any are cited (#415).
+                # Remember this call's passages as (chunk_id, rendered snippet)
+                # so the compactor can protect/re-embed its cited evidence (#415).
                 if result.passages:
-                    result_chunk_ids[call.id] = frozenset(p.chunk_id for p in result.passages)
+                    result_passage_snippets[call.id] = tuple(
+                        (p.chunk_id, p.text.strip()[: assembled.snippet_budget])
+                        for p in result.passages
+                    )
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
                     if passage.chunk_id in cited:
@@ -642,7 +649,7 @@ class ChatRuntime:
                 model=route.model,
                 tools=advertised,
                 config=self._context_config,
-                protected_tool_call_ids=_cited_tool_call_ids(result_chunk_ids, cited),
+                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             _, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised, tool_choice="none"
@@ -1157,25 +1164,34 @@ def _hash_query(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
-def _cited_tool_call_ids(
-    result_chunk_ids: dict[str, frozenset[UUID]], cited: dict[UUID, GroundedCitation]
-) -> frozenset[str]:
-    """The tool ``call.id``s whose result carried a chunk that has been cited (#415).
+def _cited_snippets_by_call(
+    result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]],
+    cited: dict[UUID, GroundedCitation],
+) -> dict[str, tuple[str, ...]]:
+    """Map each tool ``call.id`` to the RENDERED snippets the answer cited from it (#415).
 
-    Handed to :func:`~app.llm.context.fit_transcript` as ``protected_tool_call_ids``
-    so the in-answer compactor keeps those results verbatim and digests uncited
-    ones first — preserving grounding for evidence the answer already relies on.
-    Compaction of a protected result is still the last resort before an outright
-    refusal, so a search-heavy answer degrades gracefully rather than failing.
+    Handed to :func:`~app.llm.context.fit_transcript` as ``cited_snippets``: the
+    compactor digests uncited results first, and when a cited result must compact
+    as the last resort, its digest re-embeds these snippets **verbatim**
+    (ADR-0016 §3.1) — so the evidence behind an existing citation never leaves
+    the model's view. The snippet is the *rendered* form (trimmed to the run's
+    snippet budget — exactly what the transcript showed the model), deduped by
+    chunk in passage order (deterministic); chunks the answer did not cite
+    contribute nothing.
     """
     if not cited:
-        return frozenset()
-    cited_chunks = cited.keys()
-    return frozenset(
-        call_id
-        for call_id, chunks in result_chunk_ids.items()
-        if not chunks.isdisjoint(cited_chunks)
-    )
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for call_id, pairs in result_passage_snippets.items():
+        seen: set[UUID] = set()
+        snippets: list[str] = []
+        for chunk_id, snippet in pairs:
+            if chunk_id in cited and chunk_id not in seen:
+                seen.add(chunk_id)
+                snippets.append(snippet)
+        if snippets:
+            out[call_id] = tuple(snippets)
+    return out
 
 
 def _is_retrieval_call(call: ToolCall) -> bool:
