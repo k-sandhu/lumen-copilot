@@ -418,6 +418,15 @@ class Settings(BaseSettings):
     context_compaction_chunk_size: int = Field(
         default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
     )
+    # How many of one turn's read-only tool calls execute at once (#412,
+    # ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB
+    # session (released before it queues to persist), so this bounds the
+    # per-answer draw on the engine pool — keep it under the pool size, and
+    # remember concurrent answers each get their own batch. Validated to
+    # [1, 16]: 0 would deadlock the batch semaphore, an unbounded value could
+    # exhaust the pool; 1 disables fan-out entirely (the genuinely serial
+    # pre-#412 path — no batch, no extra sessions, per-call event order).
+    chat_tool_concurrency: int = Field(default=4, gt=0, le=16, alias="CHAT_TOOL_CONCURRENCY")
 
     @model_validator(mode="after")
     def _context_budget_leaves_room(self) -> Settings:

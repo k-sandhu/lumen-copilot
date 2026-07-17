@@ -346,6 +346,7 @@ async def execute_run(
         request_id=request_id,
         source_ip=source_ip,
         default_max_tool_turns=settings.chat_max_tool_turns,
+        tool_concurrency=settings.chat_tool_concurrency,
         context_config=ContextConfig(
             fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
             output_headroom_tokens=settings.context_output_headroom_tokens,

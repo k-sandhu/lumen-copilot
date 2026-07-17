@@ -135,6 +135,7 @@ class RetrievalLike(Protocol):
         query: str,
         k: int,
         collection_ids: Sequence[UUID] | None = ...,
+        document_ids: Sequence[UUID] | None = ...,
     ) -> list[RetrievedPassage]: ...
 
     async def search_documents(
@@ -216,6 +217,7 @@ class OfflineRetrieval:
         query: str,
         k: int,
         collection_ids: Sequence[UUID] | None = None,
+        document_ids: Sequence[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         if not query.strip():
             return []

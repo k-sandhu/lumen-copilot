@@ -21,8 +21,11 @@ Headlines:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -38,11 +41,21 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import CodeRunStatus, Role
-from app.domain.llm import Completion, StreamEvent, TokenUsage, ToolCall
+from app.domain.entities import AutonomyLevel, CodeRunStatus, Role
+from app.domain.llm import ChatMessage, Completion, StreamEvent, TokenUsage, ToolCall
+from app.domain.llm import Role as LlmRole
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
+from app.domain.tools import (
+    ERROR_NOT_FOUND,
+    ERROR_TOOL_ERROR,
+    ERROR_TOOL_TIMEOUT,
+    RiskTier,
+    ToolHandlerResult,
+)
 from app.realtime.backplane import InMemoryBackplane
+from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
+from app.services.tools.types import ToolContext, ToolDefinition
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -267,20 +280,30 @@ def _runtime(
     retrieval: object,
     backplane: InMemoryBackplane,
     default_max_tool_turns: int = 4,
+    tool_concurrency: int = 4,
     context_config: object = None,
     interactive: bool = True,
     suggestions_enabled: bool = False,
+    retrieval_factory: object = None,
+    mcp_tools_factory: object = None,
+    sessionmaker: object = None,
 ) -> ChatRuntime:
     return ChatRuntime(
-        sessionmaker=ctx.sessionmaker,
+        sessionmaker=(  # type: ignore[arg-type]
+            sessionmaker if sessionmaker is not None else ctx.sessionmaker
+        ),
         gateway=gateway,  # type: ignore[arg-type]
         backplane=backplane,
         principal=ctx.principal,
         request_id="req-1",
         source_ip="127.0.0.1",
         default_max_tool_turns=default_max_tool_turns,
+        tool_concurrency=tool_concurrency,
         context_config=context_config,  # type: ignore[arg-type]
-        retrieval_factory=lambda _session: retrieval,  # type: ignore[arg-type,return-value]
+        retrieval_factory=(  # type: ignore[arg-type]
+            retrieval_factory if retrieval_factory is not None else lambda _session: retrieval
+        ),
+        mcp_tools_factory=mcp_tools_factory,  # type: ignore[arg-type]
         interactive=interactive,
         suggestions_enabled=suggestions_enabled,
         suggestions_timeout_seconds=2.0,
@@ -1429,6 +1452,8 @@ async def test_usage_row_zeroed_when_provider_omits_usage_and_is_tenant_scoped(
         assert foreign == []
 
 
+
+
 # --- Spec 0006 (#429): steps, ask_user, suggestions --------------------------
 
 
@@ -1925,6 +1950,24 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             session_id=ctx.session_id,
         )
         await session.commit()
+        # Deterministic "last": both records land in the same second (SQLite's
+        # server-default created_at is second-resolution) and the repo's
+        # tie-break is the random uuid id — a coin flip (#439). Give the first
+        # record an explicitly older created_at so "newest" is unambiguous;
+        # #439 owns the semantic fix (a monotonic ordering key).
+        from sqlalchemy import update as _sql_update
+
+        from app.db import models as _models
+
+        await session.execute(
+            _sql_update(_models.LlmUsage)
+            .where(
+                _models.LlmUsage.session_id == ctx.session_id,
+                _models.LlmUsage.prompt_tokens == 100,
+            )
+            .values(created_at=datetime(2000, 1, 1, 0, 0, 0))
+        )
+        await session.commit()
         totals = await repo.totals_for_session(ctx.session_id)
         assert totals.answers == 2
         assert totals.prompt_tokens == 400
@@ -2257,3 +2300,796 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
         row = rows[0]
         assert row.prompt_tokens == 45  # 10 + 30 + 5 — the billing sum
         assert row.context_prompt_tokens == 30  # the final loop turn only
+
+
+# --- #412: concurrent tool execution within a turn ---------------------------
+
+
+class _BarrierRetrieval(_FakeRetrieval):
+    """``search_text`` blocks until ``expected`` searches have STARTED.
+
+    Under serial execution the first search would wait forever (the second never
+    starts), so only genuinely concurrent execution completes inside the guard
+    timeout — a deterministic overlap proof, no wall-clock heuristics (#412
+    AC-1). A ``query == "boom"`` raises instead (the mid-batch failure case);
+    it still counts toward the barrier before raising. ``completed`` records
+    finish order for the serialization assertions.
+    """
+
+    def __init__(self, passages: list[RetrievedPassage], *, expected: int) -> None:
+        super().__init__(passages)
+        self._expected = expected
+        self._all_started = asyncio.Event()
+        self.started = 0
+        self.completed: list[str] = []
+
+    async def search_text(
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        self.started += 1
+        if self.started >= self._expected:
+            self._all_started.set()
+        if query == "boom":
+            raise RuntimeError("mid-batch tool failure — must not leak")
+        await asyncio.wait_for(self._all_started.wait(), timeout=2)
+        self.completed.append(query)
+        return await super().search_text(
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
+
+class _PeakGaugeRetrieval(_FakeRetrieval):
+    """Tracks how many ``search_text`` calls are in flight at once (the cap test)."""
+
+    def __init__(self, passages: list[RetrievedPassage]) -> None:
+        super().__init__(passages)
+        self.inflight = 0
+        self.peak = 0
+
+    async def search_text(
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        self.inflight += 1
+        self.peak = max(self.peak, self.inflight)
+        await asyncio.sleep(0.02)
+        self.inflight -= 1
+        return await super().search_text(
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
+
+class _ChainRetrieval(_FakeRetrieval):
+    """Forces REVERSE completion: q1 waits for q2, which waits for q3.
+
+    q3 completes only after all three have STARTED (so the chain is also an
+    overlap proof — serial call-order execution would deadlock on q1), then
+    releases q2, which releases q1. Deterministic completion order
+    ``q3, q2, q1`` against dispatch order ``q1, q2, q3``.
+    """
+
+    def __init__(self, passages: list[RetrievedPassage]) -> None:
+        super().__init__(passages)
+        self._all_started = asyncio.Event()
+        self._done: dict[str, asyncio.Event] = {q: asyncio.Event() for q in ("q2", "q3")}
+        self.started = 0
+        self.completed: list[str] = []
+
+    async def search_text(
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        self.started += 1
+        if self.started >= 3:
+            self._all_started.set()
+        if query == "q3":
+            await asyncio.wait_for(self._all_started.wait(), timeout=2)
+        else:
+            successor = "q2" if query == "q1" else "q3"
+            await asyncio.wait_for(self._done[successor].wait(), timeout=2)
+        self.completed.append(query)
+        if query in self._done:
+            self._done[query].set()
+        return await super().search_text(
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
+
+class _HangAfterFirstRetrieval(_FakeRetrieval):
+    """q1 returns immediately; every other query hangs until cancelled.
+
+    Drives the mid-batch cancellation case: the dispatcher publishes q1's
+    result, then the answer task is cancelled while q2/q3 are still in
+    flight.
+    """
+
+    def __init__(self, passages: list[RetrievedPassage]) -> None:
+        super().__init__(passages)
+        self._never = asyncio.Event()
+
+    async def search_text(
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        if query != "q1":
+            await self._never.wait()  # only a cancellation ends this
+        return await super().search_text(
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
+
+class _RecordingScriptedGateway(_ScriptedGateway):
+    """A scripted gateway that also records each call's message transcript."""
+
+    def __init__(
+        self, turns: list[list[StreamEvent]], *, synthesis: list[StreamEvent] | None = None
+    ) -> None:
+        super().__init__(turns, synthesis=synthesis)
+        self.seen: list[list[ChatMessage]] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.seen.append(list(cast("Sequence[ChatMessage]", messages)))
+        async for ev in super().stream_tools(
+            messages,
+            tools=tools,
+            model=model,
+            tool_choice=tool_choice,
+            api_key=api_key,
+            api_base=api_base,
+        ):
+            yield ev
+
+
+def _three_search_turn() -> list[StreamEvent]:
+    return [
+        StreamEvent(
+            tool_calls=(
+                ToolCall(id="c1", name="search_text", arguments={"query": "q1"}),
+                ToolCall(id="c2", name="search_text", arguments={"query": "q2"}),
+                ToolCall(id="c3", name="search_text", arguments={"query": "q3"}),
+            ),
+            finish_reason="tool_calls",
+        )
+    ]
+
+
+def _answer_turn() -> list[StreamEvent]:
+    return [StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]
+
+
+def _tool_events(envs: list[dict[str, object]]) -> list[tuple[str, str]]:
+    """(name, callId) for every tool_call/tool_result event, in wire order."""
+    out: list[tuple[str, str]] = []
+    for e in envs:
+        if e["type"] == "event" and e.get("name") in ("tool_call", "tool_result"):
+            data = cast("dict[str, object]", e["data"])
+            out.append((cast(str, e["name"]), cast(str, data["callId"])))
+    return out
+
+
+def _result_outcomes(envs: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    """callId → the tool_result event's data payload."""
+    out: dict[str, dict[str, object]] = {}
+    for e in envs:
+        if e["type"] == "event" and e.get("name") == "tool_result":
+            data = cast("dict[str, object]", e["data"])
+            out[cast(str, data["callId"])] = data
+    return out
+
+
+async def test_concurrent_searches_overlap_and_transcript_keeps_call_order(ctx: _Ctx) -> None:
+    """AC-1 (#412): three read-only searches in one turn genuinely OVERLAP and
+    complete in FORCED REVERSE order (a release chain that would deadlock
+    serial call-order execution), every ``tool_call`` event emits at dispatch
+    BEFORE any ``tool_result``, the wire seq stays monotonic — and the next
+    turn's transcript still appends the TOOL replies in ORIGINAL call order."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _ChainRetrieval([passage])
+    gateway = _RecordingScriptedGateway([_three_search_turn(), _answer_turn()])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    # All three were in flight together AND completed in reverse.
+    assert retrieval.started == 3
+    assert retrieval.completed == ["q3", "q2", "q1"]
+    events = _tool_events(envs)
+    calls = [cid for name, cid in events if name == "tool_call"]
+    call_positions = [i for i, (name, _) in enumerate(events) if name == "tool_call"]
+    result_positions = [i for i, (name, _) in enumerate(events) if name == "tool_result"]
+    # Dispatch emission: the full plan (three tool_call events, call order)
+    # precedes every completion event. Result EVENTS land in dispatch order
+    # even though the handlers completed in reverse: a call's ``run`` returns
+    # only after its ordered finalise persisted, so a result is never visible
+    # on the wire before its audit/trace writes — visibility follows
+    # persistence, and persistence follows dispatch.
+    assert calls == ["c1", "c2", "c3"]
+    assert max(call_positions) < min(result_positions)
+    result_ids = [cid for name, cid in events if name == "tool_result"]
+    assert result_ids == ["c1", "c2", "c3"]
+    outcomes = _result_outcomes(envs)
+    assert set(outcomes) == {"c1", "c2", "c3"}
+    assert all(data["ok"] is True for data in outcomes.values())
+    # Monotonic, gapless-unique seq across the whole stream.
+    seqs = [e["seq"] for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)  # type: ignore[type-var]
+    # The synthesis call's transcript pairs the TOOL replies to the calls in
+    # ORIGINAL call order (provider protocol + cache-stable prefix) — NOT the
+    # reverse completion order the wire just showed.
+    tool_msgs = [m for m in gateway.seen[1] if m.role is LlmRole.TOOL]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2", "c3"]
+
+
+async def test_mid_batch_failure_keeps_dispatch_ordinals_and_full_trace(ctx: _Ctx) -> None:
+    """AC-2 (#412): with one call FAILING mid-batch, every call still gets its
+    ``tool_invocations`` row with a DISPATCH-order ordinal (ordinal == call
+    index, even though the failing call completes FIRST — it never waits on
+    the barrier), the failing row records the typed ``tool_error``, and the
+    vendor detail never reaches the wire."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _BarrierRetrieval([passage], expected=3)
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "q1"}),
+                        ToolCall(id="c2", name="search_text", arguments={"query": "boom"}),
+                        ToolCall(id="c3", name="search_text", arguments={"query": "q3"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+
+    from sqlalchemy import select
+
+    from app.db import models
+    from app.services.tools.runner import hash_args
+
+    async with ctx.sessionmaker() as session:
+        stmt = select(models.ToolInvocation).where(
+            models.ToolInvocation.tenant_id == ctx.tenant_id
+        )
+        rows = list((await session.execute(stmt)).scalars().all())
+    assert len(rows) == 3
+    by_hash = {r.args_hash: r for r in rows}
+    expected = [{"query": "q1"}, {"query": "boom"}, {"query": "q3"}]
+    assert [by_hash[hash_args(a)].ordinal for a in expected] == [0, 1, 2]
+    boom_row = by_hash[hash_args({"query": "boom"})]
+    assert boom_row.ok is False
+    assert boom_row.error == ERROR_TOOL_ERROR
+    assert by_hash[hash_args({"query": "q1"})].ok is True
+    assert by_hash[hash_args({"query": "q3"})].ok is True
+    # The failure surfaced as a typed, safe tool_result; the others stayed ok.
+    outcomes = _result_outcomes(envs)
+    assert outcomes["c2"]["ok"] is False
+    assert outcomes["c2"]["error"] == ERROR_TOOL_ERROR
+    assert outcomes["c1"]["ok"] is True
+    assert outcomes["c3"]["ok"] is True
+    for e in envs:
+        assert "must not leak" not in str(e)
+
+
+async def test_hanging_call_times_out_alone_without_stalling_the_batch(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (#412): one HANGING call hits its own per-tool timeout while its
+    batch-mates complete normally, and the turn (and answer) still finishes.
+    The hanging tool is a patched STATIC registry tool so it joins the
+    concurrent batch (MCP tools are excluded from fan-out) while carrying a
+    tiny ``timeout_seconds`` (the native tools' 15s would stall the suite)."""
+
+    async def hang(args: dict[str, Any], ctx_: ToolContext) -> ToolHandlerResult:
+        await asyncio.sleep(30)
+        return ToolHandlerResult(content="never")  # pragma: no cover
+
+    hang_def = ToolDefinition(
+        name="hang_probe",
+        description="hangs",
+        json_schema={"type": "object"},
+        handler=hang,
+        timeout_seconds=0.05,
+    )
+    from app.services.tools import runner as runner_module
+
+    real_get_tool = runner_module.get_tool
+
+    def patched_get_tool(name: str) -> ToolDefinition:
+        if name == "hang_probe":
+            return hang_def
+        return real_get_tool(name)
+
+    monkeypatch.setattr(runner_module, "get_tool", patched_get_tool)
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _BarrierRetrieval([passage], expected=2)  # only the searches barrier
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="hang_probe", arguments={}),
+                        ToolCall(id="c2", name="search_text", arguments={"query": "q2"}),
+                        ToolCall(id="c3", name="search_text", arguments={"query": "q3"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    config = AssistantRunConfig(
+        system_prompt="You are grounded.",
+        allowed=frozenset({"search_text", "hang_probe"}),
+        collection_ids=None,
+        model=None,
+        autonomy=AutonomyLevel.ACT_AUTO,
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        assistant_config=config,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    outcomes = _result_outcomes(envs)
+    assert outcomes["c1"]["ok"] is False
+    assert outcomes["c1"]["error"] == ERROR_TOOL_TIMEOUT
+    assert outcomes["c2"]["ok"] is True
+    assert outcomes["c3"]["ok"] is True
+
+
+async def test_concurrent_calls_get_isolated_sessions_not_the_runtime_session(
+    ctx: _Ctx,
+) -> None:
+    """AC-4 (#412): each concurrent call runs in its OWN call scope — the
+    retrieval factory is invoked once for the runtime session and once per
+    concurrent call with a DISTINCT fresh session (an ``AsyncSession`` admits
+    no concurrent operations, so sharing one would be the #412 hazard)."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _BarrierRetrieval([passage], expected=3)
+    sessions: list[AsyncSession] = []
+
+    def factory(session: AsyncSession) -> object:
+        sessions.append(session)
+        return retrieval
+
+    gateway = _ScriptedGateway([_three_search_turn(), _answer_turn()])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, retrieval_factory=factory
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    # One factory call for the runtime's own session + one per concurrent call.
+    assert len(sessions) == 4
+    runtime_session, *scope_sessions = sessions
+    assert len(scope_sessions) == 3
+    # All four are pairwise distinct; no scope reuses the runtime session.
+    assert len({id(s) for s in sessions}) == 4
+    assert all(s is not runtime_session for s in scope_sessions)
+
+
+async def test_side_effecting_call_serializes_after_the_read_only_batch(ctx: _Ctx) -> None:
+    """v1 conservatism (ADR-0016 §5): a T1 side-effecting call placed BETWEEN
+    two reads in the model's call list executes only AFTER both reads complete
+    (they overlap; it does not), runs on the runtime context (no extra scope
+    session), and the transcript still appends in ORIGINAL call order."""
+    order: list[str] = []
+
+    async def write_note(args: dict[str, Any], ctx_: ToolContext) -> ToolHandlerResult:
+        order.append("write")
+        return ToolHandlerResult(content="wrote", summary="wrote")
+
+    write_def = ToolDefinition(
+        name="mcp:t:note",
+        description="writes",
+        json_schema={"type": "object"},
+        handler=write_note,
+        risk_tier=RiskTier.T1,
+        requires_approval=False,
+        read_only=False,
+    )
+
+    async def mcp_factory(_session: AsyncSession) -> dict[str, ToolDefinition]:
+        return {"mcp:t:note": write_def}
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _BarrierRetrieval([passage], expected=2)
+    sessions: list[AsyncSession] = []
+
+    def factory(session: AsyncSession) -> object:
+        sessions.append(session)
+        return retrieval
+
+    gateway = _RecordingScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "q1"}),
+                        ToolCall(id="c2", name="mcp:t:note", arguments={}),
+                        ToolCall(id="c3", name="search_text", arguments={"query": "q3"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    config = AssistantRunConfig(
+        system_prompt="You are grounded.",
+        allowed=frozenset({"search_text", "mcp:t:note"}),
+        collection_ids=None,
+        model=None,
+        autonomy=AutonomyLevel.ACT_AUTO,
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=retrieval,
+        backplane=backplane,
+        retrieval_factory=factory,
+        mcp_tools_factory=mcp_factory,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        assistant_config=config,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    # Both reads completed (they overlapped on the barrier) BEFORE the write.
+    assert set(retrieval.completed) == {"q1", "q3"}
+    assert len(retrieval.completed) == 2
+    assert order == ["write"]
+    # The write executed on the runtime context: scopes were opened only for
+    # the two concurrent reads (1 runtime factory call + 2 scope calls).
+    assert len(sessions) == 3
+    # The wire shows the true dispatch order: the fan-out plan (c1, c3)
+    # emits first; the serialized write's tool_call emits at ITS dispatch,
+    # after the batch — and its result is the last.
+    events = _tool_events(envs)
+    assert [cid for name, cid in events if name == "tool_call"] == ["c1", "c3", "c2"]
+    assert events[-1] == ("tool_result", "c2")
+    # Transcript order is the ORIGINAL call order, the write in the middle.
+    tool_msgs = [m for m in gateway.seen[1] if m.role is LlmRole.TOOL]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2", "c3"]
+
+
+async def test_tool_concurrency_cap_bounds_parallelism(ctx: _Ctx) -> None:
+    """The semaphore honors ``tool_concurrency``: with a cap of 2, three
+    read-only calls peak at exactly 2 in flight — the third waits for a slot."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _PeakGaugeRetrieval([passage])
+    gateway = _ScriptedGateway([_three_search_turn(), _answer_turn()])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, tool_concurrency=2
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    assert retrieval.peak == 2
+
+
+class _GuardedSessionmaker:
+    """A sessionmaker proxy that fails the test if opened beyond ``allowed`` times.
+
+    Proves a code path allocates NO extra DB sessions: the runtime's own
+    session is the only permitted open; any call-scope open trips the guard.
+    """
+
+    def __init__(self, inner: async_sessionmaker[AsyncSession], allowed: int) -> None:
+        self._inner = inner
+        self._allowed = allowed
+        self.calls = 0
+
+    def __call__(self) -> AsyncSession:
+        self.calls += 1
+        if self.calls > self._allowed:
+            raise AssertionError(
+                f"unexpected extra DB session (open #{self.calls}, allowed {self._allowed})"
+            )
+        return self._inner()
+
+
+async def test_cap_of_one_is_the_genuinely_serial_pre_412_path(ctx: _Ctx) -> None:
+    """``tool_concurrency=1`` (finding: the configured contract) — no fan-out,
+    no call scopes, strict pre-#412 per-call event alternation
+    (call → result → call → result …), and never more than one search in
+    flight. The runtime session is the only DB session opened."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _PeakGaugeRetrieval([passage])
+    gateway = _ScriptedGateway([_three_search_turn(), _answer_turn()])
+    guarded = _GuardedSessionmaker(ctx.sessionmaker, allowed=1)
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=retrieval,
+        backplane=backplane,
+        tool_concurrency=1,
+        sessionmaker=guarded,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    assert retrieval.peak == 1
+    assert guarded.calls == 1  # the runtime session only — zero call scopes
+    events = _tool_events(envs)
+    assert events == [
+        ("tool_call", "c1"),
+        ("tool_result", "c1"),
+        ("tool_call", "c2"),
+        ("tool_result", "c2"),
+        ("tool_call", "c3"),
+        ("tool_result", "c3"),
+    ]
+
+
+async def test_denial_only_batch_opens_no_call_scopes(ctx: _Ctx) -> None:
+    """A batch of hallucinated tool names (finding: denial-only calls must not
+    cost sessions): both fan out, both are denied ``tool_not_found`` through
+    the coordinator WITHOUT opening any call-scope session — under pool
+    pressure a refusal must stay a typed refusal, never an infra failure. Both
+    still get trace rows with dispatch ordinals (INV-6)."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="made_up_one", arguments={"a": 1}),
+                        ToolCall(id="c2", name="made_up_two", arguments={"a": 2}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    guarded = _GuardedSessionmaker(ctx.sessionmaker, allowed=1)
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx, gateway=gateway, retrieval=retrieval, backplane=backplane, sessionmaker=guarded
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    assert guarded.calls == 1  # the runtime session only — denials cost nothing
+    outcomes = _result_outcomes(envs)
+    assert outcomes["c1"]["ok"] is False and outcomes["c1"]["error"] == ERROR_NOT_FOUND
+    assert outcomes["c2"]["ok"] is False and outcomes["c2"]["error"] == ERROR_NOT_FOUND
+
+    from sqlalchemy import select
+
+    from app.db import models
+    from app.services.tools.runner import hash_args
+
+    async with ctx.sessionmaker() as session:
+        stmt = select(models.ToolInvocation).where(
+            models.ToolInvocation.tenant_id == ctx.tenant_id
+        )
+        rows = list((await session.execute(stmt)).scalars().all())
+    assert len(rows) == 2
+    by_hash = {r.args_hash: r for r in rows}
+    assert [by_hash[hash_args({"a": n})].ordinal for n in (1, 2)] == [0, 1]
+
+
+async def test_mid_batch_cancellation_aborts_atomically_with_one_terminal(ctx: _Ctx) -> None:
+    """Mid-batch cancellation (finding 3, the honest v1 contract): after one
+    result is already on the wire, cancelling the answer task reaps every
+    in-flight worker, publishes EXACTLY one terminal (the retryable 503), and
+    the answer transaction rolls back atomically — no partial trace rows
+    persist (the pre-#412 whole-answer-rollback semantics, now proven under a
+    concurrent batch). The wire honestly shows the divergence: c1's success
+    followed by the terminal error."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _HangAfterFirstRetrieval([passage])
+    gateway = _ScriptedGateway([_three_search_turn(), _answer_turn()])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    answer_task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    envs: list[dict[str, object]] = []
+    gen = backplane.subscribe(stream_id)
+    tasks_before = set(asyncio.all_tasks())
+    # Consume until c1's result is visible, then cancel mid-batch.
+    while True:
+        env = await asyncio.wait_for(anext(gen), timeout=2.0)
+        envs.append(env)
+        if env["type"] == "event" and env.get("name") == "tool_result":
+            break
+    answer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await answer_task
+    # Drain the rest of the stream — it must end with exactly one terminal.
+    while True:
+        try:
+            env = await asyncio.wait_for(anext(gen), timeout=2.0)
+        except StopAsyncIteration:
+            break
+        envs.append(env)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1
+    assert types.count("done") == 0
+    assert envs[-1]["type"] == "error"
+    problem = cast("dict[str, object]", envs[-1]["problem"])
+    assert problem["status"] == 503  # the retryable shutdown/cancel terminal
+    # c1's success reached the wire before the cancel — the documented honest
+    # divergence — while the database kept nothing (atomic rollback).
+    outcomes = _result_outcomes(envs)
+    assert set(outcomes) == {"c1"}
+    assert outcomes["c1"]["ok"] is True
+
+    from sqlalchemy import func, select
+
+    from app.db import models
+
+    async with ctx.sessionmaker() as session:
+
+        async def _count(model: type) -> int:
+            stmt = select(func.count()).select_from(model).where(model.tenant_id == ctx.tenant_id)  # type: ignore[attr-defined]
+            return int((await session.execute(stmt)).scalar_one())
+
+        # The WHOLE answer transaction rolled back: no trace rows, no audit
+        # events, no assistant message survived the cancel.
+        assert await _count(models.ToolInvocation) == 0
+        assert await _count(models.AuditEvent) == 0
+        assert await _count(models.Message) == 0
+
+    # Every worker was reaped: no task born during the answer is still alive
+    # (the cancelled batch's workers were cancel()ed and gathered before the
+    # terminal; only pre-existing tasks may remain).
+    lingering = [
+        t
+        for t in asyncio.all_tasks()
+        if t not in tasks_before and t is not asyncio.current_task() and not t.done()
+    ]
+    assert lingering == []

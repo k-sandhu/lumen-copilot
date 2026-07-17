@@ -291,3 +291,415 @@ async def test_rls_backstop_isolates_tenants_on_postgres() -> None:
                 await conn.execute(text(f'DROP ROLE IF EXISTS "{app_role}"'))
         finally:
             await admin.dispose()
+
+
+@_live
+async def test_parallel_call_scopes_keep_rls_isolation_on_postgres() -> None:
+    """#412 / ADR-0016 §5 "parallel RLS isolation": concurrent per-call scopes
+    stay tenant-isolated under real Postgres RLS.
+
+    The concurrent tool executor opens one fresh session per call and binds the
+    tenant GUC on each (``chat_runtime._call_scope``). This is the live proof
+    that the mechanism is sound under REAL parallelism: four call-scope-shaped
+    workers (two bound to tenant A, two to B) start together behind a barrier,
+    then each runs the predicate-free ``SELECT`` (repository predicate
+    deliberately bypassed) — every worker must see exactly its own tenant's
+    rows. ``SET LOCAL``-semantics binding is per transaction, so concurrent
+    sessions on pooled connections must never leak a GUC across workers.
+    Connects as a NON-superuser, NON-bypassrls app role (a superuser would make
+    the test vacuous — see the test above).
+    """
+    import asyncio
+
+    from alembic import command
+
+    tmp_db = f"lumen_rls412_{uuid.uuid4().hex[:12]}"
+    app_role = f"lumen_rls412_app_{uuid.uuid4().hex[:8]}"
+    app_pw = "rls_test_pw"  # noqa: S105 — throwaway role in a throwaway DB
+    admin_url = _swap_db(_PG_URL, "postgres")
+    tmp_url = _swap_db(_PG_URL, tmp_db)
+    parsed = urlparse(tmp_url)
+    app_url = urlunparse(
+        parsed._replace(netloc=f"{app_role}:{app_pw}@{parsed.hostname}:{parsed.port}")
+    )
+
+    admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{tmp_db}"'))
+            create_role = (
+                f'CREATE ROLE "{app_role}" LOGIN ' f"PASSWORD '{app_pw}' NOSUPERUSER NOBYPASSRLS"
+            )
+            await conn.execute(text(create_role))
+    finally:
+        await admin.dispose()
+
+    orig = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = tmp_url
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    engine = create_async_engine(tmp_url)
+    app_engine = create_async_engine(app_url)
+    try:
+        await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for tbl in ("tenants", "users", "collections"):
+                await conn.execute(
+                    text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {tbl} TO "{app_role}"')
+                )
+
+        tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+        coll_a, coll_b = uuid.uuid4(), uuid.uuid4()
+        user_a, user_b = uuid.uuid4(), uuid.uuid4()
+        owner_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        app_factory = async_sessionmaker(bind=app_engine, expire_on_commit=False)
+
+        async with owner_factory() as sess:
+            await bind_bypass(sess)
+            for tid, uid, cid in ((tenant_a, user_a, coll_a), (tenant_b, user_b, coll_b)):
+                await sess.execute(
+                    text("INSERT INTO tenants (id, name) VALUES (:id, :name)"),
+                    {"id": tid, "name": f"Tenant {tid}"},
+                )
+                await sess.execute(
+                    text(
+                        "INSERT INTO users (id, tenant_id, email, password_hash, roles) "
+                        "VALUES (:id, :tid, :email, 'h', ARRAY['member'])"
+                    ),
+                    {"id": uid, "tid": tid, "email": f"u-{uid}@t.test"},
+                )
+                await sess.execute(
+                    text(
+                        "INSERT INTO collections (id, tenant_id, owner_id, name) "
+                        "VALUES (:id, :tid, :oid, 'C')"
+                    ),
+                    {"id": cid, "tid": tid, "oid": uid},
+                )
+            await sess.commit()
+
+        # --- four concurrent call scopes, interleaved tenants, one barrier ----
+        started = 0
+        all_started = asyncio.Event()
+
+        async def _call_scope_reads(tenant_id: uuid.UUID) -> set[uuid.UUID]:
+            nonlocal started
+            # The exact per-call-scope shape the #412 executor uses: fresh
+            # session → bind_tenant → (handler's) reads → close.
+            async with app_factory() as sess:
+                await bind_tenant(sess, tenant_id)
+                started += 1
+                if started >= 4:
+                    all_started.set()
+                # Hold every worker inside its bound transaction until ALL four
+                # are bound — the overlap is real, not sequential.
+                await asyncio.wait_for(all_started.wait(), timeout=10)
+                rows = (
+                    (await sess.execute(text("SELECT id, tenant_id FROM collections")))
+                    .all()
+                )
+                assert all(r[1] == tenant_id for r in rows), "cross-tenant row leaked"
+                return {r[0] for r in rows}
+
+        results = await asyncio.gather(
+            _call_scope_reads(tenant_a),
+            _call_scope_reads(tenant_b),
+            _call_scope_reads(tenant_a),
+            _call_scope_reads(tenant_b),
+        )
+        assert results[0] == results[2] == {coll_a}
+        assert results[1] == results[3] == {coll_b}
+    finally:
+        await engine.dispose()
+        await app_engine.dispose()
+        if orig is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = orig
+        get_settings.cache_clear()
+        admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{tmp_db}" WITH (FORCE)'))
+                await conn.execute(text(f'DROP ROLE IF EXISTS "{app_role}"'))
+        finally:
+            await admin.dispose()
+
+
+@_live
+async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None:
+    """#412 / #433 round-2: the REAL runtime composition under live RLS.
+
+    Drives an actual :class:`~app.services.chat_runtime.ChatRuntime` — not a
+    hand-shaped session pattern — through a three-search fan-out turn on a
+    migrated throwaway Postgres, connected as a NON-superuser, NON-bypassrls
+    app role. The injected retrieval factory executes a REAL predicate-free
+    ``SELECT`` on whatever session the runtime hands it, so this exercises the
+    genuine ``_call_scope`` path: per-call sessions, ``bind_tenant`` on each,
+    concurrent overlapping transactions (a start barrier guarantees it). RLS
+    must confine every worker to the bound tenant, the answer must complete,
+    and the factory must have seen one runtime session + three DISTINCT scope
+    sessions.
+    """
+    import asyncio
+
+    from alembic import command
+
+    from app.auth.principal import Principal
+    from app.domain.entities import Role as EntityRole
+    from app.domain.llm import StreamEvent, ToolCall
+    from app.domain.retrieval import RetrievedPassage
+    from app.realtime.backplane import InMemoryBackplane
+    from app.services.chat_runtime import ChatRuntime
+
+    tmp_db = f"lumen_rls412c_{uuid.uuid4().hex[:12]}"
+    app_role = f"lumen_rls412c_app_{uuid.uuid4().hex[:8]}"
+    app_pw = "rls_test_pw"  # noqa: S105 — throwaway role in a throwaway DB
+    admin_url = _swap_db(_PG_URL, "postgres")
+    tmp_url = _swap_db(_PG_URL, tmp_db)
+    parsed = urlparse(tmp_url)
+    app_url = urlunparse(
+        parsed._replace(netloc=f"{app_role}:{app_pw}@{parsed.hostname}:{parsed.port}")
+    )
+
+    admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{tmp_db}"'))
+            create_role = (
+                f'CREATE ROLE "{app_role}" LOGIN ' f"PASSWORD '{app_pw}' NOSUPERUSER NOBYPASSRLS"
+            )
+            await conn.execute(text(create_role))
+    finally:
+        await admin.dispose()
+
+    orig = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = tmp_url
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    engine = create_async_engine(tmp_url)
+    app_engine = create_async_engine(app_url)
+    try:
+        await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
+        grant_tables = (
+            "tenants",
+            "users",
+            "chat_sessions",
+            "messages",
+            "citations",
+            "collections",
+            "documents",
+            "chunks",
+            "tool_invocations",
+            "audit_events",
+            "llm_usage",
+        )
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for tbl in grant_tables:
+                await conn.execute(
+                    text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {tbl} TO "{app_role}"')
+                )
+
+        tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+        user_a, user_b = uuid.uuid4(), uuid.uuid4()
+        coll_a, coll_b = uuid.uuid4(), uuid.uuid4()
+        doc_a, chunk_a = uuid.uuid4(), uuid.uuid4()
+        chat_session_a = uuid.uuid4()
+        owner_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        app_factory = async_sessionmaker(bind=app_engine, expire_on_commit=False)
+
+        async with owner_factory() as sess:
+            await bind_bypass(sess)
+            for tid, uid, cid in ((tenant_a, user_a, coll_a), (tenant_b, user_b, coll_b)):
+                await sess.execute(
+                    text("INSERT INTO tenants (id, name) VALUES (:id, :name)"),
+                    {"id": tid, "name": f"Tenant {tid}"},
+                )
+                await sess.execute(
+                    text(
+                        "INSERT INTO users (id, tenant_id, email, password_hash, roles) "
+                        "VALUES (:id, :tid, :email, 'h', ARRAY['member'])"
+                    ),
+                    {"id": uid, "tid": tid, "email": f"u-{uid}@t.test"},
+                )
+                await sess.execute(
+                    text(
+                        "INSERT INTO collections (id, tenant_id, owner_id, name) "
+                        "VALUES (:id, :tid, :oid, 'C')"
+                    ),
+                    {"id": cid, "tid": tid, "oid": uid},
+                )
+            await sess.execute(
+                text(
+                    "INSERT INTO documents (id, tenant_id, owner_id, collection_id, filename, "
+                    "mime_type, size_bytes, storage_key, status) VALUES "
+                    "(:id, :tid, :oid, :cid, 'taxes.pdf', 'application/pdf', 10, :key, 'ready')"
+                ),
+                {
+                    "id": doc_a,
+                    "tid": tenant_a,
+                    "oid": user_a,
+                    "cid": coll_a,
+                    "key": f"{tenant_a}/t",
+                },
+            )
+            await sess.execute(
+                text(
+                    "INSERT INTO chunks (id, tenant_id, document_id, ord, text, char_start, "
+                    "char_end) VALUES (:id, :tid, :did, 0, 'The deduction is $14,600.', 0, 25)"
+                ),
+                {"id": chunk_a, "tid": tenant_a, "did": doc_a},
+            )
+            await sess.execute(
+                text(
+                    "INSERT INTO chat_sessions (id, tenant_id, owner_id, model, title) "
+                    "VALUES (:id, :tid, :oid, 'test/model', 'rls-412')"
+                ),
+                {"id": chat_session_a, "tid": tenant_a, "oid": user_a},
+            )
+            await sess.commit()
+
+        # --- the probe retrieval: REAL SQL on whatever session it is given ----
+        started = 0
+        all_started = asyncio.Event()
+        seen_sessions: list[object] = []
+
+        class _SqlProbeRetrieval:
+            def __init__(self, session: AsyncSession) -> None:
+                self._session = session
+
+            async def search_text(
+                self,
+                *,
+                principal: object,
+                query: str,
+                k: int,
+                collection_ids: object = None,
+                document_ids: object = None,
+            ) -> list[RetrievedPassage]:
+                nonlocal started
+                started += 1
+                if started >= 3:
+                    all_started.set()
+                # Hold until all three scopes are live — the overlap is real.
+                await asyncio.wait_for(all_started.wait(), timeout=10)
+                rows = (
+                    await self._session.execute(text("SELECT id, tenant_id FROM collections"))
+                ).all()
+                # RLS confinement inside the concurrent call scope: only the
+                # bound tenant's rows are visible, predicate-free.
+                assert {r[1] for r in rows} == {tenant_a}, "cross-tenant row leaked in scope"
+                assert {r[0] for r in rows} == {coll_a}
+                return [
+                    RetrievedPassage(
+                        chunk_id=chunk_a,
+                        document_id=doc_a,
+                        document_name="taxes.pdf",
+                        ord=0,
+                        text="The deduction is $14,600.",
+                        char_start=0,
+                        char_end=25,
+                        score=0.9,
+                    )
+                ]
+
+            async def search_documents(
+                self, *, principal: object, name_or_query: str, k: int = 10
+            ) -> list[object]:
+                return []
+
+            async def get_document(
+                self, *, principal: object, document_id: object
+            ) -> object | None:
+                return None
+
+        def retrieval_factory(session: AsyncSession) -> _SqlProbeRetrieval:
+            seen_sessions.append(session)
+            return _SqlProbeRetrieval(session)
+
+        class _ThreeSearchGateway:
+            async def stream_tools(
+                self,
+                messages: object,
+                *,
+                tools: object,
+                model: object = None,
+                tool_choice: object = None,
+                api_key: object = None,
+                api_base: object = None,
+            ):  # noqa: ANN202 — async generator
+                msgs = list(messages)  # type: ignore[arg-type]
+                has_tool = any(getattr(m.role, "value", "") == "tool" for m in msgs)
+                if tool_choice == "none" or has_tool:
+                    yield StreamEvent(text="Grounded answer.")
+                    yield StreamEvent(finish_reason="stop")
+                else:
+                    yield StreamEvent(
+                        tool_calls=(
+                            ToolCall(id="c1", name="search_text", arguments={"query": "q1"}),
+                            ToolCall(id="c2", name="search_text", arguments={"query": "q2"}),
+                            ToolCall(id="c3", name="search_text", arguments={"query": "q3"}),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+
+        principal = Principal(
+            user_id=user_a, tenant_id=tenant_a, roles=(EntityRole.MEMBER,)
+        )
+        backplane = InMemoryBackplane()
+        stream_id = uuid.uuid4().hex
+
+        async def _drain() -> list[dict[str, object]]:
+            return [env async for env in backplane.subscribe(stream_id)]
+
+        consumer = asyncio.create_task(_drain())
+        await asyncio.sleep(0)
+        runtime = ChatRuntime(
+            sessionmaker=app_factory,
+            gateway=_ThreeSearchGateway(),  # type: ignore[arg-type]
+            backplane=backplane,
+            principal=principal,
+            request_id="rls-412",
+            source_ip="127.0.0.1",
+            retrieval_factory=retrieval_factory,  # type: ignore[arg-type]
+        )
+        await runtime.run(
+            stream_id=stream_id,
+            session_id=chat_session_a,
+            question="what is the deduction?",
+            model="test/model",
+            history=[],
+            collection_ids=None,
+        )
+        envs = await asyncio.wait_for(consumer, timeout=10)
+
+        assert envs[-1]["type"] == "done"
+        assert started == 3  # all three scopes were live simultaneously
+        results = [
+            e
+            for e in envs
+            if e["type"] == "event" and e.get("name") == "tool_result"
+        ]
+        assert len(results) == 3
+        assert all(e["data"]["ok"] is True for e in results)  # type: ignore[index]
+        # The factory saw the runtime session + three DISTINCT call scopes.
+        assert len(seen_sessions) == 4
+        assert len({id(s) for s in seen_sessions}) == 4
+    finally:
+        await engine.dispose()
+        await app_engine.dispose()
+        if orig is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = orig
+        get_settings.cache_clear()
+        admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{tmp_db}" WITH (FORCE)'))
+                await conn.execute(text(f'DROP ROLE IF EXISTS "{app_role}"'))
+        finally:
+            await admin.dispose()

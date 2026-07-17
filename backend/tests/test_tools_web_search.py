@@ -95,10 +95,12 @@ def test_web_search_is_off_by_default_allowlist() -> None:
     defn = get_tool("web_search")
     assert defn.default_offered is False
     assert "web_search" not in default_allowlist()
-    # The read-only retrieval tools remain the ad-hoc default (regression); this is
-    # the full set — four since list_documents joined (#371).
+    # The read-only tools remain the ad-hoc default (regression); this is the
+    # full set — four retrieval tools since list_documents joined (#371), plus
+    # ask_user (spec 0006 #429/#434: the clarifying-question tool is offered by
+    # default so interactive chat can intercept it).
     assert default_allowlist() == frozenset(
-        {"search_text", "search_documents", "list_documents", "get_document"}
+        {"search_text", "search_documents", "list_documents", "get_document", "ask_user"}
     )
 
 
