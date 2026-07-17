@@ -181,14 +181,33 @@ def _fit(
     tools: tuple[ToolSpec, ...] = (),
     fallback: int = 10_000,
     headroom: int = 0,
+    digest_chars: int = 100,
+    chunk_size: int = 2,
+    protected: frozenset[str] = frozenset(),
 ) -> list[ChatMessage]:
     return fit_transcript(
         messages,
         model="fake/model",
         tools=tools,
-        config=ContextConfig(fallback_max_input_tokens=fallback, output_headroom_tokens=headroom),
+        config=ContextConfig(
+            fallback_max_input_tokens=fallback,
+            output_headroom_tokens=headroom,
+            compaction_digest_chars=digest_chars,
+            compaction_chunk_size=chunk_size,
+        ),
         counter=_CHAR_COUNTER,
         max_input_resolver=lambda _m: max_input,
+        protected_tool_call_ids=protected,
+    )
+
+
+def _tool_result(call_id: str, content: str) -> ChatMessage:
+    return ChatMessage(role=Role.TOOL, content=content, tool_call_id=call_id, name="search_text")
+
+
+def _tool_call(call_id: str) -> ChatMessage:
+    return ChatMessage(
+        role=Role.ASSISTANT, content="", tool_calls=(ToolCall(id=call_id, name="s", arguments={}),)
     )
 
 
@@ -230,16 +249,30 @@ def test_fit_transcript_sheds_oldest_history_preserving_live_tail() -> None:
     assert any(m.content == "current question" for m in fitted)
 
 
-def test_fit_transcript_refuses_when_live_tail_alone_overflows() -> None:
-    """If even the system head + current live turn exceed budget, refuse with the
-    typed context_too_large rather than send an over-budget call (#424 finding 1)."""
+def test_fit_transcript_compacts_a_huge_tool_result_instead_of_refusing() -> None:
+    """#415: a huge tool result that used to force a refusal is now DIGESTED so the
+    turn fits — the answer proceeds on the (bounded, content-bearing) digest."""
     system = _msg(Role.SYSTEM, "SYS")
     question = _msg(Role.USER, "q")
-    huge_result = ChatMessage(
+    huge = ChatMessage(
         role=Role.TOOL, content="x" * 5000, tool_call_id="c1", name="search_text"
     )
+    fitted = _fit([system, question, huge], max_input=1024 + 400)
+    result = fitted[-1]
+    assert result.tool_call_id == "c1"  # still present + paired
+    assert len(result.content) < 5000  # digested, not the full 5000
+    assert result.content.startswith("x" * 100)  # content-bearing head kept
+    assert "truncated to fit the context window" in result.content  # the marker
+
+
+def test_fit_transcript_refuses_when_non_compactable_tail_overflows() -> None:
+    """When the overflow is in a NON-compactable part (a huge question, not a tool
+    result), there is nothing to digest — refuse with the typed context_too_large
+    rather than send an over-budget call."""
+    system = _msg(Role.SYSTEM, "SYS")
+    huge_question = _msg(Role.USER, "q" * 5000)
     with pytest.raises(ValidationError) as excinfo:
-        _fit([system, question, huge_result], max_input=1024 + 200)
+        _fit([system, huge_question], max_input=1024 + 200)
     assert excinfo.value.code == "context_too_large"
 
 
@@ -390,3 +423,87 @@ def test_fit_transcript_never_orphans_a_tool_pair_in_history() -> None:
     result_ref_ids = {m.tool_call_id for m in fitted if m.tool_call_id is not None}
     # Every retained tool result still has its call present — no orphan.
     assert result_ref_ids <= call_ids
+
+
+# --- #415: in-answer tool-result compaction ---------------------------------
+
+
+def test_context_digest_is_content_bearing_head_not_summary() -> None:
+    """#415: the digest keeps the HEAD of the real content (attributable evidence)
+    plus a marker — never the ≤300-char count-style summary."""
+    import app.llm.context as ctx_mod
+
+    content = "[1] taxes.pdf (chunk abc, chars 0-40):\n" + ("evidence " * 200)
+    digest = ctx_mod._context_digest(content, 120)
+    assert digest.startswith("[1] taxes.pdf")  # the passage label survives
+    assert len(digest) < len(content)
+    assert "truncated to fit the context window" in digest
+    # Content already within budget is returned unchanged (nothing to gain).
+    assert ctx_mod._context_digest("short", 120) == "short"
+
+
+def test_compaction_digests_oldest_results_and_keeps_recent() -> None:
+    """#415: over budget, the OLDEST tool results are digested while the most
+    recent stays verbatim so the freshest evidence is intact."""
+    system = _msg(Role.SYSTEM, "SYS")
+    question = _msg(Role.USER, "q")
+    # Four uncited tool results, each 1000 chars.
+    tail = [_tool_call(f"c{i}") for i in range(4)]
+    results = [_tool_result(f"c{i}", f"{i}" * 1000) for i in range(4)]
+    messages = [system, question]
+    for tc, r in zip(tail, results, strict=True):
+        messages += [tc, r]
+
+    # digest 100, chunk 2. Budget ~3100 lets compacting the OLDEST chunk of 2
+    # (of 4) bring it under budget — so the two most recent results stay whole.
+    fitted = _fit(messages, max_input=1024 + 3500, digest_chars=100, chunk_size=2)
+    tool_msgs = [m for m in fitted if m.role is Role.TOOL]
+    # The oldest were digested (short + marker); the newest stayed full (1000).
+    assert any("truncated to fit" in m.content for m in tool_msgs)
+    assert any(len(m.content) == 1000 for m in tool_msgs)  # a recent one kept whole
+
+
+def test_compaction_is_chunked_not_one_at_a_time() -> None:
+    """#415 AC-2: clearing happens in chunks (>= chunk_size at once), so a single
+    over-budget crossing compacts a batch — amortizing cache invalidation."""
+    system = _msg(Role.SYSTEM, "SYS")
+    question = _msg(Role.USER, "q")
+    tail: list[ChatMessage] = []
+    for i in range(6):
+        tail.append(
+            _tool_call(f"c{i}")
+        )
+        tail.append(_tool_result(f"c{i}", f"{i}" * 1000))
+    messages = [system, question, *tail]
+
+    # A budget just under the full size forces compaction; chunk_size=4 means at
+    # least 4 results are digested even though fewer might have sufficed.
+    fitted = _fit(messages, max_input=1024 + 4000, digest_chars=100, chunk_size=4)
+    digested = sum(1 for m in fitted if m.role is Role.TOOL and "truncated to fit" in m.content)
+    assert digested >= 4
+
+
+def test_compaction_prefers_uncited_then_falls_back_to_cited() -> None:
+    """#415: uncited results are digested first (cited evidence preserved); only if
+    that is not enough are cited results compacted too — better degraded than refused."""
+    system = _msg(Role.SYSTEM, "SYS")
+    question = _msg(Role.USER, "q")
+    cited_call = _tool_call("cited")
+    cited_result = _tool_result("cited", "C" * 1000)
+    uncited_call = _tool_call("unc")
+    uncited_result = _tool_result("unc", "U" * 1000)
+    messages = [system, question, cited_call, cited_result, uncited_call, uncited_result]
+
+    prot = frozenset({"cited"})
+    # budget ~1600: compacting ONLY the uncited result (→ ~1550 total) is enough,
+    # so the cited result is kept verbatim.
+    fitted = _fit(messages, max_input=1024 + 1800, digest_chars=100, chunk_size=1, protected=prot)
+    by_id = {m.tool_call_id: m for m in fitted if m.role is Role.TOOL}
+    assert "truncated to fit" in by_id["unc"].content  # uncited digested
+    assert by_id["cited"].content == "C" * 1000  # cited kept verbatim
+
+    # budget ~800: even after digesting the uncited result it is still over, so the
+    # cited result is compacted too (last resort) rather than the answer refused.
+    fitted2 = _fit(messages, max_input=1024 + 1200, digest_chars=100, chunk_size=1, protected=prot)
+    by_id2 = {m.tool_call_id: m for m in fitted2 if m.role is Role.TOOL}
+    assert "truncated to fit" in by_id2["cited"].content  # cited compacted as last resort

@@ -505,6 +505,11 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
+        # Which tool CALL produced which passage chunk_ids (#415): lets the
+        # in-answer compactor protect a tool result whose passages have been cited
+        # — it keeps that result verbatim, preferring to digest UNCITED results
+        # first so grounding for existing citations survives.
+        result_chunk_ids: dict[str, frozenset[UUID]] = {}
         # The answer is the text of exactly ONE turn: the tool-free turn the model
         # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
         # text is pre-tool narration ("I'll search…"), not answer content — it is
@@ -571,7 +576,11 @@ class ChatRuntime:
             # ``context_too_large``, which ``run``'s ``except AppError`` arm turns
             # into the terminal problem envelope — never an over-budget call.
             messages = fit_transcript(
-                messages, model=route.model, tools=advertised, config=self._context_config
+                messages,
+                model=route.model,
+                tools=advertised,
+                config=self._context_config,
+                protected_tool_call_ids=_cited_tool_call_ids(result_chunk_ids, cited),
             )
             turn_tool_calls, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised
@@ -608,6 +617,10 @@ class ChatRuntime:
                         name=call.name,
                     )
                 )
+                # Remember which chunk_ids this call's result carried, so the
+                # compactor can protect it once any are cited (#415).
+                if result.passages:
+                    result_chunk_ids[call.id] = frozenset(p.chunk_id for p in result.passages)
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
                     if passage.chunk_id in cited:
@@ -625,7 +638,11 @@ class ChatRuntime:
             # finding 1): the forced-synthesis call sends the full accumulated
             # transcript, so it must respect the budget like every other turn.
             messages = fit_transcript(
-                messages, model=route.model, tools=advertised, config=self._context_config
+                messages,
+                model=route.model,
+                tools=advertised,
+                config=self._context_config,
+                protected_tool_call_ids=_cited_tool_call_ids(result_chunk_ids, cited),
             )
             _, finish_reason, turn_text = await self._stream_one_turn(
                 messages=messages, route=route, usage=usage, tools=advertised, tool_choice="none"
@@ -1138,6 +1155,27 @@ def _hash_query(query: str) -> str:
     reviewer correlate retrieval + answer events for the same turn.
     """
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def _cited_tool_call_ids(
+    result_chunk_ids: dict[str, frozenset[UUID]], cited: dict[UUID, GroundedCitation]
+) -> frozenset[str]:
+    """The tool ``call.id``s whose result carried a chunk that has been cited (#415).
+
+    Handed to :func:`~app.llm.context.fit_transcript` as ``protected_tool_call_ids``
+    so the in-answer compactor keeps those results verbatim and digests uncited
+    ones first — preserving grounding for evidence the answer already relies on.
+    Compaction of a protected result is still the last resort before an outright
+    refusal, so a search-heavy answer degrades gracefully rather than failing.
+    """
+    if not cited:
+        return frozenset()
+    cited_chunks = cited.keys()
+    return frozenset(
+        call_id
+        for call_id, chunks in result_chunk_ids.items()
+        if not chunks.isdisjoint(cited_chunks)
+    )
 
 
 def _is_retrieval_call(call: ToolCall) -> bool:

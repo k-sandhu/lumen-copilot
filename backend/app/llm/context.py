@@ -38,7 +38,7 @@ to a heuristic, never a crashed answer.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
@@ -83,6 +83,19 @@ _TIGHT_BUDGET_FRACTION = 0.15
 _MESSAGE_FRAMING_TOKENS = 4
 #: The outer ``[]`` framing of the messages array (counted once).
 _ARRAY_FRAMING_TOKENS = 2
+#: How many chars of a tool result's ACTUAL content the compaction digest keeps
+#: (ADR-0016 §3.1 / #415): a bounded, content-bearing head extract — NOT the
+#: ≤300-char user summary — so the model retains real evidence, just less of it.
+DEFAULT_COMPACTION_DIGEST_CHARS = 1200
+#: How many tool results one compaction pass clears at once (ADR-0016 §3.1): a
+#: CHUNK, so cache invalidation is paid rarely (once per chunk) not per-turn.
+DEFAULT_COMPACTION_CHUNK_SIZE = 4
+#: The marker appended to a compacted tool result so the model (and a reader) knows
+#: the content was truncated and that grounding lives in the recorded citations.
+_COMPACTION_MARKER = (
+    "\n[… earlier tool output truncated to fit the context window; "
+    "the answer's recorded citations preserve the cited evidence …]"
+)
 
 #: Counts the tokens of a TEXT fragment for the answer's model.
 TokenCounter = Callable[[str], int]
@@ -96,6 +109,11 @@ class ContextConfig:
 
     fallback_max_input_tokens: int = DEFAULT_FALLBACK_MAX_INPUT_TOKENS
     output_headroom_tokens: int = DEFAULT_OUTPUT_HEADROOM_TOKENS
+    #: In-answer tool-result compaction (ADR-0016 §3.1 / #415): the digest size
+    #: (chars of real content kept per compacted result) and the chunk size (how
+    #: many results are cleared per pass, amortizing cache invalidation).
+    compaction_digest_chars: int = DEFAULT_COMPACTION_DIGEST_CHARS
+    compaction_chunk_size: int = DEFAULT_COMPACTION_CHUNK_SIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +403,7 @@ def fit_transcript(
     config: ContextConfig | None = None,
     counter: TokenCounter | None = None,
     max_input_resolver: MaxInputResolver | None = None,
+    protected_tool_call_ids: frozenset[str] = frozenset(),
 ) -> list[ChatMessage]:
     """Re-fit an already-grown transcript to the model's input budget (#424, finding 1).
 
@@ -395,16 +414,23 @@ def fit_transcript(
     very failure this module exists to prevent. The runtime therefore calls this
     before **every** ``stream_tools`` turn.
 
-    Trimming is conservative and structure-preserving: the head (the system
-    message at index 0) and the **current answer's live tail** — everything from
-    the user question onward, i.e. the question plus this answer's tool-call /
-    tool-result messages, which must stay paired — are protected. Only the
-    *conversation history* between them (plain prior user/assistant turns, which
-    carry no tool-call structure) is shed, oldest-first, until the estimate fits.
-    If the protected head+tail alone still exceed the budget, it raises the typed
-    ``context_too_large`` — a deterministic refusal, never an over-budget call.
-    (Graceful in-loop compaction of the tool tail itself — digesting old results
-    rather than refusing — is the ADR-0016 §3.1 follow-up, issue #415.)
+    The degrade order, applied only when over budget:
+
+    1. **Shed conversation history.** The head (the system message at index 0) and
+       the current answer's live tail (the question + this answer's tool-call /
+       result messages, kept paired) are protected; only the plain prior turns
+       between them are shed, oldest-first, in whole units.
+    2. **Compact the live tail's oldest tool results** (ADR-0016 §3.1 / #415).
+       Rather than refuse, replace the OLDEST tool results' contents with a
+       bounded, content-bearing digest (:func:`_context_digest`), cleared in
+       CHUNKS so cache invalidation is amortized. A result whose passages the
+       answer **already cited** (its ``tool_call_id`` in ``protected_tool_call_ids``)
+       is kept verbatim, so grounding for existing citations survives (INV-3 also
+       holds structurally: citations are recorded at retrieval time, independent
+       of the transcript).
+    3. **Refuse.** Only if the system + question + protected/compacted tail still
+       cannot fit does it raise the typed ``context_too_large`` — a deterministic
+       refusal, never an over-budget call.
     """
     cfg = config or ContextConfig()
     count = counter or litellm_token_counter(model)
@@ -453,10 +479,33 @@ def fit_transcript(
     if dropped:
         log.info("context.transcript_refit", dropped_messages=dropped, budget_tokens=budget)
 
+    # (2) Compact the live tail's oldest tool results (ADR-0016 §3.1 / #415) —
+    # digest them rather than refuse. Only reached if shedding history was not
+    # enough. Chunked so cache invalidation is paid rarely; cited results are
+    # protected. Mutates ``working``/``costs``/``total`` in place.
     if total > budget:
-        # Even with all history shed, the system prompt + current live turn
-        # exceed the window. Refuse deterministically rather than send an
-        # over-budget call (the #415 follow-up will compact the tail instead).
+        total, compacted = _compact_oldest_tool_results(
+            working,
+            costs,
+            tail_start=tail_start,
+            budget=budget,
+            total=total,
+            count=count,
+            digest_chars=cfg.compaction_digest_chars,
+            chunk_size=max(1, cfg.compaction_chunk_size),
+            protected=protected_tool_call_ids,
+        )
+        if compacted:
+            log.info(
+                "context.tool_results_compacted",
+                compacted=compacted,
+                budget_tokens=budget,
+            )
+
+    if total > budget:
+        # (3) Even with history shed AND old tool results compacted, the system
+        # prompt + question + protected/recent tail exceed the window. Refuse
+        # deterministically rather than send an over-budget call.
         raise ValidationError(
             "This answer's context exceeded the model's window even after "
             "trimming history. Start a new conversation or choose a "
@@ -514,6 +563,79 @@ def _oldest_sheddable_span(
     return (start, start + 1)
 
 
+def _context_digest(content: str, digest_chars: int) -> str:
+    """A bounded, content-bearing digest of a tool result's content (ADR-0016 §3.1).
+
+    Keeps the first ``digest_chars`` of the ACTUAL content — for a rendered
+    retrieval result that is the first labelled passages (document + chunk id +
+    the start of each snippet), so the model retains real, attributable evidence,
+    just less of it — then appends a marker noting the truncation. This is
+    deliberately NOT the ≤300-char user-facing ``ToolResult.summary`` (a count
+    like "3 passages" is not evidence). Content already within budget is returned
+    unchanged (nothing to gain by digesting it).
+    """
+    trimmed = content[: max(1, digest_chars)].rstrip()
+    if len(trimmed) >= len(content.rstrip()):
+        return content
+    return trimmed + _COMPACTION_MARKER
+
+
+def _compact_oldest_tool_results(
+    working: list[ChatMessage],
+    costs: list[int],
+    *,
+    tail_start: int,
+    budget: int,
+    total: int,
+    count: TokenCounter,
+    digest_chars: int,
+    chunk_size: int,
+    protected: frozenset[str],
+) -> tuple[int, int]:
+    """Digest the OLDEST live-tail tool results in chunks until it fits (#415).
+
+    Operates only on the live tail ``[tail_start, len)`` — this answer's tool
+    activity — never on history (already shed) or the system/question. A candidate
+    is a ``tool``-result message whose content is longer than the digest (already-
+    short ones gain nothing).
+
+    Two tiers, so cited evidence is preferentially preserved: **uncited** results
+    (``tool_call_id`` not in ``protected``) are compacted first; only if the budget
+    STILL cannot be met are the ``protected`` (cited) results compacted too — a
+    degraded-but-answered turn beats a refusal. Within each tier, oldest-first in
+    **chunks** of ``chunk_size`` (even when fewer would suffice) so the prefix
+    changes once per chunk, not per turn (amortized cache invalidation). Mutates
+    ``working``/``costs`` in place; returns ``(new_total, compacted_count)``.
+    """
+    compacted = 0
+    for include_cited in (False, True):
+        if total <= budget:
+            break
+        # Tier 1 compacts uncited results; tier 2 then re-scans and — since the
+        # just-compacted uncited results are now short (excluded by the length
+        # filter) — targets the remaining cited ones.
+        candidates = [
+            i
+            for i in range(tail_start, len(working))
+            if working[i].role is Role.TOOL
+            and len(working[i].content) > digest_chars
+            and (include_cited or working[i].tool_call_id not in protected)
+        ]
+        pos = 0
+        while total > budget and pos < len(candidates):
+            for i in candidates[pos : pos + chunk_size]:
+                digested = replace(
+                    working[i], content=_context_digest(working[i].content, digest_chars)
+                )
+                new_cost = count(_message_wire_text(digested)) + _MESSAGE_FRAMING_TOKENS
+                total += new_cost - costs[i]
+                working[i] = digested
+                costs[i] = new_cost
+                compacted += 1
+            pos += chunk_size
+    return total, compacted
+
+
 def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
     """Serialize the tools to the EXACT wire shape the gateway sends, for counting.
 
@@ -545,6 +667,8 @@ def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
 
 
 __all__ = [
+    "DEFAULT_COMPACTION_CHUNK_SIZE",
+    "DEFAULT_COMPACTION_DIGEST_CHARS",
     "DEFAULT_FALLBACK_MAX_INPUT_TOKENS",
     "DEFAULT_OUTPUT_HEADROOM_TOKENS",
     "ContextBudget",

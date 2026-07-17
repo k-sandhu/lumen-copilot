@@ -349,6 +349,8 @@ async def execute_run(
         context_config=ContextConfig(
             fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
             output_headroom_tokens=settings.context_output_headroom_tokens,
+            compaction_digest_chars=settings.context_compaction_digest_chars,
+            compaction_chunk_size=settings.context_compaction_chunk_size,
         ),
         mcp_tools_factory=_build_run_mcp_tools_factory(
             principal=principal,
