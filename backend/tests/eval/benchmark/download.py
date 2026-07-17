@@ -165,6 +165,36 @@ def _process_entry(
     return FetchResult(entry, "ok", f"downloaded, checksum verified ({observed.size_bytes:,} B)")
 
 
+def fetch_entries(
+    entries: list[CorpusFile],
+    pins: dict[str, Checksum],
+    *,
+    dest_dir: Path,
+    pin_mode: bool = False,
+    force: bool = False,
+) -> list[FetchResult]:
+    """Fetch/verify ``entries`` into ``dest_dir`` (the reusable core of ``main``).
+
+    Mutates ``pins`` in ``pin_mode``; the caller decides whether to persist
+    them. Also used by the data-pack loader (#441) to ensure its selected
+    files are present before uploading.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    results: list[FetchResult] = []
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=_TIMEOUT_SECONDS,
+        headers={"User-Agent": _USER_AGENT},
+    ) as client:
+        for entry in entries:
+            result = _process_entry(
+                client, entry, pins, dest_dir=dest_dir, pin_mode=pin_mode, force=force
+            )
+            results.append(result)
+            print(f"[{result.status:>6}] {entry.file_id}: {result.detail}")
+    return results
+
+
 def _select(only: str | None, smoke: bool) -> list[CorpusFile]:
     entries = list(CORPUS)
     if smoke:
@@ -195,22 +225,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     dest_dir = Path(args.dest) if args.dest else corpus_dir()
-    dest_dir.mkdir(parents=True, exist_ok=True)
     pins = load_checksums()
     entries = _select(args.only, args.smoke)
-
-    results: list[FetchResult] = []
-    with httpx.Client(
-        follow_redirects=True,
-        timeout=_TIMEOUT_SECONDS,
-        headers={"User-Agent": _USER_AGENT},
-    ) as client:
-        for entry in entries:
-            result = _process_entry(
-                client, entry, pins, dest_dir=dest_dir, pin_mode=args.pin, force=args.force
-            )
-            results.append(result)
-            print(f"[{result.status:>6}] {entry.file_id}: {result.detail}")
+    results = fetch_entries(entries, pins, dest_dir=dest_dir, pin_mode=args.pin, force=args.force)
 
     if args.pin:
         save_checksums(pins)

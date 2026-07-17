@@ -200,6 +200,31 @@ For **manual end-to-end testing**, upload files from `corpus/` through the UI
 that must be rejected) and spot-check questions from the bank in chat — every
 question's `evidence.locator` tells a human where the answer lives.
 
+## Load the data pack into your own profile (#441)
+
+`load_pack.py` seeds the corpus into **any signed-in user's account** on a
+running stack — no eval, no bench user, just real documents in your profile.
+Pick the formats and the count; the same flags always select the same files:
+
+```powershell
+# from backend/ — preview the deterministic selection (nothing is touched):
+uv run --extra dev python -m tests.eval.benchmark.load_pack --formats pdf,xlsx --count 5 --dry-run
+
+# load into YOUR profile on the primary dev stack:
+uv run --extra dev python -m tests.eval.benchmark.load_pack `
+  --api http://localhost:47181 --email you@acme.test --password ... `
+  --formats pdf,docx,xlsx --count 10
+```
+
+**Determinism rule:** ingestable entries only (the deliberate negative-format
+files are never offered), round-robin across your formats **in the order you
+gave them** (default `txt, md, pdf, docx, pptx, xlsx`), each format's files in
+manifest order. Missing files download first (checksum-verified); uploads are
+idempotent by filename, so re-running is a safe no-op. Credentials may also
+come from `LUMEN_PACK_EMAIL` / `LUMEN_PACK_PASSWORD`. The selection rule is
+unit-tested (`tests/eval/test_benchmark_pack.py`), and the shared HTTP client
+(`client.py`) survives the 15-minute access-token expiry mid-ingestion.
+
 ## Live accuracy run (#430)
 
 `run_live.py` drives the REAL stack over HTTP end-to-end — login, uploads
