@@ -2204,6 +2204,7 @@ class MessageRepository(_TenantScopedRepository):
         *,
         after_created_at: datetime,
         after_message_id: UUID,
+        limit: int | None = None,
     ) -> list[Message]:
         """Messages STRICTLY NEWER than the coverage cursor, oldest first (#416).
 
@@ -2215,14 +2216,16 @@ class MessageRepository(_TenantScopedRepository):
         — duplication-safe, loss-unsafe never. Valid after the boundary row is
         pruned (the comparison never needs the row).
         """
-        # The tie branch uses a ±1s TOLERANCE window instead of equality:
-        # SQLite stores server-default timestamps second-resolution while
-        # bound datetime params render with microseconds, so a string
-        # equality can never match (#446 round-3). ``> cursor - 1s`` admits
-        # the cursor's own second (and, on microsecond backends, up to 1s of
-        # older rows — consistent with the documented RESEND-safe tie policy:
-        # duplication is acceptable, loss never is). The boundary row itself
-        # is excluded by id.
+        # The tie branch uses a ±1s TOLERANCE window (SQLite's server-default
+        # timestamps are second-resolution strings while bound params carry
+        # microseconds — an equality can never match) AND the ``(created_at,
+        # id)`` TOTAL ORDER the summary CAS uses (#446 round-3 liveness): the
+        # tie admits only LARGER ids, so batch selection and CAS acceptance
+        # advance in the SAME order — a 100-same-second backlog covers in
+        # id-ordered passes instead of starving. Same-second peers with a
+        # SMALLER id than the boundary were covered by an earlier id-ordered
+        # pass, so their exclusion is exact, not lossy. ``limit`` bounds the
+        # fetch (the task's batch path must not materialize a whole backlog).
         window_start = after_created_at - timedelta(seconds=1)
         stmt = (
             select(models.Message)
@@ -2233,16 +2236,17 @@ class MessageRepository(_TenantScopedRepository):
                     models.Message.created_at > after_created_at,
                     and_(
                         models.Message.created_at > window_start,
-                        models.Message.id != after_message_id,
+                        models.Message.id > after_message_id,
                     ),
                 ),
             )
-            # created_at only — the SAME (imperfect) tie order the unfiltered
-            # list uses: random uuids cannot order same-second peers, and a
-            # DIFFERENT tie-break here would reorder the verbatim tail relative
-            # to the main read (#439 tracks the monotonic-key fix).
-            .order_by(models.Message.created_at.asc())
+            # (created_at, id) — the SAME total order the CAS compares, so a
+            # batch's last element is always the maximum the CAS will accept
+            # (#446 round-3 liveness; #439 tracks a truly chronological key).
+            .order_by(models.Message.created_at.asc(), models.Message.id.asc())
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_message(r) for r in rows]
 
@@ -4918,7 +4922,7 @@ def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
     raw_mentioned = (
         row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
     )
-    for key, name in list(raw_mentioned.items())[:_EVIDENCE_MAX_PAIRS]:
+    for key, name in list(raw_mentioned.items())[:_MENTIONED_MAX_ENTRIES]:
         try:
             mentioned.append((UUID(str(key)), str(name)))
         except (TypeError, ValueError):
@@ -4942,6 +4946,10 @@ def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
 # row can fan out into unbounded permission checks or a context refusal.
 _EVIDENCE_MAX_PAIRS = 20
 _SUMMARY_MAX_CHARS = 6_000
+# The mention map's own cap (#446 round-3): LARGER than the evidence cap —
+# it merges forward across passes, and every name the rolled-forward text may
+# still carry must stay redactable (blocker 1's >20-name gap).
+_MENTIONED_MAX_ENTRIES = 40
 
 
 class SessionSummaryRepository(_TenantScopedRepository):
@@ -5023,7 +5031,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
         text_value = summary[:_SUMMARY_MAX_CHARS]
         mentioned_payload = {
             str(k): str(v)[:200]
-            for k, v in list((mentioned_documents or {}).items())[:_EVIDENCE_MAX_PAIRS]
+            for k, v in list((mentioned_documents or {}).items())[:_MENTIONED_MAX_ENTRIES]
         }
         insert = self._insert().values(  # type: ignore[attr-defined]
             id=uuid_mod.uuid4(),

@@ -85,6 +85,21 @@ async def ctx() -> AsyncIterator[_Ctx]:
                     session_id=chat.id, role=role, content=f"turn {i}: the sky is {i}"
                 )
                 ids.append(m.id)
+            # Distinct ascending stamps (a real session spans time; SQLite's
+            # server default would land everything in one second and make
+            # index order diverge from the (created_at, id) total order).
+            from datetime import datetime as _dt
+
+            from sqlalchemy import update as _upd
+
+            from app.db import models as _models
+
+            for i, mid in enumerate(ids):
+                await seed.execute(
+                    _upd(_models.Message)
+                    .where(_models.Message.id == mid)
+                    .values(created_at=_dt(2021, 1, 1, 0, i))
+                )
             await seed.commit()
             yield _Ctx(
                 sessionmaker=factory,
@@ -413,13 +428,35 @@ async def test_same_second_ties_advance_only_in_id_order(ctx: _Ctx) -> None:
     next strictly-newer-timestamp pass)."""
     async with ctx.sessionmaker() as session:
         repo = SessionSummaryRepository(session, ctx.tenant_id)
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
-        same_second = [m for m in rows if m.created_at == rows[0].created_at]
-        assert len(same_second) >= 2  # the fixture seeds within one second
+        from datetime import datetime as _dt
+
+        from sqlalchemy import update as _upd
+
+        from app.db import models as _models
+
+        messages_repo = MessageRepository(session, ctx.tenant_id)
+        pair = []
+        for i in range(2):
+            pair.append(
+                await messages_repo.add(
+                    session_id=ctx.session_id,
+                    role=MessageRole.USER,
+                    content=f"tie {i}",
+                )
+            )
+        stamp = _dt(2022, 6, 1, 12, 0, 0)
+        for m in pair:
+            await session.execute(
+                _upd(_models.Message)
+                .where(_models.Message.id == m.id)
+                .values(created_at=stamp)
+            )
+        await session.commit()
+        rows = await messages_repo.list_for_session(ctx.session_id)
+        same_second = [m for m in rows if m.created_at == stamp]
+        assert len(same_second) == 2
         # Sorted by STORAGE order (undashed hex ≡ sqlite CHAR(32); pg uuid).
-        small, large = sorted(same_second[:2], key=lambda m: m.id.hex)
+        small, large = sorted(same_second, key=lambda m: m.id.hex)
         accepted, _ = await repo.upsert_summary(
             ctx.session_id,
             summary="A",
@@ -545,3 +582,70 @@ async def test_summary_route_resolves_provider_sessions(
     )
     assert not ghost.model.startswith("provider:")
     assert ghost.api_key is None
+
+
+async def test_mention_map_holds_forty_entries(ctx: _Ctx) -> None:
+    """#446 round-3 blocker-1 gate: the mention map stores and reads back up to
+    40 entries — a 25-name summary keeps EVERY name redactable (the >20-name
+    revocation gap is closed at both write and defensive read)."""
+    async with ctx.sessionmaker() as session:
+        repo = SessionSummaryRepository(session, ctx.tenant_id)
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
+            ctx.session_id
+        )
+        mentioned = {uuid.uuid4(): f"doc-{i}.pdf" for i in range(25)}
+        accepted, srow = await repo.upsert_summary(
+            ctx.session_id,
+            summary="mentions many documents",
+            covers_through_message_id=rows[0].id,
+            covered_created_at=rows[0].created_at,
+            mentioned_documents=mentioned,
+        )
+        await session.commit()
+        assert accepted is True
+        assert srow is not None
+        assert len(srow.mentioned_documents) == 25
+        stored_names = {name for _id, name in srow.mentioned_documents}
+        assert "doc-24.pdf" in stored_names  # entry 21+ survives
+
+
+async def test_same_second_backlog_converges_across_passes(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#446 round-3 major-5 gate (the 100-same-second starvation probe): the
+    batch selection and the CAS advance in the SAME (created_at, id) order,
+    so repeated passes fold the whole backlog — versions strictly increase,
+    no pass is skipped as stale, and coverage completes."""
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
+    monkeypatch.setattr(
+        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
+    )
+    # 100 messages in ONE second (the fixture's 14 + 86 more).
+    async with ctx.sessionmaker() as session:
+        messages = MessageRepository(session, ctx.tenant_id)
+        for i in range(14, 100):
+            await messages.add(
+                session_id=ctx.session_id,
+                role=MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT,
+                content=f"turn {i}",
+            )
+        await session.commit()
+
+    outcomes = []
+    versions = []
+    for _ in range(6):
+        outcomes.append(await task_module._summarize(ctx.tenant_id, ctx.session_id))  # noqa: SLF001
+        async with ctx.sessionmaker() as session:
+            row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
+                ctx.session_id
+            )
+        versions.append(row.version if row is not None else 0)
+
+    # The 96 coverable messages (100 - keep 4) fold in 40+40+16 = three passes;
+    # later passes skip BELOW BATCH (nothing left), never as stale.
+    assert outcomes[:3] == ["summarized", "summarized", "summarized"]
+    assert "skipped_stale_coverage" not in outcomes
+    assert versions[:3] == [1, 2, 3]
+    assert versions[-1] == 3

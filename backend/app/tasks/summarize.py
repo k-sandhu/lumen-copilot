@@ -23,6 +23,7 @@ session's persisted summary:
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from app.core.config import Settings, get_settings
@@ -205,25 +206,50 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # Uncovered = everything after the durable coverage CURSOR, fetched in
         # SQL (#446 r2 finding 5) — valid after the boundary row is pruned,
         # never a full-history Python scan once a cursor exists.
+        keep = settings.chat_summary_keep_messages
+        fetch_limit = _MAX_BATCH_MESSAGES + keep
         if (
             row is not None
             and row.covers_through_message_id is not None
             and row.covers_through_created_at is not None
         ):
-            uncovered = await messages_repo.list_for_session_after(
+            fetched = await messages_repo.list_for_session_after(
                 session_id,
                 after_created_at=row.covers_through_created_at,
                 after_message_id=row.covers_through_message_id,
+                limit=fetch_limit,
             )
+            # EXACT cut in Python (#446 round-3 liveness): the SQL window is
+            # resend-tolerant across the format trap, but datetimes read back
+            # compare exactly here — keep only rows STRICTLY greater than the
+            # cursor in the (created_at, id-hex) total order, so the batch's
+            # boundary is always one the CAS will accept.
+            cursor = (row.covers_through_created_at, row.covers_through_message_id.hex)
+            uncovered = [
+                m for m in fetched if (m.created_at, m.id.hex) > cursor
+            ]
         else:
-            uncovered = await messages_repo.list_for_session(session_id)
-        keep = settings.chat_summary_keep_messages
-        to_cover = uncovered[:-keep] if len(uncovered) > keep else []
-        # BOUNDED batch (#446 r2 finding 5): a backlog summarizes incrementally
-        # — each pass advances the cursor by at most _MAX_BATCH_MESSAGES and
-        # the next enqueue continues, so one unbudgeted mega-prompt can never
-        # wedge the summarizer on the same batch forever.
-        to_cover = to_cover[:_MAX_BATCH_MESSAGES]
+            # First-ever pass: the SAME ordered, limited query via a sentinel
+            # cursor — a rowid-ordered initial batch would strand same-second
+            # rows whose uuid sorts below the first boundary (they would fall
+            # outside every later id-ordered window: silent LOSS, #446 r3).
+            sentinel = datetime(1970, 1, 1)
+            fetched = await messages_repo.list_for_session_after(
+                session_id,
+                after_created_at=sentinel,
+                after_message_id=UUID(int=0),
+                limit=fetch_limit,
+            )
+            uncovered = fetched
+        # BOUNDED batch (#446 r2 finding 5): each pass folds at most
+        # _MAX_BATCH_MESSAGES; a full fetch window means MORE rows exist
+        # beyond it, so nothing fetched belongs to the verbatim keep-tail and
+        # everything is coverable — the next enqueue continues the backlog.
+        if len(fetched) >= fetch_limit:
+            to_cover = uncovered[:_MAX_BATCH_MESSAGES]
+        else:
+            to_cover = uncovered[:-keep] if len(uncovered) > keep else []
+            to_cover = to_cover[:_MAX_BATCH_MESSAGES]
         if len(to_cover) < settings.chat_summary_min_batch:
             return "skipped_below_batch"
 
