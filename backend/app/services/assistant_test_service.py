@@ -257,6 +257,17 @@ class AssistantTestService:
                 request_id=self._request_id,
                 source_ip=self._source_ip,
                 default_max_tool_turns=self._settings.chat_max_tool_turns,
+                # HARDCODED 1 — never the configured cap (#412 / #433 review).
+                # This composition deliberately routes EVERY ``sessionmaker()``
+                # open to the ONE shared rollback-only session above, so the
+                # preview's writes and its uncommitted setup share a single
+                # transaction that rolls back atomically (AC-1). Fan-out would
+                # hand that same session to concurrent call scopes — racing
+                # one AsyncSession across workers — and per-call real sessions
+                # could not see the uncommitted setup anyway. Serial execution
+                # is a correctness requirement of the preview harness, not a
+                # tuning choice.
+                tool_concurrency=1,
                 context_config=ContextConfig(
                     fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
                     output_headroom_tokens=self._settings.context_output_headroom_tokens,

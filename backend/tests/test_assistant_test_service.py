@@ -466,3 +466,84 @@ async def test_test_run_is_audited(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -
     assert len(tested) == 1
     assert tested[0].resource_id == str(ctx.assistant_id)
     assert tested[0].actor_id == ctx.alice.user_id
+
+
+# --- #412/#433 blocker regression: the preview must never fan out -----------
+
+
+class _TwoSearchGateway:
+    """Requests TWO searches in one turn, then answers — the fan-out bait."""
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        msgs = list(messages)  # type: ignore[arg-type]
+        has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
+        if tool_choice == "none" or has_tool_result:
+            yield StreamEvent(text="The 2024 standard deduction is $14,600.")
+            yield StreamEvent(finish_reason="stop")
+        else:
+            yield StreamEvent(
+                tool_calls=(
+                    ToolCall(id="c1", name="search_text", arguments={"query": "a"}),
+                    ToolCall(id="c2", name="search_text", arguments={"query": "b"}),
+                ),
+                finish_reason="tool_calls",
+            )
+
+
+async def test_preview_with_two_reads_stays_on_the_one_rollback_session(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 round-2 blocker regression: the preview composition routes EVERY
+    ``sessionmaker()`` open to ONE shared rollback-only session, so the runtime
+    it builds MUST pin ``tool_concurrency=1`` — a fanned-out preview would race
+    concurrent call scopes over that single session. A two-read preview turn
+    must complete serially: exactly ONE session open (the runtime's own — zero
+    call scopes), both searches succeed, and nothing durable persists."""
+    captured: dict[str, object] = {}
+    opens = {"n": 0}
+    retrieval = _Retrieval(_passage(ctx))
+    real_cls = assistant_test_service.ChatRuntime
+
+    def _factory(**kwargs: object) -> object:
+        captured["tool_concurrency"] = kwargs.get("tool_concurrency")
+        inner = kwargs["sessionmaker"]
+
+        def counting() -> object:
+            opens["n"] += 1
+            return inner()  # type: ignore[operator]
+
+        kwargs["sessionmaker"] = counting
+        kwargs["gateway"] = _TwoSearchGateway()
+        kwargs["retrieval_factory"] = lambda _session: retrieval
+        return real_cls(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(assistant_test_service, "ChatRuntime", _factory)
+
+    async with ctx.sessionmaker() as session:
+        service = await _service(ctx, session, principal=ctx.alice)
+        trace = await service.run_test(ctx.assistant_id, input_text="deduction?")
+        await session.commit()
+
+    # The composition pinned the serial path — this is the invariant, not a
+    # tunable: fan-out over the shared rollback session would race it.
+    assert captured["tool_concurrency"] == 1
+    # Exactly one sessionmaker open: the runtime's own. Zero call scopes.
+    assert opens["n"] == 1
+    # Both reads ran (serially) and succeeded.
+    search_calls = [c for c in trace.tool_calls if c["tool"] == "search_text"]
+    assert len(search_calls) == 2
+    assert all(c["result"] is not None and c["result"]["ok"] is True for c in search_calls)
+    assert trace.succeeded is True
+    # The preview stayed non-durable: no chat sessions / messages persisted.
+    async with ctx.sessionmaker() as session:
+        assert await _count(session, models.ChatSession, ctx.tenant_a) == 0
+        assert await _count(session, models.Message, ctx.tenant_a) == 0

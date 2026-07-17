@@ -107,6 +107,7 @@ def _make_runner(
     allowed: frozenset[str],
     gate: Any | None = None,
     autonomy: AutonomyLevel = AutonomyLevel.ACT_AUTO,
+    extra_tools: dict[str, ToolDefinition] | None = None,
 ) -> tuple[ToolRunner, AuditEventRepository, ToolInvocationRepository]:
     audit_repo = AuditEventRepository(w.session, w.tenant_id)
     inv_repo = ToolInvocationRepository(w.session, w.tenant_id)
@@ -119,6 +120,7 @@ def _make_runner(
         source_ip="127.0.0.1",
         session_id=None,
         gate=gate,
+        extra_tools=extra_tools,
         autonomy=autonomy,
     )
     return r, audit_repo, inv_repo
@@ -528,6 +530,148 @@ async def test_success_writes_both_audit_events_and_a_trace_row(
 async def test_args_hash_is_order_independent() -> None:
     assert hash_args({"a": 1, "b": 2}) == hash_args({"b": 2, "a": 1})
     assert hash_args({"a": 1}) != hash_args({"a": 2})
+
+
+# --- #412: concurrent execution — dispatch ordinals + the persist lock ------
+
+
+async def test_preassigned_dispatch_ordinals_survive_out_of_order_completion(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0016 §5: the dispatcher claims ordinals in call order BEFORE fanning
+    out; the calls then complete in REVERSE (a release chain forces 2 → 1 → 0);
+    the persisted trace still orders by dispatch (ordinal == call index) and
+    every call has its row + both audit events — INV-6 gap-free under
+    parallelism, with the runner's persist lock serializing the flushes on the
+    one shared session."""
+    finished: list[int] = []
+    gates = [asyncio.Event() for _ in range(3)]
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+        i = int(args["call"])
+        await asyncio.wait_for(gates[i].wait(), timeout=2)
+        finished.append(i)
+        if i > 0:
+            gates[i - 1].set()
+        return ToolHandlerResult(content="ok", summary=f"call {i}")
+
+    _patch_tool(
+        monkeypatch,
+        ToolDefinition(
+            name="probe", description="d", json_schema={"type": "object"}, handler=handler
+        ),
+    )
+    r, audit_repo, _ = _make_runner(world, allowed=frozenset({"probe"}))
+
+    ordinals = [r.claim_ordinal() for _ in range(3)]
+    assert ordinals == [0, 1, 2]
+    tasks = [
+        asyncio.create_task(
+            r.run(
+                call=ToolCall(id=f"c{i}", name="probe", arguments={"call": i}),
+                context=_context(world),
+                ordinal=ordinals[i],
+            )
+        )
+        for i in range(3)
+    ]
+    gates[2].set()  # open the chain: 2 completes first, then 1, then 0
+    results = await asyncio.gather(*tasks)
+
+    assert finished == [2, 1, 0]  # completion order really was reversed…
+    assert all(res.ok for res in results)
+    invocations = await _all_invocations(world)
+    assert len(invocations) == 3
+    by_hash = {inv.args_hash: inv.ordinal for inv in invocations}
+    # …yet the trace orders by DISPATCH: ordinal == call index, not completion.
+    assert [by_hash[hash_args({"call": i})] for i in range(3)] == [0, 1, 2]
+    actions = await _audit_actions(audit_repo)
+    assert actions.count(AuditAction.TOOL_INVOKED.value) == 3
+    assert actions.count(AuditAction.TOOL_RESULT.value) == 3
+    # The append-only audit events were PHYSICALLY WRITTEN in dispatch order —
+    # the finalise drain admits ordinal N only after N-1 persisted, so the
+    # FULL interleave for the whole batch is invoked(0), result(0), invoked(1),
+    # result(1), invoked(2), result(2) despite the reversed completions. The
+    # explicit ``ORDER BY rowid`` pins SQLite's physical insertion order (an
+    # unordered SELECT guarantees nothing); each event also carries the
+    # ordinal + call id in metadata for off-sequence readers.
+    from sqlalchemy import select, text
+
+    from app.db import models
+
+    stmt = (
+        select(models.AuditEvent)
+        .where(models.AuditEvent.tenant_id == world.tenant_id)
+        .order_by(text("rowid"))
+    )
+    events = list((await world.session.execute(stmt)).scalars().all())
+    tool_events = [
+        e
+        for e in events
+        if e.action in (AuditAction.TOOL_INVOKED.value, AuditAction.TOOL_RESULT.value)
+    ]
+    assert [(e.action, e.event_metadata["ordinal"]) for e in tool_events] == [
+        (AuditAction.TOOL_INVOKED.value, 0),
+        (AuditAction.TOOL_RESULT.value, 0),
+        (AuditAction.TOOL_INVOKED.value, 1),
+        (AuditAction.TOOL_RESULT.value, 1),
+        (AuditAction.TOOL_INVOKED.value, 2),
+        (AuditAction.TOOL_RESULT.value, 2),
+    ]
+    assert [e.event_metadata["call_id"] for e in tool_events] == [
+        "c0",
+        "c0",
+        "c1",
+        "c1",
+        "c2",
+        "c2",
+    ]
+    # And the tool_invocations rows themselves landed in the same physical
+    # order (rowid follows dispatch, matching the ordinal column).
+    inv_stmt = (
+        select(models.ToolInvocation)
+        .where(models.ToolInvocation.tenant_id == world.tenant_id)
+        .order_by(text("rowid"))
+    )
+    inv_rows = list((await world.session.execute(inv_stmt)).scalars().all())
+    assert [r.ordinal for r in inv_rows] == [0, 1, 2]
+
+
+async def test_is_concurrency_safe_classifies_read_only_unknown_write_and_mcp(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The v1 partition rule (#412): a STATIC read-only tool joins the
+    concurrent batch; so does an UNKNOWN name (its denial runs no handler and
+    persists only through the ordered finalise). A side-effecting T1 / gated
+    T2 tool does not — nor does ANY dynamic ``extra_tools`` (MCP) tool, EVEN A
+    READ-ONLY T0 ONE (#433 round-2): its handler closes over runtime-session
+    collaborators a call scope cannot rebind. ``requires_call_scope`` gates
+    the session allocation the same way (plus the allow-list — a denial-only
+    call never costs a session)."""
+    _patch_tool(monkeypatch, _ok_tool("probe"))
+    read_only_mcp = _ok_tool("mcp:srv:lookup")  # T0, read_only=True — still excluded
+    r, _, _ = _make_runner(
+        world,
+        allowed=frozenset({"probe", "mcp:srv:lookup", "write_note"}),
+        extra_tools={
+            "mcp:srv:lookup": read_only_mcp,
+            "write_note": _t1_tool("write_note"),
+            "send_email": _gated_tool(),
+        },
+    )
+    assert r.is_concurrency_safe("probe") is True
+    assert r.is_concurrency_safe("does_not_exist") is True
+    assert r.is_concurrency_safe("write_note") is False
+    assert r.is_concurrency_safe("send_email") is False
+    # The read-only T0 MCP tool: allowed, resolvable, read_only — and STILL
+    # excluded from both fan-out and scope allocation (the closure hazard).
+    assert read_only_mcp.read_only is True
+    assert r.is_concurrency_safe("mcp:srv:lookup") is False
+    assert r.requires_call_scope("mcp:srv:lookup") is False
+    # Scope allocation: only static + allowed + read-only qualifies.
+    assert r.requires_call_scope("probe") is True
+    assert r.requires_call_scope("does_not_exist") is False
+    assert r.requires_call_scope("write_note") is False
 
 
 # --- helpers ----------------------------------------------------------------

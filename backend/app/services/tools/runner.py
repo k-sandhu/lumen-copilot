@@ -41,7 +41,8 @@ import enum
 import hashlib
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from itertools import count
 from uuid import UUID
 
@@ -72,6 +73,16 @@ from app.services.tools.types import (
 )
 
 log = get_logger(__name__)
+
+
+# The isolated call-scope factory a concurrent dispatcher passes into
+# :meth:`ToolRunner.run` (ADR-0016 §5, #412): each invocation yields the
+# per-call :class:`ToolContext` the handler executes against — its own
+# tenant-bound ``AsyncSession``-backed collaborators — and may bound the
+# dispatcher's concurrency (the runtime's factory acquires the batch semaphore
+# on enter). Entered only after governance passes; exited before the ordered
+# finalise persists.
+CallScopeFactory = Callable[[], AbstractAsyncContextManager[ToolContext]]
 
 
 class _AutonomyDecision(enum.Enum):
@@ -167,12 +178,91 @@ class ToolRunner:
         self._gate: ApprovalGate = gate or DenyAllApprovalGate()
         self._extra_tools: Mapping[str, ToolDefinition] = extra_tools or {}
         self._autonomy = autonomy
-        # Per-turn arrival counter (#397): a runner lives exactly one answer
-        # turn, so this is the per-message ordinal the trace orders by.
+        # Per-turn dispatch counter (#397, #412): a runner lives exactly one
+        # answer turn, so this is the per-message ordinal the trace orders by.
+        # Ordinals are claimed AT DISPATCH — the serial path claims at ``run``
+        # entry; a concurrent dispatcher preassigns per call, in dispatch
+        # order, via :meth:`claim_ordinal` before fanning out.
         self._ordinal = count()
+        # The serialized persistence coordinator (ADR-0016 §5, #412):
+        # ``_finalise`` writes (two audit events + the ``tool_invocations``
+        # row) flush on the runner's one DB session, which admits no concurrent
+        # operations — AND the ADR requires those writes to land in DISPATCH
+        # order, not completion order. The condition gates each finalise until
+        # every lower ordinal has persisted, so the physical write sequence of
+        # all three durable record types follows dispatch even when handlers
+        # complete out of order. Uncontended (zero overhead) on the serial
+        # path. Invariant: every claimed ordinal reaches ``_finalise`` or the
+        # whole batch aborts (the dispatcher cancels all siblings and the
+        # answer terminates) — an abandoned ordinal never leaves a live waiter.
+        self._persist_gate = asyncio.Condition()
+        self._next_persist_ordinal = 0
+
+    def claim_ordinal(self) -> int:
+        """Preassign the next dispatch ordinal (ADR-0016 §5, #412).
+
+        A concurrent dispatcher claims one ordinal per call, **in dispatch
+        order, before fanning out** — so the trace orders by dispatch even when
+        completions land out of order. Serial callers never need this:
+        :meth:`run` claims its own at entry when none is passed. Synchronous on
+        purpose — a mint can never interleave with another. Every claimed
+        ordinal must then be passed to exactly one :meth:`run` call (the
+        finalise drain persists strictly in ordinal order, so a claimed-but-
+        never-run ordinal would stall its successors; the dispatcher's
+        abort-the-batch error path upholds this).
+        """
+        return next(self._ordinal)
+
+    def is_concurrency_safe(self, name: str) -> bool:
+        """Whether ``name`` may join the turn's concurrent read-only batch (#412).
+
+        True for a **static registry** read-only tool (structurally T0 and
+        never approval-gated, per :class:`ToolDefinition`'s construction
+        checks) and for an **unresolvable** name (its denial executes no
+        handler, allocates no call scope — see :meth:`requires_call_scope` —
+        and persists only through the ordered finalise drain). False for:
+
+        * any side-effecting or gated tool — the v1 executor runs those
+          serially *after* the read-only batch (ADR-0016 §5 conservatism), on
+          the runtime's own context, where the approval gate's DB reads stay
+          single-writer; and
+        * ANY dynamic ``extra_tools`` (MCP) tool, read-only or not — an MCP
+          handler is a closure over the per-run client whose auth resolver and
+          ``secret.accessed`` audit are bound to the RUNTIME session, which a
+          per-call scope cannot rebind. Fanning those out would race the
+          shared session outside the persistence coordinator (and a raced
+          secret read degrades to an anonymous outbound call). MCP fan-out
+          needs per-call re-resolution (a full ADR-0016 §5 call-scope for the
+          MCP seam) — deferred, tracked with the #427 amendments.
+        """
+        if name in self._extra_tools:
+            return False
+        definition = self._resolve(name)
+        return definition is None or definition.read_only
+
+    def requires_call_scope(self, name: str) -> bool:
+        """Whether a concurrent call actually needs an isolated call scope (#412).
+
+        Only a call that can reach **handler execution** needs one — a static,
+        read-only tool that is on this run's allow-list. A denial-only call
+        (unresolvable, or off the allow-list) never executes a handler and
+        persists only through the coordinator, so opening a DB session for it
+        would spend pool capacity on a refusal — under pool pressure that would
+        turn a typed, audited denial into an infrastructure failure.
+        """
+        if name in self._extra_tools:
+            return False
+        definition = self._resolve(name)
+        return definition is not None and definition.read_only and name in self._allowed
 
     async def run(
-        self, *, call: ToolCall, context: ToolContext, message_id: UUID | None = None
+        self,
+        *,
+        call: ToolCall,
+        context: ToolContext,
+        message_id: UUID | None = None,
+        ordinal: int | None = None,
+        scope: CallScopeFactory | None = None,
     ) -> ToolResult:
         """Invoke ``call`` through the governed path; always return a :class:`ToolResult`.
 
@@ -180,7 +270,26 @@ class ToolRunner:
         tool is an ``ok=False`` result the model reads and the run recovers from).
         Emits ``tool.invoked`` before and ``tool.result`` after, and writes one
         ``tool_invocations`` row — for every outcome (AC-4/INV-6).
+
+        ``ordinal`` is the call's trace dispatch ordinal (#412): ``None`` (the
+        serial path, unchanged) claims the next one here at entry; a concurrent
+        dispatcher preassigns them in dispatch order via :meth:`claim_ordinal`
+        BEFORE fanning out, so the trace orders by dispatch even when
+        completions land out of order (ADR-0016 §5).
+
+        ``scope`` is the optional **isolated call-scope factory** (ADR-0016 §5,
+        #412): an async context manager yielding the per-call
+        :class:`ToolContext` a concurrent handler executes against (its own
+        tenant-bound session + collaborators). Governance (resolve → allow-list
+        → autonomy → approval) runs FIRST, on the base ``context``'s identity —
+        a denial never opens the scope, so a refused call costs no session.
+        The scope closes as soon as the handler returns, BEFORE the ordered
+        finalise below — a completed call never holds its session (or the
+        dispatcher's concurrency slot, which the factory may bound) while
+        waiting its turn to persist.
         """
+        if ordinal is None:
+            ordinal = self.claim_ordinal()
         args_hash = hash_args(call.arguments)
         started = time.monotonic()
 
@@ -197,6 +306,7 @@ class ToolRunner:
                 call=call,
                 args_hash=args_hash,
                 message_id=message_id,
+                ordinal=ordinal,
                 result=ToolResult.failure(
                     call_id=call.id,
                     name=call.name,
@@ -212,6 +322,7 @@ class ToolRunner:
                 call=call,
                 args_hash=args_hash,
                 message_id=message_id,
+                ordinal=ordinal,
                 result=ToolResult.failure(
                     call_id=call.id,
                     name=call.name,
@@ -244,6 +355,7 @@ class ToolRunner:
                     call=call,
                     args_hash=args_hash,
                     message_id=message_id,
+                    ordinal=ordinal,
                     result=ToolResult.failure(
                         call_id=call.id,
                         name=call.name,
@@ -281,6 +393,7 @@ class ToolRunner:
                     call=call,
                     args_hash=args_hash,
                     message_id=message_id,
+                    ordinal=ordinal,
                     result=ToolResult.failure(
                         call_id=call.id,
                         name=call.name,
@@ -296,13 +409,20 @@ class ToolRunner:
                 )
 
         # (5) Bounded execute (AC-5). A raised/timed-out handler becomes an
-        # ok=False result — the stream never crashes.
-        result = await self._execute(definition, call, context, started)
+        # ok=False result — the stream never crashes. A concurrent call enters
+        # its isolated scope ONLY here — after every governance gate passed —
+        # and leaves it before the finalise drain (#412).
+        if scope is None:
+            result = await self._execute(definition, call, context, started)
+        else:
+            async with scope() as scoped_context:
+                result = await self._execute(definition, call, scoped_context, started)
         outcome = AuditOutcome.ALLOWED if result.ok else AuditOutcome.ERROR
         return await self._finalise(
             call=call,
             args_hash=args_hash,
             message_id=message_id,
+            ordinal=ordinal,
             result=result,
             outcome=outcome,
         )
@@ -382,6 +502,7 @@ class ToolRunner:
         call: ToolCall,
         args_hash: str,
         message_id: UUID | None,
+        ordinal: int,
         result: ToolResult,
         outcome: AuditOutcome,
     ) -> ToolResult:
@@ -390,48 +511,68 @@ class ToolRunner:
         Runs for **every** outcome — success, denial, or failure — so INV-6 holds:
         an invocation with no emitted audit event or no trace row is impossible
         because this is the one exit through which every result returns.
+
+        The ADR-0016 §5 **serialized persistence coordinator** (#412): the
+        writes flush on the runner's one DB session (which admits no concurrent
+        operations) AND must land in **dispatch order** — the append-only audit
+        events carry no ordering column of their own, so their physical write
+        sequence is the record. The condition gates each finalise until every
+        lower ordinal has persisted; completions may land in any order, the
+        writes never do. Both audit events also carry the ordinal in metadata,
+        so dispatch order stays reconstructible even off-sequence readers.
+        The ``finally`` advances the drain even when a write raises — the
+        exception still propagates (the answer dies with a terminal), but a
+        sibling finalise is never left waiting on a wedged ordinal.
         """
         metadata = {
             "tool": call.name,
             "call_id": call.id,
             "args_hash": args_hash,
             "ok": result.ok,
+            "ordinal": ordinal,
             **({"error": result.error} if result.error else {}),
         }
-        await self._audit.emit(
-            action=AuditAction.TOOL_INVOKED,
-            actor=self._actor,
-            resource_type="tool",
-            resource_id=call.name,
-            outcome=outcome,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata=metadata,
-        )
-        await self._audit.emit(
-            action=AuditAction.TOOL_RESULT,
-            actor=self._actor,
-            resource_type="tool",
-            resource_id=call.name,
-            outcome=outcome,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={**metadata, "duration_ms": result.duration_ms},
-        )
-        await self._invocations.record(
-            tool_name=call.name,
-            args_hash=args_hash,
-            ok=result.ok,
-            duration_ms=result.duration_ms,
-            session_id=self._session_id,
-            message_id=message_id,
-            error=result.error,
-            # The handler's user-safe result line ("3 passages", "13 documents")
-            # persists so the thread trace can say what the tool returned (#377).
-            # Bounded by the repository; never raw args/payloads.
-            result_summary=result.summary,
-            ordinal=next(self._ordinal),
-        )
+        async with self._persist_gate:
+            await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)
+            try:
+                await self._audit.emit(
+                    action=AuditAction.TOOL_INVOKED,
+                    actor=self._actor,
+                    resource_type="tool",
+                    resource_id=call.name,
+                    outcome=outcome,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata=metadata,
+                )
+                await self._audit.emit(
+                    action=AuditAction.TOOL_RESULT,
+                    actor=self._actor,
+                    resource_type="tool",
+                    resource_id=call.name,
+                    outcome=outcome,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata={**metadata, "duration_ms": result.duration_ms},
+                )
+                await self._invocations.record(
+                    tool_name=call.name,
+                    args_hash=args_hash,
+                    ok=result.ok,
+                    duration_ms=result.duration_ms,
+                    session_id=self._session_id,
+                    message_id=message_id,
+                    error=result.error,
+                    # The handler's user-safe result line ("3 passages", "13
+                    # documents") persists so the thread trace can say what the
+                    # tool returned (#377). Bounded by the repository; never
+                    # raw args/payloads.
+                    result_summary=result.summary,
+                    ordinal=ordinal,
+                )
+            finally:
+                self._next_persist_ordinal += 1
+                self._persist_gate.notify_all()
         return result
 
 
@@ -469,4 +610,4 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-__all__ = ["ToolRunner", "hash_args"]
+__all__ = ["CallScopeFactory", "ToolRunner", "hash_args"]

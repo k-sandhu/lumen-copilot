@@ -189,3 +189,16 @@ def test_context_compaction_knobs_accept_valid() -> None:
     )
     assert s.context_compaction_digest_chars == 800
     assert s.context_compaction_chunk_size == 2
+
+
+def test_chat_tool_concurrency_defaults_and_rejects_out_of_range() -> None:
+    """#412: the per-turn concurrent tool-call cap defaults to 4 and is
+    validated to [1, 16] — zero would deadlock the batch semaphore, an
+    unbounded value could exhaust the engine pool; both fail at startup."""
+    assert Settings(_env_file=None, **_BASE).chat_tool_concurrency == 4
+    assert Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=2).chat_tool_concurrency == 2
+    assert Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=16).chat_tool_concurrency == 16
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=17)

@@ -48,8 +48,9 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -143,6 +144,15 @@ McpToolsFactory = Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]
 # configured default is injected (offline tests); the API always passes the
 # configured value, which a tenant admin may override per tenant (issue #148).
 _DEFAULT_MAX_TOOL_TURNS = 20
+# How many of one turn's read-only tool calls may execute at once (#412,
+# ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB
+# session (the scope closes before the call queues to persist), so the cap
+# bounds the per-answer draw on the engine pool (the default pool is 5 +
+# overflow; 4 executing scopes + the runtime session fit inside it). A value
+# of 1 disables fan-out entirely — the genuinely serial pre-#412 path.
+# Mirrors ``Settings.chat_tool_concurrency`` (validated [1, 16] there); this
+# constant is the offline/test default.
+_DEFAULT_TOOL_CONCURRENCY = 4
 # The per-search passage budget now comes from the context assembler
 # (``ContextBudget.retrieval_k``, ADR-0016 §1 / #410): the historical default of
 # 6 when the window is roomy, fewer when it is tight — so the knob is derived
@@ -231,6 +241,7 @@ class ChatRuntime:
         request_id: str,
         source_ip: str,
         default_max_tool_turns: int = _DEFAULT_MAX_TOOL_TURNS,
+        tool_concurrency: int = _DEFAULT_TOOL_CONCURRENCY,
         context_config: ContextConfig | None = None,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
@@ -250,6 +261,9 @@ class ChatRuntime:
         # System default tool-turn budget (``Settings.chat_max_tool_turns``); a
         # tenant's ``max_tool_turns`` override beats it when set (issue #148).
         self._default_max_tool_turns = default_max_tool_turns
+        # The per-turn concurrent tool-call cap (#412, ADR-0016 §5) — bounds the
+        # read-only batch's parallelism AND its per-answer session draw.
+        self._tool_concurrency = tool_concurrency
         # The context-assembler budget knobs (ADR-0016 §1, issue #410): the
         # unknown-model fallback window + the output headroom. Injectable so the
         # API wires ``Settings``; defaults (module constants) keep offline tests
@@ -742,16 +756,20 @@ class ChatRuntime:
             messages.append(
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
-            for call in turn_tool_calls:
-                result = await self._run_one_tool(
-                    state=state,
-                    runner=runner,
-                    audit=audit,
-                    context=tool_context,
-                    call=call,
-                    message_id=assistant_message_id,
-                )
+            results = await self._run_tool_batch(
+                state=state,
+                runner=runner,
+                audit=audit,
+                context=tool_context,
+                calls=turn_tool_calls,
+                message_id=assistant_message_id,
+            )
+            for call, result in zip(turn_tool_calls, results, strict=True):
                 total_hits += result.hit_count
+                # Transcript messages append in ORIGINAL call order (#412) —
+                # the provider protocol pairs each tool reply to its request,
+                # and a deterministic order keeps the prompt prefix stable for
+                # caching (ADR-0016 §2) regardless of completion order.
                 messages.append(
                     ChatMessage(
                         role=Role.TOOL,
@@ -1141,26 +1159,145 @@ class ChatRuntime:
                     state, envelopes.delta(state.stream_id, state.next_seq(), {"text": chunk})
                 )
 
-    async def _run_one_tool(
+    async def _run_tool_batch(
         self,
         *,
         state: _StreamState,
         runner: ToolRunner,
         audit: AuditSink,
         context: ToolContext,
-        call: ToolCall,
+        calls: Sequence[ToolCall],
         message_id: UUID,
-    ) -> ToolResult:
-        """Surface a tool_call event, run the call through the governed runner, emit its result.
+    ) -> list[ToolResult]:
+        """Run one turn's tool calls — read-only concurrently, the rest serially after.
 
-        The runner is the single governance chokepoint (issue #207): it enforces
-        the allow-list + approval seam, bounds the call, records the
-        ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result`` — so
-        an off-list / unapproved / failing tool returns an ``ok=False`` result the
-        model reads, and the stream never crashes (AC-2/3/5, INV-6). This method
-        only renders the WS trace envelopes and layers the retrieval-specific
-        ``retrieval.query`` audit on top for tools that returned passages/documents.
+        The concurrent executor (ADR-0016 §5, issue #412). The runner stays the
+        single governance chokepoint for every call (allow-list → autonomy →
+        approval → bounded execute → ordered audit + trace row, issue #207);
+        this method owns only the *scheduling* around it:
+
+        * The **fan-out set** is the static read-only calls plus unresolvable
+          names (:meth:`ToolRunner.is_concurrency_safe`) — engaged only when it
+          has 2+ members AND ``tool_concurrency`` > 1. Its ``tool_call`` events
+          emit together at fan-out (dispatch, call order — the client sees the
+          batch's plan immediately); its ordinals are claimed at that same
+          moment, in call order. Each ``tool_result`` event emits when its
+          call's ``run`` returns — which, because the runner's finalise drain
+          persists in dispatch order, is also dispatch order: a result is
+          never visible on the wire before its audit + trace row are written,
+          even though the HANDLERS overlap freely and may complete in any
+          order (the batch still takes ~max of the individual latencies).
+        * Each fanned-out call that can actually reach handler execution
+          (:meth:`ToolRunner.requires_call_scope`) gets an **isolated call
+          scope**, entered by the runner only after governance passes: the
+          batch semaphore slot, its own ``AsyncSession`` (tenant-bound via
+          :func:`bind_tenant`, RLS-armed), its own ``RetrievalService``; the
+          write seams (``artifacts``/``sandbox``) are stripped — a read-only
+          tool has no business with them, and both are bound to the runtime
+          session. The scope closes before the runner's ordered finalise, so a
+          completed call holds neither its session nor its slot while waiting
+          to persist. A denial-only call (unknown / off-list) fans out
+          scopeless — a refusal never costs a pool connection.
+        * Everything else — side-effecting (T1+) and ALL dynamic MCP tools (v1
+          conservatism, ADR-0016 §5; their handlers close over runtime-session
+          collaborators), plus every call when the fan-out set is too small or
+          the cap is 1 — runs in the **serial form**, in call order, exactly
+          the pre-#412 shape: ``tool_call`` at its own dispatch → govern +
+          execute on the runtime context → ``retrieval.query`` audit →
+          ``tool_result``. Ordinals claim at each run's entry, so the trace's
+          dispatch order is the true execution order (fan-out first, then the
+          serial tail).
+        * For fanned-out retrieval calls the ``retrieval.query`` audit emits
+          after the whole fan-out completes (call order): it rides the runtime
+          session, and only then is that session guaranteed single-writer
+          again. Under a mid-batch abort these audits are skipped along with
+          the answer — the whole answer transaction rolls back atomically
+          (pre-#412 semantics: a cancelled answer persists nothing).
+
+        Every publish here happens in THIS coroutine — never in a worker — so
+        the stream's ``seq`` mint + publish stay atomic and the wire order
+        stays monotonic without a lock.
         """
+        safe = [i for i, c in enumerate(calls) if runner.is_concurrency_safe(c.name)]
+        fan_out = safe if self._tool_concurrency > 1 and len(safe) > 1 else []
+        fanned = set(fan_out)
+        serial_form = [i for i in range(len(calls)) if i not in fanned]
+        done: dict[int, ToolResult] = {}
+
+        if fan_out:
+            for i in fan_out:
+                await self._publish_tool_call(state, calls[i])
+            ordinals = {i: runner.claim_ordinal() for i in fan_out}
+            semaphore = asyncio.Semaphore(self._tool_concurrency)
+            tenant_id = self._principal.tenant_id
+
+            @asynccontextmanager
+            async def _call_scope() -> AsyncIterator[ToolContext]:
+                # The isolated call scope (ADR-0016 §5): the semaphore bounds
+                # how many scopes — and so how many extra pool connections —
+                # exist at once per answer; the session closes (rolling back
+                # the read transaction) when the handler returns.
+                async with semaphore, self._sessionmaker() as call_session:
+                    await bind_tenant(call_session, tenant_id)
+                    yield replace(
+                        context,
+                        retrieval=self._retrieval_factory(call_session),
+                        artifacts=None,
+                        sandbox=None,
+                    )
+
+            async def _worker(i: int) -> tuple[int, ToolResult]:
+                call = calls[i]
+                scope = _call_scope if runner.requires_call_scope(call.name) else None
+                return i, await runner.run(
+                    call=call,
+                    context=context,
+                    message_id=message_id,
+                    ordinal=ordinals[i],
+                    scope=scope,
+                )
+
+            tasks = [asyncio.create_task(_worker(i)) for i in fan_out]
+            try:
+                for fut in asyncio.as_completed(tasks):
+                    i, result = await fut
+                    done[i] = result
+                    await self._publish_tool_result(state, calls[i], result)
+            except BaseException:
+                # A worker raised something the runner does not absorb
+                # (cancellation, or an infrastructure fault like a failed
+                # session open). Reap the siblings before propagating so no
+                # orphaned task outlives the stream, then let ``run`` map the
+                # raise to the terminal envelope exactly as the serial path
+                # did. The answer transaction rolls back as a whole (nothing
+                # half-persists), upholding the runner's claimed-ordinal
+                # invariant — no finalise waiter survives the abort.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            # The fanned-out retrieval audits (call order), now that the
+            # runtime session is single-writer again.
+            for i in fan_out:
+                if _is_retrieval_call(calls[i]):
+                    await self._audit_retrieval(audit=audit, call=calls[i], result=done[i])
+
+        # The serial form — the pre-#412 per-call shape, byte-for-byte:
+        # dispatch event → govern + execute (runtime context, no extra
+        # session) → retrieval audit → result event.
+        for i in serial_form:
+            call = calls[i]
+            await self._publish_tool_call(state, call)
+            result = await runner.run(call=call, context=context, message_id=message_id)
+            done[i] = result
+            if _is_retrieval_call(call):
+                await self._audit_retrieval(audit=audit, call=call, result=result)
+            await self._publish_tool_result(state, call, result)
+
+        return [done[i] for i in range(len(calls))]
+
+    async def _publish_tool_call(self, state: _StreamState, call: ToolCall) -> None:
+        """Surface one requested call on the stream (the dispatch half of the trace)."""
         await self._publish(
             state,
             envelopes.event(
@@ -1170,12 +1307,11 @@ class ChatRuntime:
                 data={"callId": call.id, "tool": call.name, "args": call.arguments},
             ),
         )
-        result = await runner.run(call=call, context=context, message_id=message_id)
-        # A retrieval tool additionally emits the retrieval-semantics audit event
-        # (query hash + document ids + hit count, spec 0004 §2.4). The generic
-        # ``tool.invoked``/``tool.result`` events the runner emits are additive.
-        if _is_retrieval_call(call):
-            await self._audit_retrieval(audit=audit, call=call, result=result)
+
+    async def _publish_tool_result(
+        self, state: _StreamState, call: ToolCall, result: ToolResult
+    ) -> None:
+        """Surface one completed call's outcome on the stream (correlated by ``callId``)."""
         await self._publish(
             state,
             envelopes.event(
@@ -1192,7 +1328,6 @@ class ChatRuntime:
                 },
             ),
         )
-        return result
 
     # --- persistence + audit ------------------------------------------------
 
