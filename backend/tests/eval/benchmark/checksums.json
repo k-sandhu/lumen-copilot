@@ -11,9 +11,17 @@
     "sha256": "d50e518334b163d1d9da18885a123a9ae7097a015b6a0f71a15d929a8129f196",
     "size_bytes": 14190902
   },
+  "berkshire-2022-letter": {
+    "sha256": "a99f263003295b177e8c50ec34f2307093857a357276527e98d5a6205e21a908",
+    "size_bytes": 55589
+  },
   "berkshire-2023-letter": {
     "sha256": "829169be21f4ce05202720fe5645cc1b9a5b1ae20bf5e6ebaff987349766eafd",
     "size_bytes": 122415
+  },
+  "bis-basel3-finalisation": {
+    "sha256": "32afd37cade34f8439bdc16f606d5520d4612b7339ef1cf8c44ebb706df6bac4",
+    "size_bytes": 3053985
   },
   "census-county-population": {
     "sha256": "18ed5f28af2119dfb9fe1e2a70436e6c6d3da2c6573a6c40fc00e05e03632563",
@@ -31,9 +39,17 @@
     "sha256": "c3e04155c3b32f170d3fa5a67749052c095b6f56a7630f499a28d6171e2f40cb",
     "size_bytes": 31959786
   },
+  "copyright-circular-1": {
+    "sha256": "a37450360b4b440cb10ccfd9ce37cb92ea8193884c5700948df942aa1c62920f",
+    "size_bytes": 111322
+  },
   "ecma-404-json": {
     "sha256": "760a6f77c38172f4de333412292eaed092f33852592ca0cce9b7535a6e415fcf",
     "size_bytes": 639695
+  },
+  "eurlex-gdpr": {
+    "sha256": "bd84e63f5b622b739a83389afc3b30d240f792bb88d8eb03a816c9a82b0c2499",
+    "size_bytes": 982296
   },
   "example-homepage-html": {
     "sha256": "ff67a9d764d6a2367a187734e697f6a53217db9a21c101d410a113ca871a299d",
@@ -43,6 +59,10 @@
     "sha256": "c8f4a2e78fff720c814b7c8fc73e02814ca96b81a5ec93098bb07cb9deee4aba",
     "size_bytes": 24204
   },
+  "fda-lipitor-label": {
+    "sha256": "363f2a9ca6a2e193bc53d05900b9b161e6198bef64a732fa26f2f73b39c9e997",
+    "size_bytes": 2206436
+  },
   "fda-metformin-label": {
     "sha256": "5f0b2e09be4870579fa699821f6cf138a25ecf1dfe390efe1af1204c85dee8d3",
     "size_bytes": 1159832
@@ -50,6 +70,10 @@
   "gutenberg-faust-de": {
     "sha256": "fed2a58edd6910ee96d27ada614d34bcc41f03750d86541c41246bb74c564ff7",
     "size_bytes": 218440
+  },
+  "gutenberg-federalist-papers": {
+    "sha256": "0b92fadc9d7afd767eefd27805a20e44417ff26d1fb2f964229f39dcc7b2a65d",
+    "size_bytes": 1186849
   },
   "gutenberg-moby-dick": {
     "sha256": "9a6844ac0703853720010787c7b6c70b0020f1ab1862dcd74452fa46474d1215",
@@ -67,6 +91,10 @@
     "sha256": "3cf4b3d44ee14cff4e14e78e2ad3318eff76f3f7f2afc3cee6bb925879110a37",
     "size_bytes": 5638480
   },
+  "gutenberg-us-constitution": {
+    "sha256": "d177168e3f4898213dced30fbbe60d74ad08e884ed5dd86bff94a1b8836b5982",
+    "size_bytes": 48326
+  },
   "intel-sdm-vol1": {
     "sha256": "7aca6a3e847520c4a1b2f1230da74ae3837757bc49288f5c895a6b003371d051",
     "size_bytes": 3190742
@@ -82,6 +110,10 @@
   "irs-1040-instructions-2024": {
     "sha256": "0ae53ed5020d69e6571d40cd7955b7735f44a28df483626d128628d2810e93d4",
     "size_bytes": 4375877
+  },
+  "irs-1040-instructions-current": {
+    "sha256": "482e9c487c608f1bbeaceef35bc3c0933e8b35443cfff447e4279d590468364a",
+    "size_bytes": 4434643
   },
   "irs-form-1040-1913": {
     "sha256": "7bb00943803f5cecc34782145cd75dfd8feaa07a1c4daadeab2689f0980f810b",

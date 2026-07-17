@@ -76,6 +76,12 @@ class CorpusFile:
     expected_ingest: ExpectedIngest = "ok"
     text_quality: TextQuality = "good"
     smoke: bool = False
+    # Rolling entries (#443) point at a source's *current* alias (e.g. the IRS
+    # current-year instructions) and are refreshed on demand: their checksum pin
+    # is informational (last-seen), a changed upstream is expected rather than a
+    # failure, and benchmark questions may never cite them (grounding stays on
+    # immutable files only — enforced in bank/manifest validation).
+    rolling: bool = False
     notes: str = ""
 
 
@@ -474,6 +480,101 @@ CORPUS: tuple[CorpusFile, ...] = (
         domain="statistics",
         description="~3k-row workbook — the larger spreadsheet extraction case.",
     ),
+    # --- Industry-pack additions (#443) ---------------------------------------
+    # Files added to give the healthcare / financial / legal packs real
+    # substance (see packs.py for the research-backed pack definitions).
+    CorpusFile(
+        file_id="fda-lipitor-label",
+        filename="fda-lipitor-prescribing-information.pdf",
+        url="https://www.accessdata.fda.gov/drugsatfda_docs/label/2019/020702s073lbl.pdf",
+        mime_type=_PDF,
+        source="FDA (Drugs@FDA) — Lipitor (atorvastatin calcium) prescribing information",
+        license="Public domain (US federal government work / approved labeling)",
+        domain="pharmaceutical",
+        description="Second drug label: dosing, interactions, trial tables — pairs "
+        "with the metformin label for within-domain retrieval discrimination.",
+    ),
+    CorpusFile(
+        file_id="berkshire-2022-letter",
+        filename="berkshire-2022-shareholder-letter.pdf",
+        url="https://www.berkshirehathaway.com/letters/2022ltr.pdf",
+        mime_type=_PDF,
+        source="Berkshire Hathaway — Warren Buffett's 2022 letter to shareholders",
+        license="© Berkshire Hathaway; public investor-relations document (local "
+        "benchmarking use only)",
+        domain="finance",
+        description="Prior-year letter — year-over-year pair with the 2023 letter.",
+    ),
+    CorpusFile(
+        file_id="bis-basel3-finalisation",
+        filename="bis-basel3-finalisation.pdf",
+        url="https://www.bis.org/bcbs/publ/d424.pdf",
+        mime_type=_PDF,
+        source="Bank for International Settlements — Basel III: Finalising "
+        "post-crisis reforms (d424)",
+        license="© BIS; reproduction/translation permitted with attribution",
+        domain="finance",
+        description="Banking regulation: capital-requirement rules and ratios — the "
+        "regulatory backbone financial-services teams query.",
+    ),
+    CorpusFile(
+        file_id="eurlex-gdpr",
+        filename="eu-gdpr-regulation-2016-679.pdf",
+        url="https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:32016R0679",
+        mime_type=_PDF,
+        source="EUR-Lex — Regulation (EU) 2016/679 (GDPR), English PDF",
+        license="© European Union; reuse permitted (Commission Decision 2011/833/EU)",
+        domain="legal",
+        description="The privacy regulation legal/compliance teams query daily: "
+        "articles, recitals, defined terms.",
+    ),
+    CorpusFile(
+        file_id="copyright-circular-1",
+        filename="us-copyright-circular-1.pdf",
+        url="https://www.copyright.gov/circs/circ01.pdf",
+        mime_type=_PDF,
+        source="US Copyright Office — Circular 1: Copyright Basics",
+        license="Public domain (US federal government work)",
+        domain="legal",
+        description="Plain-language legal guidance: registration, duration, fair use.",
+    ),
+    CorpusFile(
+        file_id="gutenberg-us-constitution",
+        filename="us-constitution.txt",
+        url="https://www.gutenberg.org/cache/epub/5/pg5.txt",
+        mime_type=_TXT,
+        source="Project Gutenberg #5 — The United States Constitution",
+        license="Public domain; Project Gutenberg License for the trademark",
+        domain="legal",
+        description="Foundational legal text: articles and amendments.",
+    ),
+    CorpusFile(
+        file_id="gutenberg-federalist-papers",
+        filename="federalist-papers.txt",
+        url="https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+        mime_type=_TXT,
+        source="Project Gutenberg #1404 — The Federalist Papers",
+        license="Public domain; Project Gutenberg License for the trademark",
+        domain="legal",
+        description="85 essays of constitutional interpretation — long-form legal "
+        "argumentation to retrieve across.",
+    ),
+    # --- Rolling entries (#443): refresh-on-demand aliases --------------------
+    CorpusFile(
+        file_id="irs-1040-instructions-current",
+        filename="irs-form-1040-instructions-current.pdf",
+        url="https://www.irs.gov/pub/irs-pdf/i1040gi.pdf",
+        mime_type=_PDF,
+        source="IRS — Form 1040 instructions, CURRENT tax year (rolling alias)",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="The current-year instructions alias the IRS re-publishes "
+        "annually — the refresh-on-demand case (loader --refresh).",
+        rolling=True,
+        notes="Deliberately unpinnable: the URL's content changes every filing "
+        "season. The pinned prior-year archive entry stays the benchmark's "
+        "immutable ground truth; no questions may cite this file.",
+    ),
     # --- Deliberate negatives (formats outside the upload allowlist) ----------
     CorpusFile(
         file_id="census-state-population-csv",
@@ -609,6 +710,16 @@ def manifest_issues(corpus: tuple[CorpusFile, ...] = CORPUS) -> list[ManifestIss
             )
         if entry.smoke and entry.expected_ingest != "ok":
             issues.append(ManifestIssue(entry.file_id, "smoke subset must be ingestable"))
+        if entry.rolling and entry.expected_ingest != "ok":
+            issues.append(ManifestIssue(entry.file_id, "a rolling entry must be ingestable"))
+        if entry.rolling and entry.smoke:
+            issues.append(
+                ManifestIssue(
+                    entry.file_id,
+                    "a rolling entry cannot be in the smoke subset (smoke feeds the "
+                    "pinned-grounding eval harness)",
+                )
+            )
     for mime in _REQUIRED_MIME_COVERAGE:
         ok_entries = [e for e in corpus if e.mime_type == mime and e.expected_ingest == "ok"]
         if not ok_entries:

@@ -327,6 +327,7 @@ def bank_issues(
     """Validate the whole bank offline (no downloaded corpus required)."""
     ok_ids = {e.file_id for e in corpus if e.expected_ingest == "ok"}
     good_ids = {e.file_id for e in corpus if e.expected_ingest == "ok" and e.text_quality == "good"}
+    rolling_ids = {e.file_id for e in corpus if e.rolling}
     issues: list[BankIssue] = []
 
     seen_qids: set[str] = set()
@@ -340,6 +341,17 @@ def bank_issues(
             issues.append(BankIssue(q.qid, "duplicate question text"))
         seen_questions.add(normalized_question)
         issues.extend(_validate_one(q, ok_ids, good_ids))
+        # Rolling files (#443) refresh on demand — a question grounded in one
+        # would silently break on refresh, so citing them is a validation error.
+        for ev in q.evidence:
+            if ev.file_id in rolling_ids:
+                issues.append(
+                    BankIssue(
+                        q.qid,
+                        f"evidence cites rolling file {ev.file_id!r} — "
+                        "questions must ground in immutable (pinned) files",
+                    )
+                )
 
     counts = Counter(q.category for q in questions)
     for category, minimum in _MIN_PER_CATEGORY.items():

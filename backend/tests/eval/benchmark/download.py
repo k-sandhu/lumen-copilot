@@ -129,9 +129,15 @@ def _process_entry(
     dest = dest_dir / entry.filename
     pin = pins.get(entry.file_id)
 
-    # Cached-and-verified short-circuit (the idempotency contract).
+    # Cached-and-verified short-circuit (the idempotency contract). A rolling
+    # entry (#443) short-circuits on ANY cached bytes — its content is allowed
+    # to drift; ``force`` (the loader's --refresh) re-fetches it.
     if dest.exists() and not force:
         observed = _sha256_of(dest)
+        if entry.rolling:
+            return FetchResult(
+                entry, "cached", "rolling entry cached (refresh with --force)", observed
+            )
         if pin is not None and observed == pin:
             return FetchResult(entry, "cached", "already downloaded, checksum verified", observed)
         if pin_mode:
@@ -148,6 +154,18 @@ def _process_entry(
     except RuntimeError as exc:
         return FetchResult(entry, "FAILED", str(exc))
 
+    if entry.rolling:
+        # Rolling entries always record their last-seen identity; a change from
+        # the previous pin is the expected refresh, never a failure.
+        changed = pin is not None and observed != pin
+        pins[entry.file_id] = observed
+        return FetchResult(
+            entry,
+            "rolled" if changed else ("pinned" if pin_mode or pin is None else "ok"),
+            f"rolling entry fetched ({observed.size_bytes:,} B"
+            + (", content changed since last seen)" if changed else ")"),
+            observed,
+        )
     if pin_mode:
         pins[entry.file_id] = observed
         return FetchResult(entry, "pinned", f"downloaded and pinned ({observed.size_bytes:,} B)")

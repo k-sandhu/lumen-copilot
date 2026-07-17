@@ -66,7 +66,12 @@ def offline_findings() -> list[Finding]:
     for entry in CORPUS:
         pin = pins.get(entry.file_id)
         if pin is None:
-            findings.append(Finding("pins", entry.file_id, "no checksum pin (run download --pin)"))
+            # Rolling entries (#443) are refresh-on-demand: their pin is a
+            # last-seen record, not a requirement.
+            if not entry.rolling:
+                findings.append(
+                    Finding("pins", entry.file_id, "no checksum pin (run download --pin)")
+                )
         elif len(pin.sha256) != 64:
             findings.append(Finding("pins", entry.file_id, "malformed sha256 pin"))
     for pinned_id in pins:
@@ -115,7 +120,9 @@ def corpus_findings(*, check_hashes: bool = True) -> list[Finding]:
             continue
         pin = pins.get(entry.file_id)
         if pin is None:
-            continue  # already reported offline
+            continue  # already reported offline (or rolling with no pin yet)
+        if entry.rolling:
+            continue  # rolling content is expected to drift from its last-seen pin
         if path.stat().st_size != pin.size_bytes:
             findings.append(
                 Finding(

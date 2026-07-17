@@ -48,6 +48,7 @@ from tests.eval.benchmark.manifest import (
     load_checksums,
     size_class,
 )
+from tests.eval.benchmark.packs import PACKS, pack_by_id, pack_files
 
 _INGEST_TIMEOUT_SECONDS = 45 * 60
 
@@ -110,6 +111,38 @@ def select_pack(
     return tuple(selected)
 
 
+def select_from_pack(
+    pack_id: str,
+    formats: Sequence[str] | None = None,
+    count: int | None = None,
+) -> tuple[CorpusFile, ...]:
+    """Deterministic pack selection: curated pack order, optionally filtered.
+
+    ``--formats`` narrows to those formats (pack order preserved); ``--count``
+    takes the first N of what remains. No round-robin here — a pack's order is
+    itself the curation.
+    """
+    files = pack_files(pack_by_id(pack_id))
+    if formats is not None:
+        keys = []
+        for name in formats:
+            key = name.strip().lower()
+            if not key:
+                continue
+            if key not in FORMAT_MIME:
+                raise ValueError(f"unknown format {name!r} (choose from {', '.join(FORMAT_MIME)})")
+            keys.append(key)
+        if not keys:
+            raise ValueError("at least one format is required")
+        mimes = {FORMAT_MIME[k] for k in keys}
+        files = tuple(e for e in files if e.mime_type in mimes)
+    if count is not None:
+        if count <= 0:
+            raise ValueError("count must be a positive integer")
+        files = files[:count]
+    return files
+
+
 def _print_selection(selection: tuple[CorpusFile, ...]) -> None:
     pins = load_checksums()
     print(f"{len(selection)} file(s) selected (deterministic):")
@@ -117,7 +150,20 @@ def _print_selection(selection: tuple[CorpusFile, ...]) -> None:
         pin = pins.get(entry.file_id)
         size = f"{pin.size_bytes:,} B ({size_class(pin.size_bytes)})" if pin else "unpinned"
         fmt = next(k for k, v in FORMAT_MIME.items() if v == entry.mime_type)
-        print(f"  {fmt:>4}  {entry.file_id:<34} {size}")
+        marker = "  (rolling)" if entry.rolling else ""
+        print(f"  {fmt:>4}  {entry.file_id:<34} {size}{marker}")
+
+
+def _print_packs() -> None:
+    print("Available industry packs:")
+    for pack in PACKS:
+        rolling = sum(1 for e in pack_files(pack) if e.rolling)
+        print(f"\n  {pack.pack_id}  —  {pack.name} ({pack.industry})")
+        print(
+            f"      {len(pack.file_ids)} files"
+            + (f", {rolling} rolling (refresh with --refresh)" if rolling else "")
+        )
+        print(f"      {pack.rationale}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,15 +172,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--email", default=os.environ.get("LUMEN_PACK_EMAIL", ""))
     parser.add_argument("--password", default=os.environ.get("LUMEN_PACK_PASSWORD", ""))
     parser.add_argument("--collection", default="RAG benchmark pack")
+    parser.add_argument("--pack", help="industry pack id (see --list-packs)")
+    parser.add_argument("--list-packs", action="store_true", help="show the pack catalog")
     parser.add_argument("--formats", help="comma-separated: txt,md,pdf,docx,pptx,xlsx")
     parser.add_argument("--count", type=int, help="max files (default: all matching)")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-download rolling entries and replace them in the profile",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the selection and exit")
     args = parser.parse_args(argv)
 
+    if args.list_packs:
+        _print_packs()
+        return 0
+
     formats = [t for t in args.formats.split(",") if t.strip()] if args.formats else None
     try:
-        selection = select_pack(formats, args.count)
-    except ValueError as exc:
+        if args.pack:
+            selection = select_from_pack(args.pack, formats, args.count)
+        else:
+            selection = select_pack(formats, args.count)
+    except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     _print_selection(selection)
@@ -147,12 +207,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # Ensure the selected files are on disk (checksum-verified against the pins).
+    # Ensure the selected files are on disk (checksum-verified against the pins);
+    # with --refresh, rolling entries re-fetch even when cached.
     directory = corpus_dir()
     missing = [e for e in selection if not (directory / e.filename).exists()]
-    if missing:
-        print(f"\ndownloading {len(missing)} missing file(s)…")
+    to_refresh = [
+        e for e in selection if e.rolling and args.refresh and (directory / e.filename).exists()
+    ]
+    if missing or to_refresh:
+        print(f"\ndownloading {len(missing)} missing, refreshing {len(to_refresh)} rolling…")
         results = fetch_entries(missing, load_checksums(), dest_dir=directory)
+        results += fetch_entries(to_refresh, load_checksums(), dest_dir=directory, force=True)
         failed = [r for r in results if r.status == "FAILED"]
         if failed:
             print(f"error: {len(failed)} download(s) failed; aborting", file=sys.stderr)
@@ -166,13 +231,21 @@ def main(argv: list[str] | None = None) -> int:
 
         existing = api.existing_documents()
         uploaded: set[str] = set()
+        replaced = 0
         for entry in selection:
             if entry.filename in existing:
-                print(
-                    f"[  skip] {entry.file_id}: already in profile "
-                    f"(status={existing[entry.filename]['status']})"
-                )
-                continue
+                if entry.rolling and args.refresh:
+                    # Rolling refresh: replace the profile's copy with the
+                    # freshly-fetched content (delete, then re-upload below).
+                    api.delete_document(str(existing[entry.filename]["id"]))
+                    replaced += 1
+                    print(f"[replac] {entry.file_id}: refreshing rolling document")
+                else:
+                    print(
+                        f"[  skip] {entry.file_id}: already in profile "
+                        f"(status={existing[entry.filename]['status']})"
+                    )
+                    continue
             payload = (directory / entry.filename).read_bytes()
             response = api.upload_document(
                 collection_id=collection_id,
@@ -196,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
             if not_ready:
                 print(f"error: not ready: {not_ready}", file=sys.stderr)
                 return 1
-        print(f"\ndone — {len(selection)} file(s) in your profile ({len(uploaded)} new)")
+        print(
+            f"\ndone — {len(selection)} file(s) in your profile "
+            f"({len(uploaded) - replaced} new, {replaced} refreshed)"
+        )
     return 0
 
 

@@ -10,9 +10,16 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from tests.eval.benchmark.bank import (
+    BenchmarkQuestion,
+    Evidence,
+    bank_issues,
+    load_questions,
+)
 from tests.eval.benchmark.client import ApiClient
-from tests.eval.benchmark.load_pack import FORMAT_MIME, select_pack
-from tests.eval.benchmark.manifest import CORPUS
+from tests.eval.benchmark.load_pack import FORMAT_MIME, select_from_pack, select_pack
+from tests.eval.benchmark.manifest import CORPUS, manifest_issues
+from tests.eval.benchmark.packs import PACKS, pack_issues
 
 # --- Deterministic selection ---------------------------------------------------
 
@@ -77,6 +84,77 @@ def test_duplicate_formats_collapse() -> None:
     a = select_pack(["pdf", "pdf", "PDF"], 2)
     b = select_pack(["pdf"], 2)
     assert [e.file_id for e in a] == [e.file_id for e in b]
+
+
+# --- Industry pack catalog (#443) ----------------------------------------------
+
+
+def test_pack_catalog_is_structurally_sound() -> None:
+    """Ids resolve, packs are all-signal (no negatives / poor extraction), ≥4 files."""
+    issues = pack_issues()
+    assert issues == [], "\n".join(f"{i.pack_id}: {i.problem}" for i in issues)
+    assert len(PACKS) == 5
+
+
+def test_pack_selection_is_deterministic_and_ordered() -> None:
+    """--pack keeps the curated order; twice ⇒ identical."""
+    first = select_from_pack("financial-services")
+    second = select_from_pack("financial-services")
+    assert [e.file_id for e in first] == [e.file_id for e in second]
+    assert first[0].file_id == "berkshire-2023-letter"
+
+
+def test_pack_format_and_count_filters_compose() -> None:
+    """--pack legal-compliance --formats txt --count 1 ⇒ the Constitution."""
+    selection = select_from_pack("legal-compliance", ["txt"], 1)
+    assert [e.file_id for e in selection] == ["gutenberg-us-constitution"]
+
+
+def test_unknown_pack_raises() -> None:
+    with pytest.raises(KeyError, match="unknown pack"):
+        select_from_pack("aerospace")
+
+
+def test_rolling_entries_are_marked_and_outside_smoke() -> None:
+    """The rolling contract: ingestable, never in smoke, never cited by questions."""
+    rolling = [e for e in CORPUS if e.rolling]
+    assert rolling, "the catalog should keep a rolling refresh-on-demand example"
+    for entry in rolling:
+        assert entry.expected_ingest == "ok"
+        assert not entry.smoke
+    assert manifest_issues() == []
+
+
+def test_questions_never_cite_rolling_files() -> None:
+    """A question grounded in a rolling file would break on refresh — forbidden."""
+    rolling_ids = {e.file_id for e in CORPUS if e.rolling}
+    for q in load_questions():
+        for ev in q.evidence:
+            assert ev.file_id not in rolling_ids, f"{q.qid} cites rolling {ev.file_id}"
+
+
+def test_bank_validation_rejects_a_rolling_citation() -> None:
+    """The negative: bank_issues flags a question that cites a rolling file."""
+    rolling_id = next(e.file_id for e in CORPUS if e.rolling)
+    bad = BenchmarkQuestion(
+        qid="bm-999",
+        question="What does the current-year instruction booklet say?",
+        category="single_hop",
+        difficulty="easy",
+        answerable=True,
+        gold_answer="x",
+        answer_facts=("a fact that appears in the quote below",),
+        source_files=(rolling_id,),
+        evidence=(
+            Evidence(
+                file_id=rolling_id,
+                locator="p. 1",
+                quote="a fact that appears in the quote below, padded for length",
+            ),
+        ),
+    )
+    problems = bank_issues((bad,))
+    assert any("rolling" in i.problem for i in problems)
 
 
 # --- ApiClient 401-refresh replay ----------------------------------------------
