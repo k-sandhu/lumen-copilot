@@ -81,30 +81,45 @@ class QuestionOutcome:
 
 @dataclass(slots=True)
 class RunState:
-    """Everything the stages share."""
+    """Everything the stages share, including credentials for token refresh.
+
+    Access tokens are capped at 15 minutes (``ACCESS_TOKEN_TTL_SECONDS``) while
+    a full run takes hours, so every request goes through :meth:`request`, which
+    re-logs-in once on a 401 and replays the call.
+    """
 
     client: httpx.Client
     api: str
+    email: str
+    password: str
     collection_id: str = ""
     doc_ids: dict[str, str] = field(default_factory=dict)  # file_id -> document_id
     uploads: list[UploadOutcome] = field(default_factory=list)
 
+    def login(self) -> None:
+        response = self.client.post(
+            f"{self.api}/api/v1/auth/login",
+            json={"email": self.email, "password": self.password},
+        )
+        response.raise_for_status()
+        self.client.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
 
-def _login(client: httpx.Client, api: str, email: str, password: str) -> str:
-    response = client.post(f"{api}/api/v1/auth/login", json={"email": email, "password": password})
-    response.raise_for_status()
-    token = response.json()["access_token"]
-    assert isinstance(token, str)
-    return token
+    def request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
+        """An authed request that survives access-token expiry (one re-login)."""
+        response = self.client.request(method, f"{self.api}{path}", **kwargs)  # type: ignore[arg-type]
+        if response.status_code == 401:
+            self.login()
+            response = self.client.request(method, f"{self.api}{path}", **kwargs)  # type: ignore[arg-type]
+        return response
 
 
 def _ensure_collection(state: RunState, name: str) -> str:
-    listing = state.client.get(f"{state.api}/api/v1/collections")
+    listing = state.request("GET", "/api/v1/collections")
     listing.raise_for_status()
     for item in listing.json().get("items", []):
         if item["name"] == name:
             return str(item["id"])
-    created = state.client.post(f"{state.api}/api/v1/collections", json={"name": name})
+    created = state.request("POST", "/api/v1/collections", json={"name": name})
     created.raise_for_status()
     return str(created.json()["id"])
 
@@ -117,7 +132,7 @@ def _existing_documents(state: RunState) -> dict[str, dict[str, object]]:
         params: dict[str, str] = {"limit": "100"}
         if cursor:
             params["cursor"] = cursor
-        response = state.client.get(f"{state.api}/api/v1/documents", params=params)
+        response = state.request("GET", "/api/v1/documents", params=params)
         response.raise_for_status()
         payload = response.json()
         for item in payload.get("items", []):
@@ -145,13 +160,14 @@ def _upload_corpus(state: RunState) -> None:
             )
             print(f"[reuse ] {entry.file_id}: already uploaded (status={prior['status']})")
             continue
-        path = corpus_dir() / entry.filename
-        with path.open("rb") as handle:
-            response = state.client.post(
-                f"{state.api}/api/v1/documents",
-                data={"collection_id": state.collection_id},
-                files={"file": (entry.filename, handle, entry.mime_type)},
-            )
+        # Bytes (not a handle) so a 401-refresh replay can re-send the body.
+        payload = (corpus_dir() / entry.filename).read_bytes()
+        response = state.request(
+            "POST",
+            "/api/v1/documents",
+            data={"collection_id": state.collection_id},
+            files={"file": (entry.filename, payload, entry.mime_type)},
+        )
         if entry.expected_ingest == "rejected_type":
             outcome = (
                 f"rejected:{response.status_code}"
@@ -192,11 +208,19 @@ def _wait_for_ingestion(state: RunState) -> None:
     pending = {
         u.file_id: u for u in state.uploads if u.expected == "ok" and u.document_id is not None
     }
+    consecutive_errors = 0
     while pending and time.monotonic() < deadline:
         try:
             by_filename = _existing_documents(state)
+            consecutive_errors = 0
         except httpx.HTTPError as exc:
-            # One transient listing failure must not abort a long ingestion wait.
+            # A transient listing failure must not abort a long ingestion wait,
+            # but a persistent one (bad creds, downed stack) must not spin.
+            consecutive_errors += 1
+            if consecutive_errors > 20:
+                raise RuntimeError(
+                    f"documents listing failed {consecutive_errors} times in a row"
+                ) from exc
             print(f"[  poll] transient documents-list error, retrying: {exc}")
             time.sleep(_POLL_SECONDS)
             continue
@@ -221,8 +245,9 @@ def _gold_document_ids(state: RunState, question: BenchmarkQuestion) -> set[str]
 
 
 def _score_retrieval(state: RunState, question: BenchmarkQuestion) -> int | None:
-    response = state.client.get(
-        f"{state.api}/api/v1/search",
+    response = state.request(
+        "GET",
+        "/api/v1/search",
         params={"q": question.question, "limit": str(_SEARCH_K)},
     )
     response.raise_for_status()
@@ -237,21 +262,23 @@ def _ask_chat(
     state: RunState, question: BenchmarkQuestion, model: str
 ) -> tuple[str, list[dict[str, object]]]:
     """One chat session per question; return (answer_text, citations)."""
-    created = state.client.post(
-        f"{state.api}/api/v1/chat/sessions",
+    created = state.request(
+        "POST",
+        "/api/v1/chat/sessions",
         json={"title": f"bench {question.qid}", "model": model},
     )
     created.raise_for_status()
     session_id = created.json()["id"]
-    sent = state.client.post(
-        f"{state.api}/api/v1/chat/sessions/{session_id}/messages",
+    sent = state.request(
+        "POST",
+        f"/api/v1/chat/sessions/{session_id}/messages",
         json={"content": question.question, "model": model},
     )
     sent.raise_for_status()
 
     deadline = time.monotonic() + _ANSWER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        listing = state.client.get(f"{state.api}/api/v1/chat/sessions/{session_id}/messages")
+        listing = state.request("GET", f"/api/v1/chat/sessions/{session_id}/messages")
         listing.raise_for_status()
         assistant = [
             m
@@ -474,15 +501,15 @@ def main(argv: list[str] | None = None) -> int:
         questions = tuple(q for q in questions if q.qid in wanted)
 
     with httpx.Client(timeout=httpx.Timeout(60.0, read=300.0)) as client:
-        token = _login(client, args.api, args.email, args.password)
-        client.headers["Authorization"] = f"Bearer {token}"
-        state = RunState(client=client, api=args.api)
+        state = RunState(client=client, api=args.api, email=args.email, password=args.password)
+        state.login()
         state.collection_id = _ensure_collection(state, args.collection)
         print(f"collection: {state.collection_id}")
 
         if args.skip_upload:
+            existing = _existing_documents(state)
             for entry in CORPUS:
-                row = _existing_documents(state).get(entry.filename)
+                row = existing.get(entry.filename)
                 if row is not None:
                     state.doc_ids[entry.file_id] = str(row["id"])
         else:
