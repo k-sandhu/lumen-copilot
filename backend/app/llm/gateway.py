@@ -659,6 +659,13 @@ class LLMGateway:
                 model=model_id,
                 input=list(inputs),
                 timeout=self._settings.llm_timeout_seconds,
+                # Pin the response encoding: the OpenAI SDK under LiteLLM defaults
+                # to base64, which some OpenAI-compatible providers reject —
+                # OpenRouter's NVIDIA embedding models answer base64 with a
+                # 200-wrapped error ("use float instead"), surfacing as an opaque
+                # "No embedding data received" (#430). Floats are what this
+                # gateway consumes; every provider serves them.
+                encoding_format="float",
                 **self._credentials(api_key=api_key, api_base=effective_api_base or None),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
