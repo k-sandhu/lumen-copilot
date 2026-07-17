@@ -151,7 +151,13 @@ class _FakeRetrieval:
         self._passage = passage
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         return [self._passage]
 
