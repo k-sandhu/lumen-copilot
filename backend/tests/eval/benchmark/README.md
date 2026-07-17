@@ -228,6 +228,32 @@ uv run --extra dev python -m tests.eval.benchmark.run_live `
   --api http://localhost:47281 --email bench@lumen.test --password lumen-bench-local
 ```
 
+### Reference run (2026-07-17, tencent/hy3:free + nemotron-embed-vl-1b-v2:free)
+
+Point-in-time numbers from the first full run (101 questions, 0 errors; all 30
+files ingested, both negatives rejected 415) — not a CI gate, kept here as the
+baseline the dataset was proven against:
+
+| layer | metric | value |
+|---|---|---|
+| retrieval | hit@5 / hit@10 | **1.00 / 1.00** (every category, incl. German + tables) |
+| retrieval | MRR@10 | 0.95 |
+| answers | fact recall | 0.73 (procedural/navigation 1.0 · set 0.92 · … · comparison 0.50 · false-premise 0.25) |
+| answers | cited the gold file | 0.90 |
+| answers | wrong refusals (answerable) | 0.23 — see below |
+| unanswerable | refused in text | 13/14 (hallucination rate 0.07) |
+| unanswerable | refused with **zero citations** (AC-3) | **0/14 — every refusal carried citations (bug filed)** |
+
+What the slicing localized: retrieval (nemotron embeddings + BM25 hybrid) is
+not the bottleneck on this corpus — generation behaviour is. The wrong-refusal
+mass splits between genuine misses (mostly literature questions where the
+model's own tool query missed, despite `/search` ranking the gold file #1) and
+hedged answers that contain the right facts but lead with "couldn't find the
+exact line…", which the substring refusal markers count as refusals. The
+false-premise category is the weakest: the model refuses rather than corrects.
+And the unanswerable slice exposed a real product gap — the runtime attaches
+citations to refusal answers, which the eval contract (AC-3) forbids.
+
 ## Maintenance
 
 - **A pin broke** (`checksum mismatch`): the upstream file changed. Decide
