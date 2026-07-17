@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.chat import AskUserQuestion
 from app.domain.scheduling import Cadence
 
 
@@ -920,6 +921,9 @@ class Message:
     content: str
     model: str | None
     created_at: datetime
+    # The clarifying question this assistant turn ended with, if any
+    # (spec 0006 #429); None for every other turn.
+    question: AskUserQuestion | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -41,6 +41,7 @@ from app.core.config import Settings
 from app.core.errors import NotFoundError
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
+from app.domain.chat import AskUserQuestion
 from app.domain.entities import Message, MessageRole, ToolInvocation
 from app.domain.llm import ChatMessage, Role
 from app.llm.context import ContextConfig
@@ -153,6 +154,30 @@ class MessageToolInvocationResponse(BaseModel):
     created_at: datetime
 
 
+class AskUserOptionResponse(BaseModel):
+    """``#/components/schemas/AskUserOption`` (spec 0006 #429)."""
+
+    model_config = {"extra": "forbid"}
+
+    label: str
+    description: str | None = None
+
+
+class AskUserQuestionResponse(BaseModel):
+    """``#/components/schemas/AskUserQuestion`` (spec 0006 #429).
+
+    The clarifying question an assistant turn ended with; the UI re-renders the
+    clickable options from here after reload (active only while it is the
+    conversation's last message).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    question: str
+    options: list[AskUserOptionResponse]
+    allow_free_text: bool
+
+
 class MessageResponse(BaseModel):
     """``#/components/schemas/Message``."""
 
@@ -165,6 +190,7 @@ class MessageResponse(BaseModel):
     model: str | None = None
     citations: list[CitationResponse]
     tool_invocations: list[MessageToolInvocationResponse]
+    question: AskUserQuestionResponse | None = None
     created_at: datetime
 
 
@@ -244,6 +270,21 @@ def _tool_invocation_to_response(inv: ToolInvocation) -> MessageToolInvocationRe
     )
 
 
+def _question_to_response(
+    question: AskUserQuestion | None,
+) -> AskUserQuestionResponse | None:
+    if question is None:
+        return None
+    return AskUserQuestionResponse(
+        question=question.question,
+        options=[
+            AskUserOptionResponse(label=o.label, description=o.description)
+            for o in question.options
+        ],
+        allow_free_text=question.allow_free_text,
+    )
+
+
 def _message_to_response(view: MessageView) -> MessageResponse:
     m = view.message
     return MessageResponse(
@@ -254,6 +295,7 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         model=m.model,
         citations=[_citation_to_response(c) for c in view.citations],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
+        question=_question_to_response(m.question),
         created_at=m.created_at,
     )
 
@@ -275,6 +317,7 @@ def _bare_message_to_response(message: Message) -> MessageResponse:
         model=message.model,
         citations=[],
         tool_invocations=[],
+        question=_question_to_response(message.question),
         created_at=message.created_at,
     )
 
@@ -565,6 +608,10 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
+        # Follow-up suggestions knobs (spec 0006 #429).
+        suggestions_enabled=settings.chat_suggestions_enabled,
+        suggestions_count=settings.chat_suggestions_count,
+        suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
     )
     history = _to_chat_messages(result.history)
 

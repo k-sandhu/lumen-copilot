@@ -85,6 +85,155 @@ class AnswerResult:
         return len(self.citations) > 0
 
 
+# --- ask_user — the clarifying question (spec 0006 #429) --------------------
+
+# Bounds for a model-authored question (spec 0006 §3.3). Enforced at parse time
+# so an out-of-bounds call becomes a typed tool error the model can recover
+# from — never a broken event or an oversized persisted payload.
+ASK_USER_MIN_OPTIONS = 2
+ASK_USER_MAX_OPTIONS = 4
+ASK_USER_MAX_QUESTION_CHARS = 500
+ASK_USER_MAX_LABEL_CHARS = 120
+ASK_USER_MAX_DESCRIPTION_CHARS = 240
+
+
+class AskUserValidationError(ValueError):
+    """The model's ``ask_user`` arguments don't form a renderable question.
+
+    Raised by :meth:`AskUserQuestion.parse`; the chat runtime turns it into an
+    ``ok=False`` tool *result* (the model reads the reason and recovers — the
+    turn continues toward a normal answer, spec 0006 §2 / #429 AC-N1).
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class AskUserOption:
+    """One clickable choice of a clarifying question (spec 0006 #429).
+
+    ``label`` is sent verbatim as the user's reply when clicked, so it must read
+    as an answer on its own; ``description`` is optional elaboration for the UI.
+    """
+
+    label: str
+    description: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AskUserQuestion:
+    """A clarifying question the model asked instead of answering (spec 0006).
+
+    Mirrors the contract shapes (WS ``ChatAskUser`` minus ``messageId``; REST
+    ``AskUserQuestion``). Built only via :meth:`parse`, which enforces the spec
+    bounds — so a persisted/emitted question is renderable by construction.
+    """
+
+    question: str
+    options: tuple[AskUserOption, ...]
+    allow_free_text: bool = True
+
+    @classmethod
+    def parse(cls, arguments: dict[str, object]) -> AskUserQuestion:
+        """Validate raw model tool arguments into a question, or raise.
+
+        Rules (spec 0006 §3.3): non-empty question ≤ 500 chars; 2–4 options
+        after trimming and case-insensitive label dedupe; labels ≤ 120 chars;
+        descriptions ≤ 240 chars (longer ones are truncated, not fatal — only
+        *structural* problems reject). Raises :class:`AskUserValidationError`
+        with a reason the model can act on.
+        """
+        question = str(arguments.get("question") or "").strip()
+        if not question:
+            raise AskUserValidationError("ask_user requires a non-empty 'question'.")
+        if len(question) > ASK_USER_MAX_QUESTION_CHARS:
+            raise AskUserValidationError(
+                f"ask_user 'question' exceeds {ASK_USER_MAX_QUESTION_CHARS} characters."
+            )
+
+        raw_options = arguments.get("options")
+        if not isinstance(raw_options, list):
+            raise AskUserValidationError("ask_user requires an 'options' array.")
+        options: list[AskUserOption] = []
+        seen_labels: set[str] = set()
+        for raw in raw_options:
+            if isinstance(raw, dict):
+                label = str(raw.get("label") or "").strip()
+                description = str(raw.get("description") or "").strip() or None
+            elif isinstance(raw, str):
+                # Tolerate the natural model shorthand ["A", "B"] — the intent
+                # is unambiguous, so accepting it beats a retry round-trip.
+                label, description = raw.strip(), None
+            else:
+                continue
+            if not label or label.casefold() in seen_labels:
+                continue
+            seen_labels.add(label.casefold())
+            if description is not None:
+                description = description[:ASK_USER_MAX_DESCRIPTION_CHARS]
+            options.append(
+                AskUserOption(label=label[:ASK_USER_MAX_LABEL_CHARS], description=description)
+            )
+        if not ASK_USER_MIN_OPTIONS <= len(options) <= ASK_USER_MAX_OPTIONS:
+            raise AskUserValidationError(
+                "ask_user requires between "
+                f"{ASK_USER_MIN_OPTIONS} and {ASK_USER_MAX_OPTIONS} distinct, "
+                f"non-empty options (got {len(options)})."
+            )
+
+        return cls(
+            question=question,
+            options=tuple(options),
+            allow_free_text=bool(arguments.get("allow_free_text", True)),
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        """The portable JSON payload (the ``messages.question`` column shape).
+
+        Snake_case, matching the REST ``AskUserQuestion`` schema — the repository
+        stores and returns it verbatim, so the stored shape IS the wire shape.
+        """
+        return {
+            "question": self.question,
+            "options": [
+                {
+                    "label": o.label,
+                    **({"description": o.description} if o.description else {}),
+                }
+                for o in self.options
+            ],
+            "allow_free_text": self.allow_free_text,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> AskUserQuestion | None:
+        """Rehydrate from a stored ``messages.question`` payload; ``None`` if unusable.
+
+        Reads are lenient (a malformed row must never 500 a history load — the
+        message still renders as plain content); writes are strict via
+        :meth:`parse`.
+        """
+        if not isinstance(payload, dict):
+            return None
+        question = str(payload.get("question") or "").strip()
+        raw_options = payload.get("options")
+        if not question or not isinstance(raw_options, list):
+            return None
+        options = tuple(
+            AskUserOption(
+                label=str(raw.get("label")),
+                description=(str(raw["description"]) if raw.get("description") else None),
+            )
+            for raw in raw_options
+            if isinstance(raw, dict) and str(raw.get("label") or "").strip()
+        )
+        if not options:
+            return None
+        return cls(
+            question=question,
+            options=options,
+            allow_free_text=bool(payload.get("allow_free_text", True)),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolInvocation:
     """A record of one retrieval tool the agent ran (surfaced as WS events).

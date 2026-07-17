@@ -32,6 +32,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
+from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
     Artifact,
     ArtifactProducedBy,
@@ -280,6 +281,9 @@ def _to_message(row: models.Message) -> Message:
         content=row.content,
         model=row.model,
         created_at=row.created_at,
+        # Lenient rehydration (spec 0006): a malformed stored payload yields
+        # None and the message still renders as plain content — never a 500.
+        question=AskUserQuestion.from_payload(row.question),
     )
 
 
@@ -2127,6 +2131,7 @@ class MessageRepository(_TenantScopedRepository):
         role: MessageRole,
         content: str,
         model: str | None = None,
+        question: AskUserQuestion | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -2143,6 +2148,9 @@ class MessageRepository(_TenantScopedRepository):
             role=role.value,
             content=content,
             model=model,
+            # The clarifying question this turn ended with, if any (spec 0006):
+            # stored as the REST payload verbatim (AskUserQuestion.to_payload).
+            question=question.to_payload() if question is not None else None,
         )
         self._session.add(row)
         await self._session.flush()
