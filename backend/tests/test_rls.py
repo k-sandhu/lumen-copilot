@@ -572,7 +572,13 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
                 self._session = session
 
             async def search_text(
-                self, *, principal: object, query: str, k: int, collection_ids: object = None
+                self,
+                *,
+                principal: object,
+                query: str,
+                k: int,
+                collection_ids: object = None,
+                document_ids: object = None,
             ) -> list[RetrievedPassage]:
                 nonlocal started
                 started += 1

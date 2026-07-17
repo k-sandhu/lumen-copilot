@@ -2305,7 +2305,13 @@ class _BarrierRetrieval(_FakeRetrieval):
         self.completed: list[str] = []
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.started += 1
         if self.started >= self._expected:
@@ -2315,7 +2321,11 @@ class _BarrierRetrieval(_FakeRetrieval):
         await asyncio.wait_for(self._all_started.wait(), timeout=2)
         self.completed.append(query)
         return await super().search_text(
-            principal=principal, query=query, k=k, collection_ids=collection_ids
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
 
 
@@ -2328,14 +2338,24 @@ class _PeakGaugeRetrieval(_FakeRetrieval):
         self.peak = 0
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.inflight += 1
         self.peak = max(self.peak, self.inflight)
         await asyncio.sleep(0.02)
         self.inflight -= 1
         return await super().search_text(
-            principal=principal, query=query, k=k, collection_ids=collection_ids
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
 
 
@@ -2356,7 +2376,13 @@ class _ChainRetrieval(_FakeRetrieval):
         self.completed: list[str] = []
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.started += 1
         if self.started >= 3:
@@ -2370,7 +2396,11 @@ class _ChainRetrieval(_FakeRetrieval):
         if query in self._done:
             self._done[query].set()
         return await super().search_text(
-            principal=principal, query=query, k=k, collection_ids=collection_ids
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
 
 
@@ -2387,12 +2417,22 @@ class _HangAfterFirstRetrieval(_FakeRetrieval):
         self._never = asyncio.Event()
 
     async def search_text(
-        self, *, principal: object, query: str, k: int, collection_ids: object = None
+        self,
+        *,
+        principal: object,
+        query: str,
+        k: int,
+        collection_ids: object = None,
+        document_ids: object = None,
     ) -> list[RetrievedPassage]:
         if query != "q1":
             await self._never.wait()  # only a cancellation ends this
         return await super().search_text(
-            principal=principal, query=query, k=k, collection_ids=collection_ids
+            principal=principal,
+            query=query,
+            k=k,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
 
 
