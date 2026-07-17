@@ -551,6 +551,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /chat/sessions/{sessionId}/usage:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    get:
+      operationId: getChatSessionUsage
+      summary: Token/context accounting for a session (spec 0007 #429).
+      description: >
+        Powers the conversation context meter: summed per-answer llm_usage
+        (#409), the most recent answer's record, and the input-token budget the
+        context assembler grants the session's model (window − output headroom −
+        safety margin — the same formula answers are assembled under). A session
+        with no answers yet returns all-zero totals and no `last`.
+      tags: [chat]
+      responses:
+        "200":
+          description: The session's usage accounting.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionUsage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /chat/sessions/{sessionId}/messages:
     parameters:
       - { $ref: "#/components/parameters/SessionId" }
@@ -3056,6 +3078,74 @@ components:
         next_cursor:
           type: [string, "null"]
 
+    SessionUsageTotals:
+      type: object
+      additionalProperties: false
+      description: >
+        Summed per-answer llm_usage for one session (spec 0007 #429). `answers`
+        is how many produced answers the sums cover; all zero before the first.
+      required:
+        [
+          answers,
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cached_prompt_tokens,
+          cache_write_tokens,
+        ]
+      properties:
+        answers: { type: integer, minimum: 0 }
+        prompt_tokens: { type: integer, minimum: 0 }
+        completion_tokens: { type: integer, minimum: 0 }
+        total_tokens: { type: integer, minimum: 0 }
+        cached_prompt_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0 }
+
+    SessionUsageLast:
+      type: object
+      additionalProperties: false
+      description: The most recent answer's usage record (spec 0007 #429).
+      required:
+        [
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cached_prompt_tokens,
+          cache_write_tokens,
+        ]
+      properties:
+        prompt_tokens: { type: integer, minimum: 0 }
+        completion_tokens: { type: integer, minimum: 0 }
+        total_tokens: { type: integer, minimum: 0 }
+        cached_prompt_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0 }
+
+    SessionUsage:
+      type: object
+      additionalProperties: false
+      description: >
+        A session's token/context accounting (spec 0007 #429). The context meter
+        reads `last.prompt_tokens / input_budget_tokens` as window utilization;
+        `window_known=false` means the model was absent from the model map and
+        the configured conservative fallback window was used.
+      required: [model, totals, input_budget_tokens, window_known]
+      properties:
+        model:
+          type: string
+          description: The session's model id the budget was computed for.
+        totals: { $ref: "#/components/schemas/SessionUsageTotals" }
+        last:
+          $ref: "#/components/schemas/SessionUsageLast"
+          description: Absent until the session has produced at least one answer.
+        input_budget_tokens:
+          type: integer
+          minimum: 1
+          description: >
+            The input-token budget the context assembler grants this model
+            (window − output headroom − safety margin — the same formula answers
+            are assembled under).
+        window_known: { type: boolean }
+
     SendMessageRequest:
       type: object
       additionalProperties: false
@@ -3065,6 +3155,17 @@ components:
         model:
           type: string
           description: Override the session model for this turn (a GET /models id).
+        document_ids:
+          type: array
+          maxItems: 20
+          description: >
+            Pinned documents (spec 0007 #429): passage retrieval for THIS answer
+            narrows to these ids — an additional filter over the caller's
+            allow-set (INV-2 still applies inside retrieval; an id the caller
+            cannot access contributes nothing and discloses nothing, so ids are
+            deliberately not validated at send time). Additive; omitted/empty ⇒
+            unchanged behavior.
+          items: { type: string, format: uuid }
         collection_ids:
           type: array
           description: Restrict retrieval to these collections; omitted = all permitted docs.
