@@ -1272,3 +1272,21 @@ def test_offline_llm_usage_migration_round_trips(
     assert "drop policy if exists rls_llm_usage on llm_usage" in down
     assert "drop index uq_llm_usage_tenant_message" in down
     assert "drop table llm_usage" in down
+
+
+def test_offline_tenant_fallback_models_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0035 adds ``tenants.fallback_models`` (nullable JSON); the downgrade
+    drops it (#413). Offline DDL render — additive, reversible, no DB."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0034_llm_usage_ctx:0035_tenant_fallbacks", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table tenants add column fallback_models" in up
+    assert "jsonb" in up
+
+    command.downgrade(cfg, "0035_tenant_fallbacks:0034_llm_usage_ctx", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table tenants drop column fallback_models" in down

@@ -104,7 +104,10 @@
           "format": "uuid",
           "description": "Id the in-progress assistant message will be persisted under."
         },
-        "model": { "type": "string", "description": "Model id producing this answer." }
+        "model": {
+          "type": "string",
+          "description": "The REQUESTED model id (#413): the id the session/send chose. After a mid-answer failover the model that actually produced the answer may differ — done.model is authoritative for attribution."
+        }
       }
     },
     "ChatTokenDelta": {
@@ -169,6 +172,10 @@
       "properties": {
         "messageId": { "type": "string", "format": "uuid" },
         "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter, ask_user (the turn ended with a clarifying question — spec 0006 #429)." },
+        "model": {
+          "type": "string",
+          "description": "The model that ACTUALLY produced this answer (#413, ADR-0016 §4): equals start.model unless a mid-answer failover switched to a tenant-configured fallback. Authoritative for attribution; additive (older servers omit it)."
+        },
         "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",

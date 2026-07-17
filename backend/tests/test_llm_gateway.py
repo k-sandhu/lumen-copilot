@@ -1121,3 +1121,52 @@ def test_retry_after_hint_parsed_defensively() -> None:
     assert with_header("Wed, 21 Oct 2026 07:28:00 GMT").retry_after_seconds is None
     assert with_header("-5").retry_after_seconds is None
     assert with_header(None).retry_after_seconds is None
+
+
+def test_retry_after_hint_contains_hostile_objects() -> None:
+    """#440 finding 5: raising ``headers`` properties, raising ``get``, raising
+    ``__str__``, and non-finite numerics must all be CONTAINED — the 429 stays
+    the typed retryable error, never an escaping exception."""
+    from app.llm import LlmProviderError
+
+    class _RaisingStr:
+        def __str__(self) -> str:
+            raise RuntimeError("hostile __str__")
+
+    class _RaisingGet:
+        def get(self, _name: str) -> object:
+            raise RuntimeError("hostile get")
+
+    class _RaisingHeaders:
+        @property
+        def headers(self) -> object:
+            raise RuntimeError("hostile headers property")
+
+    def rl_with_response(response: object) -> Exception:
+        exc = le.RateLimitError("m", llm_provider="p", model="x")
+        exc.response = response  # type: ignore[assignment]
+        return exc
+
+    class _Resp:
+        def __init__(self, headers: object) -> None:
+            self.headers = headers
+
+    class _HeadersOf:
+        def __init__(self, value: object) -> None:
+            self._value = value
+
+        def get(self, _name: str) -> object:
+            return self._value
+
+    cases = [
+        rl_with_response(_Resp(_HeadersOf(_RaisingStr()))),
+        rl_with_response(_Resp(_RaisingGet())),
+        rl_with_response(_RaisingHeaders()),
+        rl_with_response(_Resp(_HeadersOf("inf"))),
+        rl_with_response(_Resp(_HeadersOf("nan"))),
+    ]
+    for exc in cases:
+        mapped = _classify(exc)
+        assert isinstance(mapped, LlmProviderError)
+        assert mapped.retryable is True
+        assert mapped.retry_after_seconds is None

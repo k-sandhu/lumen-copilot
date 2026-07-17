@@ -86,7 +86,11 @@ from app.services.prompts import (
     NO_SOURCES_FALLBACK,
     render_follow_up_request,
 )
-from app.services.provider_models import ModelRoute, ModelRouteResolver
+from app.services.provider_models import (
+    ModelRoute,
+    ModelRouteResolver,
+    is_provider_model_id,
+)
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
@@ -178,6 +182,11 @@ class _RouteState:
     model: str
     route: ModelRoute
     fallbacks: list[str] = field(default_factory=list)
+    # Closed usage scopes (#413 / ADR-0016 §2.6): one (model, frozen usage)
+    # per route that spent tokens and was then failed away from. Each gets its
+    # own message-less ``llm_usage`` row — spend is attributed to the model
+    # that actually incurred it, never re-labelled under the winner.
+    spent: list[tuple[str, _Usage]] = field(default_factory=list)
 
 # The per-search passage budget now comes from the context assembler
 # (``ContextBudget.retrieval_k``, ADR-0016 §1 / #410): the historical default of
@@ -247,6 +256,43 @@ class _Usage:
         self.cached_prompt_tokens += usage.cached_prompt_tokens
         self.cache_write_tokens += usage.cache_write_tokens
 
+    def snapshot_and_reset(self) -> _Usage:
+        """Freeze the current scope's totals and zero the accumulator (#413).
+
+        Called at a model failover: the tokens spent so far belong to the ROUTE
+        that spent them (ADR-0016 §2.6 — one usage row per model attempt
+        scope), so the closing scope is snapshotted for its own ``llm_usage``
+        row and the shared accumulator restarts at zero for the new route. The
+        object identity is preserved — every holder of the accumulator keeps
+        counting into the new scope.
+        """
+        frozen = replace(self)
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.cached_prompt_tokens = 0
+        self.cache_write_tokens = 0
+        self.last_turn_prompt_tokens = None
+        return frozen
+
+
+def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
+    """The ANSWER-total usage across every route scope (#413).
+
+    The ``done`` envelope reports what the whole answer cost (billing view);
+    the per-scope ``llm_usage`` rows carry the per-model attribution. The
+    window-occupancy field stays the WINNING scope's — a dead route's last
+    prompt size is meaningless for the context meter.
+    """
+    total = replace(current)
+    for _model, scope in route_state.spent:
+        total.prompt_tokens += scope.prompt_tokens
+        total.completion_tokens += scope.completion_tokens
+        total.total_tokens += scope.total_tokens
+        total.cached_prompt_tokens += scope.cached_prompt_tokens
+        total.cache_write_tokens += scope.cache_write_tokens
+    return total
+
 
 class ChatRuntime:
     """Runs one grounded answer and streams it over the backplane.
@@ -270,6 +316,7 @@ class ChatRuntime:
         tool_concurrency: int = _DEFAULT_TOOL_CONCURRENCY,
         context_config: ContextConfig | None = None,
         retry_sleep: Callable[[float], Awaitable[None]] | None = None,
+        fallback_model_validator: Callable[[AsyncSession, str], Awaitable[bool]] | None = None,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
         mcp_tools_factory: McpToolsFactory | None = None,
@@ -294,6 +341,12 @@ class ChatRuntime:
         # The #413 retry backoff sleeper — injectable so tests observe/skip the
         # waits; production uses asyncio.sleep.
         self._retry_sleep: Callable[[float], Awaitable[None]] = retry_sleep or asyncio.sleep
+        # The #413 fallback revalidator: the SAME allow-list check the send path
+        # applies (config registry / the tenant's enabled providers), re-run at
+        # answer start so stored config that went stale is dropped fail-closed.
+        # ``None`` (offline tests / config-only runtimes) skips revalidation —
+        # the structural filter + the provider-route guard below still apply.
+        self._fallback_validator = fallback_model_validator
         # The context-assembler budget knobs (ADR-0016 §1, issue #410): the
         # unknown-model fallback window + the output headroom. Injectable so the
         # API wires ``Settings``; defaults (module constants) keep offline tests
@@ -609,11 +662,26 @@ class ChatRuntime:
         max_tool_turns = max(
             1, override if override is not None else self._default_max_tool_turns
         )
-        route_state.fallbacks = [
-            m
-            for m in (tenant_row.fallback_models or [] if tenant_row else [])
-            if isinstance(m, str) and m.strip() and m != model
-        ]
+        stored = tenant_row.fallback_models or [] if tenant_row else []
+        structural: list[str] = []
+        for m in stored:
+            if isinstance(m, str) and m.strip() and m != model and m not in structural:
+                structural.append(m)
+        # The admin write bounds the chain at 3 (INV-8) — enforce it here too so
+        # a raw-repository/seed writer cannot multiply worst-case retries.
+        structural = structural[:3]
+        if self._fallback_validator is not None:
+            # Revalidate against the CURRENT tenant state (#440 review, finding
+            # 4): a provider disabled/deleted since the admin write — or an id
+            # smuggled past the service — is dropped here, fail-closed, before
+            # any route resolution.
+            validated: list[str] = []
+            for m in structural:
+                if await self._fallback_validator(session, m):
+                    validated.append(m)
+            route_state.fallbacks = validated
+        else:
+            route_state.fallbacks = structural
 
         # Assemble the prompt under the model's input budget (ADR-0016 §1, #410),
         # replacing the old inline ``[system, *history, question]`` build and the
@@ -726,6 +794,20 @@ class ChatRuntime:
             simulate_writes=simulate_writes,
         )
 
+        def _refit(model_id: str) -> list[ChatMessage]:
+            # Per-route prompt preparation (#440 review, finding 3): a failover
+            # mid-turn refits the CURRENT transcript to the NEW route's
+            # tokenizer/window before the first attempt on it — a smaller
+            # fallback gets a prompt trimmed for its budget. Closes over the
+            # live ``messages`` binding.
+            return fit_transcript(
+                messages,
+                model=model_id,
+                tools=advertised,
+                config=self._context_config,
+                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+            )
+
         budget_exhausted = True
         for turn_index in range(max_tool_turns):
             # Re-fit the GROWN transcript to the input budget before every turn
@@ -752,6 +834,7 @@ class ChatRuntime:
                 messages=messages,
                 usage=usage,
                 tools=advertised,
+                refit=_refit,
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
@@ -888,6 +971,7 @@ class ChatRuntime:
                 usage=usage,
                 tools=advertised,
                 tool_choice="none",
+                refit=_refit,
             )
             await self._emit_step(
                 state,
@@ -917,16 +1001,13 @@ class ChatRuntime:
                 citations=[],
                 question=ask_question,
             )
-            await LlmUsageRepository(session, tenant_id).record(
-                model=route_state.model,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
-                total_tokens=usage.total_tokens,
-                cached_prompt_tokens=usage.cached_prompt_tokens,
-                cache_write_tokens=usage.cache_write_tokens,
-                context_prompt_tokens=usage.last_turn_prompt_tokens,
+            await self._record_usage_scopes(
+                session=session,
+                tenant_id=tenant_id,
+                route_state=route_state,
+                usage=usage,
                 session_id=session_id,
-                message_id=assistant_message_id,
+                assistant_message_id=assistant_message_id,
             )
             await self._audit_answer(
                 audit=audit,
@@ -939,19 +1020,20 @@ class ChatRuntime:
                 cited_document_ids=[],
             )
             await self._emit_ask_user(state, assistant_message_id, ask_question)
+            answer_usage = _answer_usage_totals(route_state, usage)
             return _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
                 citation_count=0,
                 citations=(),
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
-                total_tokens=usage.total_tokens,
-                cached_prompt_tokens=usage.cached_prompt_tokens,
-                cache_write_tokens=usage.cache_write_tokens,
+                prompt_tokens=answer_usage.prompt_tokens,
+                completion_tokens=answer_usage.completion_tokens,
+                total_tokens=answer_usage.total_tokens,
+                cached_prompt_tokens=answer_usage.cached_prompt_tokens,
+                cache_write_tokens=answer_usage.cache_write_tokens,
             )
 
-        if finish_reason == "length" and answer_chunks:
+        if finish_reason == "length":
             # Length continuation (ADR-0016 §4, #413): the answer hit the output
             # cap. Append the buffered partial as the assistant turn and run
             # exactly ONE continuation with tools disabled — a continuation can
@@ -961,9 +1043,13 @@ class ChatRuntime:
             # message are both the concatenation. A continuation that is itself
             # length-capped is accepted as-is (ONE continuation, no loops) and
             # ``done`` honestly reports ``finishReason="length"``.
-            messages.append(
-                ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks))
-            )
+            if answer_chunks:
+                # A zero-visible-text length turn (budget burned on non-text
+                # content) skips the append — an empty assistant turn helps no
+                # provider — but STILL gets its continuation (#440 finding 6).
+                messages.append(
+                    ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks))
+                )
             messages = fit_transcript(
                 messages,
                 model=route_state.route.model,
@@ -978,6 +1064,7 @@ class ChatRuntime:
                 usage=usage,
                 tools=advertised,
                 tool_choice="none",
+                refit=_refit,
             )
             await self._publish_text(state, extra_chunks)
             answer_chunks = [*answer_chunks, *extra_chunks]
@@ -1068,28 +1155,26 @@ class ChatRuntime:
         # matching the message row. Zeroed fields (a provider that omitted
         # usage) still record: the answer happened, and "no usage reported"
         # must be visible, not a gap.
-        await LlmUsageRepository(session, tenant_id).record(
-            model=route_state.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens,
-            cached_prompt_tokens=usage.cached_prompt_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            context_prompt_tokens=usage.last_turn_prompt_tokens,
+        await self._record_usage_scopes(
+            session=session,
+            tenant_id=tenant_id,
+            route_state=route_state,
+            usage=usage,
             session_id=session_id,
-            message_id=assistant_message_id,
+            assistant_message_id=assistant_message_id,
         )
 
+        answer_usage = _answer_usage_totals(route_state, usage)
         return _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
             citation_count=len(stored_citations),
             citations=tuple(stored_citations),
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens,
-            cached_prompt_tokens=usage.cached_prompt_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
+            prompt_tokens=answer_usage.prompt_tokens,
+            completion_tokens=answer_usage.completion_tokens,
+            total_tokens=answer_usage.total_tokens,
+            cached_prompt_tokens=answer_usage.cached_prompt_tokens,
+            cache_write_tokens=answer_usage.cache_write_tokens,
         )
 
     async def _resolve_mcp_tools(
@@ -1147,6 +1232,51 @@ class ChatRuntime:
             )
         )
 
+    async def _record_usage_scopes(
+        self,
+        *,
+        session: AsyncSession,
+        tenant_id: UUID,
+        route_state: _RouteState,
+        usage: _Usage,
+        session_id: UUID,
+        assistant_message_id: UUID,
+    ) -> None:
+        """One ``llm_usage`` row per model route scope (#413, ADR-0016 §2.6).
+
+        Spend is attributed to the model that INCURRED it: each failed-away
+        route's frozen scope persists as a message-less row (the answer id
+        would be wrong — that route produced no message), and only the winning
+        scope attaches to the assistant message. Read-side totals aggregate
+        rows, so billing/cache KPIs stay per-model-honest across failovers.
+        Zero-usage closed scopes still record: "the route was tried and
+        reported nothing" must be visible, not a gap (#409's posture).
+        """
+        repo = LlmUsageRepository(session, tenant_id)
+        for spent_model, scope in route_state.spent:
+            await repo.record(
+                model=spent_model,
+                prompt_tokens=scope.prompt_tokens,
+                completion_tokens=scope.completion_tokens,
+                total_tokens=scope.total_tokens,
+                cached_prompt_tokens=scope.cached_prompt_tokens,
+                cache_write_tokens=scope.cache_write_tokens,
+                context_prompt_tokens=scope.last_turn_prompt_tokens,
+                session_id=session_id,
+                message_id=None,
+            )
+        await repo.record(
+            model=route_state.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            context_prompt_tokens=usage.last_turn_prompt_tokens,
+            session_id=session_id,
+            message_id=assistant_message_id,
+        )
+
     async def _stream_turn_resilient(
         self,
         *,
@@ -1156,6 +1286,7 @@ class ChatRuntime:
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
+        refit: Callable[[str], list[ChatMessage]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
 
@@ -1210,11 +1341,19 @@ class ChatRuntime:
                         attempt=attempt,
                         code=exc.code,
                     )
-            # Retries exhausted on this route. Fail over if a candidate remains.
+            # Retries exhausted on this route. Fail over if a candidate remains:
+            # close the dying route's usage scope (its spend stays attributed to
+            # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
+            # tokenizer/window (#440 review, finding 3): a smaller fallback must
+            # get a prompt trimmed for ITS budget, not the primary's.
             if last is None:  # pragma: no cover — the loop always sets it
                 raise RuntimeError("retry loop exited without a fault")
+            dying_model = route_state.model
             if not await self._advance_to_fallback(session, route_state):
                 raise last
+            route_state.spent.append((dying_model, usage.snapshot_and_reset()))
+            if refit is not None:
+                messages = refit(route_state.route.model)
 
     async def _advance_to_fallback(
         self, session: AsyncSession, route_state: _RouteState
@@ -1235,6 +1374,16 @@ class ChatRuntime:
             except AppError as exc:
                 log.warning(
                     "llm.fallback_unresolvable", model=candidate, code=exc.code
+                )
+                continue
+            if is_provider_model_id(candidate) and route.api_key is None:
+                # The resolver degrades an unknown ``provider:`` id to a
+                # default-credential passthrough (safe for the SEND path, which
+                # pre-validates). For a stored fallback that would silently
+                # route a tenant-provider model through the GLOBAL key — skip
+                # it instead (#440 review, finding 4).
+                log.warning(
+                    "llm.fallback_unresolvable", model=candidate, code="provider_unresolved"
                 )
                 continue
             log.warning(

@@ -1241,3 +1241,24 @@ async def test_patch_fallback_models_rejects_more_than_three(
         json={"max_tool_turns": None, "fallback_models": ids},
     )
     assert resp.status_code == 422
+
+
+async def test_patch_fallback_models_rejects_unknown_provider_id(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """A ``provider:`` fallback id resolves through the TENANT-SCOPED provider
+    repository — an id for a provider this tenant does not own (unknown,
+    deleted, or another tenant's: the same invisible-row path, INV-1/INV-2)
+    fails closed as a 422 and nothing is written (#413 / #440 finding 4)."""
+    token = await _login(client, seeded.admin_a_email)
+    resp = await client.patch(
+        "/api/v1/admin/settings",
+        headers=_auth(token),
+        json={
+            "max_tool_turns": None,
+            "fallback_models": [f"provider:{uuid.uuid4()}:some/model"],
+        },
+    )
+    assert resp.status_code == 422
+    got = await client.get("/api/v1/admin/settings", headers=_auth(token))
+    assert got.json()["fallback_models"] == []

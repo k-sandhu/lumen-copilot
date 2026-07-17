@@ -1587,6 +1587,12 @@ export interface ChatDoneData {
   messageId: string;
   /** e.g. stop, length, content_filter, ask_user (spec 0006 #429). */
   finishReason: string;
+  /**
+   * The model that ACTUALLY produced this answer (#413, ADR-0016 §4): equals
+   * start.model unless a mid-answer failover switched to a tenant-configured
+   * fallback. Additive — older servers omit it.
+   */
+  model?: string;
   citationCount: number;
   usage?: {
     promptTokens?: number;

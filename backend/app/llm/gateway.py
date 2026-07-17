@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
@@ -87,21 +88,23 @@ def _retry_after_hint(exc: Exception) -> float | None:
     The CAP is applied by the retry loop, not here — the gateway only reports.
     Never touches the exception MESSAGE (which may carry the api_key).
     """
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
     try:
+        # The WHOLE extraction sits under one broad guard: ``response`` /
+        # ``headers`` may be hostile property objects, ``get`` may raise, and
+        # the value's ``__str__`` may raise — none of that may escape this
+        # boundary (a 429 must stay the typed retryable 503, never an opaque
+        # 500). Only finite, non-negative numerics are honored.
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
         raw = headers.get("retry-after")
-    except Exception:  # noqa: BLE001 — a hostile headers object must not raise
-        return None
-    if raw is None:
-        return None
-    try:
+        if raw is None:
+            return None
         seconds = float(str(raw).strip())
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 — attacker-adjacent input; contain everything
         return None
-    return seconds if seconds >= 0 else None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _map_vendor_error(exc: Exception) -> AppError:

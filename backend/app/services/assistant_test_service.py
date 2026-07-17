@@ -54,7 +54,7 @@ from app.services.assistant_runtime import AssistantRunConfig, assemble_run_conf
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
-from app.services.models_service import is_allowed_model
+from app.services.models_service import ChatModelService, is_allowed_model
 from app.services.run_sink import DebugTraceSink
 
 log = get_logger(__name__)
@@ -268,6 +268,9 @@ class AssistantTestService:
                 # is a correctness requirement of the preview harness, not a
                 # tuning choice.
                 tool_concurrency=1,
+                fallback_model_validator=lambda vsession, mid: ChatModelService(
+                    self._settings, session=vsession, tenant_id=self._tenant_id
+                ).is_allowed_model_async(mid),
                 context_config=ContextConfig(
                     fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
                     output_headroom_tokens=self._settings.context_output_headroom_tokens,
