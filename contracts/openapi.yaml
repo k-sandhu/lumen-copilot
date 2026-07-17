@@ -3003,7 +3003,47 @@ components:
             Governed tool calls behind an assistant message, oldest first
             (empty for user messages) (#377).
           items: { $ref: "#/components/schemas/MessageToolInvocation" }
+        question:
+          $ref: "#/components/schemas/AskUserQuestion"
+          description: >
+            Present only on an assistant turn that ended by asking the user a
+            clarifying question (spec 0006 #429, finishReason=ask_user). The UI
+            re-renders the options from here after reload; they stay active only
+            while this is the conversation's last message. The reply is an
+            ordinary SendMessageRequest.
         created_at: { type: string, format: date-time }
+
+    AskUserQuestion:
+      type: object
+      additionalProperties: false
+      description: >
+        A clarifying question the model asked instead of answering (spec 0006
+        #429). Mirrors the WS ChatAskUser payload (minus messageId — it rides
+        the owning Message). The question text is also the message content.
+      required: [question, options, allow_free_text]
+      properties:
+        question: { type: string }
+        options:
+          type: array
+          minItems: 2
+          maxItems: 4
+          description: >
+            Mutually exclusive choices; clicking one sends its label verbatim
+            as the next user message.
+          items: { $ref: "#/components/schemas/AskUserOption" }
+        allow_free_text:
+          type: boolean
+          description: Whether a typed custom reply is a sanctioned answer path.
+
+    AskUserOption:
+      type: object
+      additionalProperties: false
+      required: [label]
+      properties:
+        label: { type: string }
+        description:
+          type: string
+          description: Optional one-line elaboration shown under the label.
 
     MessageList:
       type: object
