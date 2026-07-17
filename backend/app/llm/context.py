@@ -643,14 +643,17 @@ def _compact_oldest_tool_results(
     for tier_cited in (False, True):
         if total <= budget:
             break
+        # No content-based "already digested" filter (#431 NEW-2): content is
+        # untrusted, and a result that merely ENDS with the public marker text
+        # could otherwise opt itself out of compaction (a targeted availability
+        # failure). The strict cost guard below is the real dedupe — re-digesting
+        # an actual digest re-costs equal, is not strictly smaller, and is
+        # skipped without a recount.
         candidates = [
             i
             for i in range(tail_start, len(working))
             if working[i].role is Role.TOOL
-            and (
-                (working[i].tool_call_id in cited_snippets) is tier_cited
-            )
-            and not working[i].content.endswith(_COMPACTION_MARKER)
+            and ((working[i].tool_call_id in cited_snippets) is tier_cited)
         ]
         pos = 0
         while total > budget and pos < len(candidates):

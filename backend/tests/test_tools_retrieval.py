@@ -375,3 +375,43 @@ async def test_tight_budget_clamps_every_retrieval_tool(
 
     await get_tool("list_documents").handler({"k": 50}, ctx)
     assert spy.list_k == 3  # list_documents now honours the tight ceiling too
+
+
+def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> None:
+    """#431 re-review NEW-1: the snippet string the tool reply shows and the one
+    the runtime records for compaction derive from ONE helper — byte-identical,
+    ellipsis and rstrip included — so a digest can never present a truncated
+    sentence as complete."""
+    from app.domain.retrieval import RetrievedPassage
+    from app.services.tools.impls.retrieval import _render_passages, rendered_snippet
+
+    # A passage longer than the budget, with a whitespace boundary right at the
+    # cut point (the rstrip + ellipsis case the review flagged).
+    text = ("evidence word " * 60).strip()  # ~840 chars, spaces throughout
+    passage = RetrievedPassage(
+        chunk_id=uuid.uuid4(),
+        document_id=uuid.uuid4(),
+        document_name="doc.txt",
+        ord=0,
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        score=0.5,
+    )
+    budget = 600
+    expected = rendered_snippet(text, budget)
+    assert expected.endswith("…")  # over-budget ⇒ visible truncation marker
+    assert not expected[:-1].endswith(" ")  # rstrip applied before the ellipsis
+    # The tool reply embeds EXACTLY that string.
+    assert expected in _render_passages([passage], budget)
+
+    # A short passage renders unchanged (no ellipsis) through the same helper.
+    short = rendered_snippet("short text", budget)
+    assert short == "short text"
+    assert short in _render_passages(
+        [RetrievedPassage(
+            chunk_id=uuid.uuid4(), document_id=uuid.uuid4(), document_name="d",
+            ord=0, text="short text", char_start=0, char_end=10, score=None,
+        )],
+        budget,
+    )

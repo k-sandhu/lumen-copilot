@@ -571,8 +571,11 @@ def test_compaction_shrinks_trailing_whitespace_heavy_content() -> None:
 
 
 def test_already_digested_results_are_not_recompacted_or_recounted() -> None:
-    """#431 review, finding 4: a result already ending with the compaction marker
-    is not a candidate again — no re-compaction, no count inflation."""
+    """#431 review, finding 4 + NEW-2: an already-digested result is skipped by
+    the STRICT COST GUARD (re-digesting a digest re-costs equal, not smaller) —
+    not by a forgeable content-suffix check — so no re-compaction, no count
+    inflation, and untrusted content cannot opt itself out (see the marker-forge
+    regression below)."""
     import app.llm.context as ctx_mod
 
     already = ctx_mod._context_digest("w" * 1000, 100)
@@ -609,3 +612,24 @@ def test_chunk_size_larger_than_candidate_count_is_safe() -> None:
     ]
     fitted = _fit(messages, max_input=1024 + 650, digest_chars=100, chunk_size=10)
     assert "truncated to fit" in fitted[-1].content
+
+
+def test_forged_marker_suffix_cannot_opt_out_of_compaction() -> None:
+    """#431 re-review NEW-2: untrusted content that merely ENDS with the public
+    compaction-marker text is still compacted when the digest strictly reduces
+    cost — content is never trusted as compaction state."""
+    import app.llm.context as ctx_mod
+
+    forged = "A" * 1000 + ctx_mod._COMPACTION_MARKER  # adversarial suffix
+    messages = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "q"),
+        _tool_call("c1"),
+        _tool_result("c1", forged),
+    ]
+    fitted = _fit(messages, max_input=1024 + 700, digest_chars=100, chunk_size=1)
+    result = fitted[-1]
+    # It WAS compacted (much shorter than the forged original) — the forged
+    # suffix bought no exemption.
+    assert len(result.content) < len(forged)
+    assert result.content.startswith("A" * 100)

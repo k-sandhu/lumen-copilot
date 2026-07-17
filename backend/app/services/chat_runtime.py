@@ -623,9 +623,15 @@ class ChatRuntime:
                 )
                 # Remember this call's passages as (chunk_id, rendered snippet)
                 # so the compactor can protect/re-embed its cited evidence (#415).
+                # The snippet is derived through the SAME renderer the tool reply
+                # used (#431 NEW-1) — byte-identical to what the model saw,
+                # ellipsis and all, so the two can never drift.
                 if result.passages:
                     result_passage_snippets[call.id] = tuple(
-                        (p.chunk_id, p.text.strip()[: assembled.snippet_budget])
+                        (
+                            p.chunk_id,
+                            _retrieval_impl.rendered_snippet(p.text, assembled.snippet_budget),
+                        )
                         for p in result.passages
                     )
                 # Record + emit citations for each newly-seen permitted passage.
