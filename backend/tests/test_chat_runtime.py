@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
 from typing import Any, cast
 
 import pytest
@@ -1947,6 +1948,24 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
             total_tokens=330,
             cache_write_tokens=5,
             session_id=ctx.session_id,
+        )
+        await session.commit()
+        # Deterministic "last": both records land in the same second (SQLite's
+        # server-default created_at is second-resolution) and the repo's
+        # tie-break is the random uuid id — a coin flip (#439). Give the first
+        # record an explicitly older created_at so "newest" is unambiguous;
+        # #439 owns the semantic fix (a monotonic ordering key).
+        from sqlalchemy import update as _sql_update
+
+        from app.db import models as _models
+
+        await session.execute(
+            _sql_update(_models.LlmUsage)
+            .where(
+                _models.LlmUsage.session_id == ctx.session_id,
+                _models.LlmUsage.prompt_tokens == 100,
+            )
+            .values(created_at=datetime(2000, 1, 1, 0, 0, 0))
         )
         await session.commit()
         totals = await repo.totals_for_session(ctx.session_id)
