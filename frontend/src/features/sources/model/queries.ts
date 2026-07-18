@@ -20,8 +20,8 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query';
-import { createSource, deleteSource, listSources, syncSource } from '@/api';
-import type { Source, SourceCreate, SourceList } from '@/api';
+import { connectSource, createSource, deleteSource, listSources, syncSource } from '@/api';
+import type { Source, SourceConnectResponse, SourceCreate, SourceList } from '@/api';
 
 /** Stable query key for the sources list. */
 export const sourcesKey = ['sources'] as const;
@@ -30,6 +30,8 @@ export const sourcesKey = ['sources'] as const;
 export const SYNC_POLL_INTERVAL_MS = 4_000;
 
 function hasUnsettled(list: SourceList | undefined): boolean {
+  // `pending_auth` is deliberately NOT unsettled: it only resolves when a human
+  // completes the provider consent (off-app), so polling on it would never quiet.
   return (list?.items ?? []).some((s) => s.status === 'pending' || s.status === 'syncing');
 }
 
@@ -58,6 +60,21 @@ export function useCreateSource() {
   return useMutation<Source, unknown, SourceCreate>({
     mutationFn: (body) => createSource(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: sourcesKey }),
+  });
+}
+
+/**
+ * Start (or restart) a managed source's OAuth consent flow (#455, ADR-0019 §1;
+ * admin only). Returns `{authorization_url}` — the CALLER navigates the browser
+ * there (a full-page navigation, not SPA routing); the provider redirects back
+ * to /sources with the frozen `connect` params `useConnectReturn` handles. No
+ * invalidation here: connect does not change the row (the status flips only
+ * after consent completes server-side). A 403 (non-admin, INV-5) / 409 (web
+ * source, INV-8) propagates as an `ApiError` the UI surfaces — never swallowed.
+ */
+export function useConnectSource() {
+  return useMutation<SourceConnectResponse, unknown, string>({
+    mutationFn: (id) => connectSource(id),
   });
 }
 
