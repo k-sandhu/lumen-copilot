@@ -47,6 +47,11 @@ export interface LiveAnswer {
   codeRuns: CodeRunActivity[];
   /** Live run-phase steps (spec 0006 #429) — transient, stream-only. */
   steps: ChatStep[];
+  /**
+   * The current tool-calling turn's live narration (event:narration,
+   * ADR-0016 §6 #414) — transient muted status; never part of the answer.
+   */
+  narration: string | null;
   /** The clarifying question the turn ended with (spec 0006 #429), if any. */
   askUser: ChatAskUser | null;
   problem: WsProblem | null;
@@ -268,8 +273,24 @@ export function ChatThread({
             // region even though suggestion generation still runs.
             const answerSettled = live.steps.some((s) => s.key === 'finalize');
             const liveQuestion = live.askUser ? questionFromAskUser(live.askUser) : undefined;
+            // Transient narration (#414): shown only while the answer is still
+            // streaming and there is no answer text yet — the model narrating
+            // its tool work. Cleared naturally once deltas arrive or the
+            // stream settles; never rendered into the message body.
+            const showNarration =
+              live.phase === 'streaming' && !answerSettled && !live.text && !!live.narration;
             return (
               <>
+                {showNarration && (
+                  <div
+                    className="chat-narration text-sm italic text-muted-foreground px-4 py-1"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="live-narration"
+                  >
+                    {live.narration}
+                  </div>
+                )}
                 <MessageBubble
                   role="assistant"
                   // A question turn streams no deltas — the question text IS the

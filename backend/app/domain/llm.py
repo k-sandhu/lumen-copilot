@@ -124,7 +124,12 @@ class StreamEvent:
       runtime runs them, appends results, and streams the next turn);
     * ``finish_reason`` — the terminal marker for this turn (``stop`` /
       ``tool_calls`` / ``length`` / ...), carried on the last event;
-    * ``usage`` — token accounting, when the provider reports it at end-of-turn.
+    * ``usage`` — token accounting, when the provider reports it at end-of-turn;
+    * ``tool_call_started`` — the ADR-0016 §6 classification signal (#414):
+      the provider's FIRST tool-call fragment arrived, so this turn is
+      provably tool-calling (its buffered text is narration). Provider-neutral
+      — no vendor fragment shape leaks; the assembled calls still arrive via
+      ``tool_calls`` at end-of-turn.
 
     Keeping this one flat type (rather than a union) keeps the consumer loop a
     single ``async for`` and the gateway the only place vendor chunks are parsed.
@@ -134,6 +139,8 @@ class StreamEvent:
     tool_calls: tuple[ToolCall, ...] = ()
     finish_reason: str | None = None
     usage: TokenUsage | None = None
+    #: The first-tool-fragment classification signal (ADR-0016 §6, #414).
+    tool_call_started: bool = False
 
 
 @dataclass(frozen=True, slots=True)

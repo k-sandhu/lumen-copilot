@@ -449,6 +449,7 @@ class LLMGateway:
         # Tool-call fragments arrive across many chunks keyed by ``index``; we
         # accumulate name + the arguments string per index and parse once at end.
         tool_acc: dict[int, _ToolCallAccumulator] = {}
+        tool_call_signalled = False
         finish_reason: str | None = None
         usage: TokenUsage | None = None
         try:
@@ -462,7 +463,16 @@ class LLMGateway:
                 content = getattr(delta, "content", None)
                 if content:
                     yield StreamEvent(text=content)
-                for frag in getattr(delta, "tool_calls", None) or []:
+                fragments = getattr(delta, "tool_calls", None) or []
+                if fragments and not tool_call_signalled:
+                    # The ADR-0016 §6 classification point (#414): the FIRST
+                    # tool-call fragment proves the turn tool-calling. One
+                    # provider-neutral signal, before accumulation continues —
+                    # the runtime flushes buffered narration and closes the
+                    # retry window HERE, not at stream end.
+                    tool_call_signalled = True
+                    yield StreamEvent(tool_call_started=True)
+                for frag in fragments:
                     _accumulate_tool_call(tool_acc, frag)
                 fr = getattr(choice, "finish_reason", None)
                 if fr:

@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429). Clients MUST ignore unknown names (forward compatibility)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414). Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
@@ -199,6 +199,17 @@
       }
     },
 
+    "ChatNarration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=narration (ADR-0016 §6, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
+      "required": ["text", "turn"],
+      "properties": {
+        "text": { "type": "string", "description": "One narration chunk; append-ordered within the turn by seq." },
+        "turn": { "type": "integer", "minimum": 1, "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)." }
+      }
+    },
+
     "ChatStep": {
       "type": "object",
       "additionalProperties": false,
@@ -320,7 +331,7 @@
 
   "x-chatStream": {
     "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via the run_python tool (CC-A #207, ADR-0013 #229), the sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
     "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full, output-size-capped run record (code, stdout/stderr, resource_usage) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
@@ -331,6 +342,7 @@
       "event.data[name=tool_result]": "#/$defs/ChatToolResult",
       "event.data[name=code_output]": "#/$defs/CodeOutput",
       "event.data[name=code_result]": "#/$defs/CodeResult",
+      "event.data[name=narration]": "#/$defs/ChatNarration",
       "event.data[name=step]": "#/$defs/ChatStep",
       "event.data[name=ask_user]": "#/$defs/ChatAskUser",
       "event.data[name=suggestions]": "#/$defs/ChatSuggestions",

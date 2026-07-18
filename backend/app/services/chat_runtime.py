@@ -817,8 +817,9 @@ class ChatRuntime:
         result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]] = {}
         # The answer is the text of exactly ONE turn: the tool-free turn the model
         # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
-        # text is pre-tool narration ("I'll search…"), not answer content — it is
-        # never streamed as a ``delta`` nor persisted (issue #148). Streaming it
+        # text is pre-tool narration ("I'll search…"), not answer content — it
+        # streams as transient ``event:narration`` (#414), never as a ``delta``
+        # and never persisted (issue #148). Streaming it as answer
         # would diverge the live answer from the stored message and re-expose the
         # narration-as-answer bug for clients that render the stream.
         answer_chunks: list[str] = []
@@ -917,6 +918,23 @@ class ChatRuntime:
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
             )
+            async def _publish_narration(
+                text: str, *, _turn: int = turn_index + 1
+            ) -> None:
+                # ADR-0016 §6 (#414): a tool-calling turn's visible narration,
+                # streamed live as transient status — NEVER a delta, never
+                # persisted (the #148 invariant is untouched). Runs in the
+                # answer coroutine, so seq mint + publish stay atomic.
+                await self._publish(
+                    state,
+                    envelopes.event(
+                        state.stream_id,
+                        state.next_seq(),
+                        name="narration",
+                        data={"text": text, "turn": _turn},
+                    ),
+                )
+
             turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
                 session=session,
                 route_state=route_state,
@@ -924,6 +942,7 @@ class ChatRuntime:
                 usage=usage,
                 tools=advertised,
                 refit=_refit,
+                narrate=_publish_narration,
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
@@ -982,8 +1001,10 @@ class ChatRuntime:
                 turn=turn_index + 1,
             )
             # The assistant turn that requested tools must be in the transcript
-            # before its tool results (provider protocol). Its narration text is
-            # dropped — neither streamed nor persisted.
+            # before its tool results (provider protocol). Its narration text
+            # already streamed live as transient ``event:narration`` (#414) —
+            # it is dropped from the TRANSCRIPT/persistence, never from the
+            # wire (the #148 answer invariant concerns deltas only).
             messages.append(
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
@@ -1034,7 +1055,8 @@ class ChatRuntime:
             # tool-free answer (issue #148 — the live empty-answer bug). Force one
             # synthesis turn with tools disabled so the model answers over the
             # gathered tool context, then stream + persist THAT as the answer. The
-            # narration from the exhausted tool turns was never emitted, so the
+            # narration from the exhausted tool turns streamed only as transient
+            # ``event:narration`` (#414) — never as deltas — so the
             # live stream and the stored message agree. Re-fit here too (#424
             # finding 1): the forced-synthesis call sends the full accumulated
             # transcript, so it must respect the budget like every other turn.
@@ -1445,13 +1467,17 @@ class ChatRuntime:
         tool_choice: str | None = None,
         refit: Callable[[str], list[ChatMessage]] | None = None,
         allow_failover: bool = True,
+        narrate: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
 
-        Safe by construction: :meth:`_stream_one_turn` publishes NOTHING (turns
-        are buffered; only the caller decides what streams) and tools run
+        Safe by construction: an UNCLASSIFIED turn publishes nothing (its text
+        is buffered; only the caller decides what streams) and tools run
         between turns — so a retried or failed-over turn can neither duplicate
-        wire output nor re-execute a tool. Policy, in order:
+        wire output nor re-execute a tool. A turn CLASSIFIED tool-calling
+        (ADR-0016 §6, #414) may publish narration through the ``narrate``
+        seam — and from that classification instant the window below is
+        closed: no retry, no failover. Policy, in order:
 
         * a gateway-classified RETRYABLE fault (timeout / connection / 429 /
           provider 5xx) retries on the SAME route, ≤ ``len(_RETRY_BACKOFF_
@@ -1471,6 +1497,20 @@ class ChatRuntime:
         ``usage`` into the running totals — deliberately kept: those tokens
         were genuinely spent, and the usage row is billing-honest.
         """
+        emitted = {"narration": False}
+
+        async def _narrate_and_close_window(text: str) -> None:
+            # ADR-0016 §4/§6 (#414): the window closes at the CLASSIFICATION
+            # point — the first invocation of this callback — whether or not
+            # any text was buffered yet (#447 round-2: a signal-only turn must
+            # not retry either; the amendment closes the window at the
+            # fragment, not at the first byte). Recorded BEFORE the publish so
+            # a fault mid-publish still counts; empty text closes the window
+            # without emitting a pointless envelope.
+            emitted["narration"] = True
+            if narrate is not None and text:
+                await narrate(text)
+
         while True:
             last: LlmProviderError | None = None
             for attempt in range(1 + len(_RETRY_BACKOFF_SECONDS)):
@@ -1487,9 +1527,15 @@ class ChatRuntime:
                         usage=usage,
                         tools=tools,
                         tool_choice=tool_choice,
+                        narrate=(
+                            _narrate_and_close_window if narrate is not None else None
+                        ),
                     )
                 except LlmProviderError as exc:
-                    if not exc.retryable:
+                    if not exc.retryable or emitted["narration"]:
+                        # Terminal — or the turn already emitted narration
+                        # (ADR-0016 §4: the retry window closed at first
+                        # emission; a retry could duplicate wire output).
                         raise
                     last = exc
                     # Class-name-derived detail only — never vendor text (#36 AC-7).
@@ -1608,14 +1654,18 @@ class ChatRuntime:
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
+        narrate: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
         Buffers the turn's text chunks and folds token ``usage`` into the running
-        total, but does **not** publish: only the caller knows whether a turn's
-        text is answer content (a tool-free turn, or the forced synthesis) to be
-        streamed, or pre-tool narration (a tool-calling turn) to be dropped (issue
-        #148). ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue
+        total. ANSWER text is never published from here (only the caller knows a
+        tool-free turn's text is the answer — issue #148); a turn PROVEN
+        tool-calling (the first tool fragment, ADR-0016 §6 #414) flushes its
+        buffered text through the optional ``narrate`` callback and streams the
+        rest live as transient narration — the one publishing this method does,
+        and only via that caller-supplied seam. ``tools`` is the run's
+        allow-list rendered as ``ToolSpec``s (issue
         #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
         forces a tool-free turn — the final synthesis once the budget is spent.
 
@@ -1627,6 +1677,7 @@ class ChatRuntime:
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
+        narrating = False
         async for ev in self._gateway.stream_tools(
             messages,
             tools=list(tools),
@@ -1635,7 +1686,26 @@ class ChatRuntime:
             api_key=route.api_key,
             api_base=route.api_base,
         ):
+            if (
+                (ev.tool_call_started or ev.tool_calls)
+                and not narrating
+                and narrate is not None
+            ):
+                # The classification point (ADR-0016 §6, #414): the FIRST
+                # tool-call fragment proves this turn is tool-calling, hence
+                # its text is narration. Flush the buffer as narration and
+                # stream the rest live; the caller's callback also CLOSES the
+                # turn's retry window (§4 — an emitting turn never retries).
+                narrating = True
+                buffered = "".join(text_chunks)
+                # ALWAYS invoke — an empty buffer still closes the retry
+                # window (the amendment's letter: the window closes AT the
+                # classification point, #447 round-2 blocker-1 edge); the
+                # wrapper's callback skips publishing empty text.
+                await narrate(buffered)
             if ev.text:
+                if narrating and narrate is not None:
+                    await narrate(ev.text)
                 text_chunks.append(ev.text)
             if ev.tool_calls:
                 turn_tool_calls = list(ev.tool_calls)
