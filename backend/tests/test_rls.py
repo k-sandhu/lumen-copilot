@@ -630,7 +630,8 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
                 tool_choice: object = None,
                 api_key: object = None,
                 api_base: object = None,
-            ):  # noqa: ANN202 — async generator
+                cache_key: object = None,
+                        ):  # noqa: ANN202 — async generator
                 msgs = list(messages)  # type: ignore[arg-type]
                 has_tool = any(getattr(m.role, "value", "") == "tool" for m in msgs)
                 if tool_choice == "none" or has_tool:

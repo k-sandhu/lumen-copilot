@@ -103,6 +103,7 @@ class _ScriptedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         # Turn shape is decided by whether the transcript already has a tool turn:
         # a real gateway streams; here we infer the turn from message count.
@@ -140,6 +141,7 @@ class _CapturingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append({"model": model, "api_key": api_key, "api_base": api_base})
         yield StreamEvent(text="Routed answer.")
@@ -743,6 +745,7 @@ class _BlockingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.entered.set()
         await asyncio.Event().wait()  # blocks forever unless cancelled

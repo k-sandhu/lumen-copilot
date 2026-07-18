@@ -202,3 +202,11 @@ def test_chat_tool_concurrency_defaults_and_rejects_out_of_range() -> None:
         Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=0)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **_BASE, CHAT_TOOL_CONCURRENCY=17)
+
+
+def test_chat_prompt_cache_kill_switch_defaults_on() -> None:
+    """#411: provider prompt-cache directives default ON and are killable via
+    ``CHAT_PROMPT_CACHE_ENABLED=false`` (AC-3: off ⇒ the exact pre-#411 wire)."""
+    assert Settings(_env_file=None, **_BASE).chat_prompt_cache_enabled is True
+    off = Settings(_env_file=None, **_BASE, CHAT_PROMPT_CACHE_ENABLED="false")
+    assert off.chat_prompt_cache_enabled is False

@@ -411,6 +411,14 @@ class Settings(BaseSettings):
     )
     chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
 
+    # Prompt caching (ADR-0016 §2, #411): provider cache directives on the
+    # answer loop's repeated prefixes (Anthropic cache_control breakpoints /
+    # OpenAI prompt_cache_key). A kill-switch, not a tuning knob — off means
+    # the exact pre-#411 wire shape everywhere.
+    chat_prompt_cache_enabled: bool = Field(
+        default=True, alias="CHAT_PROMPT_CACHE_ENABLED"
+    )
+
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the
     # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).

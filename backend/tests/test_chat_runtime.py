@@ -121,6 +121,7 @@ class _ScriptedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         if tool_choice == "none":
@@ -147,6 +148,7 @@ class _BoomGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator
@@ -924,6 +926,7 @@ class _CapturingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
@@ -1053,6 +1056,7 @@ class _RecordingSearchGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -1242,6 +1246,7 @@ class _RecordingGetDocGateway(_RecordingSearchGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -2077,7 +2082,8 @@ async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-        ):
+            cache_key: object = None,
+                ):
             if self.first_prompt is None:
                 self.first_prompt = list(messages)  # type: ignore[call-overload]
             async for ev in super().stream_tools(
@@ -2517,6 +2523,7 @@ class _RecordingScriptedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.seen.append(list(cast("Sequence[ChatMessage]", messages)))
         async for ev in super().stream_tools(
@@ -3171,6 +3178,7 @@ class _ModelRoutedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.models_called.append(str(model))
         pending = self._failures.get(str(model))
@@ -3557,6 +3565,7 @@ class _MidStreamFaultGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if not self._faulted:
             self._faulted = True
@@ -4472,6 +4481,7 @@ async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating… ")
@@ -4561,6 +4571,7 @@ async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: 
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating before the fragment… ")
@@ -4605,6 +4616,7 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(tool_call_started=True)  # NO text at all

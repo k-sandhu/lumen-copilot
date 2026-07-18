@@ -291,3 +291,194 @@ async def test_first_tool_fragment_emits_the_classification_signal(
     assert kinds == ["text", "signal", "text", "terminal"]
     # The second fragment did NOT re-signal; the assembled call still arrives.
     assert events[-1].tool_calls and events[-1].tool_calls[0].name == "search_text"
+
+
+# --- Prompt-cache directives (ADR-0016 §2, #411) ----------------------------
+#
+# The gateway decorates the OUTGOING wire per provider family — Anthropic-style
+# ``cache_control`` breakpoints on the serialized messages, OpenAI-style
+# ``prompt_cache_key`` routing affinity via ``extra_body`` — and sends the exact
+# pre-#411 wire for unknown families or when the kill-switch is off (AC-3).
+# These capture ``litellm.acompletion``'s kwargs and assert the wire byte-shape.
+
+
+def _capture_acompletion(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.clear()
+        captured.update(kwargs)
+        return _FakeStream([_Part(content="ok", finish_reason="stop")])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    return captured
+
+
+def _has_cache_control(wire_message: dict[str, Any]) -> bool:
+    content = wire_message.get("content")
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and "cache_control" in part for part in content
+    )
+
+
+_CONVO = [
+    ChatMessage(role=Role.SYSTEM, content="sys prompt"),
+    ChatMessage(role=Role.USER, content="first question"),
+    ChatMessage(role=Role.ASSISTANT, content="first answer"),
+    ChatMessage(role=Role.USER, content="follow-up"),
+]
+
+
+async def test_anthropic_family_marks_prefix_and_previous_turn_breakpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic-family models get exactly two ``cache_control`` breakpoints:
+    message[0] (the stable system prefix boundary) and message[-2] (the moving
+    per-turn mark — everything up to the previous turn caches). Other messages
+    stay plain strings, and no ``extra_body`` is sent (that's OpenAI's knob)."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
+
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-1")]
+
+    wire = captured["messages"]
+    assert [_has_cache_control(m) for m in wire] == [True, False, True, False]
+    # The decorated entries are single text parts wrapping the original string.
+    part = wire[0]["content"][0]
+    assert part == {
+        "type": "text",
+        "text": "sys prompt",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert wire[2]["content"][0]["text"] == "first answer"
+    # Undecorated entries keep the plain-string shape.
+    assert wire[1]["content"] == "first question"
+    assert wire[3]["content"] == "follow-up"
+    assert "extra_body" not in captured
+
+
+async def test_anthropic_single_message_gets_one_breakpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-message transcript anchors only message[0] — the len-2 index would
+    alias the same message; the anchor set dedupes it (no double-wrap)."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")], tools=_TOOLS
+        )
+    ]
+    wire = captured["messages"]
+    assert len(wire) == 1 and _has_cache_control(wire[0])
+    assert wire[0]["content"] == [
+        {"type": "text", "text": "q", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
+async def test_anthropic_skips_empty_content_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool-call-only assistant message (content ``""``) at an anchor index is
+    left untouched — there is no text part to hang ``cache_control`` on."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
+    messages = [
+        ChatMessage(role=Role.SYSTEM, content="sys"),
+        ChatMessage(role=Role.USER, content="q"),
+        ChatMessage(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+        ),
+        ChatMessage(role=Role.TOOL, content="result", tool_call_id="c1", name="search_text"),
+    ]
+    _ = [ev async for ev in gw.stream_tools(messages, tools=_TOOLS)]
+    wire = captured["messages"]
+    # message[0] decorated; message[2] (the empty tool-call turn) skipped.
+    assert _has_cache_control(wire[0])
+    assert wire[2]["content"] == ""
+    assert wire[2]["tool_calls"][0]["function"]["name"] == "search_text"
+
+
+async def test_openai_family_sends_prompt_cache_key_untouched_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI-family models get ``extra_body.prompt_cache_key`` (routing
+    affinity for implicit prefix caching) and NO message decoration."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings())  # default: openrouter/openai/gpt-4o-mini
+
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-42")]
+
+    assert captured["extra_body"] == {"prompt_cache_key": "sess-42"}
+    assert all(not _has_cache_control(m) for m in captured["messages"])
+
+    # Without a cache key there is nothing to steer — no extra_body at all.
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS)]
+    assert "extra_body" not in captured
+
+
+async def test_unknown_family_and_kill_switch_send_bare_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-3: an unknown provider family — and ANY family with the
+    ``CHAT_PROMPT_CACHE_ENABLED=false`` kill-switch — sends the exact pre-#411
+    wire: plain-string contents, no ``cache_control``, no ``extra_body``."""
+    captured = _capture_acompletion(monkeypatch)
+
+    # Unknown family (cache_key given, still nothing sent).
+    gw = LLMGateway(_settings(LLM_MODEL="openrouter/mistralai/mistral-large"))
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
+    assert "extra_body" not in captured
+    assert all(isinstance(m.get("content"), str) for m in captured["messages"])
+
+    # Kill-switch, Anthropic family: no breakpoints.
+    gw = LLMGateway(
+        _settings(
+            LLM_MODEL="openrouter/anthropic/claude-opus-4.8",
+            CHAT_PROMPT_CACHE_ENABLED="false",
+        )
+    )
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
+    assert all(isinstance(m.get("content"), str) for m in captured["messages"])
+
+    # Kill-switch, OpenAI family: no prompt_cache_key either.
+    gw = LLMGateway(_settings(CHAT_PROMPT_CACHE_ENABLED="false"))
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
+    assert "extra_body" not in captured
+
+
+async def test_anthropic_prefix_breakpoint_is_stable_across_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-2: growing the transcript must not perturb the already-sent prefix.
+
+    Turn N+1 = turn N's messages + [assistant, user]. The serialized wire of
+    the shared messages must be byte-identical across the two calls — including
+    the decorated message[0] — with ONLY the moving len-2 mark repositioned
+    (its old position reverts to a plain string). Any other difference would
+    invalidate the provider's cached prefix every turn."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
+
+    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="s")]
+    wire1 = captured["messages"]
+
+    grown = [
+        *_CONVO,
+        ChatMessage(role=Role.ASSISTANT, content="second answer"),
+        ChatMessage(role=Role.USER, content="third question"),
+    ]
+    _ = [ev async for ev in gw.stream_tools(grown, tools=_TOOLS, cache_key="s")]
+    wire2 = captured["messages"]
+
+    # The stable anchor is identical; turn 1's moving mark (index 2) reverted
+    # to the plain shape in turn 2; the new mark sits at the new len-2.
+    assert wire2[0] == wire1[0]
+    assert wire2[2]["content"] == "first answer"
+    assert [_has_cache_control(m) for m in wire2] == [True, False, False, False, True, False]
+    # Every shared undecorated message is byte-identical across turns.
+    assert wire2[1] == wire1[1]
+    assert wire2[3] == wire1[3]

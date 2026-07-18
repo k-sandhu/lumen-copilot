@@ -388,7 +388,8 @@ class _TestHarnessGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-    ):  # noqa: ANN201 — async generator
+        cache_key: object = None,
+        ):  # noqa: ANN201 — async generator
         from app.domain.llm import StreamEvent
 
         yield StreamEvent(text="This is a preview answer.")

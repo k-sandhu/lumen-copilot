@@ -107,6 +107,63 @@ def _retry_after_hint(exc: Exception) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
+def _cache_family(model: str | None) -> str | None:
+    """The provider cache family for a model id — resolved INSIDE the gateway.
+
+    The capability map lives here (ADR-0016 §2.4 / #427 item 14: no provider
+    categories leak above ``llm/``): "anthropic" ⇒ Anthropic-style
+    ``cache_control`` breakpoints; "openai" ⇒ OpenAI-style implicit prefix
+    caching steered by ``prompt_cache_key``; ``None`` ⇒ no cache directives at
+    all (AC-3: an unsupported provider behaves exactly as before #411).
+    Heuristic over the routed id (which may carry gateway prefixes like
+    ``openrouter/``) — conservative: unknown families get nothing.
+    """
+    if not model:
+        return None
+    lowered = model.lower()
+    if "claude" in lowered or "anthropic/" in lowered:
+        return "anthropic"
+    if "gpt-" in lowered or "openai/" in lowered:
+        return "openai"
+    return None
+
+
+def _apply_cache_directives(
+    wire: list[dict[str, Any]], family: str | None
+) -> list[dict[str, Any]]:
+    """Decorate serialized messages with Anthropic cache breakpoints (#411).
+
+    Applied AFTER :meth:`_to_wire_messages` so the assembler's token-count
+    mirror keeps matching the undecorated shape (the ~20 tokens of directive
+    framing sit comfortably inside the assembler's 1024-token safety margin).
+    Two breakpoints (limit is four): the FIRST message (the stable
+    system/tools prefix boundary) and the SECOND-TO-LAST (the moving per-turn
+    mark — everything up to and including the previous turn's tool results
+    caches; only the newest message is fresh). Only plain-string contents are
+    wrapped; tool-call-only messages with empty content are skipped (nothing
+    to anchor). Non-Anthropic families return the wire untouched.
+    """
+    if family != "anthropic" or not wire:
+        return wire
+    anchors = {0}
+    if len(wire) >= 2:
+        anchors.add(len(wire) - 2)
+    for i in anchors:
+        content = wire[i].get("content")
+        if isinstance(content, str) and content:
+            wire[i] = {
+                **wire[i],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+    return wire
+
+
 def _map_vendor_error(exc: Exception) -> AppError:
     """Map a LiteLLM/provider exception to a typed :class:`AppError`.
 
@@ -398,6 +455,7 @@ class LLMGateway:
         tool_choice: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        cache_key: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -432,10 +490,23 @@ class LLMGateway:
         extra: dict[str, Any] = {}
         if tool_choice is not None:
             extra["tool_choice"] = tool_choice
+        # Prompt-cache directives (ADR-0016 §2, #411), keyed by the provider
+        # family resolved HERE (no provider categories leak above llm/):
+        # Anthropic-style breakpoints decorate the serialized messages below;
+        # OpenAI-style implicit caching is steered by prompt_cache_key (the
+        # session id) via extra_body passthrough. Unknown families — and a
+        # disabled kill-switch — send the exact pre-#411 wire (AC-3).
+        family = (
+            _cache_family(model_id) if self._settings.chat_prompt_cache_enabled else None
+        )
+        if family == "openai" and cache_key:
+            extra["extra_body"] = {"prompt_cache_key": cache_key}
         try:
             response = await litellm.acompletion(
                 model=model_id,
-                messages=self._to_wire_messages(messages),
+                messages=_apply_cache_directives(
+                    self._to_wire_messages(messages), family
+                ),
                 tools=self._to_wire_tools(tools),
                 stream=True,
                 stream_options={"include_usage": True},

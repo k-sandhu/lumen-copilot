@@ -993,6 +993,57 @@ async def test_live_embed_smoke(_live_gateway: LLMGateway) -> None:
     assert len(embeddings[0].vector) == settings.llm_embedding_dimensions
 
 
+@live
+@pytest.mark.live
+async def test_live_prompt_cache_second_turn_reads_cache(_live_gateway: LLMGateway) -> None:
+    """#411 AC-1: two identical-prefix tool turns against a real Anthropic
+    model — the second turn's usage must report cache reads (or, at minimum,
+    the first must report a cache write that the second does not repeat).
+
+    The prefix must clear Anthropic's ~1024-token minimum cacheable size, so
+    the system message is padded well past it. Costs two small haiku calls;
+    gated like every live smoke (RUN_LIVE=1 + key).
+    """
+    from app.domain.llm import ToolSpec
+
+    filler = " ".join(
+        f"Fact {i}: the lumen copilot cache smoke sentence number {i} pads the prefix."
+        for i in range(220)
+    )
+    messages = [
+        ChatMessage(role=Role.SYSTEM, content=f"You answer tersely. Context: {filler}"),
+        ChatMessage(role=Role.USER, content="Reply with the single word: pong"),
+    ]
+    tools = (
+        ToolSpec(
+            name="noop",
+            description="never call this",
+            parameters={"type": "object", "properties": {}},
+        ),
+    )
+
+    async def _turn_usage() -> TokenUsage | None:
+        usage: TokenUsage | None = None
+        async for ev in _live_gateway.stream_tools(
+            messages,
+            tools=tools,
+            model="openrouter/anthropic/claude-haiku-4.5",
+            tool_choice="none",
+            cache_key="lumen-cache-smoke",
+        ):
+            usage = ev.usage or usage
+        return usage
+
+    first = await _turn_usage()
+    second = await _turn_usage()
+    assert first is not None and second is not None
+    assert first.prompt_tokens > 1024  # the prefix actually clears the minimum
+    # AC-1: the second turn hits the cache written by the first.
+    assert second.cached_prompt_tokens > 0 or (
+        first.cache_write_tokens > 0 and second.cache_write_tokens == 0
+    )
+
+
 # --- #94 regression: the gateway's client-close teardown is real ------------
 
 

@@ -347,6 +347,9 @@ class ChatRuntime:
         # persist spent scopes in an INDEPENDENT transaction when the answer
         # transaction rolls back (error/cancel) — providers billed those calls.
         self._salvage: tuple[_RouteState, _Usage] | None = None
+        # The prompt-cache steering key (#411): the answer's session id, set
+        # per answer in _answer (the runtime is constructed per answer).
+        self._cache_key: UUID | None = None
         # The #413 fallback revalidator: the SAME allow-list check the send path
         # applies (config registry / the tenant's enabled providers), re-run at
         # answer start so stored config that went stale is dropped fail-closed.
@@ -593,6 +596,8 @@ class ChatRuntime:
         # per-turn thrashing back). ``route_state.model`` is therefore the
         # model that ACTUALLY produced the answer — what ``done``, the message
         # row, the usage row, and the audit record.
+        # The per-session prompt-cache key (#411) the turn streamer forwards.
+        self._cache_key = session_id
         route_state = _RouteState(
             model=model, route=await self._resolve_model_route(session, model)
         )
@@ -1301,6 +1306,18 @@ class ChatRuntime:
         )
 
         answer_usage = _answer_usage_totals(route_state, usage)
+        # The cache-hit KPI (#411 / ADR-0016 §2.6): per-answer cached/total
+        # input ratio, from the same counters the llm_usage rows persist.
+        if answer_usage.prompt_tokens:
+            log.info(
+                "llm.cache_kpi",
+                cached_prompt_tokens=answer_usage.cached_prompt_tokens,
+                prompt_tokens=answer_usage.prompt_tokens,
+                cache_hit_ratio=round(
+                    answer_usage.cached_prompt_tokens / answer_usage.prompt_tokens, 3
+                ),
+                cache_write_tokens=answer_usage.cache_write_tokens,
+            )
         return _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
@@ -1685,6 +1702,10 @@ class ChatRuntime:
             tool_choice=tool_choice,
             api_key=route.api_key,
             api_base=route.api_base,
+            # The prompt-cache steering key (#411): stable per session so
+            # OpenAI-style implicit caching lands consecutive answers of one
+            # conversation on the same cache shard.
+            cache_key=str(self._cache_key) if self._cache_key else None,
         ):
             if (
                 (ev.tool_call_started or ev.tool_calls)
