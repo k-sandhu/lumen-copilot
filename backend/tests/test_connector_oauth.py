@@ -1235,20 +1235,31 @@ async def test_rotation_deletion_race_through_unmocked_vault(
         )
 
     orig_load = SecretsService._load_owned_or_404
+    load_calls = {"n": 0}
 
     async def _load_then_delete(
         self: SecretsService, secret_id: uuid.UUID, **kwargs: object
     ) -> object:
+        # Call 1 is get_secret_plaintext's authorization read — it must run
+        # untouched so the refresh happens. Call 2 is rotate_secret_value's:
+        # the racing deletion lands exactly between ITS authorization read and
+        # the atomic UPDATE, so the UPDATE genuinely finds no row and the
+        # repository's None → NotFoundError mapping is the path under test.
+        load_calls["n"] += 1
         secret = await orig_load(self, secret_id, **kwargs)  # type: ignore[arg-type]
-        # The racing deletion lands between the authorization read and the
-        # atomic UPDATE — same session, so the UPDATE genuinely finds no row.
-        await self._session.execute(sa_delete(models.Secret).where(models.Secret.id == secret_id))
+        if load_calls["n"] == 2:
+            await self._session.execute(
+                sa_delete(models.Secret).where(models.Secret.id == secret_id)
+            )
         return secret
 
     monkeypatch.setattr(sync_mod, "refresh_access_token", _rotated)
     monkeypatch.setattr(SecretsService, "_load_owned_or_404", _load_then_delete)
     result = await _run_sync(seeded.tenant_a, source_id)
     assert result.error == "reauthorize_required"  # type: ignore[attr-defined]
+    # The rotation phase was genuinely reached: the plaintext read succeeded
+    # (call 1), the refresh ran, and the deletion raced the ROTATION's load.
+    assert load_calls["n"] == 2
     async with task_db() as session:
         row = (
             await session.execute(
