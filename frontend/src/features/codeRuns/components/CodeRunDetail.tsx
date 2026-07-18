@@ -11,7 +11,7 @@
  */
 import { ApiError } from '@/api';
 import { Icon } from '@/ui';
-import { useCodeRun } from '../model/queries';
+import { useCancelCodeRun, useCodeRun } from '../model/queries';
 import { isTerminalCodeRun } from '../model/presentation';
 import { viewFromRecord } from '../model/view';
 import { CodeRunInspector } from './CodeRunInspector';
@@ -24,15 +24,11 @@ export interface CodeRunDetailProps {
 
 export function CodeRunDetail({ runId, resolveArtifactHref }: CodeRunDetailProps) {
   const query = useCodeRun(runId);
+  const cancel = useCancelCodeRun(runId);
 
   if (query.isPending) {
     return (
-      <div
-        role="status"
-        aria-live="polite"
-        aria-busy="true"
-        className="space-y-3 p-4"
-      >
+      <div role="status" aria-live="polite" aria-busy="true" className="space-y-3 p-4">
         <span className="sr-only">Loading code run…</span>
         <div className="h-5 w-40 animate-pulse rounded bg-surface-muted" aria-hidden="true" />
         <div className="h-40 animate-pulse rounded bg-surface-muted" aria-hidden="true" />
@@ -79,8 +75,15 @@ export function CodeRunDetail({ runId, resolveArtifactHref }: CodeRunDetailProps
     <div className="p-4">
       <CodeRunInspector
         view={{ ...base, streaming: base.streaming || live }}
+        onCancel={() => cancel.mutate()}
+        cancelling={cancel.isPending}
         {...(resolveArtifactHref ? { resolveArtifactHref } : {})}
       />
+      {cancel.isError ? (
+        <p role="alert" className="mt-2 text-xs text-danger">
+          Couldn’t cancel this execution. Try resetting the chat sandbox.
+        </p>
+      ) : null}
     </div>
   );
 }

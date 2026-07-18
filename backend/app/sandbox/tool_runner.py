@@ -10,12 +10,12 @@ concrete implementation the chat runtime wires into the tool context:
   assistant message (``session_id`` / the trace), through the tenant-scoped
   :class:`~app.db.repositories.CodeRunRepository` (the only SQL);
 * it **submits** the run to the merged :class:`~app.sandbox.service.SandboxService`
-  — the owning module for code execution (ADR-0013 §1). A disabled/over-quota
-  tenant is refused there (``status=denied``, audited) *before* any container
-  launches, so admin-gating and the quota gate hold by delegation — the tool never
-  re-implements them;
+  — the owning module for code execution (ADR-0020 §1). A disabled tenant or
+  disallowed package request is refused there (``status=denied``, audited) *before*
+  tenant code launches, so policy gating holds by delegation — the tool never
+  re-implements it;
 * it **streams** the captured output over the chat stream as ``code_output`` chunks
-  and terminates with exactly one ``code_result`` (the frozen ADR-0013 WS contract),
+  and terminates with exactly one ``code_result`` (the ADR-0020 WS contract),
   correlated by the ``runId`` (the ``code_run`` id);
 * it returns the terminal :class:`~app.services.tools.types.SandboxRun` domain summary
   to the tool — never a runner/Docker wire object (ADR-0004 boundary rule).
@@ -28,7 +28,7 @@ exercised without a container engine; the true kernel-level isolation is #230's
 live-gated coverage.
 
 The engine drives a run to a terminal status and captures the whole result; this
-seam re-reads that terminal record and replays its (output-size-capped, G7) stdout
+seam re-reads that terminal record and replays its captured stdout
 /stderr as ``code_output`` chunks *after* the terminal is known — the contract
 permits zero-or-more chunks in ``seq`` order before the single ``code_result``, and
 a truncating run still terminates with ``code_result``. Per-token live streaming is
@@ -67,7 +67,7 @@ class ChatSandboxToolRunner:
     tool args), the injected :class:`SandboxRunner` (live HTTP client or a test
     fake), the object store, the backplane the answer streams over, and the
     ``stream_id`` / ``session_id`` / ``message_id`` the run links back to. All
-    tenant/owner scoping + the deny-by-default quota/enable gate live in the
+    tenant/owner scoping + the deny-by-default enable/package gate live in the
     composed :class:`SandboxService`; this class only creates the run row, drives the
     service, and renders the WS events.
     """
@@ -106,16 +106,15 @@ class ChatSandboxToolRunner:
         self._session_id = session_id
         self._message_id = message_id
 
-    async def submit(self, *, code: str, timeout_s: int | None = None) -> SandboxRun:
+    async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> SandboxRun:
         """Run ``code`` to a terminal status; stream its output; return the summary.
 
         Creates the ``queued`` ``code_run`` (linked to the parent session + the
         assistant message via ``trace_id``), submits it to the sandbox service, then
         re-reads the terminal record and emits its captured stdout/stderr as
-        ``code_output`` chunks followed by exactly one ``code_result``. ``timeout_s``
-        is accepted for the seam's contract and recorded for the run; the hard
-        wall-clock cap remains the configured ceiling (G6) — a per-call hint can
-        never widen it, so it is not honoured as an override here.
+        ``code_output`` chunks followed by exactly one ``code_result``. Package
+        requirements are policy-checked and installed by the runner before
+        tenant inputs are staged. There is no automatic execution timeout.
         """
         code_runs = CodeRunRepository(self._session, self._tenant_id)
         run = await code_runs.create(
@@ -124,8 +123,9 @@ class ChatSandboxToolRunner:
             session_id=self._session_id,
             # Link the code-run to the parent chat/agent trace: the assistant message
             # id doubles as the trace id until the agent-trace tables land (mirrors
-            # the code_runs row's documented ``trace_id`` semantics, ADR-0013 §4).
+            # the code_runs row's documented ``trace_id`` semantics).
             trace_id=self._message_id,
+            requested_packages=packages,
         )
         run_id = run.id
 
@@ -154,6 +154,8 @@ class ChatSandboxToolRunner:
                 duration_ms=None,
                 stdout="",
                 stderr="",
+                sandbox_session_id=None,
+                sandbox_generation=None,
             )
             await self._emit_result(summary)
             return summary
@@ -164,9 +166,9 @@ class ChatSandboxToolRunner:
         return summary
 
     async def _stream_output(self, run: CodeRun) -> None:
-        """Emit the run's captured stdout/stderr as ``code_output`` chunks (ADR-0013).
+        """Emit the run's captured stdout/stderr as ``code_output`` chunks (ADR-0020).
 
-        The engine captures the whole (output-size-capped, G7) output; this replays it
+        The engine captures the whole output; this replays it
         as at most one stdout chunk and one stderr chunk in ``seq`` order before the
         terminal ``code_result``. A run refused before execution (``denied``) has no
         process output, so no chunk is emitted.
@@ -190,7 +192,7 @@ class ChatSandboxToolRunner:
         )
 
     async def _emit_result(self, run: SandboxRun) -> None:
-        """Emit the single terminal ``code_result`` for the run (ADR-0013 contract).
+        """Emit the single terminal ``code_result`` for the run (ADR-0020 contract).
 
         This is a run-level terminal, NOT the chat stream's terminal — the chat
         stream still ends with its own ``done``/``error``. ``artifactIds`` are the
@@ -208,6 +210,10 @@ class ChatSandboxToolRunner:
                     "exitCode": run.exit_code,
                     "durationMs": run.duration_ms,
                     "artifactIds": [str(a) for a in run.artifact_ids],
+                    "sandboxSessionId": (
+                        str(run.sandbox_session_id) if run.sandbox_session_id else None
+                    ),
+                    "sandboxGeneration": run.sandbox_generation,
                 },
             ),
         )
@@ -223,6 +229,8 @@ def _to_summary(run: CodeRun) -> SandboxRun:
         stdout=run.stdout,
         stderr=run.stderr,
         artifact_ids=tuple(run.artifact_ids),
+        sandbox_session_id=run.sandbox_session_id,
+        sandbox_generation=run.sandbox_generation,
     )
 
 

@@ -3,13 +3,10 @@
  * surface. Covers every async state (frontend/AGENTS.md: not just success) plus the
  * governance behaviour that matters:
  *
- * - loading shimmer → the policy form (enable toggle, package/egress fields, caps);
+ * - loading shimmer → the policy form (enable toggle + package policy);
  * - the deny-by-default hint when no policy is stored (`is_default`);
- * - saving PATCHes the full policy body (enable + packages + egress + caps) and shows a
- *   success toast;
- * - client-side validation blocks a cap ABOVE the deploy-wide ceiling (would be clamped)
- *   WITHOUT calling the API — a dismissible error, never a silent no-op;
- * - a 422 (invalid cap) / 403 write error surfaces a dismissible alert;
+ * - compatibility-only egress/cap values are preserved but not offered as active controls;
+ * - a 422 (invalid package policy) / 403 write error surfaces a dismissible alert;
  * - the read 403 (INV-5) lands as the shared actionable panel error.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -50,16 +47,16 @@ beforeEach(() => {
 });
 
 describe('SandboxGovernancePanel', () => {
-  it('renders the policy form with the enable toggle and cap inputs', async () => {
+  it('renders enable/package policy and explains the intentionally unbounded posture', async () => {
     getSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
     renderWithQuery(<SandboxGovernancePanel />);
 
     expect(
       await screen.findByRole('switch', { name: /enable code execution/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('switch', { name: /enable outbound network/i })).toBeInTheDocument();
-    expect(screen.getByLabelText(/max runtime/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/max concurrency/i)).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: /outbound network/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/max runtime/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/no automatic runtime.*memory.*process.*output/i)).toBeInTheDocument();
     // Deny-by-default hint when no policy is stored.
     expect(screen.getByText(/disabled for this tenant by default/i)).toBeInTheDocument();
   });
@@ -80,25 +77,17 @@ describe('SandboxGovernancePanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /save policy/i }));
 
     expect(updateSandboxPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ enabled: true, allowed_packages: ['numpy'] }),
+      expect.objectContaining({
+        enabled: true,
+        allowed_packages: ['numpy'],
+        egress_allowed: false,
+        max_runtime_s: 30,
+        max_memory_mb: 512,
+        daily_runtime_cap_s: 3600,
+        max_concurrency: 2,
+      }),
     );
     expect(await screen.findByText(/sandbox policy saved/i)).toBeInTheDocument();
-  });
-
-  it('blocks a cap above the deploy ceiling client-side, without calling the API (AC-2)', async () => {
-    getSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
-    renderWithQuery(<SandboxGovernancePanel />);
-    await screen.findByLabelText(/max runtime/i);
-
-    // The ceiling is 30; typing 9999 must be refused before any PATCH.
-    const runtime = screen.getByLabelText(/max runtime/i);
-    await userEvent.clear(runtime);
-    await userEvent.type(runtime, '9999');
-    await userEvent.click(screen.getByRole('button', { name: /save policy/i }));
-
-    const alert = await screen.findByRole('alert');
-    expect(within(alert).getByText(/cannot exceed the deploy-wide limit/i)).toBeInTheDocument();
-    expect(updateSandboxPolicy).not.toHaveBeenCalled();
   });
 
   it('surfaces a write error (403) as a dismissible alert, not a silent no-op', async () => {
@@ -114,7 +103,7 @@ describe('SandboxGovernancePanel', () => {
     expect(within(alert).getByText(/admin role/i)).toBeInTheDocument();
   });
 
-  it('surfaces a 422 (invalid cap) write error as an actionable alert (INV-8)', async () => {
+  it('surfaces a 422 package-policy write error as an actionable alert (INV-8)', async () => {
     getSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
     updateSandboxPolicy.mockRejectedValue(new ApiError('unprocessable', 422));
     renderWithQuery(<SandboxGovernancePanel />);
@@ -122,7 +111,7 @@ describe('SandboxGovernancePanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /save policy/i }));
     const alert = await screen.findByRole('alert');
-    expect(within(alert).getByText(/positive number/i)).toBeInTheDocument();
+    expect(within(alert).getByText(/package-policy value/i)).toBeInTheDocument();
   });
 
   it('surfaces a read 403 as an actionable panel error (INV-5)', async () => {

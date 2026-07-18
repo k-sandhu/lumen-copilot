@@ -32,6 +32,7 @@ import base64
 import binascii
 import uuid
 from dataclasses import dataclass, field
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -200,6 +201,12 @@ def _clamp_limit(limit: int | None) -> int:
     return max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
 
 
+class SandboxLifecycle(Protocol):
+    """Narrow deletion hook; the sandbox module owns container lifecycle."""
+
+    async def close(self, chat_session_id: UUID) -> None: ...
+
+
 class ChatService:
     """Create / list / get / update / delete sessions + send/list messages.
 
@@ -215,6 +222,7 @@ class ChatService:
         tenant_id: UUID,
         owner_id: UUID,
         settings: Settings,
+        sandbox_lifecycle: SandboxLifecycle | None = None,
     ) -> None:
         self._sessions = ChatSessionRepository(session, tenant_id)
         self._messages = MessageRepository(session, tenant_id)
@@ -232,6 +240,7 @@ class ChatService:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
+        self._sandbox_lifecycle = sandbox_lifecycle
 
     # --- model selection ----------------------------------------------------
 
@@ -454,6 +463,8 @@ class ChatService:
         existing = await self._sessions.get(session_id)
         if existing is None or not self._owns(existing):
             return False
+        if self._sandbox_lifecycle is not None:
+            await self._sandbox_lifecycle.close(session_id)
         return await self._sessions.delete(session_id)
 
     # --- message use-cases --------------------------------------------------

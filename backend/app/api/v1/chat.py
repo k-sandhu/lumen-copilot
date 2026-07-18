@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -38,16 +38,17 @@ from app.api.deps import (
     get_llm_gateway,
 )
 from app.core.config import Settings
-from app.core.errors import NotFoundError
+from app.core.errors import DependencyError, NotFoundError
 from app.core.logging import get_logger
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
 from app.domain.chat import AskUserQuestion
-from app.domain.entities import Message, MessageRole, ToolInvocation
+from app.domain.entities import Message, MessageRole, SandboxSession, ToolInvocation
 from app.domain.llm import ChatMessage, Role
 from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
+from app.sandbox.service import SandboxSessionService
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime, SandboxContext
@@ -102,6 +103,21 @@ class ChatSessionUpdate(BaseModel):
             raise ValueError("At least one field must be provided.")
         return self
 
+
+class SandboxSessionResponse(BaseModel):
+    """``#/components/schemas/SandboxSession``."""
+
+    model_config = {"extra": "forbid"}
+
+    status: Literal["not_created", "active", "closed", "error"]
+    enabled: bool
+    root_access: Literal[True] = True
+    sandbox_session_id: UUID | None = None
+    generation: int | None = None
+    image_digest: str | None = None
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+    closed_at: datetime | None = None
 
 class ChatSessionResponse(BaseModel):
     """``#/components/schemas/ChatSession``."""
@@ -396,11 +412,52 @@ def _build_service(
     tenant_id: CurrentTenant,
     settings: SettingsDep,
 ) -> ChatService:
+    lifecycle = SandboxSessionService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        settings=settings,
+    )
     return ChatService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         settings=settings,
+        sandbox_lifecycle=lifecycle,
+    )
+
+
+def _build_sandbox_service(
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxSessionService:
+    return SandboxSessionService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        settings=settings,
+    )
+
+
+def _sandbox_response(
+    value: SandboxSession | None, *, enabled: bool
+) -> SandboxSessionResponse:
+    if value is None:
+        return SandboxSessionResponse(status="not_created", enabled=enabled)
+    return SandboxSessionResponse(
+        status=value.status.value,
+        enabled=enabled,
+        sandbox_session_id=value.id,
+        generation=value.generation,
+        image_digest=value.image_digest,
+        created_at=value.created_at,
+        last_used_at=value.last_used_at,
+        closed_at=value.closed_at,
     )
 
 
@@ -567,6 +624,75 @@ async def delete_session(
     return response
 
 
+@router.get(
+    "/sessions/{session_id}/sandbox",
+    response_model=SandboxSessionResponse,
+    response_model_exclude_none=True,
+)
+async def get_sandbox_session(
+    session_id: UUID,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxSessionResponse:
+    """Inspect this visible chat's reusable sandbox state."""
+    service = _build_sandbox_service(
+        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+    )
+    value = await service.get(session_id)
+    return _sandbox_response(value, enabled=await service.is_enabled())
+
+
+@router.post(
+    "/sessions/{session_id}/sandbox/reset",
+    response_model=SandboxSessionResponse,
+    response_model_exclude_none=True,
+)
+async def reset_sandbox_session(
+    session_id: UUID,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> SandboxSessionResponse:
+    """Destroy prior state and start a clean sandbox generation."""
+    service = _build_sandbox_service(
+        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+    )
+    try:
+        value = await service.reset(session_id)
+    except DependencyError:
+        # The service already advanced the durable generation and marked it error.
+        # Preserve that recovery signal even when the runner failed after destroying
+        # the old container; rolling back would falsely report the old state active.
+        await session.commit()
+        raise
+    await session.commit()
+    return _sandbox_response(value, enabled=True)
+
+
+@router.delete(
+    "/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT
+)
+async def close_sandbox_session(
+    session_id: UUID,
+    response: Response,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> Response:
+    """Idempotently close and destroy a visible chat's reusable sandbox."""
+    service = _build_sandbox_service(
+        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+    )
+    await service.close(session_id)
+    await session.commit()
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
 # --- Message routes ---------------------------------------------------------
 
 
@@ -673,7 +799,7 @@ def _schedule_answer(
 
     The #231 ``run_python`` sandbox seam is wired via a factory the runtime only
     invokes when a run's allow-list actually offers ``run_python`` (an admin/
-    assistant-gated, off-by-default tool). The deny-by-default admin/quota gate lives
+    assistant-gated, off-by-default tool). The deny-by-default enable/package gate lives
     inside the sandbox service the seam composes (``SANDBOX_ENABLED`` / the #233
     per-tenant enable), so a disabled tenant's run is refused there and surfaces as a
     typed ``ok=False`` tool result — never an exception.
@@ -779,7 +905,7 @@ def _build_sandbox_factory(
     only container-engine surface — an internal HTTP hop to the dedicated runner, no
     Docker socket) and the object store into a :class:`ChatSandboxToolRunner` scoped
     to the streaming principal (tenant + owner from the token, never model input).
-    The deny-by-default admin/quota gate is inside the sandbox service the seam
+    The deny-by-default enable/package gate is inside the sandbox service the seam
     composes, so this factory does not gate — it wires; a disabled tenant's run is
     refused downstream and surfaces as a typed ``ok=False`` result.
     """

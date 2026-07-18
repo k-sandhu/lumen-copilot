@@ -1,24 +1,21 @@
-"""Sandbox run spec + result — the domain value objects (ADR-0013 §4, #230).
+"""Reusable sandbox session/run domain value objects (ADR-0020, #457).
 
 Pure, frozen dataclasses that describe **what to run** (:class:`RunSpec` — the code,
-staged read-only inputs, resource limits, egress/package policy) and **what came
+package requirements, and staged read-only inputs) and **what came
 back** (:class:`RunResult` — status, captured output, produced files, timing,
 resource usage). The ``sandbox/`` module exposes *these* domain types to its
 ``services`` caller — never the ``sandbox-runner``'s wire objects or Docker's
 container objects (ADR-0004 boundary rule).
 
-The isolation guarantees (G1–G8, ADR-0013 §5) are expressed here as **explicit,
-inspectable enforcement fields** so the offline tests can assert the wiring is
-correct (network mode is ``none``, no host mounts, caps dropped, limits present)
-even where the true kernel-level behaviour can only be proven against a live
-runner. Deny-by-default is the default: a freshly constructed :class:`SandboxPolicy`
-denies all egress and installs no packages.
+Legacy ADR-0013 policy value objects remain for source compatibility. ADR-0020's
+active enforcement is the fixed runner mapping: network mode ``none``, no host mounts,
+all capabilities dropped, contained UID 0, and no automatic execution limits.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.domain.entities import CodeRunStatus, ResourceUsage
 
@@ -29,12 +26,9 @@ METADATA_IP = "169.254.169.254"
 
 @dataclass(frozen=True, slots=True)
 class RunLimits:
-    """The per-run resource caps enforced by the sandbox (ADR-0013 §2, G6/G7).
+    """Legacy ADR-0013 limits retained only for reading older callers/tests.
 
-    Every field is a hard ceiling the runner passes to the container engine (CPU
-    quota, memory → OOM-kill, pids → fork-bomb cap) or enforces itself (wall-clock
-    → SIGKILL, output bytes → truncate/fail). All must be **positive**; the config
-    layer validates them fail-fast so a run can never be launched unbounded.
+    These values are not populated or passed to the ADR-0020 reusable runner.
     """
 
     cpus: float
@@ -74,18 +68,31 @@ class EgressPolicy:
 
 @dataclass(frozen=True, slots=True)
 class SandboxPolicy:
-    """The full run policy: egress + package + runtime (ADR-0013 §3/§5, deny-by-default).
+    """Legacy per-run policy value retained for source compatibility.
 
-    ``egress`` denies all network by default (G2–G4). ``allow_package_install`` is
-    False: a run gets exactly the curated, pinned base image's libraries — no
-    arbitrary internet ``pip install`` (ADR-0013 §3). ``runtime`` names the OCI
-    runtime the runner uses (``runc`` = hardened Docker baseline; ``runsc`` = the
-    recommended gVisor production hardening — a config swap, no code change).
+    ADR-0020 ignores its egress/package booleans: model code is always offline and
+    admitted packages are acquired through the runner before tenant bytes are staged.
+    ``runtime`` remains meaningful on :class:`SandboxSessionSpec`.
     """
 
     egress: EgressPolicy = field(default_factory=EgressPolicy)
     allow_package_install: bool = False
     runtime: str = "runc"
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSessionSpec:
+    """The opaque reusable-container identity passed to the runner (ADR-0020)."""
+
+    sandbox_session_id: UUID
+    generation: int
+    image: str
+    runtime: str
+    env: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.generation < 1:
+            raise ValueError("sandbox generation must be >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,16 +114,20 @@ class StagedInput:
 
 @dataclass(frozen=True, slots=True)
 class RunSpec:
-    """A complete sandbox run request (worker → runner, ADR-0013 §4 ``POST /runs``).
+    """One execution inside a reusable sandbox generation (ADR-0020).
 
     Carries the exact ``code`` to execute, the ``inputs`` staged read-only, the
-    ``limits`` (G6/G7), and the ``policy`` (egress/package/runtime, G2–G4). This is
-    the domain shape the ``SandboxService`` builds and hands to a :class:`SandboxRunner`;
-    the runner client maps it to the runner's wire form.
+    optional compatibility policy values. This is the domain shape the
+    ``SandboxService`` builds and hands to a :class:`SandboxRunner`; the runner client
+    maps only ADR-0020 fields to the runner wire form.
     """
 
     code: str
-    limits: RunLimits
+    execution_id: UUID = field(default_factory=uuid4)
+    packages: tuple[str, ...] = ()
+    # Kept optional for source compatibility with historical callers. ADR-0020
+    # never populates or enforces automatic run limits.
+    limits: RunLimits | None = None
     policy: SandboxPolicy = field(default_factory=SandboxPolicy)
     inputs: tuple[StagedInput, ...] = ()
     # Minimal, curated env handed to the run. NEVER app secrets / DB creds (G5) —
@@ -129,7 +140,7 @@ class OutputFile:
     """One file the code wrote to the designated output dir, collected by the runner.
 
     Persisted as a tenant-scoped artifact via CC-B (#208) by the service. ``data`` is
-    the collected bytes (already output-size-capped, G7); ``filename`` and
+    the collected bytes; ``filename`` and
     ``content_type`` drive the artifact's metadata/allowlist check.
     """
 
@@ -140,11 +151,11 @@ class OutputFile:
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """A completed sandbox run's outcome (runner → worker, ADR-0013 §4).
+    """A completed sandbox run's outcome (runner → worker, ADR-0020 §4).
 
     ``status`` is the terminal :class:`CodeRunStatus` (``succeeded``/``failed``/
-    ``timeout``/``killed``); ``stdout``/``stderr`` are captured + output-size-capped
-    (G7); ``output_files`` are the collected files (→ artifacts, CC-B). ``image_digest``
+    historical ``timeout``/explicit ``killed``); ``stdout``/``stderr`` are captured;
+    ``output_files`` are the collected files (→ artifacts, CC-B). ``image_digest``
     is the pinned base image actually used (reproducibility, E3-7). ``resource_usage``
     is best-effort measured consumption.
     """

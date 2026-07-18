@@ -665,8 +665,8 @@ Let technical teams extend the product into proprietary systems and external AI 
 - **AC:** Failed deliveries are visible and retryable; events exclude restricted content unless explicitly authorized.
 
 **E15-7.** As a **DEV** or **DATA** user, I want agents to run code or transformations in a sandbox, so that they can analyze data without risking local or production systems.
-- **AC:** Sandboxes isolate files, network, secrets, and execution time; admins restrict packages, outbound network, runtime, and data egress.
-- **AC:** Generated code and outputs are inspectable; sandbox runs link to the parent chat or agent trace.
+- **AC:** A mutable environment is reused inside one chat so files and policy-admitted root-installed packages survive across turns; another chat, user, or tenant cannot observe that state. The environment has no host mounts, container-engine socket, application secrets, or model-code network route.
+- **AC:** Generated code and outputs are inspectable and link to the parent chat or agent trace; users can cancel, reset, or close the environment, and deleting the chat closes it.
 
 **E15-8.** As a **DEV**, I want local development and test tools for connectors, actions, and agents, so that I can build and test extensions before deploying.
 - **AC:** Developers can run mocked sources, sample ACLs, and test users; the toolchain validates schemas, permissions, action previews, and error handling.

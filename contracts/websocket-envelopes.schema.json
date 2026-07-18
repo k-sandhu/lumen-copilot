@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414). Clients MUST ignore unknown names (forward compatibility)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry reusable sandbox output/outcome, ADR-0020 #457), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414). Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
@@ -268,7 +268,7 @@
     "CodeOutput": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=code_output — one streamed chunk of a sandbox code run's output (ADR-0013 §4, epic #200). Emitted within the chat answer stream while the agent's `run_python` tool (CC-A #207) executes: it lets the inspector UI (#232) show stdout/stderr live (E6-5 debuggable runs). `stream` says whether the chunk is stdout or stderr; multiple code_output events per `runId` arrive in `seq` order. Non-terminal — the run's outcome arrives as a single code_result. Chunks are output-size-capped (§2/G7); a truncating run still terminates with code_result.",
+      "description": "`event.data` for name=code_output — one streamed chunk from a reusable sandbox run (ADR-0020). Emitted within the chat answer stream while `run_python` executes so the inspector can show stdout/stderr. `stream` identifies stdout or stderr; multiple events for a `runId` arrive in `seq` order. Non-terminal — one code_result carries the outcome.",
       "required": ["runId", "stream", "text"],
       "properties": {
         "runId": {
@@ -287,20 +287,30 @@
         },
         "text": {
           "type": "string",
-          "description": "The chunk of captured output (may be truncated at the output-size cap, G7)."
+          "description": "The chunk of captured output."
         }
       }
     },
     "CodeResult": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=code_result — the terminal-ish outcome of a sandbox code run (ADR-0013 §4). Exactly one arrives per `runId` after its code_output chunks, carrying the run's final `status`, `exitCode`, `durationMs`, and the ids of any emitted artifacts (`artifactIds`, collected via CC-B #208). This is a run-level terminal event, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full record (code, stdout/stderr, resource usage) is inspectable via GET /code-runs/{runId}.",
+      "description": "`event.data` for name=code_result — the terminal-ish outcome of a sandbox code run (ADR-0020). Exactly one arrives per `runId` after its code_output chunks, carrying the reusable sandbox id/generation, final status, exit code, duration, and emitted artifact ids. This is a run-level terminal event, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full record is inspectable via GET /code-runs/{runId}.",
       "required": ["runId", "status", "artifactIds"],
       "properties": {
         "runId": {
           "type": "string",
           "format": "uuid",
           "description": "The code_runs.id this result finalizes (matches GET /code-runs/{codeRunId})."
+        },
+        "sandboxSessionId": {
+          "type": ["string", "null"],
+          "format": "uuid",
+          "description": "Opaque reusable sandbox session used by this run; null when denied before allocation."
+        },
+        "sandboxGeneration": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Reusable sandbox generation used by this run; changes after reset or cancel."
         },
         "callId": {
           "type": "string",
@@ -330,9 +340,9 @@
   },
 
   "x-chatStream": {
-    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via the run_python tool (CC-A #207, ADR-0013 #229), the sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
+    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via run_python (ADR-0020 #457), sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
     "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
-    "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full, output-size-capped run record (code, stdout/stderr, resource_usage) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
+    "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full run record (code, stdout/stderr, resource_usage, sandbox generation) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
       "start.data": "#/$defs/ChatStartData",

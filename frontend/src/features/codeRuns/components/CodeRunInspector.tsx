@@ -39,12 +39,17 @@ export interface CodeRunInspectorProps {
   resolveArtifactHref?: (artifactId: string) => string | undefined;
   /** Optional heading id so a container can label the region. */
   headingId?: string;
+  /** Explicit recovery for an unbounded queued/running execution. */
+  onCancel?: () => void;
+  cancelling?: boolean;
 }
 
 export function CodeRunInspector({
   view,
   resolveArtifactHref,
   headingId,
+  onCancel,
+  cancelling = false,
 }: CodeRunInspectorProps) {
   const { status } = view;
   const tone = CODE_RUN_STATUS_TONE[status];
@@ -75,31 +80,42 @@ export function CodeRunInspector({
           <Meta label="Exit" value={formatExitCode(view.exitCode)} />
           <Meta label="Duration" value={formatDuration(view.durationMs)} />
         </dl>
+        {(status === 'queued' || status === 'running') && onCancel ? (
+          <button
+            type="button"
+            className="rounded-md border border-danger/50 px-2 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-60"
+            disabled={cancelling}
+            onClick={onCancel}
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel execution'}
+          </button>
+        ) : null}
       </header>
+
+      {view.sandboxSessionId ? (
+        <p className="text-[11px] text-foreground-muted">
+          Reusable sandbox generation {view.sandboxGeneration ?? '—'} · root inside container ·
+          offline
+        </p>
+      ) : null}
 
       {/* A denied run: a clear policy-refusal banner (AC-2), never a stderr dump. */}
       {denied ? (
-        <div
-          role="alert"
-          className="space-y-1 rounded-lg border border-warn/50 bg-warn/10 p-3"
-        >
+        <div role="alert" className="space-y-1 rounded-lg border border-warn/50 bg-warn/10 p-3">
           <p className="flex items-center gap-1.5 text-sm font-semibold text-warn">
             <Icon name="shield-x" className="shrink-0" />
             Code execution was not allowed
           </p>
           <p className="text-sm text-foreground-muted">
-            This run was refused before it executed — code execution may be disabled
-            for your workspace, or blocked by a policy or quota.
+            This run was refused before it executed — code execution may be disabled for your
+            workspace, or blocked by its package policy.
           </p>
         </div>
       ) : null}
 
       {/* A hard failure: surface the stderr tail prominently (AC-2). */}
       {failure ? (
-        <div
-          role="alert"
-          className="space-y-1 rounded-lg border border-danger/50 bg-danger/10 p-3"
-        >
+        <div role="alert" className="space-y-1 rounded-lg border border-danger/50 bg-danger/10 p-3">
           <p className="flex items-center gap-1.5 text-sm font-semibold text-danger">
             <Icon name="alert-triangle" className="shrink-0" />
             {CODE_RUN_STATUS_HEADLINE[status]}
@@ -123,9 +139,7 @@ export function CodeRunInspector({
         </h3>
         {view.code != null ? (
           <div className="max-h-72 overflow-auto rounded-md border border-border">
-            <MarkdownView className="text-xs">
-              {toPythonBlock(view.code)}
-            </MarkdownView>
+            <MarkdownView className="text-xs">{toPythonBlock(view.code)}</MarkdownView>
           </div>
         ) : (
           <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-foreground-muted">
@@ -135,6 +149,24 @@ export function CodeRunInspector({
           </p>
         )}
       </div>
+
+      {view.requestedPackages.length > 0 ? (
+        <div className="space-y-1">
+          <h3 className="text-xs font-medium text-foreground-muted">
+            Packages installed for this run
+          </h3>
+          <ul className="flex flex-wrap gap-1.5" aria-label="Requested Python packages">
+            {view.requestedPackages.map((requirement) => (
+              <li
+                key={requirement}
+                className="rounded-md border border-border bg-surface-muted px-2 py-1 font-mono text-xs"
+              >
+                {requirement}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/* Output — stdout + stderr, each in its own scrollable, wrapping box (AC-3). */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

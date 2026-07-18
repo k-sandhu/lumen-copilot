@@ -135,16 +135,20 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "run.delivered",
         "run.delivery_read",
         "run.digest_sent",
-        # Sandbox code execution (ADR-0013 §4 / issue #230) — additive; every run is
+        # Sandbox code execution (ADR-0020 / issue #457) — additive; every run is
         # bracketed by code_run.started/code_run.finished (INV-6) and a run refused
         # before execution is audited code_run.denied (never a silent drop).
         "code_run.started",
         "code_run.finished",
         "code_run.denied",
+        "code_run.cancelled",
+        # Reusable chat-scoped environment lifecycle. Reset/close are destructive to
+        # mutable sandbox state and therefore always leave an audit trail (INV-6).
+        "sandbox_session.created",
+        "sandbox_session.reset",
+        "sandbox_session.closed",
         # Admin per-tenant sandbox governance (issue #233) — additive; setting a
-        # tenant's sandbox policy (enable code exec + package/egress/runtime/quota caps)
-        # is a T1 governance write audited (INV-6). This is the policy the sandbox
-        # admission path consults per run.
+        # tenant's enablement/package policy is a T1 governance write audited (INV-6).
         "sandbox_policy.updated",
         # Admin per-tenant autonomy cap (ADR-0011 §3 / issue #218) — additive; setting
         # the tenant's maximum assistant autonomy (the ceiling an assistant's EFFECTIVE

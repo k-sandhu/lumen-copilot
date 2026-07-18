@@ -18,7 +18,7 @@ import { useId, useState } from 'react';
 import { ApiError } from '@/api';
 import { Icon, StatusDot } from '@/ui';
 import type { CodeRunActivity } from '@/features/chat/model/streamReducer';
-import { useCodeRun } from '../model/queries';
+import { useCancelCodeRun, useCodeRun } from '../model/queries';
 import {
   CODE_RUN_STATUS_HEADLINE,
   CODE_RUN_STATUS_TONE,
@@ -91,6 +91,7 @@ export function CodeRunPanel({
 }
 
 function PanelBody({
+  runId,
   activity,
   headingId,
   query,
@@ -102,6 +103,7 @@ function PanelBody({
   query: ReturnType<typeof useCodeRun>;
   resolveArtifactHref?: (artifactId: string) => string | undefined;
 }) {
+  const cancel = useCancelCodeRun(runId);
   // Prefer the merged view when both live activity and the fetched record exist;
   // otherwise use whichever we have. This guarantees a non-blank pane the instant
   // the panel opens on a live run, even before the first read resolves.
@@ -124,7 +126,9 @@ function PanelBody({
   // No live activity and the read failed → an actionable error (or an honest
   // existence-non-disclosure dead-end for a 404 / 401).
   if (!view && query.isError) {
-    return <ReadError error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />;
+    return (
+      <ReadError error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />
+    );
   }
 
   if (!view) {
@@ -140,8 +144,15 @@ function PanelBody({
       <CodeRunInspector
         view={view}
         headingId={headingId}
+        onCancel={() => cancel.mutate()}
+        cancelling={cancel.isPending}
         {...(resolveArtifactHref ? { resolveArtifactHref } : {})}
       />
+      {cancel.isError ? (
+        <p role="alert" className="text-xs text-danger">
+          Couldn’t cancel this execution. Try resetting the chat sandbox.
+        </p>
+      ) : null}
       {/* If we have a live view but the record read failed, note it inline without
           hiding the live output we already have (degraded, not dead). */}
       {activity && query.isError && !query.data ? (

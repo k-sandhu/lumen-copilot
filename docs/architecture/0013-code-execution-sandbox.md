@@ -1,6 +1,6 @@
 # 13. Code-execution sandbox for agent-authored Python
 
-- **Status:** Accepted *(sponsor-delegated decision recorded 2026-07-02; the sponsor delegated the mechanism choice to this spike within the constraints below — SPIKE-3 / issue [#204](https://github.com/k-sandhu/lumen-copilot/issues/204), epic [#200](https://github.com/k-sandhu/lumen-copilot/issues/200))*
+- **Status:** Accepted, **superseded in part by [ADR-0020](0020-reusable-root-sandbox-sessions.md)** *(ADR-0020 replaces the fresh-container-per-run, non-root/read-only-rootfs, automatic timeout, and per-run resource-cap decisions for interactive `run_python`; the dedicated runner boundary and remaining isolation/audit decisions stay in force.)*
 - **Date:** 2026-07-02
 - **Builds on:** [ADR-0003](0003-application-stack.md) (OSS-only stack, Celery off the request path), [ADR-0004](0004-architecture-boundaries-and-adapters.md) (module boundaries — a new owning module + a boundary-table row), [ADR-0005](0005-local-run-and-developer-workflow.md) (one-command laptop-viable compose, no `:latest`), [ADR-0008](0008-conflict-free-parallel-delivery.md) (serialized seam → parallel build), [ADR-0009](0009-connector-framework-and-web-source.md) (deny-by-default egress / SSRF stance mirrored here), [spec 0004](../specs/0004-security-and-domain-invariants.md) (INV-1 tenancy, INV-2 permission, INV-6 audit, INV-7 read-before-write; deny-by-default)
 

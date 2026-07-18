@@ -7,7 +7,7 @@
  *   - missing/expired token → 401 (INV-4)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiError, getCodeRun, setAccessToken, clearAccessToken } from '@/api';
+import { ApiError, cancelCodeRun, getCodeRun, setAccessToken, clearAccessToken } from '@/api';
 import type { CodeRun } from '@/api';
 
 function json(body: unknown, status = 200): Response {
@@ -34,6 +34,7 @@ const RUN: CodeRun = {
   resource_usage: { peak_memory_bytes: 1024, cpu_time_ms: 40, max_pids: 2, output_bytes: 3 },
   artifact_ids: ['art-1'],
   image_digest: 'sha256:abc',
+  requested_packages: [],
   created_at: '2026-07-02T00:00:00Z',
 };
 
@@ -68,6 +69,18 @@ describe('code-runs api boundary', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(404, 'Not found'));
     await expect(getCodeRun('nope')).rejects.toBeInstanceOf(ApiError);
     await expect(getCodeRun('nope')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('POST /code-runs/{id}/cancel returns the killed record', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        json({ ...RUN, status: 'killed', stderr: 'Code execution was cancelled.' }),
+      );
+    const result = await cancelCodeRun('cr-1');
+    expect(result.status).toBe('killed');
+    expect(lastCall(spy).init.method).toBe('POST');
+    expect(lastCall(spy).url).toContain('/code-runs/cr-1/cancel');
   });
 
   it('malformed id → 422 ApiError (INV-8)', async () => {

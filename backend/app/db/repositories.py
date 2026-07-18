@@ -27,11 +27,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -82,6 +83,8 @@ from app.domain.entities import (
     RunStep,
     RunStepKind,
     RunTrigger,
+    SandboxSession,
+    SandboxSessionStatus,
     SavedSearch,
     Schedule,
     ScheduleDelivery,
@@ -604,7 +607,10 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         stdout=row.stdout,
         stderr=row.stderr,
         artifact_ids=[UUID(x) for x in (row.artifact_ids or [])],
+        requested_packages=tuple(row.requested_packages or []),
         session_id=row.session_id,
+        sandbox_session_id=row.sandbox_session_id,
+        sandbox_generation=row.sandbox_generation,
         run_id=row.run_id,
         trace_id=row.trace_id,
         exit_code=row.exit_code,
@@ -614,6 +620,21 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         started_at=row.started_at,
         finished_at=row.finished_at,
         created_at=row.created_at,
+    )
+
+
+def _to_sandbox_session(row: models.SandboxSession) -> SandboxSession:
+    return SandboxSession(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        owner_id=row.owner_id,
+        chat_session_id=row.chat_session_id,
+        generation=row.generation,
+        status=SandboxSessionStatus(row.status),
+        image_digest=row.image_digest,
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
+        closed_at=row.closed_at,
     )
 
 
@@ -2370,9 +2391,7 @@ class CitationRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_citation(r) for r in rows]
 
-    async def list_for_messages_hydrated_batch(
-        self, message_ids: list[UUID]
-    ) -> list[CitationView]:
+    async def list_for_messages_hydrated_batch(self, message_ids: list[UUID]) -> list[CitationView]:
         """Hydrated citations for MANY messages in ONE query (#446 round-2).
 
         The summarizer's capture path: a backlog batch must not issue one
@@ -3577,9 +3596,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_llm_usage(row)
 
-    async def list_for_session(
-        self, session_id: UUID, *, limit: int = 200
-    ) -> list[LlmUsageRecord]:
+    async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[LlmUsageRecord]:
         """The usage records for one chat session (tenant-scoped), oldest first."""
         stmt = (
             select(models.LlmUsage)
@@ -3894,9 +3911,7 @@ class AssistantVersionRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant_version(row) if row is not None else None
 
-    async def get_by_number(
-        self, assistant_id: UUID, version: int
-    ) -> AssistantVersion | None:
+    async def get_by_number(self, assistant_id: UUID, version: int) -> AssistantVersion | None:
         """The specific numbered version of an assistant (for rollback), tenant-scoped."""
         stmt = select(models.AssistantVersion).where(
             models.AssistantVersion.tenant_id == self._tenant_id,
@@ -4023,9 +4038,7 @@ class RunRepository(_TenantScopedRepository):
             .where(
                 models.Run.tenant_id == self._tenant_id,
                 models.Run.schedule_id == schedule_id,
-                models.Run.status.in_(
-                    [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
-                ),
+                models.Run.status.in_([RunStatus.QUEUED.value, RunStatus.RUNNING.value]),
             )
         )
         return int((await self._session.execute(stmt)).scalar_one())
@@ -4412,8 +4425,172 @@ class RunDeliveryReconcileRepository:
         return list(rows)
 
 
+class SandboxSessionRepository(_TenantScopedRepository):
+    """Tenant-scoped durable identities for reusable chat sandboxes (ADR-0020)."""
+
+    async def get(self, sandbox_session_id: UUID) -> SandboxSession | None:
+        stmt = select(models.SandboxSession).where(
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.id == sandbox_session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_sandbox_session(row) if row is not None else None
+
+    async def get_for_chat(self, chat_session_id: UUID) -> SandboxSession | None:
+        stmt = select(models.SandboxSession).where(
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.chat_session_id == chat_session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_sandbox_session(row) if row is not None else None
+
+    async def get_or_create(
+        self,
+        *,
+        owner_id: UUID,
+        chat_session_id: UUID,
+        image_digest: str,
+    ) -> SandboxSession:
+        """Return one active identity per tenant/chat, safe under concurrent first use."""
+        existing = await self.get_for_chat(chat_session_id)
+        if existing is not None:
+            if existing.owner_id != owner_id:
+                # A chat cannot legitimately change owners. Treat mismatched input as
+                # nonexistent rather than ever reassigning a sandbox across principals.
+                raise ValueError("sandbox session owner does not match the chat owner")
+            if existing.status in (
+                SandboxSessionStatus.CLOSED,
+                SandboxSessionStatus.ERROR,
+            ):
+                advanced = await self.advance_generation(
+                    existing.id,
+                    image_digest=image_digest,
+                    expected_generation=existing.generation,
+                )
+                if advanced is not None:
+                    return advanced
+                # Another request already reactivated/reset this identity. Reuse its
+                # winner rather than incrementing a second time from stale state.
+                winner = await self.get_for_chat(chat_session_id)
+                if winner is None:  # pragma: no cover - row was read in this transaction
+                    raise RuntimeError("sandbox session vanished during reactivation")
+                return winner
+            return existing
+
+        row = models.SandboxSession(
+            tenant_id=self._tenant_id,
+            owner_id=owner_id,
+            chat_session_id=chat_session_id,
+            generation=1,
+            status=SandboxSessionStatus.ACTIVE.value,
+            image_digest=image_digest,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(row)
+                await self._session.flush()
+        except IntegrityError:
+            # Another worker won the unique (tenant, chat) insert. The savepoint
+            # contains the violation, leaving the caller's transaction usable.
+            winner = await self.get_for_chat(chat_session_id)
+            if winner is None:  # pragma: no cover - defensive against a broken DB
+                raise
+            return winner
+        return _to_sandbox_session(row)
+
+    async def advance_generation(
+        self,
+        sandbox_session_id: UUID,
+        *,
+        image_digest: str | None = None,
+        expected_generation: int | None = None,
+    ) -> SandboxSession | None:
+        """Atomically replace one generation; an expected-generation mismatch loses."""
+        values: dict[str, object] = {
+            "generation": models.SandboxSession.generation + 1,
+            "status": SandboxSessionStatus.ACTIVE.value,
+            "closed_at": None,
+            "last_used_at": datetime.now(UTC),
+        }
+        if image_digest is not None:
+            values["image_digest"] = image_digest
+        predicate = [
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.id == sandbox_session_id,
+        ]
+        if expected_generation is not None:
+            predicate.append(models.SandboxSession.generation == expected_generation)
+        stmt = (
+            update(models.SandboxSession)
+            .where(*predicate)
+            .values(**values)
+            .returning(models.SandboxSession)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_sandbox_session(row) if row is not None else None
+
+    async def touch(self, sandbox_session_id: UUID) -> SandboxSession | None:
+        row = await self._get_row(sandbox_session_id)
+        if row is None:
+            return None
+        row.last_used_at = datetime.now(UTC)
+        await self._session.flush()
+        return _to_sandbox_session(row)
+
+    async def close(
+        self, sandbox_session_id: UUID, *, expected_generation: int | None = None
+    ) -> SandboxSession | None:
+        now = datetime.now(UTC)
+        predicate = [
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.id == sandbox_session_id,
+        ]
+        if expected_generation is not None:
+            predicate.append(models.SandboxSession.generation == expected_generation)
+        stmt = (
+            update(models.SandboxSession)
+            .where(*predicate)
+            .values(
+                status=SandboxSessionStatus.CLOSED.value,
+                closed_at=now,
+                last_used_at=now,
+            )
+            .returning(models.SandboxSession)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_sandbox_session(row) if row is not None else None
+
+    async def mark_error(
+        self, sandbox_session_id: UUID, *, expected_generation: int | None = None
+    ) -> SandboxSession | None:
+        predicate = [
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.id == sandbox_session_id,
+        ]
+        if expected_generation is not None:
+            predicate.append(models.SandboxSession.generation == expected_generation)
+        stmt = (
+            update(models.SandboxSession)
+            .where(*predicate)
+            .values(
+                status=SandboxSessionStatus.ERROR.value,
+                last_used_at=datetime.now(UTC),
+            )
+            .returning(models.SandboxSession)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_sandbox_session(row) if row is not None else None
+
+    async def _get_row(self, sandbox_session_id: UUID) -> models.SandboxSession | None:
+        stmt = select(models.SandboxSession).where(
+            models.SandboxSession.tenant_id == self._tenant_id,
+            models.SandboxSession.id == sandbox_session_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+
 class CodeRunRepository(_TenantScopedRepository):
-    """Sandbox code-run records within one tenant (ADR-0013 §4, #230).
+    """Sandbox code-run records within one tenant (ADR-0020 §4, #457).
 
     Tenant-scoped like every repository (INV-1): a foreign-tenant ``code_run_id``
     resolves to ``None`` (the existence-non-disclosure 404 is enforced one layer up
@@ -4423,8 +4600,9 @@ class CodeRunRepository(_TenantScopedRepository):
 
     The run's ``status`` is written as the sandbox walks the state machine
     (``queued`` → ``running`` → a terminal); a crash-safe task always writes a
-    terminal, never leaving a stuck ``running`` (ADR-0013 §5, INV-8). Concurrency
-    accounting (the per-tenant cap, §6) reads :meth:`count_active`.
+    terminal, never leaving a stuck ``running`` (ADR-0020 §4, INV-8). Legacy
+    ADR-0013 accounting readers remain for wire/data compatibility but ADR-0020
+    does not enforce those caps.
     """
 
     async def create(
@@ -4437,8 +4615,9 @@ class CodeRunRepository(_TenantScopedRepository):
         run_id: UUID | None = None,
         trace_id: UUID | None = None,
         code_run_id: UUID | None = None,
+        requested_packages: tuple[str, ...] = (),
     ) -> CodeRun:
-        """Create a ``queued`` (or already-``denied``) code run (ADR-0013 §4 enqueue).
+        """Create a ``queued`` (or already-``denied``) code run (ADR-0020 §4).
 
         ``code_run_id`` may be pre-minted so it doubles as the WS ``runId`` known to
         the enqueuer before the task starts (the ``code_output``/``code_result``
@@ -4454,6 +4633,7 @@ class CodeRunRepository(_TenantScopedRepository):
             trace_id=trace_id,
             status=status.value,
             code=code,
+            requested_packages=list(requested_packages),
             stdout="",
             stderr="",
             artifact_ids=[],
@@ -4471,11 +4651,7 @@ class CodeRunRepository(_TenantScopedRepository):
         return _to_code_run(row) if row is not None else None
 
     async def count_active(self) -> int:
-        """Count the tenant's still-active runs (``queued``/``running``) — the concurrency gate.
-
-        Tenant-scoped (INV-1). The per-tenant concurrency cap (ADR-0013 §6) keys on
-        this before enqueuing so a single tenant cannot monopolise the sandbox pool.
-        """
+        """Count active runs for legacy ADR-0013 accounting; not an ADR-0020 gate."""
         stmt = (
             select(func.count())
             .select_from(models.CodeRun)
@@ -4489,12 +4665,7 @@ class CodeRunRepository(_TenantScopedRepository):
         return int((await self._session.execute(stmt)).scalar_one())
 
     async def runtime_ms_since(self, since: datetime) -> int:
-        """Sum ``duration_ms`` across the tenant's runs finished since ``since`` — the daily cap.
-
-        Tenant-scoped (INV-1). Backs the per-tenant daily-runtime cap (ADR-0013 §6):
-        the aggregate wall-clock the tenant's runs have already consumed in the
-        window. A run with a null ``duration_ms`` (queued/denied) contributes 0.
-        """
+        """Sum duration for legacy ADR-0013 accounting; not an ADR-0020 gate."""
         stmt = select(func.coalesce(func.sum(models.CodeRun.duration_ms), 0)).where(
             models.CodeRun.tenant_id == self._tenant_id,
             models.CodeRun.finished_at.is_not(None),
@@ -4504,18 +4675,40 @@ class CodeRunRepository(_TenantScopedRepository):
         return int(total or 0)
 
     async def mark_running(
-        self, code_run_id: UUID, *, started_at: datetime, image_digest: str | None = None
+        self,
+        code_run_id: UUID,
+        *,
+        started_at: datetime,
+        image_digest: str | None = None,
+        sandbox_session_id: UUID | None = None,
+        sandbox_generation: int | None = None,
     ) -> CodeRun | None:
-        """Transition a run to ``running`` and stamp ``started_at`` (+ the image digest)."""
-        row = await self._get_row(code_run_id)
-        if row is None:
-            return None
-        row.status = CodeRunStatus.RUNNING.value
-        row.started_at = started_at
+        """Atomically transition ``queued`` to ``running``; otherwise return current."""
+        values: dict[str, object] = {
+            "status": CodeRunStatus.RUNNING.value,
+            "started_at": started_at,
+        }
         if image_digest is not None:
-            row.image_digest = image_digest
-        await self._session.flush()
-        return _to_code_run(row)
+            values["image_digest"] = image_digest
+        if sandbox_session_id is not None:
+            values["sandbox_session_id"] = sandbox_session_id
+        if sandbox_generation is not None:
+            values["sandbox_generation"] = sandbox_generation
+        stmt = (
+            update(models.CodeRun)
+            .where(
+                models.CodeRun.tenant_id == self._tenant_id,
+                models.CodeRun.id == code_run_id,
+                models.CodeRun.status == CodeRunStatus.QUEUED.value,
+            )
+            .values(**values)
+            .returning(models.CodeRun)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            return _to_code_run(row)
+        current = await self._get_row(code_run_id, populate_existing=True)
+        return _to_code_run(current) if current is not None else None
 
     async def mark_terminal(
         self,
@@ -4537,29 +4730,50 @@ class CodeRunRepository(_TenantScopedRepository):
         ``timeout``/``killed``/``denied``, ``finished_at``, and the captured
         output/exit/timing/resource-usage/artifacts. A crash path calls this with
         ``failed`` + an error message on ``stderr`` so a run never ends in silence
-        (INV-8, never a stuck ``running``).
+        (INV-8, never a stuck ``running``). Terminal states are immutable: when
+        cancellation and normal completion race, the first terminal transition wins.
         """
-        row = await self._get_row(code_run_id)
-        if row is None:
-            return None
-        row.status = status.value
-        row.finished_at = finished_at
-        row.stdout = stdout
-        row.stderr = stderr
-        row.exit_code = exit_code
-        row.duration_ms = duration_ms
-        row.resource_usage = resource_usage.to_dict() if resource_usage is not None else None
+        if status in (CodeRunStatus.QUEUED, CodeRunStatus.RUNNING):
+            raise ValueError("mark_terminal requires a terminal code-run status")
+        values: dict[str, object] = {
+            "status": status.value,
+            "finished_at": finished_at,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "resource_usage": resource_usage.to_dict() if resource_usage is not None else None,
+            "artifact_ids": [str(a) for a in (artifact_ids or [])],
+        }
         if image_digest is not None:
-            row.image_digest = image_digest
-        row.artifact_ids = [str(a) for a in (artifact_ids or [])]
-        await self._session.flush()
-        return _to_code_run(row)
+            values["image_digest"] = image_digest
+        stmt = (
+            update(models.CodeRun)
+            .where(
+                models.CodeRun.tenant_id == self._tenant_id,
+                models.CodeRun.id == code_run_id,
+                models.CodeRun.status.in_(
+                    [CodeRunStatus.QUEUED.value, CodeRunStatus.RUNNING.value]
+                ),
+            )
+            .values(**values)
+            .returning(models.CodeRun)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            return _to_code_run(row)
+        current = await self._get_row(code_run_id, populate_existing=True)
+        return _to_code_run(current) if current is not None else None
 
-    async def _get_row(self, code_run_id: UUID) -> models.CodeRun | None:
+    async def _get_row(
+        self, code_run_id: UUID, *, populate_existing: bool = False
+    ) -> models.CodeRun | None:
         stmt = select(models.CodeRun).where(
             models.CodeRun.tenant_id == self._tenant_id,
             models.CodeRun.id == code_run_id,
         )
+        if populate_existing:
+            stmt = stmt.execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
@@ -4919,9 +5133,7 @@ def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
         except (KeyError, TypeError, ValueError):
             continue
     mentioned: list[tuple[UUID, str]] = []
-    raw_mentioned = (
-        row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
-    )
+    raw_mentioned = row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
     for key, name in list(raw_mentioned.items())[:_MENTIONED_MAX_ENTRIES]:
         try:
             mentioned.append((UUID(str(key)), str(name)))
@@ -4991,8 +5203,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
         (#446 finding 3). Touches nothing the summarizer owns.
         """
         payload = [
-            {"document_id": str(d), "chunk_id": str(c)}
-            for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
+            {"document_id": str(d), "chunk_id": str(c)} for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
         ]
         insert = self._insert().values(  # type: ignore[attr-defined]
             id=uuid_mod.uuid4(),
@@ -5056,10 +5267,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
                 models.SessionSummary.covers_through_created_at.is_(None)
                 | (models.SessionSummary.covers_through_created_at < covered_created_at)
                 | (
-                    (
-                        models.SessionSummary.covers_through_created_at
-                        == covered_created_at
-                    )
+                    (models.SessionSummary.covers_through_created_at == covered_created_at)
                     # ORDERED tie-break (#446 round-2 blocker 3): within one
                     # second, coverage may only advance toward the LARGER
                     # boundary id — an arbitrary but STABLE total order, so a
@@ -5067,10 +5275,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
                     # probe). A same-second boundary with a smaller id waits
                     # for the next pass (a strictly-newer timestamp) — progress
                     # converges, regression cannot happen.
-                    & (
-                        models.SessionSummary.covers_through_message_id
-                        < covers_through_message_id
-                    )
+                    & (models.SessionSummary.covers_through_message_id < covers_through_message_id)
                 )
             ),
         )
@@ -5078,7 +5283,6 @@ class SessionSummaryRepository(_TenantScopedRepository):
         await self._session.flush()
         row = await self.get_for_session(session_id)
         accepted = bool(getattr(result, "rowcount", 0)) and (
-            row is not None
-            and row.covers_through_message_id == covers_through_message_id
+            row is not None and row.covers_through_message_id == covers_through_message_id
         )
         return accepted, row

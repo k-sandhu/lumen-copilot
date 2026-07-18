@@ -63,15 +63,18 @@ export interface CodeRunActivity {
   runId: string;
   /** The originating run_python tool_call, when correlated. */
   callId?: string;
+  /** Reusable environment identity/generation, once the result supplies it. */
+  sandboxSessionId?: string | null;
+  sandboxGeneration?: number | null;
   /**
    * 'running' until the code_result arrives, then its terminal status. `queued` is
    * never seen on the stream (output only flows once running), so the live start
    * state is 'running'.
    */
   status: CodeRunStatus;
-  /** stdout accumulated from code_output chunks (may be truncated at the cap, G7). */
+  /** stdout accumulated from code_output chunks. */
   stdout: string;
-  /** stderr accumulated from code_output chunks (may be truncated at the cap, G7). */
+  /** stderr accumulated from code_output chunks. */
   stderr: string;
   /** Exit code from the code_result; null/absent until it finishes (or if killed). */
   exitCode?: number | null;
@@ -235,6 +238,8 @@ function applyCodeResult(runs: CodeRunActivity[], res: CodeResult): CodeRunActiv
     exitCode: res.exitCode ?? null,
     durationMs: res.durationMs ?? null,
     artifactIds: res.artifactIds,
+    sandboxSessionId: res.sandboxSessionId ?? null,
+    sandboxGeneration: res.sandboxGeneration ?? null,
   });
   if (!runs.some((r) => r.runId === res.runId)) {
     return [
@@ -266,7 +271,8 @@ function asAskUser(data: unknown): ChatAskUser | null {
   if (typeof a.messageId !== 'string' || typeof a.question !== 'string') return null;
   if (!Array.isArray(a.options) || a.options.length === 0) return null;
   const labelled = a.options.every(
-    (o) => typeof o === 'object' && o !== null && typeof (o as { label?: unknown }).label === 'string',
+    (o) =>
+      typeof o === 'object' && o !== null && typeof (o as { label?: unknown }).label === 'string',
   );
   return labelled ? (data as ChatAskUser) : null;
 }

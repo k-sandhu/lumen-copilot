@@ -1,20 +1,16 @@
 /**
  * SandboxGovernancePanel — the per-tenant code-execution sandbox policy (#233, area:ui).
  *
- * A WRITE panel on the admin console: it shows and edits the tenant's sandbox policy —
- * an enable toggle, package allow/deny lists, an egress toggle + allowlist, and the
- * runtime / memory / quota caps. Saving PATCHes /admin/sandbox-policy; the backend
- * clamps every cap DOWN to the deploy-wide ceiling (a per-tenant value can only narrow)
- * and strips the cloud-metadata IP from the egress allowlist (never reachable, G4), so
- * the returned effective policy is re-seeded into the form after each save. Deny-by-
- * default: a tenant with no stored policy shows code execution OFF, with every cap at
- * the config ceiling (the reader reports `is_default`).
+ * A WRITE panel on the admin console: it edits the tenant's enablement and package
+ * policy. ADR-0020 deliberately starts reusable sessions with fixed network isolation
+ * and no automatic runtime/resource/quota caps. The older policy fields remain on the
+ * wire for compatibility but are preserved unchanged and are not presented as active
+ * controls. Deny-by-default: a tenant with no stored policy shows code execution OFF.
  *
  * All admin-only + tenant-scoped: a non-admin caller (403, INV-5) or expired session
  * (401, INV-4) surfaces as the shared panel error, never a blank pane. Every async
  * state is handled (frontend/AGENTS.md: "every state, not just success"): a loading
  * shimmer, an actionable read error with Retry, a saving indicator, client-side
- * validation of the caps (positive, within the ceiling) before the PATCH, and a
  * dismissible success/error toast so an audited action's outcome is always visible.
  */
 import { useEffect, useState } from 'react';
@@ -28,7 +24,7 @@ function describeWriteError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 403) return 'You need the admin role to change the sandbox policy.';
     if (error.status === 401) return 'Your session has expired. Sign in again.';
-    if (error.status === 422) return 'One of the limits is invalid. Each must be a positive number.';
+    if (error.status === 422) return 'One of the package-policy values is invalid.';
     return error.displayMessage;
   }
   if (error instanceof Error) return error.message;
@@ -48,17 +44,11 @@ function fromList(items: string[]): string {
   return items.join('\n');
 }
 
-/** The editable form state — strings for the list textareas, numbers for the caps. */
+/** Only fields enforced by reusable sandbox sessions are editable here. */
 interface FormState {
   enabled: boolean;
   allowedPackages: string;
   deniedPackages: string;
-  egressAllowed: boolean;
-  egressAllowlist: string;
-  maxRuntimeS: number;
-  maxMemoryMb: number;
-  dailyRuntimeCapS: number;
-  maxConcurrency: number;
 }
 
 function toForm(policy: SandboxPolicy): FormState {
@@ -66,46 +56,23 @@ function toForm(policy: SandboxPolicy): FormState {
     enabled: policy.enabled,
     allowedPackages: fromList(policy.allowed_packages),
     deniedPackages: fromList(policy.denied_packages),
-    egressAllowed: policy.egress_allowed,
-    egressAllowlist: fromList(policy.egress_allowlist),
-    maxRuntimeS: policy.max_runtime_s,
-    maxMemoryMb: policy.max_memory_mb,
-    dailyRuntimeCapS: policy.daily_runtime_cap_s,
-    maxConcurrency: policy.max_concurrency,
   };
 }
 
-function toUpdate(form: FormState): SandboxPolicyUpdate {
+function toUpdate(form: FormState, policy: SandboxPolicy): SandboxPolicyUpdate {
   return {
     enabled: form.enabled,
     allowed_packages: toList(form.allowedPackages),
     denied_packages: toList(form.deniedPackages),
-    egress_allowed: form.egressAllowed,
-    egress_allowlist: toList(form.egressAllowlist),
-    max_runtime_s: form.maxRuntimeS,
-    max_memory_mb: form.maxMemoryMb,
-    daily_runtime_cap_s: form.dailyRuntimeCapS,
-    max_concurrency: form.maxConcurrency,
+    // Compatibility-only fields from ADR-0013 are preserved; ADR-0020's runner
+    // always uses network=none and applies none of these automatic ceilings.
+    egress_allowed: policy.egress_allowed,
+    egress_allowlist: policy.egress_allowlist,
+    max_runtime_s: policy.max_runtime_s,
+    max_memory_mb: policy.max_memory_mb,
+    daily_runtime_cap_s: policy.daily_runtime_cap_s,
+    max_concurrency: policy.max_concurrency,
   };
-}
-
-/** Client-side validation mirroring the server's positive-cap + ceiling rules (#233). */
-function validate(form: FormState, policy: SandboxPolicy): string | null {
-  const caps: Array<[string, number, number]> = [
-    ['Max runtime (s)', form.maxRuntimeS, policy.max_runtime_s_ceiling],
-    ['Max memory (MiB)', form.maxMemoryMb, policy.max_memory_mb_ceiling],
-    ['Daily runtime cap (s)', form.dailyRuntimeCapS, policy.daily_runtime_cap_s_ceiling],
-    ['Max concurrency', form.maxConcurrency, policy.max_concurrency_ceiling],
-  ];
-  for (const [label, value, ceiling] of caps) {
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
-      return `${label} must be a whole number of at least 1.`;
-    }
-    if (value > ceiling) {
-      return `${label} cannot exceed the deploy-wide limit of ${ceiling} (it would be clamped).`;
-    }
-  }
-  return null;
 }
 
 /** A small accessible on/off switch mirroring the tool-governance toggle. */
@@ -136,43 +103,6 @@ function ToggleSwitch({
   );
 }
 
-/** One labelled positive-integer cap input with its deploy-wide ceiling shown. */
-function CapField({
-  id,
-  label,
-  value,
-  ceiling,
-  disabled,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  value: number;
-  ceiling: number;
-  disabled: boolean;
-  onChange: (next: number) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-xs font-medium text-foreground">
-        {label}
-      </label>
-      <input
-        id={id}
-        type="number"
-        min={1}
-        max={ceiling}
-        step={1}
-        value={Number.isFinite(value) ? value : ''}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.valueAsNumber)}
-        className="w-full rounded-md border border-border bg-surface px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
-      />
-      <span className="text-xs text-foreground-muted">Deploy limit: {ceiling}</span>
-    </div>
-  );
-}
-
 function SandboxPolicyForm({ policy }: { policy: SandboxPolicy }) {
   const mutation = useUpdateSandboxPolicy();
   const [form, setForm] = useState<FormState>(() => toForm(policy));
@@ -190,12 +120,7 @@ function SandboxPolicyForm({ policy }: { policy: SandboxPolicy }) {
 
   const handleSave = () => {
     setToast(null);
-    const problem = validate(form, policy);
-    if (problem !== null) {
-      setToast({ kind: 'error', message: problem });
-      return;
-    }
-    mutation.mutate(toUpdate(form), {
+    mutation.mutate(toUpdate(form, policy), {
       onSuccess: () => setToast({ kind: 'ok', message: 'Sandbox policy saved.' }),
       onError: (error) => setToast({ kind: 'error', message: describeWriteError(error) }),
     });
@@ -229,8 +154,8 @@ function SandboxPolicyForm({ policy }: { policy: SandboxPolicy }) {
 
       {policy.is_default ? (
         <p className="rounded-md border border-border bg-surface-muted p-3 text-xs text-foreground-muted">
-          Code execution is disabled for this tenant by default. Enable it below and set
-          limits; changes take effect on subsequent runs.
+          Code execution is disabled for this tenant by default. Enable it below and set the package
+          policy; changes take effect on subsequent runs.
         </p>
       ) : null}
 
@@ -282,74 +207,11 @@ function SandboxPolicyForm({ policy }: { policy: SandboxPolicy }) {
         </div>
       </div>
 
-      {/* Egress */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="text-sm font-medium text-foreground">Outbound network</div>
-            <div className="text-xs text-foreground-muted">
-              Off = fully isolated (no network). The cloud-metadata address is never
-              reachable, even if listed.
-            </div>
-          </div>
-          <ToggleSwitch
-            checked={form.egressAllowed}
-            disabled={saving}
-            label={`${form.egressAllowed ? 'Disable' : 'Enable'} outbound network`}
-            onToggle={() => set('egressAllowed', !form.egressAllowed)}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label htmlFor="sandbox-egress-allowlist" className="text-xs font-medium text-foreground">
-            Egress allowlist
-          </label>
-          <textarea
-            id="sandbox-egress-allowlist"
-            rows={3}
-            value={form.egressAllowlist}
-            disabled={saving || !form.egressAllowed}
-            onChange={(e) => set('egressAllowlist', e.target.value)}
-            placeholder="host:port per line (only used when outbound network is on)"
-            className="w-full rounded-md border border-border bg-surface px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
-          />
-        </div>
-      </div>
-
-      {/* Caps */}
-      <div className="grid gap-4 sm:grid-cols-2">
-        <CapField
-          id="sandbox-max-runtime"
-          label="Max runtime (s)"
-          value={form.maxRuntimeS}
-          ceiling={policy.max_runtime_s_ceiling}
-          disabled={saving}
-          onChange={(v) => set('maxRuntimeS', v)}
-        />
-        <CapField
-          id="sandbox-max-memory"
-          label="Max memory (MiB)"
-          value={form.maxMemoryMb}
-          ceiling={policy.max_memory_mb_ceiling}
-          disabled={saving}
-          onChange={(v) => set('maxMemoryMb', v)}
-        />
-        <CapField
-          id="sandbox-daily-runtime"
-          label="Daily runtime cap (s)"
-          value={form.dailyRuntimeCapS}
-          ceiling={policy.daily_runtime_cap_s_ceiling}
-          disabled={saving}
-          onChange={(v) => set('dailyRuntimeCapS', v)}
-        />
-        <CapField
-          id="sandbox-max-concurrency"
-          label="Max concurrency"
-          value={form.maxConcurrency}
-          ceiling={policy.max_concurrency_ceiling}
-          disabled={saving}
-          onChange={(v) => set('maxConcurrency', v)}
-        />
-      </div>
+      <p className="rounded-md border border-border bg-surface-muted p-3 text-xs text-foreground-muted">
+        Reusable sessions are always offline. They currently have no automatic runtime, memory,
+        process, output, concurrency, or daily-use limits. An active run can be cancelled
+        explicitly, which destroys that environment generation.
+      </p>
 
       <div className="flex items-center gap-3">
         <button
@@ -375,9 +237,8 @@ export function SandboxGovernancePanel() {
           Sandbox governance
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Set the code-execution sandbox policy for this tenant — packages, outbound
-          network, runtime, and resource quotas. Limits can only narrow the deploy-wide
-          ceiling; changes take effect on subsequent runs.
+          Enable reusable Python sessions and control which packages may be installed. Sessions are
+          fixed offline and currently run without automatic time or resource ceilings.
         </p>
       </header>
       <PanelBody

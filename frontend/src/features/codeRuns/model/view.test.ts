@@ -24,6 +24,7 @@ const RECORD: CodeRun = {
   stdout: '',
   stderr: '',
   artifact_ids: [],
+  requested_packages: [],
   created_at: '2026-07-02T00:00:00Z',
   image_digest: 'sha256:abc',
 };
@@ -71,7 +72,7 @@ describe('mergeView', () => {
     expect(v.streaming).toBe(false);
   });
 
-  it('once the record is terminal it is authoritative (output-capped truth)', () => {
+  it('once the record is terminal it is authoritative (persisted truth)', () => {
     const record: CodeRun = {
       ...RECORD,
       status: 'succeeded',
