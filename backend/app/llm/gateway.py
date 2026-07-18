@@ -657,6 +657,11 @@ class LLMGateway:
             response = await litellm.aembedding(
                 model=model_id,
                 input=list(inputs),
+                # Make the provider response unambiguous for OpenAI-compatible
+                # embedding endpoints.  Without this, OpenRouter can return a
+                # valid 200 response that LiteLLM interprets as having no
+                # embedding data for models such as Nemotron 3 Embed.
+                encoding_format="float",
                 timeout=self._settings.llm_timeout_seconds,
                 **self._credentials(api_key=api_key, api_base=effective_api_base or None),
             )

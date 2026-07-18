@@ -233,7 +233,7 @@ async def execute_run(
     gateway: LLMGateway | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     request_id: str = "run-task",
-    source_ip: str = "system",
+    source_ip: str = "127.0.0.1",
     attempt: int = 0,
 ) -> RunStatus:
     """Execute one headless run end-to-end and persist its terminal outcome (ADR-0015 §4).
@@ -510,7 +510,7 @@ async def _fail_run(
     session: AsyncSession | None = None,
     tenant_id: UUID | None = None,
     request_id: str = "run-task",
-    source_ip: str = "system",
+    source_ip: str = "127.0.0.1",
 ) -> None:
     """Write a run's ``failed`` terminal + audit ``run.finished`` (the crash-safe path).
 
