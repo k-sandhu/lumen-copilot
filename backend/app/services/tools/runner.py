@@ -469,10 +469,13 @@ class ToolRunner:
     ) -> ToolResult:
         """Run the handler under its timeout, mapping any failure to an ok=False result."""
         try:
-            body = await asyncio.wait_for(
-                definition.handler(call.arguments, context),
-                timeout=definition.timeout_seconds,
-            )
+            if definition.timeout_seconds is None:
+                body = await definition.handler(call.arguments, context)
+            else:
+                body = await asyncio.wait_for(
+                    definition.handler(call.arguments, context),
+                    timeout=definition.timeout_seconds,
+                )
         except TimeoutError:
             return ToolResult.failure(
                 call_id=call.id,

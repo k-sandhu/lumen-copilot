@@ -1,6 +1,6 @@
-"""Sandboxed code execution — the owning module (ADR-0013, issue #230).
+"""Reusable sandboxed code execution — the owning module (ADR-0020, issue #457).
 
-The single owning application module for **sandboxed code execution** (ADR-0013
+The single owning application module for **sandboxed code execution** (ADR-0020
 boundary row proposed for AGENTS.md §6). It is the **only** caller of the
 ``sandbox-runner`` internal API (via :class:`~app.sandbox.runner.HttpSandboxRunner`);
 the runner service is the **only** holder of container-engine / Docker-socket access.
@@ -19,7 +19,7 @@ from app.sandbox.runner import (
     SandboxRunner,
     build_container_flags,
 )
-from app.sandbox.service import SandboxReadService, SandboxService
+from app.sandbox.service import SandboxReadService, SandboxService, SandboxSessionService
 from app.sandbox.spec import (
     METADATA_IP,
     EgressPolicy,
@@ -28,6 +28,7 @@ from app.sandbox.spec import (
     RunResult,
     RunSpec,
     SandboxPolicy,
+    SandboxSessionSpec,
     StagedInput,
 )
 
@@ -44,6 +45,8 @@ __all__ = [
     "SandboxReadService",
     "SandboxRunner",
     "SandboxService",
+    "SandboxSessionService",
+    "SandboxSessionSpec",
     "StagedInput",
     "build_container_flags",
 ]

@@ -200,15 +200,19 @@ class AuditAction(str, enum.Enum):
     # (INV-6) so the trail shows who ran adversarial-by-assumption Python (the owner),
     # the terminal status (succeeded/failed/timeout/killed), and any produced
     # artifacts. ``code_run.denied`` records a run refused BEFORE execution — code
-    # execution disabled for the tenant, or a policy/quota block (§6): a refusal is
+    # execution disabled for the tenant, or a package-policy block: a refusal is
     # audited, never a silent drop.
     CODE_RUN_STARTED = "code_run.started"
     CODE_RUN_FINISHED = "code_run.finished"
     CODE_RUN_DENIED = "code_run.denied"
+    CODE_RUN_CANCELLED = "code_run.cancelled"
+    SANDBOX_SESSION_CREATED = "sandbox_session.created"
+    SANDBOX_SESSION_RESET = "sandbox_session.reset"
+    SANDBOX_SESSION_CLOSED = "sandbox_session.closed"
     # Admin per-tenant sandbox governance (issue #233). Additive to the §2.4 taxonomy
     # — deny-by-default is preserved (the set only grows; no action is relaxed).
-    # Setting a tenant's sandbox policy (enable code exec + package/egress/runtime/quota
-    # caps) is a reversible, tenant-scoped **T1** governance write (spec 0004 §2.5 —
+    # Setting a tenant's sandbox policy is a reversible, tenant-scoped **T1**
+    # governance write (spec 0004 §2.5 —
     # "authorized owner; audited; no extra approval"): admin-gated (INV-5) and audited
     # here (INV-6). This is the policy the sandbox admission path consults per run, so
     # its provenance (who enabled/narrowed what) is provable after the fact.

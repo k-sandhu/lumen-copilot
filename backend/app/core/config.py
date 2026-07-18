@@ -799,18 +799,17 @@ class Settings(BaseSettings):
             raise ValueError("INGESTION_CHUNK_OVERLAP must be < INGESTION_CHUNK_SIZE")
         return self
 
-    # --- Sandbox code execution (ADR-0013, issue #230) -----------------------
+    # --- Sandbox code execution (ADR-0020, issue #457) -----------------------
     # The isolated Python code-execution sandbox — the HIGHEST-RISK capability in
     # the program (adversarial-by-assumption model-authored code). ALL settings are
-    # config, never a literal at the call site (backend/AGENTS.md); the resource caps
-    # are load-bearing isolation controls (G6/G7) so a non-positive value fails fast.
+    # config, never a literal at the call site (backend/AGENTS.md).
     #
     # **Default OFF per tenant (ADR-0013 §6, the kill-switch).** Code execution is
     # disabled for every tenant until an admin explicitly enables it. The system flag
     # below is the deploy-wide master switch (default False): with it off, EVERY run
     # is refused (``status=denied``, audited) — the sandbox never launches. The
     # per-tenant admin enable (#233) layers on top; this issue ships the master switch
-    # + the quota gate and defaults them closed.
+    # and defaults them closed.
     sandbox_enabled: bool = Field(default=False, alias="SANDBOX_ENABLED")
     # The internal HTTP API the worker calls the dedicated ``sandbox-runner`` service
     # on (ADR-0013 §1). Inside compose this is the service name on the internal
@@ -823,26 +822,23 @@ class Settings(BaseSettings):
     # ADR-0013 §3). Pinned by digest, no ``:latest``. The runner uses this; recorded
     # per run for reproducibility (E3-7).
     sandbox_image: str = Field(
-        default="ghcr.io/k-sandhu/lumen-sandbox-py@sha256:"
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        default="lumen-sandbox-runner:0.2.0",
         alias="SANDBOX_IMAGE",
     )
     # The OCI runtime: ``runc`` (hardened Docker baseline, laptop-viable) or ``runsc``
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # Per-run resource caps (G6/G7). CPU quota, memory (→ OOM-kill), pids (fork-bomb
-    # cap), wall-clock (→ SIGKILL), captured-output cap, and the tmpfs scratch size
-    # (the ONLY writable area, G1). Defaults are laptop-viable and bounded.
+    # Compatibility-only ADR-0013 settings. Existing admin-policy rows and API clients
+    # still read these fields, so they remain validated and configurable, but ADR-0020
+    # reusable sessions deliberately do NOT pass them to the runner or enforce them.
     sandbox_cpus: float = Field(default=1.0, alias="SANDBOX_CPUS")
     sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
     sandbox_output_bytes_cap: int = Field(default=1 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP")
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
-    # Per-tenant quotas (ADR-0013 §6). Max simultaneous runs (concurrency) and the
-    # aggregate wall-clock/day a tenant may consume; exceeding either refuses the run
-    # (``status=denied``, audited). 0 would disable a cap → rejected (fail fast).
+    # Compatibility-only tenant quota values; not enforced for ADR-0020 sessions.
     sandbox_max_concurrent_per_tenant: int = Field(
         default=2, alias="SANDBOX_MAX_CONCURRENT_PER_TENANT"
     )
@@ -862,13 +858,7 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _sandbox_limits_positive(cls, value: float) -> float:
-        """A non-positive sandbox limit/quota would disable an isolation control — reject.
-
-        The per-run resource caps (G6/G7) and the per-tenant quotas (ADR-0013 §6) are
-        load-bearing; a zero or negative CPU/memory/pids/timeout/output/scratch cap
-        would let a run go unbounded, and a zero quota would either admit everything
-        or refuse everything, so a misconfiguration must fail fast at startup.
-        """
+        """Keep compatibility-only ADR-0013 policy values syntactically valid."""
         if value <= 0:
             raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)")
         return value
@@ -880,6 +870,16 @@ class Settings(BaseSettings):
         if value not in ("runc", "runsc"):
             raise ValueError("SANDBOX_RUNTIME must be 'runc' or 'runsc' (ADR-0013 §2)")
         return value
+
+    @model_validator(mode="after")
+    def _sandbox_requires_gvisor_outside_local(self) -> Settings:
+        """Root-capable reusable sandboxes require gVisor outside local development."""
+        if self.sandbox_enabled and self.environment != "local" and self.sandbox_runtime != "runsc":
+            raise ValueError(
+                "SANDBOX_RUNTIME must be 'runsc' when SANDBOX_ENABLED=true outside local "
+                "development (ADR-0020)"
+            )
+        return self
 
     # --- Chat-model picker registry (issue #47) ---
     # The curated set the picker offers (GET /models), grouped by tier. Config,

@@ -31,6 +31,7 @@ const RECORD: CodeRun = {
   duration_ms: 120,
   resource_usage: null,
   artifact_ids: [],
+  requested_packages: [],
   created_at: '2026-07-02T00:00:00Z',
 };
 
@@ -101,10 +102,7 @@ describe('CodeRunPanel', () => {
     const user = userEvent.setup();
     // A terminal live activity means the panel is collapsed by default.
     renderWithQuery(
-      <CodeRunPanel
-        runId="run-1"
-        activity={{ ...LIVE, status: 'succeeded', exitCode: 0 }}
-      />,
+      <CodeRunPanel runId="run-1" activity={{ ...LIVE, status: 'succeeded', exitCode: 0 }} />,
     );
     expect(getCodeRun).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: /code run/i }));

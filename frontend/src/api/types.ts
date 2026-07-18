@@ -1334,16 +1334,16 @@ export interface RunReroute {
   to_owner_id: string;
 }
 
-// --- Code runs (contracts/openapi.yaml §code-runs, ADR-0013 / #229) ----------
+// --- Code runs (contracts/openapi.yaml §code-runs, ADR-0020 / #457) ----------
 // One agent-authored sandbox code run, inspectable via GET /code-runs/{id}. Runs
 // are created by the `run_python` tool off the request path — there is no public
 // execute endpoint. Tenant- and owner-scoped (INV-1/INV-2): a foreign id → 404.
 
 /**
- * The lifecycle of a sandbox code run (ADR-0013 §4 `code_runs.status`).
+ * The lifecycle of a sandbox code run (ADR-0020 `code_runs.status`).
  * `queued`/`running` are non-terminal; `succeeded` = exit 0; `failed` = non-zero
- * exit; `timeout` = wall-clock-killed; `killed` = OOM/pids-capped; `denied` =
- * refused before execution (code execution disabled, or a policy/quota block).
+ * exit; `timeout` is historical compatibility; `killed` = explicit cancellation;
+ * `denied` = refused before execution (disabled or package-policy blocked).
  */
 export type CodeRunStatus =
   | 'queued'
@@ -1355,7 +1355,7 @@ export type CodeRunStatus =
   | 'denied';
 
 /**
- * Measured resource consumption for a finished run (ADR-0013 §4). Fields are
+ * Measured resource consumption for a finished run (ADR-0020). Fields are
  * best-effort — null when the runtime did not report them; the whole object is
  * null while the run is queued/running.
  */
@@ -1366,25 +1366,31 @@ export interface ResourceUsage {
   cpu_time_ms?: number | null;
   /** Peak number of processes/threads the run spawned. */
   max_pids?: number | null;
-  /** Total captured stdout+stderr size in bytes (subject to the output cap, G7). */
+  /** Total captured stdout+stderr size in bytes. */
   output_bytes?: number | null;
 }
 
 /**
- * One agent-authored sandbox code run, for inspection/history (ADR-0013 §4,
- * E15-7 / E6-5), tenant- and owner-scoped (INV-1/INV-2). `stdout`/`stderr` are
- * output-size-capped (G7, may be truncated); `exit_code`, `duration_ms`,
+ * One agent-authored sandbox code run, for inspection/history (ADR-0020,
+ * E15-7 / E6-5), tenant- and owner-scoped (INV-1/INV-2). `exit_code`, `duration_ms`,
  * `resource_usage`, and `artifact_ids` populate as the run finishes (null/empty
  * while queued or running).
  */
 export interface CodeRun {
   id: string;
+  /** Parent chat session. */
+  session_id?: string | null;
+  /** Opaque reusable sandbox identity and generation used for this run. */
+  sandbox_session_id?: string | null;
+  sandbox_generation?: number | null;
   status: CodeRunStatus;
   /** The exact Python source that was executed (inspectable, E15-7 / E6-5). */
   code: string;
-  /** Captured standard output (output-size-capped; may be truncated, G7). */
+  /** Policy-admitted PEP-508 requirements requested for this execution. */
+  requested_packages: string[];
+  /** Captured standard output. */
   stdout: string;
-  /** Captured standard error (output-size-capped; may be truncated, G7). */
+  /** Captured standard error. */
   stderr: string;
   /** Process exit code once finished; null while queued/running or killed/denied. */
   exit_code?: number | null;
@@ -1403,6 +1409,21 @@ export interface CodeRun {
   started_at?: string | null;
   /** When the run reached a terminal status; null until then. */
   finished_at?: string | null;
+}
+
+export type SandboxSessionStatus = 'not_created' | 'active' | 'closed' | 'error';
+
+/** One chat's reusable, root-inside/offline Python environment (ADR-0020). */
+export interface SandboxSession {
+  status: SandboxSessionStatus;
+  enabled: boolean;
+  root_access: true;
+  sandbox_session_id?: string | null;
+  generation?: number | null;
+  image_digest?: string | null;
+  created_at?: string | null;
+  last_used_at?: string | null;
+  closed_at?: string | null;
 }
 
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
@@ -1617,11 +1638,11 @@ export interface ChatDoneData {
 }
 
 /**
- * `event.data` for name=code_output (ADR-0013 §4, #232) — one streamed chunk of a
+ * `event.data` for name=code_output (ADR-0020, #457) — one streamed chunk of a
  * sandbox code run's output, emitted within the chat answer stream while the
  * `run_python` tool executes. `stream` says stdout vs stderr; multiple per `runId`
  * arrive in `seq` order. Non-terminal — the run's outcome arrives as a single
- * code_result. Chunks are output-size-capped (may be truncated, G7).
+ * code_result.
  */
 export interface CodeOutput {
   /** The code_runs.id this output belongs to (matches GET /code-runs/{id}). */
@@ -1630,12 +1651,12 @@ export interface CodeOutput {
   callId?: string;
   /** Which output stream this chunk came from. */
   stream: 'stdout' | 'stderr';
-  /** The chunk of captured output (may be truncated at the output cap, G7). */
+  /** The chunk of captured output. */
   text: string;
 }
 
 /**
- * `event.data` for name=code_result (ADR-0013 §4, #232) — the terminal outcome of
+ * `event.data` for name=code_result (ADR-0020, #457) — the terminal outcome of
  * a sandbox code run. Exactly one arrives per `runId` after its code_output
  * chunks, carrying the final `status`, `exitCode`, `durationMs`, and the ids of
  * any emitted artifacts. This is a RUN-level terminal, NOT the chat stream's
@@ -1645,6 +1666,8 @@ export interface CodeOutput {
 export interface CodeResult {
   /** The code_runs.id this result finalizes (matches GET /code-runs/{id}). */
   runId: string;
+  sandboxSessionId?: string | null;
+  sandboxGeneration?: number | null;
   /** Correlates to the originating run_python tool_call (ChatToolCall.callId). */
   callId?: string;
   /** The run's terminal status (CodeRunStatus minus the non-terminal queued/running). */

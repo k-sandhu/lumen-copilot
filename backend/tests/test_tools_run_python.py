@@ -76,8 +76,10 @@ class _FakeSandbox:
         self._run = run
         self.calls: list[dict[str, object]] = []
 
-    async def submit(self, *, code: str, timeout_s: int | None = None) -> SandboxRun:
-        self.calls.append({"code": code, "timeout_s": timeout_s})
+    async def submit(
+        self, *, code: str, packages: tuple[str, ...] = ()
+    ) -> SandboxRun:
+        self.calls.append({"code": code, "packages": packages})
         return self._run
 
 
@@ -182,17 +184,15 @@ async def test_success_returns_status_artifacts_and_run_id(world: _World) -> Non
     assert str(run.code_run_id) in result.content
     assert str(artifact_id) in result.content
     # The code was submitted to the seam verbatim.
-    assert sandbox.calls == [{"code": "print(6*7)", "timeout_s": None}]
+    assert sandbox.calls == [{"code": "print(6*7)", "packages": ()}]
 
 
-async def test_timeout_hint_is_clamped_and_forwarded(world: _World) -> None:
+async def test_package_requirements_are_forwarded(world: _World) -> None:
     sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED))
-    await _run_python({"code": "x=1", "timeout_s": 10}, world.context(sandbox))
-    assert sandbox.calls[0]["timeout_s"] == 10
-    # A garbage / non-positive hint degrades to None (the seam applies the default).
-    sandbox2 = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED))
-    await _run_python({"code": "x=1", "timeout_s": -5}, world.context(sandbox2))
-    assert sandbox2.calls[0]["timeout_s"] is None
+    await _run_python(
+        {"code": "x=1", "packages": ["numpy==2.1.0"]}, world.context(sandbox)
+    )
+    assert sandbox.calls[0]["packages"] == ("numpy==2.1.0",)
 
 
 # ---------------------------------------------------------------------------

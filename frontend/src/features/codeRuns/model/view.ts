@@ -23,6 +23,9 @@ export interface CodeRunView {
   resourceUsage: ResourceUsage | null;
   artifactIds: string[];
   imageDigest: string | null;
+  sandboxSessionId: string | null;
+  sandboxGeneration: number | null;
+  requestedPackages: string[];
   createdAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
@@ -43,6 +46,9 @@ export function viewFromActivity(activity: CodeRunActivity): CodeRunView {
     resourceUsage: null,
     artifactIds: activity.artifactIds,
     imageDigest: null,
+    sandboxSessionId: activity.sandboxSessionId ?? null,
+    sandboxGeneration: activity.sandboxGeneration ?? null,
+    requestedPackages: [],
     createdAt: null,
     startedAt: null,
     finishedAt: null,
@@ -63,6 +69,9 @@ export function viewFromRecord(run: CodeRun): CodeRunView {
     resourceUsage: run.resource_usage ?? null,
     artifactIds: run.artifact_ids,
     imageDigest: run.image_digest ?? null,
+    sandboxSessionId: run.sandbox_session_id ?? null,
+    sandboxGeneration: run.sandbox_generation ?? null,
+    requestedPackages: run.requested_packages,
     createdAt: run.created_at,
     startedAt: run.started_at ?? null,
     finishedAt: run.finished_at ?? null,
@@ -75,7 +84,7 @@ export function viewFromRecord(run: CodeRun): CodeRunView {
  * authoritative for the durable fields (code, resource usage, image digest,
  * timestamps). For the streamed fields (status, stdout/stderr, exit/duration,
  * artifacts) we prefer whichever side is FURTHER ALONG:
- *  - once the record is terminal, it wins (the persisted, output-capped truth);
+ *  - once the record is terminal, it wins (the persisted truth);
  *  - while the record is still non-terminal, the live stream can be ahead
  *    (output already flowing / a code_result already seen), so we take the live
  *    output and — if the live side has finalized — its terminal status/exit.
@@ -84,8 +93,7 @@ export function viewFromRecord(run: CodeRun): CodeRunView {
  */
 export function mergeView(activity: CodeRunActivity, run: CodeRun): CodeRunView {
   const record = viewFromRecord(run);
-  const recordTerminal =
-    run.status !== 'queued' && run.status !== 'running';
+  const recordTerminal = run.status !== 'queued' && run.status !== 'running';
   if (recordTerminal) {
     // Prefer the record's captured output unless it is empty and the live stream
     // has some (a race where the result landed before the record backfilled).
@@ -96,8 +104,7 @@ export function mergeView(activity: CodeRunActivity, run: CodeRun): CodeRunView 
       streaming: false,
     };
   }
-  const liveTerminal =
-    activity.status !== 'queued' && activity.status !== 'running';
+  const liveTerminal = activity.status !== 'queued' && activity.status !== 'running';
   return {
     ...record,
     status: liveTerminal ? activity.status : record.status,
@@ -106,6 +113,8 @@ export function mergeView(activity: CodeRunActivity, run: CodeRun): CodeRunView 
     exitCode: activity.exitCode ?? record.exitCode,
     durationMs: activity.durationMs ?? record.durationMs,
     artifactIds: activity.artifactIds.length ? activity.artifactIds : record.artifactIds,
+    sandboxSessionId: activity.sandboxSessionId ?? record.sandboxSessionId,
+    sandboxGeneration: activity.sandboxGeneration ?? record.sandboxGeneration,
     streaming: !liveTerminal,
   };
 }

@@ -317,13 +317,13 @@ _TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset(
 
 
 class CodeRunStatus(str, enum.Enum):
-    """The sandbox code-run state machine (ADR-0013 §4, contract ``CodeRunStatus``).
+    """The sandbox code-run state machine (ADR-0020, contract ``CodeRunStatus``).
 
     ``QUEUED`` (enqueued, not yet started) → ``RUNNING`` (executing in the ephemeral
     container) → one terminal of ``SUCCEEDED`` (exit 0) / ``FAILED`` (non-zero exit) /
-    ``TIMEOUT`` (wall-clock-killed, G6) / ``KILLED`` (OOM-killed or pids-capped, G6) /
-    ``DENIED`` (refused **before** execution — code execution disabled for the tenant,
-    a policy/quota block, §6). A crash never leaves a run stuck ``RUNNING``: the Celery
+    historical ``TIMEOUT`` / explicitly cancelled ``KILLED`` / ``DENIED`` (refused
+    **before** execution — code execution disabled or a package-policy block). A crash
+    never leaves a run stuck ``RUNNING``: the Celery
     task's failure path writes ``FAILED`` with a typed error (INV-8 — the sandbox never
     ends in silence, ADR-0013 §5).
     """
@@ -335,6 +335,14 @@ class CodeRunStatus(str, enum.Enum):
     TIMEOUT = "timeout"
     KILLED = "killed"
     DENIED = "denied"
+
+
+class SandboxSessionStatus(str, enum.Enum):
+    """Lifecycle of a reusable chat-scoped Python sandbox (ADR-0020)."""
+
+    ACTIVE = "active"
+    CLOSED = "closed"
+    ERROR = "error"
 
 
 # The terminal code-run statuses — a run in one of these never transitions again.
@@ -773,7 +781,8 @@ class TenantSandboxPolicy:
 
     One row of the ``tenant_sandbox_policy`` table: is code execution ``enabled`` for
     the tenant, the package allow/deny lists, the outbound egress posture
-    (``egress_allowed`` + ``egress_allowlist``), and the runtime / memory / quota caps.
+    Compatibility fields from ADR-0013 retain egress/runtime/quota values, but ADR-0020
+    reusable sessions enforce fixed offline execution and no automatic caps.
     Tenant-scoped (INV-1); ``updated_by`` is the admin who last set it (may be ``None``
     if that user was later deprovisioned — the policy outlives them). Absence of a row
     (not represented here) means code execution stays DISABLED for the tenant — the
@@ -1313,8 +1322,7 @@ class ResourceUsage:
 
     Best-effort — a field is ``None`` when the runtime did not report it. Stored as
     the ``code_runs.resource_usage`` jsonb and projected to the contract
-    ``ResourceUsage`` shape. ``output_bytes`` is the captured stdout+stderr size
-    (subject to the output-size cap, G7).
+    ``ResourceUsage`` shape. ``output_bytes`` is the captured stdout+stderr size.
     """
 
     peak_memory_bytes: int | None = None
@@ -1354,13 +1362,29 @@ class ResourceUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxSession:
+    """One durable tenant/owner/chat-scoped reusable sandbox identity (ADR-0020)."""
+
+    id: UUID
+    tenant_id: UUID
+    owner_id: UUID
+    chat_session_id: UUID
+    generation: int
+    status: SandboxSessionStatus
+    image_digest: str
+    created_at: datetime
+    last_used_at: datetime
+    closed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CodeRun:
     """One agent-authored sandbox code run — the ``code_runs`` row (ADR-0013 §4).
 
     Tenant- and owner-scoped (INV-1/INV-2): a run in another tenant or owned by
     another user is a 404 (existence non-disclosure). Records the exact ``code``
     executed (inspectable, E15-7/E6-5), the pinned ``image_digest`` actually used
-    (reproducibility, E3-7), captured (output-size-capped, G7) ``stdout``/``stderr``,
+    (reproducibility, E3-7), captured ``stdout``/``stderr``,
     the ``exit_code``, ``duration_ms``, and measured ``resource_usage``. ``status``
     walks the :class:`CodeRunStatus` machine; a crash writes a terminal
     (``failed``), never a stuck ``running`` (ADR-0013 §5). ``artifact_ids`` are the
@@ -1377,8 +1401,11 @@ class CodeRun:
     stdout: str
     stderr: str
     artifact_ids: list[UUID]
+    requested_packages: tuple[str, ...]
     created_at: datetime
     session_id: UUID | None = None
+    sandbox_session_id: UUID | None = None
+    sandbox_generation: int | None = None
     run_id: UUID | None = None
     trace_id: UUID | None = None
     exit_code: int | None = None

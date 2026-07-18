@@ -25,6 +25,9 @@ export {
   getChatSession,
   updateChatSession,
   deleteChatSession,
+  getSandboxSession,
+  resetSandboxSession,
+  closeSandboxSession,
   listMessages,
   sendMessage,
   getSessionUsage,
@@ -99,13 +102,8 @@ export { listRuns, getRun, resumeRun, cancelRun, rerouteRun } from './runs';
 export type { RunPageQuery } from './runs';
 export { listRunDeliveries, markRunDeliveryRead } from './runDeliveries';
 export type { RunDeliveryPageQuery } from './runDeliveries';
-export { getCodeRun } from './codeRuns';
-export {
-  listArtifacts,
-  getArtifact,
-  deleteArtifact,
-  fetchArtifactContent,
-} from './artifacts';
+export { getCodeRun, cancelCodeRun } from './codeRuns';
+export { listArtifacts, getArtifact, deleteArtifact, fetchArtifactContent } from './artifacts';
 export type { ArtifactContent } from './artifacts';
 export {
   listMcpServers,

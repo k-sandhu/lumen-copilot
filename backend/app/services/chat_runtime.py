@@ -109,14 +109,13 @@ class SandboxContext:
     """The per-answer inputs the sandbox seam factory needs (issue #231).
 
     Threaded from the runtime into the injected :data:`SandboxFactory` so the seam
-    can create + link the ``code_run`` (the runtime's own ``session`` + the parent
-    chat ``session_id`` / assistant ``message_id``), stream over the answer's
+    can create + link the ``code_run`` (using its own short transactions plus the
+    parent chat ``session_id`` / assistant ``message_id``), stream over the answer's
     ``stream_id`` with the shared monotonic ``next_seq`` (so ``code_output`` /
     ``code_result`` interleave with the answer's envelopes), and carry the audit
     correlation. Everything is the runtime's — never model/tool input.
     """
 
-    session: AsyncSession
     stream_id: str
     session_id: UUID
     message_id: UUID
@@ -1397,7 +1396,6 @@ class ChatRuntime:
             return None
         return self._sandbox_factory(
             SandboxContext(
-                session=session,
                 stream_id=state.stream_id,
                 session_id=session_id,
                 message_id=assistant_message_id,

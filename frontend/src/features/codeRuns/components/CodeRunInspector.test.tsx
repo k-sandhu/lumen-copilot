@@ -6,7 +6,7 @@
  * (AC-2); and keep long output inside its own scroll container (AC-3).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { CodeRunInspector } from './CodeRunInspector';
 import type { CodeRunView } from '../model/view';
 
@@ -22,6 +22,9 @@ function view(over: Partial<CodeRunView> = {}): CodeRunView {
     resourceUsage: { peak_memory_bytes: 2048, cpu_time_ms: 40, max_pids: 2, output_bytes: 12 },
     artifactIds: [],
     imageDigest: null,
+    sandboxSessionId: null,
+    sandboxGeneration: null,
+    requestedPackages: [],
     createdAt: '2026-07-02T00:00:00Z',
     startedAt: null,
     finishedAt: null,
@@ -64,7 +67,15 @@ describe('CodeRunInspector', () => {
   it('shows a live status + streamed output while running (AC-1)', () => {
     render(
       <CodeRunInspector
-        view={view({ status: 'running', code: null, stdout: 'partial…', exitCode: null, durationMs: null, resourceUsage: null, streaming: true })}
+        view={view({
+          status: 'running',
+          code: null,
+          stdout: 'partial…',
+          exitCode: null,
+          durationMs: null,
+          resourceUsage: null,
+          streaming: true,
+        })}
       />,
     );
     expect(screen.getByText('Running')).toBeInTheDocument();
@@ -75,10 +86,36 @@ describe('CodeRunInspector', () => {
     expect(stdout).toHaveAttribute('role', 'log');
   });
 
+  it('shows the reusable generation, package requirements, and explicit cancel recovery', () => {
+    const onCancel = vi.fn();
+    render(
+      <CodeRunInspector
+        view={view({
+          status: 'running',
+          streaming: true,
+          sandboxSessionId: 'sandbox-1',
+          sandboxGeneration: 4,
+          requestedPackages: ['numpy==2.1.0'],
+        })}
+        onCancel={onCancel}
+      />,
+    );
+
+    expect(screen.getByText(/generation 4.*root inside container.*offline/i)).toBeInTheDocument();
+    expect(screen.getByText('numpy==2.1.0')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /cancel execution/i }));
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
   it('surfaces a FAILED run’s stderr tail prominently — not a blank pane (AC-2)', () => {
     render(
       <CodeRunInspector
-        view={view({ status: 'failed', exitCode: 1, stdout: '', stderr: 'Traceback…\nZeroDivisionError' })}
+        view={view({
+          status: 'failed',
+          exitCode: 1,
+          stdout: '',
+          stderr: 'Traceback…\nZeroDivisionError',
+        })}
       />,
     );
     const alert = screen.getByRole('alert');
@@ -87,13 +124,21 @@ describe('CodeRunInspector', () => {
   });
 
   it('surfaces a TIMEOUT run distinctly (AC-2)', () => {
-    render(<CodeRunInspector view={view({ status: 'timeout', exitCode: null, stderr: 'killed by watchdog' })} />);
+    render(
+      <CodeRunInspector
+        view={view({ status: 'timeout', exitCode: null, stderr: 'killed by watchdog' })}
+      />,
+    );
     const alert = screen.getByRole('alert');
     expect(within(alert).getByText(/timed out/i)).toBeInTheDocument();
   });
 
   it('surfaces a DENIED run as a policy refusal, not a stderr dump (AC-2)', () => {
-    render(<CodeRunInspector view={view({ status: 'denied', exitCode: null, stdout: '', stderr: '' })} />);
+    render(
+      <CodeRunInspector
+        view={view({ status: 'denied', exitCode: null, stdout: '', stderr: '' })}
+      />,
+    );
     const alert = screen.getByRole('alert');
     expect(within(alert).getByText(/not allowed/i)).toBeInTheDocument();
     expect(screen.getByText('Denied')).toBeInTheDocument();

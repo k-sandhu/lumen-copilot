@@ -8,7 +8,7 @@
 import type { StatusTone } from '@/ui';
 import type { CodeRunStatus, ResourceUsage } from '@/api';
 
-/** Human label for each point in the code-run lifecycle (ADR-0013 §4). */
+/** Human label for each point in the code-run lifecycle (ADR-0020 §4). */
 export const CODE_RUN_STATUS_LABEL: Record<CodeRunStatus, string> = {
   queued: 'Queued',
   running: 'Running',
@@ -109,7 +109,7 @@ export interface UsageRow {
 }
 
 /**
- * The resource-usage grid rows for a finished run (ADR-0013 §4). Each field is
+ * The resource-usage grid rows for a finished run (ADR-0020 §4). Each field is
  * best-effort on the wire — a null field renders "—" rather than being hidden, so
  * the grid shape is stable and an absent measurement is honest (never fabricated).
  * Returns null when there is no usage object at all (queued/running).

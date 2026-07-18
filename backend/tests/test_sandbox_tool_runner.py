@@ -40,7 +40,7 @@ from app.db.repositories import (
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.realtime.backplane import InMemoryBackplane
-from app.sandbox.spec import OutputFile, RunResult, RunSpec
+from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from app.storage.keys import build_artifact_key
 from tests._sandbox_helpers import sandbox_settings
@@ -80,12 +80,26 @@ class _FakeRunner:
         self._raises = raises
         self.calls = 0
 
-    async def run(self, spec: RunSpec, *, tmpfs_scratch_bytes: int) -> RunResult:
+    async def ensure_session(self, value: SandboxSessionSpec) -> None:
+        return None
+
+    async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
         self.calls += 1
         if self._raises is not None:
             raise self._raises
         assert self._result is not None
         return self._result
+
+    async def reset_session(
+        self, previous: SandboxSessionSpec, replacement: SandboxSessionSpec
+    ) -> None:
+        return None
+
+    async def close_session(self, value: SandboxSessionSpec) -> None:
+        return None
+
+    async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+        return None
 
 
 def _ok_result(
@@ -108,11 +122,19 @@ def _ok_result(
 
 class _World:
     def __init__(
-        self, *, session: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID
+        self,
+        *,
+        session: AsyncSession,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        chat_id: uuid.UUID,
     ) -> None:
         self.session = session
+        self.sessionmaker = sessionmaker
         self.tenant_id = tenant_id
         self.user_id = user_id
+        self.chat_id = chat_id
 
     def seam(
         self,
@@ -133,7 +155,7 @@ class _World:
             return s
 
         return ChatSandboxToolRunner(
-            session=self.session,
+            sessionmaker=self.sessionmaker,
             tenant_id=self.tenant_id,
             owner_id=self.user_id,
             runner=runner,  # type: ignore[arg-type]  # structural fake
@@ -144,7 +166,7 @@ class _World:
             request_id="req-test",
             source_ip="203.0.113.5",
             next_seq=_next_seq,
-            session_id=session_id,
+            session_id=session_id or self.chat_id,
             message_id=message_id,
         )
 
@@ -180,8 +202,17 @@ async def world() -> AsyncIterator[_World]:
                 max_concurrency=2,
                 updated_by=None,
             )
+            chat = await ChatSessionRepository(session, tenant.id).create(
+                owner_id=user.id, model="m", title="default"
+            )
             await session.commit()
-            yield _World(session=session, tenant_id=tenant.id, user_id=user.id)
+            yield _World(
+                session=session,
+                sessionmaker=factory,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                chat_id=chat.id,
+            )
     finally:
         await engine.dispose()
 
@@ -205,9 +236,7 @@ async def test_submit_runs_captures_and_returns_summary(world: _World) -> None:
     chat = await ChatSessionRepository(world.session, world.tenant_id).create(
         owner_id=world.user_id, model="m", title="t"
     )
-    seam = world.seam(
-        runner, backplane=backplane, session_id=chat.id, message_id=message_id
-    )
+    seam = world.seam(runner, backplane=backplane, session_id=chat.id, message_id=message_id)
 
     summary = await seam.submit(code="print('done')")
 
@@ -260,9 +289,7 @@ async def test_streams_code_output_then_one_code_result(world: _World) -> None:
 async def test_disabled_tenant_is_denied_without_calling_runner(world: _World) -> None:
     backplane = InMemoryBackplane()
     runner = _FakeRunner(result=_ok_result())
-    seam = world.seam(
-        runner, backplane=backplane, settings_overrides={"SANDBOX_ENABLED": "false"}
-    )
+    seam = world.seam(runner, backplane=backplane, settings_overrides={"SANDBOX_ENABLED": "false"})
 
     summary = await seam.submit(code="print(1)")
 
