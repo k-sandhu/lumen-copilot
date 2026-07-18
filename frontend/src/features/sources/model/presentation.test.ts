@@ -14,6 +14,7 @@ import {
   connectReturnErrorMessage,
   connectSourceErrorMessage,
   createSourceErrorMessage,
+  deleteSourceErrorMessage,
   freshness,
   gdriveScopeLabel,
   isGdriveSource,
@@ -264,6 +265,14 @@ describe('createSourceErrorMessage', () => {
 
   it('messages a 401 as a session-expiry', () => {
     expect(createSourceErrorMessage(new ApiError('x', 401))).toMatch(/session expired/i);
+  });
+});
+
+describe('deleteSourceErrorMessage', () => {
+  it('maps 403 to the action-time admin/role gate (INV-5), 404 to already-gone, 401 to session expiry', () => {
+    expect(deleteSourceErrorMessage(new ApiError('x', 403))).toMatch(/tenant admin.*role may have changed/i);
+    expect(deleteSourceErrorMessage(new ApiError('x', 404))).toMatch(/no longer exists/i);
+    expect(deleteSourceErrorMessage(new ApiError('x', 401))).toMatch(/session expired/i);
   });
 });
 

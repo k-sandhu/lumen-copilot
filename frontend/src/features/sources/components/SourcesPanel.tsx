@@ -32,6 +32,7 @@ import { useConnectSource, useDeleteSource, useSources, useSyncSource } from '..
 import {
   connectReturnErrorMessage,
   connectSourceErrorMessage,
+  deleteSourceErrorMessage,
   isGdriveSource,
   relativeTime,
   sourceDetail,
@@ -62,6 +63,10 @@ export function SourcesPanel() {
   const closeAdd = useCallback(() => setAddOpen(false), []);
   // The source pending removal confirmation (null = dialog closed).
   const [pendingRemove, setPendingRemove] = useState<Source | null>(null);
+  // The mapped failure of the LAST confirmed remove — rendered inside the
+  // confirm dialog (a 403 from the action-time admin gate must be visible,
+  // never silently discarded).
+  const [removeError, setRemoveError] = useState<string | null>(null);
   // Track the id each mutation targets so only that card shows its busy state.
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<{ id: string; error: ApiError } | null>(null);
@@ -107,10 +112,35 @@ export function SourcesPanel() {
     });
   };
 
+  // Close the confirm on SUCCESS only. On error the dialog stays open with the
+  // mapped message (403 = the admin gate re-checked at action time, INV-5) and
+  // Cancel remains available — the pane never wedges or goes blank.
   const confirmRemove = () => {
     if (!pendingRemove) return;
     const id = pendingRemove.id;
-    remove.mutate(id, { onSettled: () => setPendingRemove(null) });
+    setRemoveError(null);
+    remove.mutate(id, {
+      onSuccess: () => {
+        setRemoveError(null);
+        setPendingRemove(null);
+      },
+      onError: (error) =>
+        setRemoveError(
+          deleteSourceErrorMessage(
+            error instanceof ApiError ? error : new ApiError('Remove failed', 0),
+          ),
+        ),
+    });
+  };
+
+  const requestRemove = (source: Source) => {
+    setRemoveError(null);
+    setPendingRemove(source);
+  };
+
+  const cancelRemove = () => {
+    setRemoveError(null);
+    setPendingRemove(null);
   };
 
   return (
@@ -155,7 +185,7 @@ export function SourcesPanel() {
             onAdd={() => setAddOpen(true)}
             onSync={handleSync}
             onConnect={handleConnect}
-            onRemove={setPendingRemove}
+            onRemove={requestRemove}
           />
         </ScrollArea>
       </div>
@@ -171,8 +201,9 @@ export function SourcesPanel() {
         }
         confirmLabel="Remove source"
         busy={remove.isPending}
+        error={removeError}
         onConfirm={confirmRemove}
-        onCancel={() => setPendingRemove(null)}
+        onCancel={cancelRemove}
       />
     </div>
   );

@@ -126,6 +126,16 @@ function LocationProbe() {
   return <span data-testid="location">{`${loc.pathname}${loc.search}`}</span>;
 }
 
+/** Serialize a Web Storage area so tests can assert nothing leaked into it. */
+function storageDump(storage: Storage): string {
+  const entries: string[] = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (key !== null) entries.push(`${key}=${storage.getItem(key) ?? ''}`);
+  }
+  return entries.join('&');
+}
+
 beforeEach(() => setAccessToken('jwt'));
 afterEach(() => {
   clearAccessToken();
@@ -264,6 +274,61 @@ describe('SourcesPanel — actions', () => {
     );
   });
 
+  it('keeps the confirm open with the role error on a DELETE 403 — pane stays usable (INV-5)', async () => {
+    installFetch({
+      roles: ['member', 'admin'],
+      sources: () => json(list([makeGdrive()])),
+      extra: (url, init) =>
+        init?.method === 'DELETE' && url.includes('/sources/g1')
+          ? problem(403, 'Forbidden')
+          : null,
+    });
+    const user = userEvent.setup();
+    renderPanel();
+
+    const card = await screen.findByRole('article', { name: /google drive/i });
+    await user.click(within(card).getByRole('button', { name: /remove google drive/i }));
+    const confirm = await screen.findByRole('alertdialog');
+    await user.click(within(confirm).getByRole('button', { name: /remove source/i }));
+
+    // The dialog STAYS OPEN and the 403 renders as the mapped role error —
+    // never silently discarded, never a blank pane.
+    const alert = await within(confirm).findByRole('alert');
+    expect(alert).toHaveTextContent(/tenant admin/i);
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+
+    // The pane remains usable: Cancel closes the dialog, the grid is intact.
+    await user.click(within(confirm).getByRole('button', { name: /cancel/i }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('article', { name: /google drive/i })).toBeInTheDocument();
+  });
+
+  it('clears a prior remove error when the confirm is reopened', async () => {
+    installFetch({
+      roles: ['member', 'admin'],
+      sources: () => json(list([makeGdrive()])),
+      extra: (url, init) =>
+        init?.method === 'DELETE' && url.includes('/sources/g1')
+          ? problem(403, 'Forbidden')
+          : null,
+    });
+    const user = userEvent.setup();
+    renderPanel();
+
+    const card = await screen.findByRole('article', { name: /google drive/i });
+    await user.click(within(card).getByRole('button', { name: /remove google drive/i }));
+    let confirm = await screen.findByRole('alertdialog');
+    await user.click(within(confirm).getByRole('button', { name: /remove source/i }));
+    await within(confirm).findByRole('alert');
+    await user.click(within(confirm).getByRole('button', { name: /cancel/i }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+
+    // Reopening starts clean — no stale error from the last attempt.
+    await user.click(within(card).getByRole('button', { name: /remove google drive/i }));
+    confirm = await screen.findByRole('alertdialog');
+    expect(within(confirm).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('opens the Add-source modal from the header button', async () => {
     installFetch();
     const user = userEvent.setup();
@@ -386,6 +451,35 @@ describe('SourcesPanel — OAuth return states (the frozen ?connect contract)', 
     installFetch();
     renderPanel('/sources?connect=error&reason=not_in_the_contract');
     expect(await screen.findByRole('alert')).toHaveTextContent(/something went wrong/i);
+  });
+
+  it('clears the ENTIRE query on the ok leg — injected code/state/token material never survives', async () => {
+    installFetch();
+    renderPanel(
+      '/sources?connect=ok&source=g1&code=SECRETCODE1&state=SECRETSTATE1&access_token=SECRETTOKEN1',
+    );
+
+    await screen.findByText(/google drive connected/i);
+    // The allowlist cleanup wipes the WHOLE query string, not just known keys.
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/));
+    // Nothing token-like remains in the DOM…
+    expect(document.body.innerHTML).not.toMatch(/SECRET(CODE|STATE|TOKEN)1/);
+    // …or in client storage (nothing from the query is ever persisted).
+    expect(storageDump(localStorage)).not.toMatch(/SECRET/);
+    expect(storageDump(sessionStorage)).not.toMatch(/SECRET/);
+  });
+
+  it('clears the ENTIRE query on the error leg too — injected extras never survive', async () => {
+    installFetch();
+    renderPanel(
+      '/sources?connect=error&reason=denied&code=SECRETCODE2&state=SECRETSTATE2&id_token=SECRETTOKEN2',
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not authorized/i);
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/));
+    expect(document.body.innerHTML).not.toMatch(/SECRET(CODE|STATE|TOKEN)2/);
+    expect(storageDump(localStorage)).not.toMatch(/SECRET/);
+    expect(storageDump(sessionStorage)).not.toMatch(/SECRET/);
   });
 
   it('the banner is dismissible', async () => {

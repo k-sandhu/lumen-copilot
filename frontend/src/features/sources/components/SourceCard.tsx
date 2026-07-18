@@ -178,18 +178,27 @@ export function SourceCard({
               {source.connected_account ? source.connected_account.email : 'Not connected yet'}
             </dd>
           </div>
-          {source.unmapped_acl_count !== null && source.unmapped_acl_count > 0 ? (
-            <div className="flex min-w-0 items-start gap-2">
-              <dt className="shrink-0 text-foreground-muted">Unmapped access</dt>
-              <dd className="min-w-0">
-                <span className="font-medium tabular-nums">
-                  {source.unmapped_acl_count.toLocaleString()}
-                </span>{' '}
-                document{source.unmapped_acl_count === 1 ? '' : 's'} visible to no one yet —
-                attesting member identities in Admin lights them up.
-              </dd>
-            </div>
-          ) : null}
+          {/* The unmapped-ACL health state is a REQUIRED contract field — always
+              rendered with an explicit state, never hidden (0 and null are
+              meaningful health readings, not absences). */}
+          <div className="flex min-w-0 items-start gap-2">
+            <dt className="shrink-0 text-foreground-muted">Unmapped access</dt>
+            <dd className="min-w-0">
+              {source.unmapped_acl_count === null ? (
+                'Not available until the first permissions sync.'
+              ) : source.unmapped_acl_count === 0 ? (
+                'None — every mirrored permission maps to a member.'
+              ) : (
+                <>
+                  <span className="font-medium tabular-nums">
+                    {source.unmapped_acl_count.toLocaleString()}
+                  </span>{' '}
+                  document{source.unmapped_acl_count === 1 ? '' : 's'} visible to no one yet —
+                  attesting member identities in Admin lights them up.
+                </>
+              )}
+            </dd>
+          </div>
         </dl>
       ) : null}
       <p className="-mt-1 text-xs text-foreground-muted">{modeLabel(source)}</p>

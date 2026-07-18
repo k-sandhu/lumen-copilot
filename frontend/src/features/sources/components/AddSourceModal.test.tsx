@@ -149,6 +149,38 @@ describe('AddSourceModal', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('parks Tab on the DIALOG itself in the all-disabled pending state (zero focusable)', async () => {
+    // While create/connect is pending every control is disabled, so the trap's
+    // fallback is `container.focus()` — which only works because the dialog
+    // carries tabIndex={-1}. Without it, Tab from outside would escape to the
+    // page behind the overlay.
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>(() => {}));
+    const user = userEvent.setup();
+    renderWithQuery(
+      <>
+        <button type="button" data-testid="behind-overlay">
+          behind the overlay
+        </button>
+        <AddSourceModal open onClose={() => {}} />
+      </>,
+    );
+
+    const dialog = screen.getByRole('dialog');
+    const outside = screen.getByTestId('behind-overlay');
+    await user.type(screen.getByLabelText(/link/i), 'https://acme.com/docs');
+    await user.click(screen.getByRole('button', { name: /add source/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /adding/i })).toBeInTheDocument(),
+    );
+
+    // Force focus OUT of the trap (a stray programmatic focus), then Tab: with
+    // zero focusable children, focus must land ON the dialog, not the page.
+    outside.focus();
+    expect(outside).toHaveFocus();
+    await user.tab();
+    expect(dialog).toHaveFocus();
+  });
+
   it('blocks a bad URL client-side without firing a request', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const user = userEvent.setup();

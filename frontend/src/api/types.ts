@@ -815,9 +815,16 @@ export interface WebSourceConfig {
   mode: WebSourceMode;
 }
 
-/** Sync the connected account's entire My Drive (no ids permitted). */
+/**
+ * Sync the connected account's entire My Drive. The contract variant is CLOSED
+ * (`additionalProperties: false` — no ids permitted); the `?: never` members
+ * make that structural, so a carried `folder_id`/`drive_id` fails to compile
+ * instead of arriving as a 422 `invalid_config` (INV-8).
+ */
 export interface GdriveMyDriveConfig {
   mode: 'my_drive';
+  folder_id?: never;
+  drive_id?: never;
 }
 
 /**
@@ -832,11 +839,15 @@ export interface GdriveFolderConfig {
   drive_id?: string;
 }
 
-/** Sync a whole Shared Drive. `drive_id` is required; `folder_id` is not permitted. */
+/**
+ * Sync a whole Shared Drive. `drive_id` is required; `folder_id` is not
+ * permitted (`?: never` makes the closed contract variant structural).
+ */
 export interface GdriveSharedDriveConfig {
   mode: 'shared_drive';
   /** The Shared Drive id to sync. */
   drive_id: string;
+  folder_id?: never;
 }
 
 /**

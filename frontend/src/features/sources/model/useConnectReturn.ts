@@ -12,6 +12,12 @@
  * the grid reflects the now-`pending` source immediately. Components render the
  * outcome as a dismissible banner; an unknown `reason` falls back to the
  * generic failure copy — never a blank state.
+ *
+ * SECURITY: the cleanup is an ALLOWLIST — the sources route carries no other
+ * query state, so the ENTIRE query string is cleared, not just the three known
+ * params. The redirect query is attacker-influenceable, and deleting only
+ * known keys would let injected `code`/`state`/token-like extras survive in
+ * the address bar and history. Nothing from the query is ever persisted.
  */
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -50,12 +56,11 @@ export function useConnectReturn(): {
       setResult({ kind: 'error', reason: parseConnectErrorReason(searchParams.get('reason')) });
     }
 
-    // Clean the frozen params off the URL (replace, so back/refresh is quiet).
-    const next = new URLSearchParams(searchParams);
-    next.delete('connect');
-    next.delete('source');
-    next.delete('reason');
-    setSearchParams(next, { replace: true });
+    // Clean the WHOLE query string off the URL (replace, so back/refresh is
+    // quiet). Allowlist semantics: this route has no other query state, and a
+    // key-by-key delete would leave injected `code`/`state`/token material
+    // behind in the address bar/history.
+    setSearchParams(new URLSearchParams(), { replace: true });
     // Run only when a connect param is present; searchParams/setSearchParams are
     // re-created per navigation and the cleanup above removes the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps

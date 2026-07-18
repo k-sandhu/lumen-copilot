@@ -186,6 +186,11 @@ export function AddSourceModal({ open, onClose, isAdmin = false }: AddSourceModa
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
+      // Programmatically focusable so the focus-trap's zero-focusable fallback
+      // (`container.focus()`) actually works while every control is disabled
+      // during a pending create/connect — without this, Tab could escape to
+      // the page behind the overlay.
+      tabIndex={-1}
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-[12vh]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !submitting) onClose();

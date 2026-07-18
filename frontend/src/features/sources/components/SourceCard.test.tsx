@@ -160,15 +160,19 @@ describe('SourceCard — gdrive health surface (ADR-0019 §5)', () => {
     expect(screen.getByText(/attesting member identities/i)).toBeInTheDocument();
   });
 
-  it('hides the unmapped-ACL line when the count is 0 or null', () => {
+  it('ALWAYS renders the unmapped-ACL row — 0 reads as all-mapped, null as awaiting first sync', () => {
+    // The field is a required contract health reading: 0 and null are
+    // meaningful states, never hidden.
     const { rerender } = render(
       <SourceCard source={makeGdrive({ unmapped_acl_count: 0 })} isAdmin onSync={() => {}} onRemove={() => {}} />,
     );
-    expect(screen.queryByText(/unmapped access/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/unmapped access/i)).toBeInTheDocument();
+    expect(screen.getByText(/every mirrored permission maps to a member/i)).toBeInTheDocument();
     rerender(
       <SourceCard source={makeGdrive({ unmapped_acl_count: null })} isAdmin onSync={() => {}} onRemove={() => {}} />,
     );
-    expect(screen.queryByText(/unmapped access/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/unmapped access/i)).toBeInTheDocument();
+    expect(screen.getByText(/not available until the first permissions sync/i)).toBeInTheDocument();
   });
 });
 

@@ -271,6 +271,22 @@ export function createSourceErrorMessage(error: ApiError): string {
 }
 
 /**
+ * Map an api/ ApiError from `deleteSource` to a human message the confirm
+ * dialog renders inline (the outcome is never silently discarded). 403 = the
+ * admin gate on managed-source mutations, checked at action time against the
+ * caller's CURRENT roles — a demoted admin's delete is denied (ADR-0019 §1,
+ * INV-5); 404 = existence non-disclosure / already gone (INV-1/INV-2).
+ */
+export function deleteSourceErrorMessage(error: ApiError): string {
+  if (error.status === 403) {
+    return 'Only a tenant admin can remove a managed source — your role may have changed.';
+  }
+  if (error.status === 404) return 'That source no longer exists — it may already have been removed.';
+  if (error.status === 401) return 'Your session expired. Sign in again to remove this source.';
+  return error.displayMessage || "Couldn't remove this source. Please try again.";
+}
+
+/**
  * Map an api/ ApiError from `connectSource` to a human message. 403 = the
  * admin gate on managed-source mutations, checked at action time (ADR-0019 §1,
  * INV-5); 409 = the source's type has no OAuth flow or it isn't connectable
