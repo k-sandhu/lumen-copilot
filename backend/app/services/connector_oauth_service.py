@@ -30,6 +30,7 @@ resolve to a trusted tenant emit ``source.connected`` with
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 from urllib.parse import urlencode
 from uuid import UUID
@@ -130,7 +131,7 @@ class ConnectorOAuthService:
         # flow. A ROLLBACK does not remove it, so every failure path that
         # later commits on this session (the failure audits) must disarm it
         # first — or the rolled-back flow's first sync would still fire.
-        self._armed_enqueue: object | None = None
+        self._armed_enqueue: Callable[..., object] | None = None
 
     # --- helpers ------------------------------------------------------------
 
