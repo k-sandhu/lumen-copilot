@@ -45,6 +45,7 @@ from app.connectors.oauth import (
     OAuthSpec,
     OAuthStateStore,
     TokenResponse,
+    build_authenticated_client,
     build_authorization_url,
     exchange_code,
     generate_pkce,
@@ -73,15 +74,23 @@ REASON_DENIED = "denied"
 REASON_PROVIDER_ERROR = "provider_error"
 REASON_FAILED = "failed"
 
-# The per-source vault handle: stable so a reconnect rotates the credential in
-# place (the vault upsert keeps the same secret row/name per owner).
+# The per-source vault handle used at FIRST connect; later reconnects rotate
+# the credential **by reference** (``rotate_secret_value``) so the row survives
+# a different admin reconnecting (ADR-0019 §1).
 _SECRET_NAME_PREFIX = "connector_oauth:"
+
+# Bounded budget for the optional account-identity probe at callback time.
+_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 class AccountEmailProbe(Protocol):
-    """A connector's optional identity probe (ADR-0019 §1 — Drive: ``about.get``)."""
+    """A connector's optional identity probe (ADR-0019 §1 — Drive: ``about.get``).
 
-    async def __call__(self, http: httpx.AsyncClient, access_token: str) -> str | None: ...
+    Receives ONLY the framework-built, host-pinned authenticated client
+    (ADR-0019 §4) — never a token string.
+    """
+
+    async def __call__(self, http: httpx.AsyncClient) -> str | None: ...
 
 
 class ConnectorOAuthService:
@@ -103,6 +112,7 @@ class ConnectorOAuthService:
         token_http: httpx.AsyncClient,
         request_id: str,
         source_ip: str,
+        probe_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
@@ -110,6 +120,12 @@ class ConnectorOAuthService:
         self._http = token_http
         self._request_id = request_id
         self._source_ip = source_ip
+        # The identity probe's inner transport (test seam — a MockTransport);
+        # None ⇒ the real transport, always wrapped by the host-allowlist guard.
+        self._probe_transport = probe_transport
+        # The flow record of the CURRENT callback once state resolves — the
+        # catch-all failure handler uses it for tenant-attributed audit.
+        self._resolved_record: OAuthFlowRecord | None = None
 
     # --- helpers ------------------------------------------------------------
 
@@ -228,10 +244,38 @@ class ConnectorOAuthService:
         the contract's frozen ``reason`` codes; see the module docstring for the
         audit staging.
         """
+        self._resolved_record = None
         try:
             return await self._complete(state=state, code=code, error=error)
         except Exception:  # noqa: BLE001 — the callback must never raise
             log.exception("connector_oauth.callback_failed")
+            # Roll back FIRST: by this point a secret, an attestation, or a
+            # source mutation may already be flushed on the session — the
+            # route's commit must never persist a half-completed flow (an
+            # orphan credential behind a `connect=error` redirect).
+            try:
+                await self._session.rollback()
+            except Exception:  # noqa: BLE001 — rollback is best-effort here
+                log.exception("connector_oauth.callback_rollback_failed")
+            # With a clean transaction, record the failure for the resolved
+            # tenant (INV-6) — attribution exists only when state resolved.
+            record = self._resolved_record
+            if record is not None:
+                try:
+                    await bind_tenant(self._session, record.tenant_id)
+                    await self._audit(record.tenant_id).emit(
+                        action=AuditAction.SOURCE_CONNECTED,
+                        actor=AuditActor.user(record.user_id),
+                        resource_type="source",
+                        resource_id=str(record.source_id),
+                        outcome=AuditOutcome.ERROR,
+                        request_id=self._request_id,
+                        source_ip=self._source_ip,
+                        metadata={"reason": "internal_error"},
+                    )
+                    await self._session.commit()
+                except Exception:  # noqa: BLE001 — the 302 outranks the audit write
+                    log.exception("connector_oauth.callback_failure_audit_failed")
             return self._error_url(REASON_FAILED)
 
     async def _complete(self, *, state: str | None, code: str | None, error: str | None) -> str:
@@ -244,6 +288,7 @@ class ConnectorOAuthService:
         if record is None:
             log.warning("connector_oauth.callback_state_unresolved")
             return self._error_url(REASON_EXPIRED)
+        self._resolved_record = record
 
         # A trusted tenant is now resolved: bind the RLS GUC for this session
         # (the request carried no token, so current_tenant never ran).
@@ -307,27 +352,42 @@ class ConnectorOAuthService:
                 detail="exchange_failed",
             )
 
-        # 5. Persist the refresh token into the vault + bind the source. A
-        #    provider may omit the refresh token on re-consent; that is fine
-        #    only when the source already holds one (rotation-less reauthorize).
+        # 5. Persist the refresh token into the vault. Rotation is **by
+        #    reference** (ADR-0019 §1): a source that already holds a credential
+        #    gets its value replaced under the SAME row regardless of which
+        #    admin originally stored it — a cross-admin reconnect never mints a
+        #    per-owner duplicate or orphans the old row. Only a first-ever
+        #    connect creates a row (tracked so a lost CAS below can remove it —
+        #    nothing half-completed may survive this transaction). A provider
+        #    may omit the refresh token on re-consent; that is fine only when
+        #    the source already holds one (rotation-less reauthorize).
+        secrets = build_secrets_service(
+            self._session,
+            settings=self._settings,
+            tenant_id=record.tenant_id,
+            owner_id=record.user_id,
+            roles=(Role.ADMIN,),
+            audit=audit,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+        )
         secret_ref = source.auth_secret_ref
+        created_secret_id: UUID | None = None
         if token.refresh_token is not None:
-            secrets = build_secrets_service(
-                self._session,
-                settings=self._settings,
-                tenant_id=record.tenant_id,
-                owner_id=record.user_id,
-                roles=(Role.ADMIN,),
-                audit=audit,
-                request_id=self._request_id,
-                source_ip=self._source_ip,
-            )
-            ref = await secrets.store_secret(
-                name=f"{_SECRET_NAME_PREFIX}{record.source_id}",
-                kind=SecretKind.CONNECTOR_OAUTH,
-                plaintext=token.refresh_token,
-            )
-            secret_ref = ref.id
+            if secret_ref is not None:
+                await secrets.rotate_secret_value(
+                    secret_ref,
+                    plaintext=token.refresh_token,
+                    accessor=AuditActor.user(record.user_id),
+                )
+            else:
+                ref = await secrets.store_secret(
+                    name=f"{_SECRET_NAME_PREFIX}{record.source_id}",
+                    kind=SecretKind.CONNECTOR_OAUTH,
+                    plaintext=token.refresh_token,
+                )
+                secret_ref = ref.id
+                created_secret_id = ref.id
         if secret_ref is None:
             return await _fail(
                 REASON_PROVIDER_ERROR,
@@ -336,35 +396,54 @@ class ConnectorOAuthService:
             )
 
         # 6. Provider-verified account identity (optional capability) + the
-        #    auto-attestation of the connecting admin (ADR-0019 §2).
-        email = await self._probe_account_email(connector, token)
-        connected_account: dict[str, object] | None = (
-            {"email": email} if email is not None else None
+        #    auto-attestation of the connecting admin (ADR-0019 §2). The probe
+        #    runs over a framework-built, host-pinned authenticated client —
+        #    connector code never receives the token string (ADR-0019 §4).
+        email = await self._probe_account_email(connector, spec, token)
+
+        # 7. Finalize with a CAS (ADR-0019 §1): one atomic UPDATE guarded on
+        #    the flow's exact generation and a connectable status — the single
+        #    authority on races. A flow superseded (or a source deleted /
+        #    mid-sync) after the earlier checks loses here; the loser unwinds
+        #    any row it created and reports `denied`, committing no credential
+        #    binding. The acting user's admin role is re-read in the same
+        #    transaction right before the CAS.
+        fresh_user = await users.get(record.user_id)
+        if fresh_user is None or Role.ADMIN not in fresh_user.roles:
+            if created_secret_id is not None:
+                await secrets.delete_secret(created_secret_id)
+            return await _fail(REASON_DENIED, outcome=AuditOutcome.DENIED, detail="not_admin")
+        connected_account: dict[str, object] = {"email": email} if email is not None else {}
+        updated = await sources.complete_connect(
+            record.source_id,
+            expected_generation=record.generation,
+            auth_secret_ref=secret_ref,
+            connected_account=connected_account,
         )
+        if updated is None:
+            if created_secret_id is not None:
+                await secrets.delete_secret(created_secret_id)
+            return await _fail(REASON_DENIED, outcome=AuditOutcome.DENIED, detail="superseded_flow")
+
+        # 8. The auto-attestation (after the CAS so a losing flow attests
+        #    nothing) + the success audit + the first sync.
         if (
             email is not None
-            and email.casefold() == user.email.casefold()
-            and user.email_attested_at is None
+            and email.casefold() == fresh_user.email.casefold()
+            and fresh_user.email_attested_at is None
         ):
-            attested = await users.attest_email(user.id, attested_by=user.id)
+            attested = await users.attest_email(fresh_user.id, attested_by=fresh_user.id)
             if attested is not None:
                 await audit.emit(
                     action=AuditAction.USER_IDENTITY_ATTESTED,
                     actor=AuditActor.system(),
                     resource_type="user",
-                    resource_id=str(user.id),
+                    resource_id=str(fresh_user.id),
                     outcome=AuditOutcome.ALLOWED,
                     request_id=self._request_id,
                     source_ip=self._source_ip,
                     metadata={"basis": "provider_verified_oauth"},
                 )
-
-        updated = await sources.complete_connect(
-            record.source_id,
-            auth_secret_ref=secret_ref,
-            connected_account=connected_account or {},
-        )
-        assert updated is not None  # loaded above in this transaction  # noqa: S101
 
         await audit.emit(
             action=AuditAction.SOURCE_CONNECTED,
@@ -383,20 +462,30 @@ class ConnectorOAuthService:
         self._enqueue_sync_after_commit(record.tenant_id, record.source_id)
         return self._success_url(record.source_id)
 
-    async def _probe_account_email(self, connector: Connector, token: TokenResponse) -> str | None:
+    async def _probe_account_email(
+        self, connector: Connector, spec: OAuthSpec, token: TokenResponse
+    ) -> str | None:
         """The connector's provider-verified account email, when it offers one.
 
         The optional ``fetch_account_email`` capability (ADR-0019 §1 — for
         Drive, an authenticated ``about.get`` after the exchange, because the
-        ``drive.readonly`` code exchange itself returns no identity claim). A
-        probe failure yields ``None`` — the account shows unverified, never a
-        crashed callback.
+        ``drive.readonly`` code exchange itself returns no identity claim). The
+        probe receives a **framework-built, host-pinned authenticated client**
+        (ADR-0019 §4) — never the token string; an off-allowlist request raises
+        inside the guard before any credential leaves. A probe failure yields
+        ``None`` — the account shows unverified, never a crashed callback.
         """
         probe = getattr(connector, "fetch_account_email", None)
         if probe is None or not callable(probe):
             return None
         try:
-            email = await probe(self._http, token.access_token)
+            async with build_authenticated_client(
+                spec,
+                access_token=token.access_token,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                inner_transport=self._probe_transport,
+            ) as guarded:
+                email = await probe(guarded)
         except Exception as exc:  # noqa: BLE001 — identity probe is best-effort
             log.warning("connector_oauth.account_probe_failed", error=type(exc).__name__)
             return None

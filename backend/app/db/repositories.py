@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -1249,48 +1249,77 @@ class SourceRepository(_TenantScopedRepository):
         """Atomically advance the source's connect generation (ADR-0019 §1).
 
         Starting flow N+1 invalidates flow N: the incremented value is stamped
-        into the new state record, and the callback rejects any record whose
-        generation no longer equals the row's. Returns the updated entity (with
-        the new generation), or ``None`` when the source is not in this tenant.
+        into the new state record, and the callback finalize is a CAS on this
+        exact value. The increment is a single ``UPDATE … SET
+        connect_generation = connect_generation + 1 RETURNING`` — never a
+        read-then-add, so two concurrent initiations can never mint the same
+        generation. Returns the updated entity, or ``None`` when the source is
+        not in this tenant.
         """
-        stmt = select(models.Source).where(
-            models.Source.tenant_id == self._tenant_id,
-            models.Source.id == source_id,
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+            )
+            .values(connect_generation=models.Source.connect_generation + 1)
+            .returning(models.Source)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        row.connect_generation = row.connect_generation + 1
         await self._session.flush()
-        await self._session.refresh(row)
         return _to_source(row)
+
+    # Statuses a callback may finalize from (ADR-0019 §1): awaiting consent, a
+    # reauthorize after a failure, a reconnect of a connected-but-idle source.
+    # A mid-``syncing`` source loses the CAS — the flow completes nothing.
+    _CONNECTABLE_STATUSES = (
+        SourceStatus.PENDING_AUTH.value,
+        SourceStatus.PENDING.value,
+        SourceStatus.READY.value,
+        SourceStatus.ERROR.value,
+    )
 
     async def complete_connect(
         self,
         source_id: UUID,
         *,
+        expected_generation: int,
         auth_secret_ref: UUID,
         connected_account: dict[str, object],
     ) -> Source | None:
-        """Record a completed OAuth consent (ADR-0019 §1).
+        """CAS-finalize a completed OAuth consent (ADR-0019 §1).
 
-        Binds the vault credential reference + provider-account metadata (never
-        token material), clears any prior failure, and moves the source to
-        ``pending`` — ready for its first sync. Tenant-scoped (INV-1).
+        One atomic ``UPDATE`` guarded on tenant, id, **the exact connect
+        generation the flow was minted with**, and a connectable status: a flow
+        superseded after the callback's earlier checks — or a source that
+        started syncing / was deleted meanwhile — loses the CAS and this
+        returns ``None`` (the caller then writes no credential binding and
+        reports the flow denied). On success binds the vault reference +
+        provider-account metadata (never token material), clears any prior
+        failure, and moves the source to ``pending``.
         """
-        stmt = select(models.Source).where(
-            models.Source.tenant_id == self._tenant_id,
-            models.Source.id == source_id,
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+                models.Source.connect_generation == expected_generation,
+                models.Source.status.in_(self._CONNECTABLE_STATUSES),
+            )
+            .values(
+                auth_secret_ref=auth_secret_ref,
+                connected_account=connected_account,
+                status=SourceStatus.PENDING.value,
+                last_error=None,
+            )
+            .returning(models.Source)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        row.auth_secret_ref = auth_secret_ref
-        row.connected_account = connected_account
-        row.status = SourceStatus.PENDING.value
-        row.last_error = None
         await self._session.flush()
-        await self._session.refresh(row)
         return _to_source(row)
 
     async def list_for_owner_page(
@@ -2843,6 +2872,38 @@ class SecretRepository(_TenantScopedRepository):
             row.nonce = nonce
             row.key_version = key_version
             row.hint = hint
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_secret(row)
+
+    async def rotate_value(
+        self,
+        secret_id: UUID,
+        *,
+        ciphertext: bytes,
+        nonce: bytes,
+        key_version: int,
+        hint: str,
+    ) -> Secret | None:
+        """Rotate a secret's value **in place by id** (tenant-scoped, INV-1).
+
+        The by-reference rotation ADR-0019 §1 needs: a bound consumer (a source
+        row holding ``auth_secret_ref``) replaces the credential under the SAME
+        row regardless of which admin originally stored it — the handle stays
+        stable, no per-owner duplicate is minted. Returns ``None`` when no such
+        secret exists in this tenant.
+        """
+        stmt = select(models.Secret).where(
+            models.Secret.tenant_id == self._tenant_id,
+            models.Secret.id == secret_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.ciphertext = ciphertext
+        row.nonce = nonce
+        row.key_version = key_version
+        row.hint = hint
         await self._session.flush()
         await self._session.refresh(row)
         return _to_secret(row)

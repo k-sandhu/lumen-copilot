@@ -150,10 +150,12 @@ class Settings(BaseSettings):
     )
 
     # --- Managed-connector OAuth (ADR-0019 §1, issue #452) ---
-    # TTL of the server-side single-use state record (the ADR caps it at 10
-    # minutes — the flow is an interactive browser round-trip, not a session).
+    # TTL of the server-side single-use state record. Bounded [1, 600]: the ADR
+    # caps the flow at 10 minutes — the record holds the PKCE verifier, so an
+    # overlong TTL retains it beyond the decided window, and a non-positive TTL
+    # would fail deep in Redis instead of at boot (fail fast, INV-8).
     connector_oauth_state_ttl_seconds: int = Field(
-        default=600, alias="CONNECTOR_OAUTH_STATE_TTL_SECONDS"
+        default=600, ge=1, le=600, alias="CONNECTOR_OAUTH_STATE_TTL_SECONDS"
     )
     # Externally-reachable base of THIS API — the provider redirects the browser
     # to ``{base}/api/v1/sources/oauth/callback``, so it must be the URL the
@@ -1010,6 +1012,27 @@ class Settings(BaseSettings):
                 "SECRETS_ENCRYPTION_KEY must be overridden outside the local environment "
                 "(issue #209)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_https_oauth_urls_in_prod(self) -> Settings:
+        """OAuth state/code must never transit cleartext outside local dev.
+
+        ADR-0019 §1: the callback URL carries the opaque state handle and the
+        provider's authorization code. The http defaults exist only for the
+        local compose stack; a deployed environment must serve both the
+        callback base and the SPA return target over https — refuse to boot
+        otherwise (fail fast, the JWT/vault-key rule applied to OAuth).
+        """
+        if self.environment != "local":
+            for value, name in (
+                (self.connector_oauth_redirect_base_url, "CONNECTOR_OAUTH_REDIRECT_BASE_URL"),
+                (self.connector_oauth_frontend_return_url, "CONNECTOR_OAUTH_FRONTEND_RETURN_URL"),
+            ):
+                if not value.startswith("https://"):
+                    raise ValueError(
+                        f"{name} must be https outside the local environment (ADR-0019 §1)"
+                    )
         return self
 
 

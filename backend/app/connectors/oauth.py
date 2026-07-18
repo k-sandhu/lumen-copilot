@@ -100,6 +100,10 @@ class OAuthSpec:
     rides this value object only from the connector into the exchange call and
     is never persisted or logged. ``extra_authorize_params`` carries provider
     quirks (e.g. Google's ``access_type=offline&prompt=consent``).
+    ``allowed_hosts`` is the connector's **fixed pinned host set** (ADR-0019
+    §5): the only hosts an authenticated run/probe client will dial — the
+    framework's guard rejects anything else *before* the Authorization header
+    could leave toward it.
     """
 
     authorize_url: str
@@ -107,7 +111,63 @@ class OAuthSpec:
     scopes: tuple[str, ...]
     client_id: str
     client_secret: str
+    allowed_hosts: tuple[str, ...] = ()
     extra_authorize_params: dict[str, str] = field(default_factory=dict)
+
+
+class EgressNotAllowedError(Exception):
+    """An authenticated connector request targeted a host outside the pinned set.
+
+    Raised by the framework's guard transport before any bytes (or the auth
+    header) leave toward the foreign host — an off-allowlist request is a
+    defect at the ADR-0009 §3 bar, never a silent dial.
+    """
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        super().__init__(f"host {host!r} is not in the connector's pinned allowlist")
+
+
+class _HostAllowlistTransport(httpx.AsyncBaseTransport):
+    """Rejects any request whose host is off the pinned set (ADR-0019 §4/§5)."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, allowed_hosts: frozenset[str]) -> None:
+        self._inner = inner
+        self._allowed = allowed_hosts
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = (request.url.host or "").casefold()
+        if host not in self._allowed:
+            raise EgressNotAllowedError(host)
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def build_authenticated_client(
+    spec: OAuthSpec,
+    *,
+    access_token: str,
+    timeout: float,
+    inner_transport: httpx.AsyncBaseTransport | None = None,
+) -> httpx.AsyncClient:
+    """The framework-owned authenticated, host-pinned client (ADR-0019 §4).
+
+    The ONLY constructor of a credential-bearing connector client: the bearer
+    header rides the client's defaults, and the allowlist guard runs **before**
+    the transport, so an off-allowlist request raises without the header ever
+    leaving. Connector code receives this client (via ``ConnectorRun`` or the
+    identity probe) — never the token string. ``inner_transport`` is the test
+    seam (a MockTransport); production uses the default transport.
+    """
+    allowed = frozenset(h.casefold() for h in spec.allowed_hosts)
+    inner = inner_transport if inner_transport is not None else httpx.AsyncHTTPTransport()
+    return httpx.AsyncClient(
+        transport=_HostAllowlistTransport(inner, allowed),
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +300,12 @@ def generate_pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
+def _is_local_host(url: str) -> bool:
+    """Loopback hosts get the explicit local-development http exception."""
+    host = (httpx.URL(url).host or "").casefold()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def build_authorization_url(
     spec: OAuthSpec,
     *,
@@ -250,8 +316,16 @@ def build_authorization_url(
     """The provider consent URL for the browser (authorization-code + PKCE).
 
     Carries the client id, scopes, the opaque ``state`` handle, and the S256
-    challenge — never the verifier, never a secret.
+    challenge — never the verifier, never a secret. Both the authorize endpoint
+    and the redirect URI must be **https** (state/code must not transit
+    cleartext), with the explicit loopback exception for local development.
     """
+    for url, what in ((spec.authorize_url, "authorize endpoint"), (redirect_uri, "redirect URI")):
+        if not url.startswith("https://") and not _is_local_host(url):
+            raise OAuthExchangeError(
+                f"{what} must be https (state/code never transit cleartext)",
+                code="insecure_endpoint",
+            )
     params = {
         "response_type": "code",
         "client_id": spec.client_id,

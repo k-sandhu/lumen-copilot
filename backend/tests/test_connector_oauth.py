@@ -111,11 +111,14 @@ class FakeDriveConnector:
             scopes=("drive.readonly",),
             client_id="client-id-1",
             client_secret="client-secret-1",
+            allowed_hosts=("provider.test",),
             extra_authorize_params={"access_type": "offline", "prompt": "consent"},
         )
 
-    async def fetch_account_email(self, http: httpx.AsyncClient, access_token: str) -> str | None:
-        assert access_token == _ACCESS_TOKEN  # the probe runs authenticated
+    async def fetch_account_email(self, http: httpx.AsyncClient) -> str | None:
+        # ADR-0019 §4: the probe receives a framework-built AUTHENTICATED client
+        # — never the token string. The bearer rides the client's defaults.
+        assert http.headers.get("Authorization") == f"Bearer {_ACCESS_TOKEN}"
         return self.account_email
 
 
@@ -151,6 +154,7 @@ class _Seeded:
         self.tenant_b = tenant_b
         self.alice_email = "alice@acme.test"  # tenant A ADMIN under test
         self.bob_email = "bob@acme.test"  # tenant A member
+        self.dave_email = "dave@acme.test"  # tenant A, a SECOND admin
         self.carol_email = "carol@globex.test"  # tenant B admin
 
 
@@ -177,6 +181,11 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 email="bob@acme.test",
                 password_hash=hash_password(_PASSWORD),
                 roles=[Role.MEMBER],
+            )
+            await UserRepository(seed, tenant_a.id).create(
+                email="dave@acme.test",
+                password_hash=hash_password(_PASSWORD),
+                roles=[Role.ADMIN],
             )
             await UserRepository(seed, tenant_b.id).create(
                 email="carol@globex.test",
@@ -674,6 +683,155 @@ async def test_member_attest_is_403_unknown_member_is_404(
 
 
 # --- lifecycle ---------------------------------------------------------------
+
+
+async def test_callback_redirects_carry_no_store_and_no_referrer(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """The callback URL carried state/code — no cache, no Referer leak."""
+    resp = await client.get("/api/v1/sources/oauth/callback", params={"code": "x"})
+    assert resp.status_code == 302
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["referrer-policy"] == "no-referrer"
+
+
+async def test_dockerfile_disables_uvicorn_access_log() -> None:
+    """Smoke (ADR-0019 §1): uvicorn's access logger would print the callback
+    query string — `state` and `code` — to stdout; the serve command must ship
+    with it disabled."""
+    dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(encoding="utf-8")
+    assert "--no-access-log" in dockerfile
+
+
+async def test_authenticated_client_is_host_pinned() -> None:
+    """ADR-0019 §4: the guard rejects off-allowlist hosts BEFORE the bearer
+    header could leave; allowed hosts pass through with the header attached."""
+    from app.connectors.oauth import EgressNotAllowedError, build_authenticated_client
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        assert request.headers["Authorization"] == "Bearer tok"
+        return httpx.Response(200, json={})
+
+    spec = FakeDriveConnector().oauth_spec()
+    async with build_authenticated_client(
+        spec,
+        access_token="tok",
+        timeout=5.0,
+        inner_transport=httpx.MockTransport(handler),
+    ) as guarded:
+        resp = await guarded.get("https://provider.test/about")
+        assert resp.status_code == 200
+        with pytest.raises(EgressNotAllowedError):
+            await guarded.get("https://evil.example/exfiltrate")
+    assert seen == ["https://provider.test/about"]  # the foreign host never dialled
+
+
+async def test_refresh_invalid_grant_maps_to_dead_error(
+    token_endpoint: TokenEndpoint,
+) -> None:
+    from app.connectors.oauth import OAuthGrantDeadError, refresh_access_token
+
+    token_endpoint.mode = "invalid_grant"
+    spec = FakeDriveConnector().oauth_spec()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(token_endpoint.handler)) as http:
+        with pytest.raises(OAuthGrantDeadError):
+            await refresh_access_token(http, spec, refresh_token="rt-dead")
+
+
+async def test_state_ttl_bounds_fail_fast() -> None:
+    """Config guard: the TTL is bounded [1, 600] at boot (ADR-0019 §1)."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from app.core.config import Settings
+
+    base = {
+        "DATABASE_URL": "postgresql+asyncpg://t:t@localhost/t",
+        "REDIS_URL": "redis://localhost",
+        "CELERY_BROKER_URL": "redis://localhost",
+        "CELERY_RESULT_BACKEND": "redis://localhost",
+        "S3_ENDPOINT_URL": "http://localhost:9000",
+        "S3_ACCESS_KEY": "t",
+        "S3_SECRET_KEY": "tt",
+        "S3_BUCKET": "b",
+    }
+    for bad in (0, -1, 601):
+        with pytest.raises(PydanticValidationError):
+            Settings(_env_file=None, **base, CONNECTOR_OAUTH_STATE_TTL_SECONDS=bad)  # type: ignore[arg-type]
+
+
+async def test_interleaved_connect_generations_are_unique(
+    seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession], client: AsyncClient
+) -> None:
+    """Two initiations through separate sessions can never mint the same
+    generation — the increment is one atomic UPDATE, not read-then-add."""
+    from app.db.repositories import SourceRepository
+
+    token = await _login(client, seeded.alice_email)
+    source_id = uuid.UUID((await _create_gdrive(client, token)).json()["id"])
+    async with sessionmaker() as s1, sessionmaker() as s2:
+        first = await SourceRepository(s1, seeded.tenant_a).begin_connect(source_id)
+        await s1.commit()
+        second = await SourceRepository(s2, seeded.tenant_a).begin_connect(source_id)
+        await s2.commit()
+    assert first is not None and second is not None
+    assert {first.connect_generation, second.connect_generation} == {1, 2}
+
+
+async def test_source_gone_syncing_between_check_and_finalize_loses_cas(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A source that starts syncing mid-flow loses the CAS: no credential is
+    bound, no secret survives, the flow reports denied."""
+    token = await _login(client, seeded.alice_email)
+    source_id, state = await _connected_state(client, token)
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(models.Source).where(models.Source.id == uuid.UUID(source_id))
+            )
+        ).scalar_one()
+        row.status = "syncing"
+        await session.commit()
+    resp = await client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"})
+    assert _reason(resp) == "denied"
+    assert not await _secret_rows(sessionmaker)
+
+
+async def test_cross_admin_reconnect_rotates_secret_in_place(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """ADR-0019 §1: a reconnect by a DIFFERENT admin rotates the credential
+    under the SAME vault row — no per-owner duplicate, no orphan, and the
+    source's stable reference is unchanged."""
+    alice = await _login(client, seeded.alice_email)
+    source_id, state = await _connected_state(client, alice)
+    await client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"})
+    before = await _secret_rows(sessionmaker)
+    assert len(before) == 1
+    original_id, original_ct = before[0].id, bytes(before[0].ciphertext)
+
+    dave = await _login(client, seeded.dave_email)
+    url = (await _connect(client, dave, source_id)).json()["authorization_url"]
+    resp = await client.get(
+        "/api/v1/sources/oauth/callback",
+        params={"state": _state_of(url), "code": "c2"},
+    )
+    assert "connect=ok" in resp.headers["location"]
+
+    after = await _secret_rows(sessionmaker)
+    assert len(after) == 1, "cross-admin reconnect must not mint a second row"
+    assert after[0].id == original_id
+    assert bytes(after[0].ciphertext) != original_ct  # value rotated in place
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(models.Source).where(models.Source.id == uuid.UUID(source_id))
+            )
+        ).scalar_one()
+        assert row.auth_secret_ref == original_id
 
 
 async def test_delete_managed_source_deletes_vault_secret(

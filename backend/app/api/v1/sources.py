@@ -73,29 +73,44 @@ class SourceConfigResponse(BaseModel):
     mode: WebSourceMode
 
 
-class GdriveSourceConfigResponse(BaseModel):
-    """``#/components/schemas/GdriveSourceConfig`` — the mode-discriminated variants.
-
-    The contract's variants are **closed** shapes: a ``my_drive`` config must not
-    even carry a ``folder_id``/``drive_id`` key, so the serializer emits only the
-    keys that are set (a ``null`` id would be an undeclared property under
-    ``additionalProperties: false``).
-    """
+class GdriveMyDriveConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveMyDriveConfig`` — closed: no id keys exist."""
 
     model_config = {"extra": "forbid"}
 
-    mode: str
-    folder_id: str | None = None
+    mode: Literal["my_drive"]
+
+
+class GdriveFolderConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveFolderConfig`` — ``folder_id`` required."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["folder"]
+    folder_id: str = Field(min_length=1)
     drive_id: str | None = None
 
     @model_serializer
     def _contract_shape(self) -> dict[str, str]:
-        out: dict[str, str] = {"mode": self.mode}
-        if self.folder_id is not None:
-            out["folder_id"] = self.folder_id
+        out = {"mode": self.mode, "folder_id": self.folder_id}
         if self.drive_id is not None:
             out["drive_id"] = self.drive_id
         return out
+
+
+class GdriveSharedDriveConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveSharedDriveConfig`` — ``drive_id`` only."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["shared_drive"]
+    drive_id: str = Field(min_length=1)
+
+
+GdriveSourceConfigResponse = Annotated[
+    GdriveMyDriveConfigResponse | GdriveFolderConfigResponse | GdriveSharedDriveConfigResponse,
+    Field(discriminator="mode"),
+]
 
 
 class SourceResponse(BaseModel):
@@ -282,16 +297,30 @@ def _config_response(config: dict[str, object]) -> SourceConfigResponse:
     return SourceConfigResponse(url=str(url) if url is not None else "", mode=mode)
 
 
-def _gdrive_config_response(config: dict[str, object]) -> GdriveSourceConfigResponse:
-    """Project a stored gdrive config to the closed wire variant (drops internals)."""
+def _gdrive_config_response(
+    config: dict[str, object],
+) -> GdriveMyDriveConfigResponse | GdriveFolderConfigResponse | GdriveSharedDriveConfigResponse:
+    """Project a stored gdrive config onto its closed wire variant — fail closed.
+
+    A stored config that fits no variant (unknown mode, a missing conditional
+    id, an id the mode does not take) raises rather than emitting a
+    contract-invalid shape: a malformed row is a defect surfaced as a 500, never
+    a silently-wrong wire object (INV-8 on the way OUT).
+    """
     mode = config.get("mode")
     folder_id = config.get("folder_id")
     drive_id = config.get("drive_id")
-    return GdriveSourceConfigResponse(
-        mode=str(mode) if isinstance(mode, str) else "my_drive",
-        folder_id=folder_id if isinstance(folder_id, str) else None,
-        drive_id=drive_id if isinstance(drive_id, str) else None,
-    )
+    if mode == "my_drive" and folder_id is None and drive_id is None:
+        return GdriveMyDriveConfigResponse(mode="my_drive")
+    if mode == "folder" and isinstance(folder_id, str):
+        return GdriveFolderConfigResponse(
+            mode="folder",
+            folder_id=folder_id,
+            drive_id=drive_id if isinstance(drive_id, str) else None,
+        )
+    if mode == "shared_drive" and isinstance(drive_id, str) and folder_id is None:
+        return GdriveSharedDriveConfigResponse(mode="shared_drive", drive_id=drive_id)
+    raise ValueError(f"stored gdrive config fits no contract variant (mode={mode!r})")
 
 
 def _connected_account_response(source: Source) -> dict[str, str] | None:
@@ -514,6 +543,20 @@ async def delete_source(
 # --- Managed-connector OAuth (ADR-0019 §1; F-CB-1 #452) ---------------------
 
 
+def _callback_redirect(url: str) -> RedirectResponse:
+    """The callback 302 with its cache/referrer hardening (ADR-0019 §1).
+
+    The request URL carried `state`/`code`: `no-store` keeps any intermediary
+    or browser cache from retaining the exchange, and `no-referrer` keeps the
+    callback URL (query included) out of the Referer header on the follow-up
+    navigation to the SPA.
+    """
+    response = RedirectResponse(url, status_code=status.HTTP_302_FOUND)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _build_oauth_service(
     *,
     session: DbSession,
@@ -601,5 +644,5 @@ async def oauth_callback(
         await session.commit()
     except Exception:  # noqa: BLE001 — the 302 guarantee outranks a commit fault
         await session.rollback()
-        return RedirectResponse(service.failure_redirect_url(), status_code=status.HTTP_302_FOUND)
-    return RedirectResponse(redirect_url, status_code=status.HTTP_302_FOUND)
+        return _callback_redirect(service.failure_redirect_url())
+    return _callback_redirect(redirect_url)

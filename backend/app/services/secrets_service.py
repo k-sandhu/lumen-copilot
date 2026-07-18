@@ -128,9 +128,7 @@ class SecretsService:
         """Whether the caller may read/use/delete ``secret`` (owner or tenant admin)."""
         return self._is_admin or secret.owner_id == self._owner_id
 
-    async def _load_owned_or_404(
-        self, secret_id: UUID, *, actor: AuditActor
-    ) -> Secret:
+    async def _load_owned_or_404(self, secret_id: UUID, *, actor: AuditActor) -> Secret:
         """Load a secret the caller may access, or raise 404 (+ a denied audit).
 
         The deny-by-default gate: the secret must exist in this tenant **and** be
@@ -240,9 +238,7 @@ class SecretsService:
             NotFoundError: the secret is missing, in another tenant, or not owned
                 by the (non-admin) caller — reported as 404.
         """
-        secret = await self._load_owned_or_404(
-            secret_id, actor=AuditActor.user(self._owner_id)
-        )
+        secret = await self._load_owned_or_404(secret_id, actor=AuditActor.user(self._owner_id))
         await self._secrets.delete(secret.id)
         await self._audit.emit(
             action=AuditAction.SECRET_DELETED,
@@ -254,6 +250,59 @@ class SecretsService:
             source_ip=self._source_ip,
             metadata={"name": secret.name, "kind": secret.kind.value},
         )
+
+    async def rotate_secret_value(
+        self,
+        secret_id: UUID,
+        *,
+        plaintext: str,
+        accessor: AuditActor | None = None,
+    ) -> SecretRef:
+        """**Internal only** — rotate a bound credential **in place by id**.
+
+        The by-reference rotation the managed-connector flows need (ADR-0019
+        §1): a consumer holding a stable reference (``sources.auth_secret_ref``)
+        replaces the value under the SAME row — regardless of which admin
+        originally stored it — so reconnects and provider-rotated refresh
+        tokens never mint a per-owner duplicate or orphan the old row. Fail
+        closed like every vault path: authorization first (owner-or-admin, else
+        404 + ``permission.denied``), then encrypt, then the in-place write,
+        then the ``secret.created`` audit (metadata marks the rotation; never
+        the value). Never wired to a router (the architecture test).
+
+        Raises:
+            ValidationError: an empty ``plaintext`` (422, INV-8).
+            NotFoundError: missing / cross-tenant / unauthorized (404).
+        """
+        if not plaintext:
+            raise ValidationError("Secret value must not be empty.", code="empty_secret_value")
+        actor = accessor if accessor is not None else AuditActor.user(self._owner_id)
+        secret = await self._load_owned_or_404(secret_id, actor=actor)
+        envelope = self._cipher.encrypt(plaintext)
+        rotated = await self._secrets.rotate_value(
+            secret.id,
+            ciphertext=envelope.ciphertext,
+            nonce=envelope.nonce,
+            key_version=envelope.key_version,
+            hint=_make_hint(plaintext),
+        )
+        assert rotated is not None  # loaded above in this transaction  # noqa: S101
+        await self._audit.emit(
+            action=AuditAction.SECRET_CREATED,
+            actor=actor,
+            resource_type="secret",
+            resource_id=str(rotated.id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={
+                "name": rotated.name,
+                "kind": rotated.kind.value,
+                "hint": rotated.hint,
+                "rotation": "in_place",
+            },
+        )
+        return _to_ref(rotated)
 
     async def get_secret_plaintext(
         self,
