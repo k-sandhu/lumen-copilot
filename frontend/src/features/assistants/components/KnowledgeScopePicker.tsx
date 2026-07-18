@@ -102,7 +102,11 @@ export function KnowledgeScopePicker({
         items={sources.data?.items ?? []}
         selected={sourceIds}
         onToggle={toggleSource}
-        renderLabel={(s: Source) => s.config.url}
+        renderLabel={(s: Source) =>
+          // `Source` is a type-discriminated union since the managed gdrive
+          // connector (ADR-0019): only the web branch carries a URL.
+          s.type === 'web' ? s.config.url : 'Google Drive'
+        }
         disabled={disabled}
       />
     </div>

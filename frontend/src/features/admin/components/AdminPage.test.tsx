@@ -51,7 +51,7 @@ vi.mock('@/api', async (importOriginal) => {
 });
 
 const MEMBERS: MemberList = {
-  items: [{ id: 'u1', email: 'admin@acme.test', role: ['admin'] }],
+  items: [{ id: 'u1', email: 'admin@acme.test', role: ['admin'], email_attested_at: null }],
   next_cursor: null,
 };
 const GOVERNANCE: ModelGovernance = {

@@ -614,6 +614,12 @@ export interface Member {
   email: string;
   /** The member's tenant roles (MVP RBAC, spec 0004 §2.3). */
   role: UserRole[];
+  /**
+   * When a tenant admin attested this member's email identity for connector-ACL
+   * mapping (ADR-0019 §2), or null — unattested members never receive mirrored
+   * connector access.
+   */
+  email_attested_at: string | null;
 }
 
 /** 200 from GET /admin/members — a cursor page of members. */
@@ -775,14 +781,15 @@ export interface AutonomyPolicyUpdate {
   max_autonomy: AutonomyLevel;
 }
 
-// --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108) ---
+// --- Sources (contracts/openapi.yaml §sources, ADR-0009 / #108 + ADR-0019 / #451) ---
 
 /**
  * The connector kind. `web` is the first connector (ADR-0009 §2): paste a public
- * URL, we ingest it — zero source-side setup. Future connectors add their own
- * values here, each behind its own ADR.
+ * URL, we ingest it — zero source-side setup. `gdrive` is the first MANAGED
+ * OAuth connector (ADR-0019 §5): read-only Google Drive with mirrored per-file
+ * ACLs. Future connectors add their own values here, each behind its own ADR.
  */
-export type SourceType = 'web';
+export type SourceType = 'web' | 'gdrive';
 
 /**
  * How a `web` source's URL is interpreted (ADR-0009 §2). `page` = one URL → one
@@ -792,27 +799,70 @@ export type SourceType = 'web';
 export type WebSourceMode = 'page' | 'feed' | 'sitemap';
 
 /**
- * Sync lifecycle for the connector health grid (ADR-0009 §4). `pending` = added,
- * not yet synced; `syncing` = a sync is in flight; `ready` = last sync succeeded;
- * `error` = the last sync failed (see `last_error`).
+ * Sync lifecycle for the connector health grid (ADR-0009 §4, ADR-0019 §1).
+ * `pending_auth` = a managed source was created but its OAuth consent has not
+ * completed (run `connectSource`); `pending` = authorized (or web), first sync
+ * not yet run; `syncing` = a sync is in flight; `ready` = last sync succeeded;
+ * `error` = the last sync failed (see `last_error`; a dead OAuth grant
+ * additionally sets `reauthorize_required`).
  */
-export type SourceStatus = 'pending' | 'syncing' | 'ready' | 'error';
+export type SourceStatus = 'pending_auth' | 'pending' | 'syncing' | 'ready' | 'error';
 
-/** Connector configuration. For the `web` connector: the fetched url + detected mode. */
-export interface SourceConfig {
+/** `web` connector configuration: the fetched url + detected mode. */
+export interface WebSourceConfig {
   /** The public URL this source ingests (http/https only; SSRF-checked). */
   url: string;
   mode: WebSourceMode;
 }
 
+/** Sync the connected account's entire My Drive (no ids permitted). */
+export interface GdriveMyDriveConfig {
+  mode: 'my_drive';
+}
+
 /**
- * One connected source, tenant- and owner-scoped (ADR-0009 §4/§5, spec 0004
- * INV-1/INV-2). Ingested content is retrievable only by the owner within tenant.
+ * Sync a single Drive folder. `folder_id` is required; `drive_id` additionally
+ * scopes a folder that lives inside a Shared Drive (ADR-0019 §3).
  */
-export interface Source {
+export interface GdriveFolderConfig {
+  mode: 'folder';
+  /** The Drive folder id to sync. */
+  folder_id: string;
+  /** The containing Shared Drive id, when the folder is in one. */
+  drive_id?: string;
+}
+
+/** Sync a whole Shared Drive. `drive_id` is required; `folder_id` is not permitted. */
+export interface GdriveSharedDriveConfig {
+  mode: 'shared_drive';
+  /** The Shared Drive id to sync. */
+  drive_id: string;
+}
+
+/**
+ * `gdrive` connector configuration (ADR-0019 §5), discriminated by `mode` —
+ * each variant is a closed shape (a missing conditional id, or an id on a mode
+ * that does not take it, is 422 `invalid_config`, INV-8).
+ */
+export type GdriveSourceConfig = GdriveMyDriveConfig | GdriveFolderConfig | GdriveSharedDriveConfig;
+
+/**
+ * A connector configuration — the additive union of every per-type config,
+ * discriminated by `mode` (the web modes and the gdrive modes are disjoint
+ * value sets). The discriminated `Source` branches bind the specific shapes
+ * (`WebSource.config` → `WebSourceConfig`, `GdriveSource.config` →
+ * `GdriveSourceConfig`), so cross-type mixes stay invalid there.
+ */
+export type SourceConfig = WebSourceConfig | GdriveSourceConfig;
+
+/**
+ * A `web` source — owner-scoped (only the owner retrieves its content, spec
+ * 0004 INV-1/INV-2). Exactly the pre-0.7.0 `Source` shape with `type` pinned.
+ */
+export interface WebSource {
   id: string;
-  type: SourceType;
-  config: SourceConfig;
+  type: 'web';
+  config: WebSourceConfig;
   status: SourceStatus;
   /** Documents this source has ingested (0 until the first sync completes). */
   indexed_count: number;
@@ -825,6 +875,61 @@ export interface Source {
   updated_at: string;
 }
 
+/**
+ * The authenticated provider account of a managed source, as reported by the
+ * provider after consent (ADR-0019 §1). Metadata only; never token material.
+ */
+export interface ConnectedAccount {
+  email: string;
+}
+
+/**
+ * A managed `gdrive` source (ADR-0019). Its content is retrievable only via the
+ * fresh mirrored source ACL — ownership and Lumen grants do not widen it — and
+ * it carries the managed-source health surface as REQUIRED fields (nullable
+ * where the value can be absent).
+ */
+export interface GdriveSource {
+  id: string;
+  type: 'gdrive';
+  config: GdriveSourceConfig;
+  status: SourceStatus;
+  /** Documents this source has ingested (0 until the first sync completes). */
+  indexed_count: number;
+  /** When the last successful sync finished (null before the first sync). */
+  last_synced_at?: string | null;
+  /** Failure reason when status is error. */
+  last_error?: string;
+  /** The provider account this source is connected as (null before OAuth completes). */
+  connected_account: ConnectedAccount | null;
+  /**
+   * When the source's mirrored ACLs were last refreshed (ADR-0019 §2; null
+   * before the first sync). Content whose ACL is older than the freshness
+   * window is denied at retrieval.
+   */
+  acl_synced_at: string | null;
+  /**
+   * Documents whose mirrored ACL mapped to no Lumen principal (ADR-0019 §2 —
+   * ingested but invisible; identity attestation lights them up). Null before
+   * the first sync.
+   */
+  unmapped_acl_count: number | null;
+  /**
+   * True when the OAuth grant is dead (revoked/expired refresh token, ADR-0019
+   * §1) — re-run `connectSource` to repair.
+   */
+  reauthorize_required: boolean;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * One connected source, tenant-scoped (ADR-0009 §4/§5, spec 0004 INV-1/INV-2)
+ * — DISCRIMINATED by `type` (`web` | `gdrive`).
+ */
+export type Source = WebSource | GdriveSource;
+
 /** 200 from GET /sources — a cursor page of sources. */
 export interface SourceList {
   items: Source[];
@@ -832,15 +937,49 @@ export interface SourceList {
 }
 
 /**
- * POST /sources body. For the `web` connector: `{type: 'web', url}`. The server
+ * POST /sources `web` body: `{type: 'web', url}` (any member). The server
  * validates + SSRF-checks the URL; an invalid or blocked URL → 422 (INV-8,
  * ADR-0009 §3).
  */
-export interface SourceCreate {
-  type: SourceType;
+export interface WebSourceCreate {
+  type: 'web';
   /** The public URL to ingest (http/https only). */
   url: string;
 }
+
+/**
+ * POST /sources `gdrive` body: `{type: 'gdrive', config}` — TENANT ADMIN only
+ * (every managed-source mutation is admin-gated, ADR-0019 §1; a non-admin
+ * receives 403, INV-5). Creates the row in `pending_auth`; run `connectSource`
+ * next to obtain the consent URL.
+ */
+export interface GdriveSourceCreate {
+  type: 'gdrive';
+  config: GdriveSourceConfig;
+}
+
+/** Add a source, discriminated by `type`. */
+export type SourceCreate = WebSourceCreate | GdriveSourceCreate;
+
+/**
+ * 200 from POST /sources/{id}/connect — the provider consent URL for a managed
+ * source's OAuth flow (ADR-0019 §1). The browser navigates there; the provider
+ * redirects back to the SPA sources route with the frozen `connect` query
+ * params. The URL carries only an opaque single-use state handle — never
+ * tokens, codes, or PKCE material.
+ */
+export interface SourceConnectResponse {
+  authorization_url: string;
+}
+
+/**
+ * The closed reason set of the OAuth callback's error redirect
+ * (`{return_url}?connect=error&reason=…`, contracts §oauthCallback): `expired`
+ * (missing/unknown/consumed/expired state), `denied` (callback
+ * re-authorization failed), `provider_error` (provider error or failed code
+ * exchange), `failed` (any other internal failure).
+ */
+export type ConnectErrorReason = 'expired' | 'denied' | 'provider_error' | 'failed';
 
 // --- Assistants (contracts/openapi.yaml §assistants, ADR-0011 / #210) ---
 

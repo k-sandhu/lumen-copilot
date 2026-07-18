@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ApiError,
   listMembers,
+  attestMemberIdentity,
   getModelGovernance,
   getRiskTiers,
   getToolPolicy,
@@ -55,16 +56,41 @@ describe('admin api boundary', () => {
     expect(new Headers(init.headers).get('Authorization')).toBe('Bearer jwt');
   });
 
-  it('parses a member roster (id, email, role[])', async () => {
+  it('parses a member roster (id, email, role[], email_attested_at)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       json({
-        items: [{ id: 'u1', email: 'a@x.test', role: ['admin'] }],
+        items: [{ id: 'u1', email: 'a@x.test', role: ['admin'], email_attested_at: null }],
         next_cursor: null,
       }),
     );
     const res = await listMembers();
     expect(res.items[0]?.email).toBe('a@x.test');
     expect(res.items[0]?.role).toContain('admin');
+    expect(res.items[0]?.email_attested_at).toBeNull();
+  });
+
+  it('POST /admin/members/{id}/attest-identity returns the member with the new attestation (ADR-0019 §2)', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      json({
+        id: 'u1',
+        email: 'a@x.test',
+        role: ['member'],
+        email_attested_at: '2026-07-18T12:00:00Z',
+      }),
+    );
+    const res = await attestMemberIdentity('u1');
+    expect(res.email_attested_at).toBe('2026-07-18T12:00:00Z');
+    const { url, init } = lastCall(spy);
+    expect(url).toContain('/admin/members/u1/attest-identity');
+    expect(init.method).toBe('POST');
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer jwt');
+  });
+
+  it('a non-admin attest → 403 ApiError (INV-5); a cross-tenant member → 404 (INV-1)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(problem(403, 'Forbidden'));
+    await expect(attestMemberIdentity('u1')).rejects.toMatchObject({ status: 403 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(problem(404, 'Not Found'));
+    await expect(attestMemberIdentity('ghost')).rejects.toBeInstanceOf(ApiError);
   });
 
   it('GET /admin/model-governance returns allowed_models + tiers', async () => {

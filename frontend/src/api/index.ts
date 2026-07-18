@@ -45,6 +45,7 @@ export { suggestSearch, listRecentSearches, clearRecentSearches } from './sugges
 export { listAuditEvents } from './audit';
 export {
   listMembers,
+  attestMemberIdentity,
   getModelGovernance,
   getRiskTiers,
   getToolPolicy,
@@ -70,7 +71,7 @@ export {
 export type { BulkOrphanResult } from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
 // public one is already re-exported above, so we expose only the functions here.
-export { listSources, createSource, syncSource, deleteSource } from './sources';
+export { listSources, createSource, connectSource, syncSource, deleteSource } from './sources';
 export {
   listAssistants,
   createAssistant,
