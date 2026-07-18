@@ -4647,13 +4647,39 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
 # selection that drops clarifying answers or usage-less routes.
 
 
-def _cache_kpi_events(cap: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [e for e in cap if e["event"] == "llm.cache_kpi"]
+class _KpiLogRecorder:
+    """Records every ``log.<method>(event, **kw)`` call on the runtime's
+    module logger. The module logger is PATCHED (not captured): structlog is
+    configured with ``cache_logger_on_first_use=True``, so once any earlier
+    test has used the logger, ``structlog.testing.capture_logs`` swaps a
+    processor chain the cached logger no longer reads — order-dependent
+    under the full suite. Patching the module attribute is order-immune."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def __getattr__(self, method: str) -> object:
+        def _record(event: str, **kw: object) -> None:
+            self.events.append({"method": method, "event": event, **kw})
+
+        return _record
+
+    def kpis(self) -> list[dict[str, object]]:
+        return [e for e in self.events if e["event"] == "llm.cache_kpi"]
 
 
-async def test_cache_kpi_emitted_once_with_ratio(ctx: _Ctx) -> None:
-    from structlog.testing import capture_logs
+def _patch_runtime_log(monkeypatch: pytest.MonkeyPatch) -> _KpiLogRecorder:
+    import app.services.chat_runtime as chat_runtime_module
 
+    recorder = _KpiLogRecorder()
+    monkeypatch.setattr(chat_runtime_module, "log", recorder)
+    return recorder
+
+
+async def test_cache_kpi_emitted_once_with_ratio(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_rec = _patch_runtime_log(monkeypatch)
     gateway = _ScriptedGateway(
         [
             [
@@ -4671,11 +4697,10 @@ async def test_cache_kpi_emitted_once_with_ratio(ctx: _Ctx) -> None:
             ]
         ]
     )
-    with capture_logs() as cap:
-        _sleeps, recorder = _sleep_recorder()
-        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
     assert envs[-1]["type"] == "done"
-    kpis = _cache_kpi_events(cap)
+    kpis = log_rec.kpis()
     assert len(kpis) == 1
     assert kpis[0]["cached_prompt_tokens"] == 40
     assert kpis[0]["prompt_tokens"] == 100
@@ -4684,38 +4709,69 @@ async def test_cache_kpi_emitted_once_with_ratio(ctx: _Ctx) -> None:
     assert kpis[0]["usage_reported"] is True
 
 
-async def test_cache_kpi_emitted_on_ask_user_terminal(ctx: _Ctx) -> None:
+async def test_cache_kpi_emitted_on_ask_user_terminal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The clarifying-question terminal is a successful answer and must appear
     in the KPI series (the round-1 review's major: the early return skipped
     the only log site, silently excluding every ask_user answer)."""
-    from structlog.testing import capture_logs
-
+    log_rec = _patch_runtime_log(monkeypatch)
     gateway = _ScriptedGateway(
         [[StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")]]
     )
-    with capture_logs() as cap:
-        _sleeps, recorder = _sleep_recorder()
-        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
     done = envs[-1]
     assert done["type"] == "done"
     assert done["data"]["finishReason"] == "ask_user"  # type: ignore[index]
-    assert len(_cache_kpi_events(cap)) == 1
+    assert len(log_rec.kpis()) == 1
 
 
-async def test_cache_kpi_emitted_without_usage_as_unreported(ctx: _Ctx) -> None:
+async def test_cache_kpi_emitted_without_usage_as_unreported(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A route that reports no usage still emits — zeros, a null ratio, and
     ``usage_reported=false`` — never a silent gap in the series."""
-    from structlog.testing import capture_logs
-
+    log_rec = _patch_runtime_log(monkeypatch)
     gateway = _ScriptedGateway(
         [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
     )
-    with capture_logs() as cap:
-        _sleeps, recorder = _sleep_recorder()
-        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
     assert envs[-1]["type"] == "done"
-    kpis = _cache_kpi_events(cap)
+    kpis = log_rec.kpis()
     assert len(kpis) == 1
     assert kpis[0]["prompt_tokens"] == 0
     assert kpis[0]["cache_hit_ratio"] is None
     assert kpis[0]["usage_reported"] is False
+
+
+async def test_cache_kpi_not_emitted_on_error_terminal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer that ends in the error terminal must NOT appear in the KPI
+    series — the KPI is a per-SUCCESSFUL-answer denominator (spend salvage
+    for failed answers is the llm_usage ledger's job, not the KPI's)."""
+    from app.core.errors import DependencyError
+
+    log_rec = _patch_runtime_log(monkeypatch)
+
+    class _FaultGateway:
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            raise DependencyError("provider down")
+            yield StreamEvent(text="unreachable")  # pragma: no cover
+
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, _FaultGateway(), _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "error"
+    assert log_rec.kpis() == []
