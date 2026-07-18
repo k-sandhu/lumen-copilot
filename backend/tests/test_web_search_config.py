@@ -7,6 +7,10 @@ negative fetch-top-n must refuse to boot rather than disable bounding).
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -68,6 +72,86 @@ def test_compose_runtime_services_use_internal_searxng_endpoint() -> None:
     for service_name in ("backend", "worker"):
         environment = compose["services"][service_name]["environment"]
         assert environment["WEB_SEARCH_ENDPOINT"] == expected
+
+
+def _resolved_compose_web_search_endpoints(
+    tmp_path: Path, *, override: str | None
+) -> dict[str, str]:
+    """Resolve Compose config without starting or mutating any Docker resources."""
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable")
+
+    compose_version = subprocess.run(
+        [docker, "compose", "version"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if compose_version.returncode != 0:
+        pytest.skip("Docker Compose plugin is unavailable")
+
+    # ``env_file: .env`` is resolved relative to --project-directory. A temporary
+    # project directory makes the test independent of any developer .env while
+    # keeping all generated input under pytest's automatic cleanup.
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            (
+                "POSTGRES_USER=test",
+                "POSTGRES_PASSWORD=test-password",
+                "POSTGRES_DB=test",
+                "MINIO_ROOT_USER=test",
+                "MINIO_ROOT_PASSWORD=test-password",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    environment = os.environ.copy()
+    environment.pop("WEB_SEARCH_ENDPOINT", None)
+    if override is not None:
+        environment["WEB_SEARCH_ENDPOINT"] = override
+
+    root = Path(__file__).resolve().parents[2]
+    resolved = subprocess.run(
+        [
+            docker,
+            "compose",
+            "--project-directory",
+            str(tmp_path),
+            "-f",
+            str(root / "docker-compose.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    services = json.loads(resolved.stdout)["services"]
+    return {
+        service_name: services[service_name]["environment"]["WEB_SEARCH_ENDPOINT"]
+        for service_name in ("backend", "worker")
+    }
+
+
+def test_compose_resolves_internal_searxng_endpoint_when_unset(tmp_path: Path) -> None:
+    assert _resolved_compose_web_search_endpoints(tmp_path, override=None) == {
+        "backend": "http://searxng:8080",
+        "worker": "http://searxng:8080",
+    }
+
+
+def test_compose_resolves_explicit_web_search_endpoint_override(tmp_path: Path) -> None:
+    override = "https://search.override.test"
+    assert _resolved_compose_web_search_endpoints(tmp_path, override=override) == {
+        "backend": override,
+        "worker": override,
+    }
 
 
 @pytest.mark.parametrize(
