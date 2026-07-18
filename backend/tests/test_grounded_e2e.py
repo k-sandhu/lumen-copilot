@@ -164,8 +164,8 @@ class _GroundedAnswerGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-
-    ) -> AsyncIterator[StreamEvent]:
+        cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         tool_texts = [
             getattr(m, "content", "")

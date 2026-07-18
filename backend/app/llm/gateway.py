@@ -33,6 +33,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.core.errors import AppError, DependencyError, ValidationError
@@ -105,6 +106,100 @@ def _retry_after_hint(exc: Exception) -> float | None:
     except Exception:  # noqa: BLE001 — attacker-adjacent input; contain everything
         return None
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _cache_family(model: str | None, api_base: str | None) -> str | None:
+    """The provider cache family for a resolved route — decided INSIDE the gateway.
+
+    The capability map lives here (ADR-0016 §2.4 / #427 item 14: no provider
+    categories leak above ``llm/``), keyed off the resolved route the gateway
+    receives per call — (model id, api_base). Directives are granted ONLY to
+    routes demonstrably going through OpenRouter — the one transport the
+    pass-through was validated against (live, §2.4 amendment):
+
+    * ``api_base`` given ⇒ its host must BE OpenRouter (a tenant's own
+      OpenRouter key); any other host gets nothing, whatever the model is
+      NAMED — a strict OpenAI-compatible endpoint must never receive vendor
+      cache fields because its model id contains ``claude`` (AC-3).
+    * no ``api_base`` ⇒ the id itself must carry the ``openrouter/`` prefix
+      (LiteLLM's adapter namespace IS the routing decision). A registry id
+      like ``anthropic/claude-...`` or ``openai/my-claude-reranker`` without
+      the prefix routes through a NATIVE LiteLLM adapter we never validated
+      directives against — fail-safe ``None``, never a name-derived guess.
+
+    Within an OpenRouter route, the family is the upstream provider PREFIX of
+    the raw id — the namespace OpenRouter itself routes by — never a substring
+    of the model name: ``anthropic/…`` ⇒ ``cache_control`` breakpoints;
+    ``openai/…`` ⇒ implicit caching steered by ``prompt_cache_key``; every
+    other upstream ⇒ ``None``.
+    """
+    if not model:
+        return None
+    lowered = model.lower()
+    if api_base is not None:
+        try:
+            host = (urlparse(api_base).hostname or "").lower()
+        except ValueError:
+            return None
+        if host != "openrouter.ai" and not host.endswith(".openrouter.ai"):
+            return None
+        raw = lowered.removeprefix("openrouter/")
+    elif lowered.startswith("openrouter/"):
+        raw = lowered[len("openrouter/") :]
+    else:
+        return None
+    upstream = raw.split("/", 1)[0]
+    if upstream == "anthropic":
+        return "anthropic"
+    if upstream == "openai":
+        return "openai"
+    return None
+
+
+def _apply_cache_directives(
+    wire: list[dict[str, Any]], family: str | None
+) -> list[dict[str, Any]]:
+    """Decorate serialized messages with Anthropic cache breakpoints (#411).
+
+    Applied AFTER :meth:`_to_wire_messages` so the assembler's token-count
+    mirror keeps matching the undecorated shape (the ~20 tokens of directive
+    framing sit comfortably inside the assembler's 1024-token safety margin).
+    Two breakpoints (limit is four): the FIRST message (the stable
+    system/tools prefix boundary) and the LAST cacheable block — the moving
+    mark. Marking the LAST block is what makes the loop cache-first: the mark
+    WRITES the entire request prefix this call, and the next call — append-only
+    by construction (§2.2) — READS it back as its longest cached prefix, then
+    writes its own mark one exchange further. Consecutive calls differ by at
+    most one assistant turn plus a bounded tool batch (≤16, #412), safely
+    inside Anthropic's ~20-block backward window from the new mark. Only
+    plain-string contents can carry a mark, so a tool-call-only assistant tail
+    (content ``""``) walks back to the newest wrappable block (in the runtime's
+    shapes: the latest tool result, or the current question on the first call).
+    Non-Anthropic families return the wire untouched.
+    """
+    if family != "anthropic" or not wire:
+        return wire
+
+    def _wrappable(i: int) -> bool:
+        content = wire[i].get("content")
+        return isinstance(content, str) and bool(content)
+
+    anchors = {0} if _wrappable(0) else set()
+    mark = next((i for i in range(len(wire) - 1, 0, -1) if _wrappable(i)), None)
+    if mark is not None:
+        anchors.add(mark)
+    for i in anchors:
+        wire[i] = {
+            **wire[i],
+            "content": [
+                {
+                    "type": "text",
+                    "text": wire[i]["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    return wire
 
 
 def _map_vendor_error(exc: Exception) -> AppError:
@@ -398,6 +493,7 @@ class LLMGateway:
         tool_choice: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        cache_key: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -432,10 +528,25 @@ class LLMGateway:
         extra: dict[str, Any] = {}
         if tool_choice is not None:
             extra["tool_choice"] = tool_choice
+        # Prompt-cache directives (ADR-0016 §2, #411), keyed by the provider
+        # family resolved HERE (no provider categories leak above llm/):
+        # Anthropic-style breakpoints decorate the serialized messages below;
+        # OpenAI-style implicit caching is steered by prompt_cache_key (the
+        # session id) via extra_body passthrough. Unknown families — and a
+        # disabled kill-switch — send the exact pre-#411 wire (AC-3).
+        family = (
+            _cache_family(model_id, api_base)
+            if self._settings.chat_prompt_cache_enabled
+            else None
+        )
+        if family == "openai" and cache_key:
+            extra["extra_body"] = {"prompt_cache_key": cache_key}
         try:
             response = await litellm.acompletion(
                 model=model_id,
-                messages=self._to_wire_messages(messages),
+                messages=_apply_cache_directives(
+                    self._to_wire_messages(messages), family
+                ),
                 tools=self._to_wire_tools(tools),
                 stream=True,
                 stream_options={"include_usage": True},

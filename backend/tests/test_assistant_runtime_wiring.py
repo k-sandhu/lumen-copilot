@@ -195,8 +195,8 @@ class _OneSearchThenAnswer:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-
-    ) -> AsyncIterator[StreamEvent]:
+        cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if not has_tool_result and tool_choice != "none":

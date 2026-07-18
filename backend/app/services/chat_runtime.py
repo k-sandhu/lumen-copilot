@@ -295,6 +295,34 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
     return total
 
 
+def _log_cache_kpi(result: _RunResult) -> None:
+    """Emit the per-answer cache-hit KPI (#411 / ADR-0016 §2.6) — exactly once
+    per SUCCESSFUL answer, on every success terminal (``ask_user`` included).
+    Called from ``run()`` AFTER the commit and the ``done`` publication — a
+    commit failure takes the error arm, and a failed ``done`` publication
+    propagates out of ``run()``; either way control never reaches the KPI
+    site, so a failed answer can never appear in the series (its spend is
+    the salvage ledger's job). A route that reported no usage still emits, with
+    ``usage_reported=false`` and a null ratio — the series must be a
+    denominator over all successful answers, never a selection that silently
+    drops the routes operators most need to see. Counts only; no prompt text,
+    ids, or secrets.
+    """
+    reported = bool(result.prompt_tokens)
+    log.info(
+        "llm.cache_kpi",
+        cached_prompt_tokens=result.cached_prompt_tokens,
+        prompt_tokens=result.prompt_tokens,
+        cache_hit_ratio=(
+            round(result.cached_prompt_tokens / result.prompt_tokens, 3)
+            if reported
+            else None
+        ),
+        cache_write_tokens=result.cache_write_tokens,
+        usage_reported=reported,
+    )
+
+
 class ChatRuntime:
     """Runs one grounded answer and streams it over the backplane.
 
@@ -347,6 +375,9 @@ class ChatRuntime:
         # persist spent scopes in an INDEPENDENT transaction when the answer
         # transaction rolls back (error/cancel) — providers billed those calls.
         self._salvage: tuple[_RouteState, _Usage] | None = None
+        # The prompt-cache steering key (#411): the answer's session id, set
+        # per answer in _answer (the runtime is constructed per answer).
+        self._cache_key: UUID | None = None
         # The #413 fallback revalidator: the SAME allow-list check the send path
         # applies (config registry / the tenant's enabled providers), re-run at
         # answer start so stored config that went stale is dropped fail-closed.
@@ -548,6 +579,10 @@ class ChatRuntime:
                 },
             ),
         )
+        # The KPI emits ONLY here — after the commit above and the successful
+        # ``done`` publication — so a failed answer can never appear in the
+        # per-successful-answer series (round-2 review, NEW-1).
+        _log_cache_kpi(result)
         return True
 
     # --- the agentic loop ---------------------------------------------------
@@ -593,6 +628,8 @@ class ChatRuntime:
         # per-turn thrashing back). ``route_state.model`` is therefore the
         # model that ACTUALLY produced the answer — what ``done``, the message
         # row, the usage row, and the audit record.
+        # The per-session prompt-cache key (#411) the turn streamer forwards.
+        self._cache_key = session_id
         route_state = _RouteState(
             model=model, route=await self._resolve_model_route(session, model)
         )
@@ -1685,6 +1722,10 @@ class ChatRuntime:
             tool_choice=tool_choice,
             api_key=route.api_key,
             api_base=route.api_base,
+            # The prompt-cache steering key (#411): stable per session so
+            # OpenAI-style implicit caching lands consecutive answers of one
+            # conversation on the same cache shard.
+            cache_key=str(self._cache_key) if self._cache_key else None,
         ):
             if (
                 (ev.tool_call_started or ev.tool_calls)

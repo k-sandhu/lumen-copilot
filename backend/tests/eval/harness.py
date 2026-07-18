@@ -177,6 +177,7 @@ class _GroundedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
 
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]

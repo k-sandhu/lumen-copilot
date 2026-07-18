@@ -121,6 +121,7 @@ class _ScriptedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         if tool_choice == "none":
@@ -147,6 +148,7 @@ class _BoomGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator
@@ -924,6 +926,7 @@ class _CapturingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
@@ -1053,6 +1056,7 @@ class _RecordingSearchGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -1242,6 +1246,7 @@ class _RecordingGetDocGateway(_RecordingSearchGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -2077,7 +2082,8 @@ async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-        ):
+            cache_key: object = None,
+                ):
             if self.first_prompt is None:
                 self.first_prompt = list(messages)  # type: ignore[call-overload]
             async for ev in super().stream_tools(
@@ -2517,6 +2523,7 @@ class _RecordingScriptedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.seen.append(list(cast("Sequence[ChatMessage]", messages)))
         async for ev in super().stream_tools(
@@ -3171,6 +3178,7 @@ class _ModelRoutedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.models_called.append(str(model))
         pending = self._failures.get(str(model))
@@ -3557,6 +3565,7 @@ class _MidStreamFaultGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
+        cache_key: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if not self._faulted:
             self._faulted = True
@@ -4472,6 +4481,7 @@ async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating… ")
@@ -4561,6 +4571,7 @@ async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: 
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating before the fragment… ")
@@ -4605,6 +4616,7 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
+            cache_key: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(tool_call_started=True)  # NO text at all
@@ -4625,3 +4637,235 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
     assert not any(
         e["type"] == "event" and e.get("name") == "narration" for e in envs
     )
+
+
+# --- The cache-hit KPI (#411 / ADR-0016 §2.6) --------------------------------
+#
+# One ``llm.cache_kpi`` log event per SUCCESSFUL answer — every terminal,
+# ``ask_user`` included, zero-usage included (``usage_reported=false``, null
+# ratio) — so the series is a denominator over all answers, never a biased
+# selection that drops clarifying answers or usage-less routes.
+
+
+class _KpiLogRecorder:
+    """Records every ``log.<method>(event, **kw)`` call on the runtime's
+    module logger. The module logger is PATCHED (not captured): structlog is
+    configured with ``cache_logger_on_first_use=True``, so once any earlier
+    test has used the logger, ``structlog.testing.capture_logs`` swaps a
+    processor chain the cached logger no longer reads — order-dependent
+    under the full suite. Patching the module attribute is order-immune."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def __getattr__(self, method: str) -> object:
+        def _record(event: str, **kw: object) -> None:
+            self.events.append({"method": method, "event": event, **kw})
+
+        return _record
+
+    def kpis(self) -> list[dict[str, object]]:
+        return [e for e in self.events if e["event"] == "llm.cache_kpi"]
+
+
+def _patch_runtime_log(monkeypatch: pytest.MonkeyPatch) -> _KpiLogRecorder:
+    import app.services.chat_runtime as chat_runtime_module
+
+    recorder = _KpiLogRecorder()
+    monkeypatch.setattr(chat_runtime_module, "log", recorder)
+    return recorder
+
+
+async def test_cache_kpi_emitted_once_with_ratio(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_rec = _patch_runtime_log(monkeypatch)
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(
+                        prompt_tokens=100,
+                        completion_tokens=5,
+                        total_tokens=105,
+                        cached_prompt_tokens=40,
+                        cache_write_tokens=10,
+                    ),
+                ),
+            ]
+        ]
+    )
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    kpis = log_rec.kpis()
+    assert len(kpis) == 1
+    assert kpis[0]["cached_prompt_tokens"] == 40
+    assert kpis[0]["prompt_tokens"] == 100
+    assert kpis[0]["cache_hit_ratio"] == 0.4
+    assert kpis[0]["cache_write_tokens"] == 10
+    assert kpis[0]["usage_reported"] is True
+
+
+async def test_cache_kpi_emitted_on_ask_user_terminal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clarifying-question terminal is a successful answer and must appear
+    in the KPI series (the round-1 review's major: the early return skipped
+    the only log site, silently excluding every ask_user answer)."""
+    log_rec = _patch_runtime_log(monkeypatch)
+    gateway = _ScriptedGateway(
+        [[StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")]]
+    )
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    done = envs[-1]
+    assert done["type"] == "done"
+    assert done["data"]["finishReason"] == "ask_user"  # type: ignore[index]
+    assert len(log_rec.kpis()) == 1
+
+
+async def test_cache_kpi_emitted_without_usage_as_unreported(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A route that reports no usage still emits — zeros, a null ratio, and
+    ``usage_reported=false`` — never a silent gap in the series."""
+    log_rec = _patch_runtime_log(monkeypatch)
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    kpis = log_rec.kpis()
+    assert len(kpis) == 1
+    assert kpis[0]["prompt_tokens"] == 0
+    assert kpis[0]["cache_hit_ratio"] is None
+    assert kpis[0]["usage_reported"] is False
+
+
+async def test_cache_kpi_not_emitted_on_error_terminal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer that ends in the error terminal must NOT appear in the KPI
+    series — the KPI is a per-SUCCESSFUL-answer denominator (spend salvage
+    for failed answers is the llm_usage ledger's job, not the KPI's)."""
+    from app.core.errors import DependencyError
+
+    log_rec = _patch_runtime_log(monkeypatch)
+
+    class _FaultGateway:
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            raise DependencyError("provider down")
+            yield StreamEvent(text="unreachable")  # pragma: no cover
+
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, _FaultGateway(), _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "error"
+    assert log_rec.kpis() == []
+
+
+async def test_cache_kpi_not_emitted_when_commit_fails(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 NEW-1: the answer streams fine but the transaction COMMIT
+    fails — the stream ends in the error terminal and the KPI must NOT have
+    been emitted (it fires only after commit + ``done`` publication)."""
+    log_rec = _patch_runtime_log(monkeypatch)
+
+    def _failing_commit_sessionmaker() -> AsyncSession:
+        session = ctx.sessionmaker()
+
+        async def _boom() -> None:
+            raise RuntimeError("simulated commit failure")
+
+        session.commit = _boom  # type: ignore[method-assign]
+        return session
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    _sleeps, recorder = _sleep_recorder()
+    runtime = ChatRuntime(
+        sessionmaker=_failing_commit_sessionmaker,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: _FakeRetrieval([]),  # type: ignore[arg-type,return-value]
+        retry_sleep=recorder,  # type: ignore[arg-type]
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert ok is False
+    assert envs[-1]["type"] == "error"
+    assert not any(e["type"] == "done" for e in envs)
+    assert log_rec.kpis() == []
+
+
+async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
+    """#411: the runtime steers provider-side caching with a per-SESSION key —
+    the gateway must receive ``cache_key == str(session_id)`` on every turn
+    (consecutive answers of one conversation land on one cache shard)."""
+
+    class _CacheKeyCapturingGateway:
+        def __init__(self) -> None:
+            self.cache_keys: list[object] = []
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.cache_keys.append(cache_key)
+            msgs = list(messages)  # type: ignore[arg-type]
+            has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
+            if has_tool_result:
+                yield StreamEvent(text="Answer.")
+                yield StreamEvent(finish_reason="stop")
+            else:
+                yield StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "q"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _CacheKeyCapturingGateway()
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([passage]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    # Both loop turns carried the SAME session-scoped key.
+    assert gateway.cache_keys == [str(ctx.session_id)] * 2
