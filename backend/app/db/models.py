@@ -1605,13 +1605,53 @@ class RunDelivery(TenantScopedMixin, Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class SandboxSession(TenantScopedMixin, Base):
+    """Durable identity for one reusable chat-scoped sandbox (ADR-0020, #457)."""
+
+    __tablename__ = "sandbox_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "chat_session_id", name="uq_sandbox_sessions_tenant_chat"
+        ),
+        Index("ix_sandbox_sessions_tenant_owner", "tenant_id", "owner_id"),
+        CheckConstraint(
+            "status in ('active', 'closed', 'error')",
+            name="ck_sandbox_sessions_status",
+        ),
+        CheckConstraint("generation >= 1", name="ck_sandbox_sessions_generation"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chat_session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    image_digest: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CodeRun(TenantScopedMixin, Base):
-    """One agent-authored sandbox code run — the ``code_runs`` row (ADR-0013 §4, #230).
+    """One agent-authored reusable sandbox run (ADR-0020, #457).
 
     The durable record of a run of adversarial-by-assumption Python in the isolated
     sandbox: the exact ``code`` executed (inspectable, E15-7/E6-5), the pinned
-    ``image_digest`` actually used (reproducibility, E3-7), captured (output-size-
-    capped, G7) ``stdout``/``stderr``, ``exit_code``, ``duration_ms``, measured
+    ``image_digest`` actually used (reproducibility, E3-7), captured
+    ``stdout``/``stderr``, ``exit_code``, ``duration_ms``, measured
     ``resource_usage`` (jsonb), and the ``artifact_ids`` of any output files
     collected via CC-B (#208). Tenant- and owner-scoped (INV-1/INV-2): a run in
     another tenant / owned by another user is a 404 (existence non-disclosure). The
@@ -1621,7 +1661,7 @@ class CodeRun(TenantScopedMixin, Base):
     those land, mirroring ``artifacts``).
 
     ``status`` walks the :class:`~app.domain.entities.CodeRunStatus` machine; a
-    crash-safe task always writes a terminal, never a stuck ``running`` (ADR-0013 §5,
+    crash-safe task always writes a terminal, never a stuck ``running`` (ADR-0020,
     INV-8). No ``TimestampMixin``/``updated_at``: the lifecycle is ``created_at`` →
     ``started_at`` → ``finished_at`` + ``status``. Tenant-scoped like every table
     (INV-1); the ``0019`` migration puts it under the RLS backstop.
@@ -1632,6 +1672,7 @@ class CodeRun(TenantScopedMixin, Base):
         Index("ix_code_runs_tenant_owner", "tenant_id", "owner_id"),
         Index("ix_code_runs_tenant_status", "tenant_id", "status"),
         Index("ix_code_runs_session_id", "session_id"),
+        Index("ix_code_runs_sandbox_session_id", "sandbox_session_id"),
         CheckConstraint(
             "status in ('queued', 'running', 'succeeded', 'failed', 'timeout', "
             "'killed', 'denied')",
@@ -1642,6 +1683,10 @@ class CodeRun(TenantScopedMixin, Base):
         ),
         CheckConstraint(
             "duration_ms is null or duration_ms >= 0", name="ck_code_runs_duration_nonneg"
+        ),
+        CheckConstraint(
+            "sandbox_generation is null or sandbox_generation >= 1",
+            name="ck_code_runs_sandbox_generation",
         ),
     )
 
@@ -1660,14 +1705,21 @@ class CodeRun(TenantScopedMixin, Base):
         ForeignKey("chat_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    sandbox_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    sandbox_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The parent agent run / trace — plain nullable UUIDs until those tables land.
     run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     trace_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
     # The exact Python source executed — inspectable (E15-7/E6-5), reproducible.
     code: Mapped[str] = mapped_column(Text, nullable=False)
-    # Captured, output-size-capped (G7). Default empty (never null) so a queued run
-    # already has readable (empty) output fields.
+    requested_packages: Mapped[list[str]] = mapped_column(
+        StringArray, nullable=False, default=list
+    )
+    # Captured output. Default empty (never null) so a queued run already has readable
+    # output fields.
     stdout: Mapped[str] = mapped_column(Text, nullable=False, default="")
     stderr: Mapped[str] = mapped_column(Text, nullable=False, default="")
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)

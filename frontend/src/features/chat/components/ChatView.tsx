@@ -19,12 +19,7 @@ import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useChatStore, type SessionScope } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
 import '../chat.css';
-import {
-  useMessages,
-  useModels,
-  useSendMessage,
-  useUpdateSession,
-} from '../model/queries';
+import { useMessages, useModels, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
@@ -36,6 +31,7 @@ import { ContextMeter } from './ContextMeter';
 import { ContextPanel } from './ContextPanel';
 import { DocumentViewer } from './DocumentViewer';
 import { WebSourceView } from './WebSourceView';
+import { SandboxSessionControl } from './SandboxSessionControl';
 
 function defaultModelId(models: ChatModelInfo[] | undefined): string {
   if (!models || models.length === 0) return '';
@@ -121,9 +117,7 @@ export function ChatView() {
               key={activeSessionId}
               sessionId={activeSessionId}
               scope={
-                sessionScope && sessionScope.sessionId === activeSessionId
-                  ? sessionScope
-                  : null
+                sessionScope && sessionScope.sessionId === activeSessionId ? sessionScope : null
               }
               models={models.data?.items}
               modelsLoading={models.isLoading}
@@ -483,6 +477,7 @@ function ActiveSession({
       {/* Conversation toolbar (spec 0007): the context meter + panel toggles. */}
       <div className="lc-chat__toolbar">
         <ContextMeter sessionId={sessionId} />
+        <SandboxSessionControl sessionId={sessionId} />
         <div className="lc-chat__toolbar-spacer" />
         <button
           type="button"

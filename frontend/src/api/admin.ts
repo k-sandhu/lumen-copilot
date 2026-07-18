@@ -30,6 +30,7 @@ import type {
   CertificationState,
   GovernedAssistant,
   GovernedAssistantList,
+  Member,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -56,6 +57,19 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 /** The tenant's members and their roles (admin only). */
 export function listMembers(page: PageQuery = {}, signal?: AbortSignal): Promise<MemberList> {
   return request<MemberList>(`/admin/members${buildQuery({ ...page })}`, { signal });
+}
+
+/**
+ * Attest a member's email identity for connector-ACL mapping (ADR-0019 §2;
+ * admin only, audited server-side as `user.identity_attested`). Mirrored
+ * connector ACLs map a source permission to a Lumen user ONLY when that user's
+ * email is attested — unattested members never receive mirrored access.
+ * Idempotent: re-attesting refreshes `email_attested_at`. A non-admin → 403
+ * (INV-5); a cross-tenant / unknown member → 404 (INV-1). Returns the member
+ * with their new attestation state.
+ */
+export function attestMemberIdentity(memberId: string): Promise<Member> {
+  return request<Member>(`/admin/members/${memberId}/attest-identity`, { method: 'POST' });
 }
 
 /** Which models are allowed, by governance tier (admin only). */

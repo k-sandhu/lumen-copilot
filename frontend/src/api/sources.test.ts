@@ -1,23 +1,26 @@
 /**
  * Sources api/ boundary calls against a mocked fetch. Verifies the request shapes
- * conform to the frozen contract (contracts/openapi.yaml §sources, ADR-0009 / #108)
- * and that the spec-0004 negative categories surface as typed ApiErrors the UI
- * branches on:
+ * conform to the frozen contract (contracts/openapi.yaml §sources, ADR-0009 /
+ * #108 + ADR-0019 §1 / #451) and that the spec-0004 negative categories surface
+ * as typed ApiErrors the UI branches on:
  *   - missing/expired token → 401 (INV-4)
  *   - invalid / SSRF-blocked URL on add → 422 (INV-8, ADR-0009 §3)
  *   - non-owner / cross-tenant source on sync/delete → 404 (INV-1/INV-2)
+ *   - non-admin managed-source mutation → 403 (INV-5, ADR-0019 §1)
+ *   - connect on a `web` source → 409 oauth_not_supported (INV-8)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ApiError,
   listSources,
   createSource,
+  connectSource,
   syncSource,
   deleteSource,
   setAccessToken,
   clearAccessToken,
 } from '@/api';
-import type { Source } from '@/api';
+import type { GdriveSource, Source } from '@/api';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -57,6 +60,22 @@ const sampleSource: Source = {
   owner_id: '22222222-2222-2222-2222-222222222222',
   created_at: '2026-06-23T00:00:00Z',
   updated_at: '2026-06-23T00:00:00Z',
+};
+
+const sampleGdrive: GdriveSource = {
+  id: '33333333-3333-3333-3333-333333333333',
+  type: 'gdrive',
+  config: { mode: 'shared_drive', drive_id: '0AbCd' },
+  status: 'pending_auth',
+  indexed_count: 0,
+  last_synced_at: null,
+  connected_account: null,
+  acl_synced_at: null,
+  unmapped_acl_count: null,
+  reauthorize_required: false,
+  owner_id: '22222222-2222-2222-2222-222222222222',
+  created_at: '2026-07-18T00:00:00Z',
+  updated_at: '2026-07-18T00:00:00Z',
 };
 
 describe('sources api boundary', () => {
@@ -138,6 +157,71 @@ describe('sources api boundary', () => {
     const { url, init } = lastCall(spy);
     expect(url).toContain(`/sources/${sampleSource.id}`);
     expect(init.method).toBe('DELETE');
+  });
+
+  it('POST /sources adds a gdrive source ({type, config}) → pending_auth with the health surface', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(sampleGdrive, 201));
+    const created = await createSource({
+      type: 'gdrive',
+      config: { mode: 'shared_drive', drive_id: '0AbCd' },
+    });
+    expect(created.status).toBe('pending_auth');
+    // The managed health surface is REQUIRED on the gdrive branch (nullable).
+    expect(created.type).toBe('gdrive');
+    if (created.type === 'gdrive') {
+      expect(created.connected_account).toBeNull();
+      expect(created.acl_synced_at).toBeNull();
+      expect(created.unmapped_acl_count).toBeNull();
+      expect(created.reauthorize_required).toBe(false);
+    }
+    const { init } = lastCall(spy);
+    expect(JSON.parse(init.body as string)).toEqual({
+      type: 'gdrive',
+      config: { mode: 'shared_drive', drive_id: '0AbCd' },
+    });
+  });
+
+  it('a non-admin gdrive add → 403 ApiError (INV-5, ADR-0019 §1)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(403, 'Forbidden'));
+    await expect(
+      createSource({ type: 'gdrive', config: { mode: 'my_drive' } }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('an invalid gdrive config → 422 ApiError code=invalid_config (INV-8)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      problem(422, 'Unprocessable Entity', 'invalid_config'),
+    );
+    await expect(
+      createSource({ type: 'gdrive', config: { mode: 'folder', folder_id: '' } }),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('POST /sources/{id}/connect returns the consent authorization_url', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      json({ authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=opaque' }),
+    );
+    const res = await connectSource(sampleGdrive.id);
+    expect(res.authorization_url).toBe(
+      'https://accounts.google.com/o/oauth2/v2/auth?state=opaque',
+    );
+    const { url, init } = lastCall(spy);
+    expect(url).toContain(`/sources/${sampleGdrive.id}/connect`);
+    expect(init.method).toBe('POST');
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer jwt');
+  });
+
+  it('a non-admin connect → 403 ApiError (INV-5)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(403, 'Forbidden'));
+    await expect(connectSource(sampleGdrive.id)).rejects.toMatchObject({ status: 403 });
+    await expect(connectSource(sampleGdrive.id)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('connect on a web source → 409 ApiError code=oauth_not_supported (INV-8)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      problem(409, 'Conflict', 'oauth_not_supported'),
+    );
+    await expect(connectSource(sampleSource.id)).rejects.toMatchObject({ status: 409 });
   });
 
   it('missing/expired token → 401 ApiError (INV-4)', async () => {

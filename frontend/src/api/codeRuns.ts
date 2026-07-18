@@ -1,12 +1,12 @@
 /**
  * Typed code-run calls — part of the api/ boundary (ADR-0004). The ONLY place the
  * SPA performs code-run HTTP. Conforms to the FROZEN contract (contracts/openapi.yaml
- * §code-runs, ADR-0013 / #229):
+ * §code-runs, ADR-0020 / #457):
  *
  *   GET /code-runs/{codeRunId}   → CodeRun
  *
  * Read-only inspection of one sandbox code run: the exact `code` executed, its
- * `status`, captured `stdout`/`stderr` (output-size-capped, G7), `exit_code`,
+ * `status`, captured `stdout`/`stderr`, `exit_code`,
  * `duration_ms`, `resource_usage`, and the ids of any artifacts it emitted
  * (`artifact_ids`, CC-B #208). Runs are agent-mediated (the `run_python` tool) —
  * there is deliberately no public "execute arbitrary code" endpoint.
@@ -25,4 +25,9 @@ import type { CodeRun } from './types';
  */
 export function getCodeRun(id: string, signal?: AbortSignal): Promise<CodeRun> {
   return request<CodeRun>(`/code-runs/${id}`, { signal });
+}
+
+/** Explicitly cancel an active unbounded execution; its environment resets. */
+export function cancelCodeRun(id: string): Promise<CodeRun> {
+  return request<CodeRun>(`/code-runs/${id}/cancel`, { method: 'POST' });
 }

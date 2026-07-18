@@ -2,10 +2,10 @@
 #   cp .env.example .env  &&  docker compose up --build
 # Brings up: Postgres+pgvector, Redis, MinIO, OpenSearch, SearXNG, backend (web),
 # Celery worker, redbeat beat, frontend.
-# The sandbox-runner (ADR-0013) is OPT-IN via the `sandbox` compose profile —
+# The sandbox-runner (ADR-0020) is OPT-IN via the `sandbox` compose profile —
 #   docker compose --profile sandbox up
-# — because its images are provisioned per-deploy (not published publicly); the
-# default stack runs fully without it (SANDBOX_ENABLED defaults to false).
+# — because code execution is explicitly enabled per deploy/tenant. The runner is
+# built from this repository; the default stack runs without it.
 # Host ports come from .env (471xx block); container-to-container traffic uses service names.
 # Images are version-pinned (no :latest) per AGENTS.md.
 
@@ -145,6 +145,10 @@ services:
       # Deployments that put object storage behind a CORS-enabled endpoint or a
       # CDN can flip this to "true" to serve bytes straight from storage.
       DOCUMENT_CONTENT_REDIRECT: ${DOCUMENT_CONTENT_REDIRECT:-false}
+      # Settings defaults to the published host port for a backend launched
+      # directly on the host. Inside Compose, callers must use the service DNS
+      # name; keep an explicit deployment override as the highest precedence.
+      WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
     env_file:
       - .env
     ports:
@@ -170,46 +174,36 @@ services:
       retries: 10
       start_period: 20s
 
-  # Dedicated sandbox runner (ADR-0013 §1, #230, risk:security): the ONLY component
-  # with container-engine / Docker-socket access. It owns ALL per-run container
-  # lifecycle — launching one ephemeral, single-use, network-none, read-only-rootfs,
-  # caps-dropped, non-root, cpu/mem/pids/timeout-bounded container per run — and
-  # exposes a small internal HTTP API (POST /runs, GET /runs/{id}, POST /runs/{id}/cancel)
+  # Dedicated sandbox runner (ADR-0020, #457, risk:security): the ONLY component
+  # with container-engine / Docker-socket access. It owns one writable, root-inside,
+  # network-none, caps-dropped container per chat, reused across executions with no
+  # automatic execution/resource caps. Its internal API covers ensure/inspect,
+  # execute, reset/close, and cancel
   # on the compose network ONLY (NO published host port — never reachable from the
   # host/browser, only from the worker). Keeping the socket out of the app/worker
   # (mounting it there is equivalent to host root) and confining it to this one small,
   # audited service is the core of the design.
   #
-  # OFF by default (ADR-0013 §6): with SANDBOX_ENABLED=false the worker refuses every
-  # run before ever calling this service, so it sits idle. Pinned image (no :latest);
-  # bounded resources so the extra service stays laptop-viable. The runner's own
-  # service image is provisioned per-deploy (its build/impl is a follow-up seam); this
-  # is the topology the ADR specifies. gVisor (SANDBOX_RUNTIME=runsc) is a runner
-  # config swap for production hardening — no app code change.
+  # OFF by default: with SANDBOX_ENABLED=false the app refuses every run. gVisor
+  # (SANDBOX_RUNTIME=runsc) is mandatory outside local development.
   #
-  # Behind the `sandbox` compose profile: the runner/runtime images below are
-  # provisioned per-deploy and not published publicly, so the DEFAULT stack starts
-  # without this service (nothing depends_on it, and the worker refuses runs while
-  # SANDBOX_ENABLED=false). Enable with: docker compose --profile sandbox up
+  # Behind the `sandbox` compose profile so the default stack starts without this
+  # privileged boundary. Enable with: docker compose --profile sandbox up --build
   sandbox-runner:
-    image: ghcr.io/k-sandhu/lumen-sandbox-runner:0.1.0
+    build:
+      context: ./sandbox_runner
+    image: lumen-sandbox-runner:0.2.0
     profiles: ["sandbox"]
     restart: unless-stopped
-    # The single Docker-socket holder. Read-only mount limits it to the container API
-    # it needs (the app/worker NEVER mount this).
+    # The single Docker-socket holder. Socket authority is host-root-equivalent and
+    # is confined here; the app/worker/session containers NEVER receive this mount.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      # The pinned per-run base image (curated Python + scientific stack, pinned by
-      # @sha256 digest, no :latest — ADR-0013 §3) and the OCI runtime.
-      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-ghcr.io/k-sandhu/lumen-sandbox-py:0.1.0}
-      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runc}
     # NO `ports:` — the internal API is reachable only on the compose network, never
-    # published to the host (ADR-0013 §1).
+    # published to the host (ADR-0020 §2).
     expose:
       - "8000"
-    # Bounded so the runner itself stays laptop-sized; per-run containers carry their
-    # own cpu/mem/pids caps (enforced by the runner from the worker's run spec).
+    # These bounds apply to the small runner control plane, not model-code containers.
     deploy:
       resources:
         limits:
@@ -236,6 +230,9 @@ services:
       # The dedicated runner's internal API (compose network only). The worker calls
       # this to execute a sandbox code run — it holds NO Docker socket itself.
       SANDBOX_RUNNER_URL: ${SANDBOX_RUNNER_URL:-http://sandbox-runner:8000}
+      # Scheduled/headless chat runs execute in the worker and need the same
+      # Compose-network web-search endpoint as interactive backend turns.
+      WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
     env_file:
       - .env
     volumes:

@@ -1,20 +1,27 @@
 /**
- * MembersPanel — the read-only Members & roles roster (#88/#122, ADR-0007 §4).
- * Lists the tenant's members and the RBAC roles each holds (member / admin /
- * security, spec 0004 §2.3). There are NO mutating controls: no invite, no role
- * edit, no remove — admin is read-mostly for v1. The roster is tenant-scoped
- * (INV-1) and admin-only; a non-admin (403, INV-5) or expired session (401,
- * INV-4) renders as an actionable error via PanelBody.
+ * MembersPanel — the Members & roles roster (#88/#122, ADR-0007 §4; #455,
+ * ADR-0019 §2). Lists the tenant's members, the RBAC roles each holds (member /
+ * admin / security, spec 0004 §2.3), and — since managed connectors landed —
+ * each member's IDENTITY ATTESTATION state with the one mutating control this
+ * panel carries: **Attest identity** (`POST /admin/members/{id}/attest-identity`,
+ * audited server-side as `user.identity_attested`). Connector ACL mirroring
+ * maps a source permission to a Lumen user ONLY when that user's email is
+ * attested — unattested members never receive mirrored access, and a source's
+ * `unmapped_acl_count` is exactly what attestation lights up.
  *
- * Columns are limited to what the contract serves. The frozen `Member` shape is
- * `{ id, email, role[] }` only — so the wireframe's "Status" and "Last active"
- * columns are deliberately OMITTED (no backing data; AGENTS.md scope guard: never
- * fake backend-unsupported fields). The avatar initials are derived client-side
- * from the email purely for legibility — honest derivation, not invented data.
+ * There is still no invite / role edit / remove — those stay read-only for v1.
+ * The roster is tenant-scoped (INV-1) and admin-only; a non-admin (403, INV-5)
+ * or expired session (401, INV-4) renders as an actionable error via PanelBody,
+ * and a failed attest renders INLINE on its row — never a blank pane.
+ *
+ * The avatar initials are derived client-side from the email purely for
+ * legibility — honest derivation, not invented data.
  */
+import { useState } from 'react';
 import { StatusDot, type StatusTone } from '@/ui';
+import { ApiError } from '@/api';
 import type { Member, UserRole } from '@/api';
-import { useMembers } from '../model/queries';
+import { useAttestMemberIdentity, useMembers } from '../model/queries';
 import { PanelBody } from './PanelState';
 
 /** Two-letter avatar initials derived from the email local part (e.g.
@@ -40,6 +47,28 @@ const ROLE_LABEL: Record<UserRole, string> = {
   security: 'Security',
   member: 'Member',
 };
+
+/** Best inline message for a failed attest action. */
+function attestErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 403) return 'You need the admin role to attest identities.';
+    if (error.status === 404) return 'That member no longer exists.';
+    if (error.status === 401) return 'Your session has expired. Sign in again.';
+    return error.displayMessage;
+  }
+  return "Couldn't attest this member. Please try again.";
+}
+
+/** Short date for the attested-at stamp, e.g. "Jul 18, 2026". */
+function attestedDate(iso: string): string {
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return iso;
+  return new Date(ts).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
 
 function RoleBadges({ roles }: { roles: UserRole[] }) {
   if (roles.length === 0) {
@@ -68,11 +97,61 @@ function MemberCell({ member }: { member: Member }) {
   );
 }
 
-function MembersTable({ members }: { members: Member[] }) {
+/** The attestation state + the admin attest action for one member row. */
+function AttestationCell({
+  member,
+  busy,
+  error,
+  onAttest,
+}: {
+  member: Member;
+  busy: boolean;
+  error: unknown | null;
+  onAttest: (member: Member) => void;
+}) {
+  const attested = member.email_attested_at !== null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {member.email_attested_at !== null ? (
+        <StatusDot tone="ok" label={`Attested ${attestedDate(member.email_attested_at)}`} />
+      ) : (
+        <StatusDot tone="muted" label="Unattested" />
+      )}
+      <button
+        type="button"
+        onClick={() => onAttest(member)}
+        disabled={busy}
+        aria-label={`${attested ? 'Re-attest' : 'Attest'} identity for ${member.email}`}
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+      >
+        {busy ? 'Attesting…' : attested ? 'Re-attest' : 'Attest identity'}
+      </button>
+      {error !== null ? (
+        <p role="alert" className="basis-full text-xs text-danger">
+          {attestErrorMessage(error)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function MembersTable({
+  members,
+  attestingId,
+  attestError,
+  onAttest,
+}: {
+  members: Member[];
+  attestingId: string | null;
+  attestError: { id: string; error: unknown } | null;
+  onAttest: (member: Member) => void;
+}) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse text-left text-sm">
-        <caption className="sr-only">Tenant members and their roles</caption>
+        <caption className="sr-only">
+          Tenant members, their roles, and their identity-attestation state
+        </caption>
         <thead>
           <tr className="border-b border-border text-xs uppercase tracking-wide text-foreground-muted">
             <th scope="col" className="px-4 py-2 font-medium">
@@ -80,6 +159,9 @@ function MembersTable({ members }: { members: Member[] }) {
             </th>
             <th scope="col" className="px-4 py-2 font-medium">
               Roles
+            </th>
+            <th scope="col" className="px-4 py-2 font-medium">
+              Identity attestation
             </th>
           </tr>
         </thead>
@@ -92,6 +174,14 @@ function MembersTable({ members }: { members: Member[] }) {
               <td className="px-4 py-3 align-middle">
                 <RoleBadges roles={member.role} />
               </td>
+              <td className="px-4 py-3 align-middle">
+                <AttestationCell
+                  member={member}
+                  busy={attestingId === member.id}
+                  error={attestError?.id === member.id ? attestError.error : null}
+                  onAttest={onAttest}
+                />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -102,7 +192,22 @@ function MembersTable({ members }: { members: Member[] }) {
 
 export function MembersPanel() {
   const query = useMembers();
+  const attest = useAttestMemberIdentity();
   const members = query.data?.items ?? [];
+
+  // Track which row the attest mutation targets so only it shows busy/error.
+  const [attestingId, setAttestingId] = useState<string | null>(null);
+  const [attestError, setAttestError] = useState<{ id: string; error: unknown } | null>(null);
+
+  const handleAttest = (member: Member) => {
+    setAttestingId(member.id);
+    setAttestError(null);
+    attest.mutate(member.id, {
+      onError: (error) => setAttestError({ id: member.id, error }),
+      onSuccess: () => setAttestError(null),
+      onSettled: () => setAttestingId(null),
+    });
+  };
 
   return (
     <section aria-labelledby="admin-members-heading" className="rounded-lg border border-border">
@@ -111,7 +216,9 @@ export function MembersPanel() {
           Members &amp; roles
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Read-only roster of this tenant&rsquo;s members and their RBAC roles.
+          This tenant&rsquo;s members and their RBAC roles. Attesting a member&rsquo;s identity
+          lets connector permission mirroring map source access to them (audited) — unattested
+          members never receive mirrored connector access.
         </p>
       </header>
       <PanelBody
@@ -123,7 +230,12 @@ export function MembersPanel() {
         onRetry={() => void query.refetch()}
         loadingRows={4}
       >
-        <MembersTable members={members} />
+        <MembersTable
+          members={members}
+          attestingId={attestingId}
+          attestError={attestError}
+          onAttest={handleAttest}
+        />
       </PanelBody>
     </section>
   );

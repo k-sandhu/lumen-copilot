@@ -35,6 +35,7 @@ dependencies = [
     # only by app/core/crypto.py — the single module that owns the cipher (ADR-0004
     # chokepoint); nothing else touches it.
     "cryptography==44.0.0",
+    "packaging==24.2",  # PEP-508 parsing/canonicalisation for governed sandbox packages (#457)
     # Ingestion parsers (CC-5 #21), pinned. Each is imported lazily inside its
     # helper in app/ingestion/parsers.py so the dependency stays localized.
     "pypdf==5.1.0",  # PDF text extraction

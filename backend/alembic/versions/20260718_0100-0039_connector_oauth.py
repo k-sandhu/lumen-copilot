@@ -19,8 +19,8 @@ No new tables; the RLS backstop on ``sources``/``users``/``secrets`` (0007)
 covers the new columns. Reversible (backend/AGENTS.md): ``downgrade`` restores
 the narrow CHECK and drops the columns.
 
-Revision ID: 0038_connector_oauth
-Revises: 0037_session_summaries
+Revision ID: 0039_connector_oauth
+Revises: 0038_sandbox_sessions
 Create Date: 2026-07-18 17:00:00+00:00
 """
 
@@ -31,8 +31,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0038_connector_oauth"
-down_revision: str | None = "0037_session_summaries"
+revision: str = "0039_connector_oauth"
+down_revision: str | None = "0038_sandbox_sessions"
 branch_labels: str | None = None
 depends_on: str | None = None
 

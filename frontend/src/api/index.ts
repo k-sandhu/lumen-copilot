@@ -25,6 +25,9 @@ export {
   getChatSession,
   updateChatSession,
   deleteChatSession,
+  getSandboxSession,
+  resetSandboxSession,
+  closeSandboxSession,
   listMessages,
   sendMessage,
   getSessionUsage,
@@ -45,6 +48,7 @@ export { suggestSearch, listRecentSearches, clearRecentSearches } from './sugges
 export { listAuditEvents } from './audit';
 export {
   listMembers,
+  attestMemberIdentity,
   getModelGovernance,
   getRiskTiers,
   getToolPolicy,
@@ -70,7 +74,7 @@ export {
 export type { BulkOrphanResult } from './admin';
 // Note: sources.ts also exports a `PageQuery` identical to documents.ts's; the
 // public one is already re-exported above, so we expose only the functions here.
-export { listSources, createSource, syncSource, deleteSource } from './sources';
+export { listSources, createSource, connectSource, syncSource, deleteSource } from './sources';
 export {
   listAssistants,
   createAssistant,
@@ -99,13 +103,8 @@ export { listRuns, getRun, resumeRun, cancelRun, rerouteRun } from './runs';
 export type { RunPageQuery } from './runs';
 export { listRunDeliveries, markRunDeliveryRead } from './runDeliveries';
 export type { RunDeliveryPageQuery } from './runDeliveries';
-export { getCodeRun } from './codeRuns';
-export {
-  listArtifacts,
-  getArtifact,
-  deleteArtifact,
-  fetchArtifactContent,
-} from './artifacts';
+export { getCodeRun, cancelCodeRun } from './codeRuns';
+export { listArtifacts, getArtifact, deleteArtifact, fetchArtifactContent } from './artifacts';
 export type { ArtifactContent } from './artifacts';
 export {
   listMcpServers,

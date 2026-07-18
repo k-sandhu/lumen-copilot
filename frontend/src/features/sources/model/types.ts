@@ -6,11 +6,23 @@
  */
 export type {
   Source,
+  WebSource,
+  GdriveSource,
   SourceList,
   SourceCreate,
+  WebSourceCreate,
+  GdriveSourceCreate,
   SourceStatus,
   SourceType,
   WebSourceMode,
   SourceConfig,
+  WebSourceConfig,
+  GdriveSourceConfig,
+  GdriveMyDriveConfig,
+  GdriveFolderConfig,
+  GdriveSharedDriveConfig,
+  ConnectedAccount,
+  SourceConnectResponse,
+  ConnectErrorReason,
 } from '@/api';
 export type { StatusTone } from '@/ui';

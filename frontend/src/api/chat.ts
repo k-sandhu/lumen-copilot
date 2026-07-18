@@ -26,6 +26,7 @@ import type {
   SendMessageRequest,
   SessionUsage,
   SendMessageResponse,
+  SandboxSession,
 } from './types';
 
 export interface PageParams {
@@ -71,6 +72,26 @@ export function updateChatSession(
 /** Delete a chat session and its messages. */
 export function deleteChatSession(sessionId: string): Promise<void> {
   return request<void>(`/chat/sessions/${sessionId}`, { method: 'DELETE' });
+}
+
+/** Inspect the reusable Python environment attached to one visible chat. */
+export function getSandboxSession(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SandboxSession> {
+  return request<SandboxSession>(`/chat/sessions/${sessionId}/sandbox`, { signal });
+}
+
+/** Destroy all mutable state and start a clean sandbox generation. */
+export function resetSandboxSession(sessionId: string): Promise<SandboxSession> {
+  return request<SandboxSession>(`/chat/sessions/${sessionId}/sandbox/reset`, {
+    method: 'POST',
+  });
+}
+
+/** Close and destroy the chat's reusable sandbox. */
+export function closeSandboxSession(sessionId: string): Promise<void> {
+  return request<void>(`/chat/sessions/${sessionId}/sandbox`, { method: 'DELETE' });
 }
 
 /** Message history for a session (oldest → newest). */

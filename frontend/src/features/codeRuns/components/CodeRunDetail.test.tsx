@@ -28,6 +28,7 @@ const SUCCEEDED: CodeRun = {
   duration_ms: 120,
   resource_usage: { peak_memory_bytes: 2048 },
   artifact_ids: [],
+  requested_packages: [],
   created_at: '2026-07-02T00:00:00Z',
 };
 
@@ -38,6 +39,7 @@ const DENIED: CodeRun = {
   stdout: '',
   stderr: '',
   artifact_ids: [],
+  requested_packages: [],
   created_at: '2026-07-02T00:00:00Z',
 };
 

@@ -750,7 +750,7 @@ class _FakeSeam:
         self.run_id = uuid.uuid4()
         self.submissions: list[str] = []
 
-    async def submit(self, *, code: str, timeout_s: int | None = None) -> object:
+    async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> object:
         from app.services.tools.types import SandboxRun
 
         self.submissions.append(code)

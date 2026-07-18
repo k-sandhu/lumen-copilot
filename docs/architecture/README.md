@@ -28,5 +28,6 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0017](0017-hierarchical-memory.md) | Hierarchical memory (org/assistant/user) with governed promotion | Accepted |
 | [0018](0018-sub-agent-orchestration.md) | Sub-agent orchestration (orchestrator–worker fan-out; feeds the research epic) | Accepted |
 | [0019](0019-connector-sdk-and-oauth.md) | Connector SDK, OAuth & ACL mirroring (first managed connector: Google Drive) | Accepted |
+| [0020](0020-reusable-root-sandbox-sessions.md) | Reusable root-capable Python sandbox sessions | Accepted |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.

@@ -56,8 +56,8 @@ function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
 }
 
 const members: Member[] = [
-  { id: 'u1', email: 'ada@acme.com', role: ['member'] },
-  { id: 'u2', email: 'grace@acme.com', role: ['admin'] },
+  { id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null },
+  { id: 'u2', email: 'grace@acme.com', role: ['admin'], email_attested_at: null },
 ];
 
 /**

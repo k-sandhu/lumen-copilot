@@ -19,6 +19,13 @@ interface ConfirmDialogProps {
   busy?: boolean;
   /** Label shown on the confirm button while `busy` (e.g. "Deleting…"). */
   busyLabel?: string;
+  /**
+   * A failure from the confirmed action, rendered INSIDE the dialog as a live
+   * alert so the outcome is never silently discarded (e.g. a 403 on an
+   * admin-gated delete). The caller keeps the dialog open on error and passes
+   * the mapped human message here; Cancel stays available.
+   */
+  error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -30,6 +37,7 @@ export function ConfirmDialog({
   confirmLabel,
   busy = false,
   busyLabel = 'Removing…',
+  error = null,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -51,6 +59,9 @@ export function ConfirmDialog({
       aria-modal="true"
       aria-labelledby={titleId}
       aria-describedby={descId}
+      // Programmatically focusable so the focus-trap's zero-focusable fallback
+      // (`container.focus()`) works while both buttons are disabled (`busy`).
+      tabIndex={-1}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !busy) onCancel();
@@ -64,6 +75,11 @@ export function ConfirmDialog({
           <p id={descId} className="text-sm text-foreground-muted">
             {description}
           </p>
+          {error ? (
+            <p role="alert" className="rounded-md bg-danger/10 px-2 py-1.5 text-sm text-danger">
+              {error}
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
           <button

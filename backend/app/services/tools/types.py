@@ -64,7 +64,7 @@ class SandboxRun:
     once a code run reaches a terminal :class:`~app.domain.entities.CodeRunStatus`:
     the ``code_run_id`` (for ``GET /code-runs/{id}`` inspection and the WS
     ``runId`` correlation), the terminal ``status``/``exit_code``/``duration_ms``,
-    the (output-size-capped, G7) ``stdout``/``stderr`` tails the tool summarises
+    the captured ``stdout``/``stderr`` tails the tool summarises
     back to the model, and the ids of any artifacts the run produced (collected via
     CC-B #208). It carries **no** runner/Docker wire object — the sandbox boundary
     exposes domain types only (ADR-0004).
@@ -77,6 +77,8 @@ class SandboxRun:
     stdout: str
     stderr: str
     artifact_ids: tuple[UUID, ...] = ()
+    sandbox_session_id: UUID | None = None
+    sandbox_generation: int | None = None
 
 
 @runtime_checkable
@@ -89,7 +91,7 @@ class SandboxToolRunner(Protocol):
     submit the model-authored ``code`` to the merged sandbox engine (#230), await
     the terminal :class:`~app.domain.entities.CodeRun`, and return a
     :class:`SandboxRun` summary — streaming ``code_output`` chunks and a terminal
-    ``code_result`` over the chat stream as the run progresses (the frozen ADR-0013
+    ``code_result`` over the chat stream as the run progresses (the ADR-0020
     contract). The real implementation is already scoped to the caller's tenant +
     owner (from the principal, never tool args), so tenant isolation (INV-1/INV-2)
     and the ``code_run.*`` audit (INV-6) hold by delegation; a test fake implements
@@ -102,13 +104,12 @@ class SandboxToolRunner(Protocol):
     seam is not wired for this session) is the tool's ``sandbox is None`` guard.
     """
 
-    async def submit(self, *, code: str, timeout_s: int | None = None) -> SandboxRun:
+    async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> SandboxRun:
         """Run ``code`` in the sandbox to a terminal status; return its outcome.
 
         Streams ``code_output`` chunks and a terminal ``code_result`` over the chat
-        stream, correlated by the ``runId`` (the ``code_run`` id). ``timeout_s`` is
-        the model's optional per-run wall-clock hint, clamped by the seam to the
-        configured ceiling (a hostile large value can never widen the cap, G6).
+        stream, correlated by the ``runId`` (the ``code_run`` id). Approved package
+        requirements are installed as root and persist in the chat's generation.
         """
         ...
 
@@ -210,7 +211,7 @@ class ToolDefinition:
     risk_tier: RiskTier = RiskTier.T0
     requires_approval: bool = False
     read_only: bool = True
-    timeout_seconds: float = 15.0
+    timeout_seconds: float | None = 15.0
     default_offered: bool = True
 
     def __post_init__(self) -> None:

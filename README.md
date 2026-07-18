@@ -13,7 +13,7 @@ Generic chatbots are unusable inside a regulated organization: they answer confi
 - **Custom assistants with governance** — saved, immutably versioned assistant configs (instructions, tool allow-list, knowledge scope, model, autonomy level) run on the same chat runtime; a shared assistant's scope can only *narrow* what its runner could already retrieve, never widen it.
 - **Tool platform + MCP** — first-party tools (retrieval, web search, Python execution, file write) carry T0–T3 risk tiers where consequential (T2+) tools structurally require approval (INV-7); per-tenant MCP server registration plugs external tools through the same governance and a single SSRF egress guard shared with the connector framework.
 - **Per-tenant encrypted secrets vault** — envelope-encrypted credentials (MCP auth, search keys) behind a write-only API: plaintext is reachable only in-process at invoke time, never via any HTTP route — an architecture test fails if a router ever imports the decryption path.
-- **Scheduled runs + sandboxed code execution** — Postgres-authoritative schedules fire headless runs via celery-redbeat; Python tool runs execute in single-use, network-none, read-only-rootfs, non-root containers launched by an isolated runner service — the only component holding a Docker socket (off by default).
+- **Scheduled runs + reusable code execution** — Postgres-authoritative schedules fire headless runs via celery-redbeat; each chat can reuse one writable, root-inside, network-none Python container launched by an isolated runner service — the only component holding a Docker socket (off by default).
 - **Eval from day one** — a golden-set evaluation harness scores retrieval recall, citation correctness, and groundedness on every offline test pass, and can run the same corpus against a live model.
 
 ## Architecture
@@ -51,7 +51,7 @@ docker compose exec backend python -m app.auth.seed   # dev user: dev@acme.test 
 
 Then open the app at **http://localhost:47180** (API docs at http://localhost:47181/docs). LLM calls route through OpenRouter — export `OPENROUTER_API_KEY` in your shell or set it in `.env`; everything else runs with the shipped local-dev defaults.
 
-Sandboxed code execution is off by default and gated behind a compose profile: `docker compose --profile sandbox up` additionally starts the `sandbox-runner`, which expects the runner/runtime images (`lumen-sandbox-runner`, `lumen-sandbox-py`) to be available to your Docker daemon — they are provisioned per-deploy and not published publicly. The default stack runs fully without them.
+Sandboxed code execution is off by default and gated behind a compose profile: `docker compose --profile sandbox up --build` builds and starts the in-repo `sandbox-runner`. Each chat gets one reusable, offline container; approved packages and workspace files persist until reset/close. Model code runs as root inside that container, but receives no host mounts, Docker socket, application secrets, or network route. The default stack runs fully without the runner.
 
 ## Evaluation & tests
 

@@ -9,11 +9,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ApiError,
   createChatSession,
+  closeSandboxSession,
   deleteChatSession,
   getChatSession,
+  getSandboxSession,
   listChatSessions,
   listMessages,
   sendMessage,
+  resetSandboxSession,
   updateChatSession,
 } from '@/api';
 import { setAccessToken, clearAccessToken } from '@/api';
@@ -68,7 +71,14 @@ describe('chat api boundary', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       json(
         {
-          message: { id: 'm', session_id: 's', role: 'user', content: 'hi', citations: [], created_at: 'x' },
+          message: {
+            id: 'm',
+            session_id: 's',
+            role: 'user',
+            content: 'hi',
+            citations: [],
+            created_at: 'x',
+          },
           stream_id: 'stream-1',
         },
         202,
@@ -108,8 +118,34 @@ describe('chat api boundary', () => {
   });
 
   it('DELETE issues a DELETE (204 → void)', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
     await expect(deleteChatSession('s')).resolves.toBeUndefined();
+    expect(lastCall(spy).init.method).toBe('DELETE');
+  });
+
+  it('gets, resets, and closes one chat sandbox through the typed boundary', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch');
+    spy.mockResolvedValueOnce(json({ status: 'not_created', enabled: true, root_access: true }));
+    expect((await getSandboxSession('s')).status).toBe('not_created');
+    expect(lastCall(spy).url).toContain('/chat/sessions/s/sandbox');
+
+    spy.mockResolvedValueOnce(
+      json({
+        status: 'active',
+        enabled: true,
+        root_access: true,
+        sandbox_session_id: 'sandbox-1',
+        generation: 1,
+      }),
+    );
+    expect((await resetSandboxSession('s')).generation).toBe(1);
+    expect(lastCall(spy).init.method).toBe('POST');
+    expect(lastCall(spy).url).toContain('/sandbox/reset');
+
+    spy.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(closeSandboxSession('s')).resolves.toBeUndefined();
     expect(lastCall(spy).init.method).toBe('DELETE');
   });
 

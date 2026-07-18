@@ -551,6 +551,62 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /chat/sessions/{sessionId}/sandbox:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    get:
+      operationId: getSandboxSession
+      summary: Inspect the reusable Python sandbox attached to this chat.
+      description: >
+        Returns the caller's chat-scoped sandbox state (ADR-0020). Before the first
+        run the state is `not_created`. Tenant/owner isolation follows the parent
+        chat: a foreign chat id is 404. Root access is contained inside the offline
+        sandbox and grants no host, engine-socket, application-secret, or network
+        authority.
+      tags: [chat]
+      responses:
+        "200":
+          description: The current sandbox state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: closeSandboxSession
+      summary: Close and destroy this chat's reusable Python sandbox.
+      description: >
+        Idempotently destroys the current container and marks the durable sandbox
+        session closed. A later run creates a fresh generation.
+      tags: [chat]
+      responses:
+        "204": { description: Closed (or no sandbox had been created). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /chat/sessions/{sessionId}/sandbox/reset:
+    parameters:
+      - { $ref: "#/components/parameters/SessionId" }
+    post:
+      operationId: resetSandboxSession
+      summary: Destroy this chat's Python sandbox and start a clean generation.
+      description: >
+        Removes all persisted files, processes, and installed packages from the
+        previous generation, then ensures an empty root-capable offline container.
+      tags: [chat]
+      responses:
+        "200":
+          description: The new active generation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SandboxSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /chat/sessions/{sessionId}/usage:
     parameters:
       - { $ref: "#/components/parameters/SessionId" }
@@ -979,13 +1035,11 @@ paths:
       operationId: getSandboxPolicy
       summary: The per-tenant code-execution sandbox policy (admin only).
       description: >
-        The caller's tenant's sandbox policy (issue #233): whether code execution is
-        `enabled` for the tenant, the package allow/deny lists, the outbound egress
-        posture (`egress_allowed` + `egress_allowlist`), and the runtime / memory /
-        quota caps. Every value is the EFFECTIVE policy — the per-tenant setting
-        already clamped to the deploy-wide `SANDBOX_*` ceiling (a per-tenant policy can
-        only NARROW, never widen: the cloud-metadata IP is never egress-allowlistable,
-        and a runtime/memory/quota above the config cap is clamped down). Absence of a
+        The caller's tenant's sandbox policy: whether code execution is `enabled` and
+        the enforced package allow/deny lists. ADR-0020 reusable sessions are always
+        offline and currently apply no automatic runtime/resource/quota ceilings. The
+        egress and cap fields remain compatibility-only values for older clients and
+        are not enforced by reusable sessions. Absence of a
         stored policy is deny-by-default — code execution stays DISABLED for the tenant
         (matching the deploy-wide kill-switch). Restricted to the `admin` role; any
         other role receives **403** (INV-5). Tenant-scoped (INV-1).
@@ -1002,16 +1056,13 @@ paths:
       operationId: updateSandboxPolicy
       summary: Set the per-tenant sandbox policy (admin only).
       description: >
-        Set the caller's tenant's sandbox policy (issue #233): enable/disable code
-        execution, the package allow/deny lists, the egress posture, and the runtime /
-        memory / quota caps. A tenant-scoped **T1** governance write (spec 0004 §2.5 —
+        Set the caller's tenant's sandbox enablement and package allow/deny lists. A
+        tenant-scoped **T1** governance write (spec 0004 §2.5 —
         "authorized owner; audited; no extra approval"): `admin`-only (**403**
-        otherwise, INV-5), audited as `sandbox_policy.updated` (INV-6). The write can
-        only NARROW the deploy-wide `SANDBOX_*` ceiling — a per-tenant runtime / memory
-        / quota above the config cap is clamped down, and the cloud-metadata IP is
-        stripped from any egress allowlist (never reachable). Changes take effect on
-        subsequent runs. An out-of-range value or unknown field is **422** (INV-8).
-        Returns the resulting effective policy (clamped).
+        otherwise, INV-5), audited as `sandbox_policy.updated` (INV-6). Compatibility
+        egress/cap fields are still accepted and clamped for old clients but are not
+        enforced by ADR-0020 reusable sessions. Changes take effect on subsequent
+        runs. An out-of-range value or unknown field is **422** (INV-8).
       tags: [admin]
       requestBody:
         required: true
@@ -2011,13 +2062,13 @@ paths:
       operationId: getCodeRun
       summary: Inspect a code run (status, code, output, timing, artifacts).
       description: >
-        Read-only inspection of one sandbox code run (ADR-0013 §4, E15-7 / E6-5).
+        Read-only inspection of one sandbox code run (ADR-0020, E15-7 / E6-5).
         Runs are **agent-mediated**: the `run_python` tool (CC-A #207, highest risk
-        tier, admin-gated #231) enqueues them off the request path (ADR-0013 §1/§4)
+        tier, admin-gated #231) enqueues them off the request path
         — there is deliberately **no** public "execute arbitrary code" endpoint here.
         This surface exists so the inspector UI (#232) and debuggable-runs (E6-5) can
         show what the agent ran and what it produced: the exact `code` executed, its
-        `status`, captured `stdout`/`stderr` (output-size-capped, §2/G7), `exit_code`,
+        `status`, captured `stdout`/`stderr`, `exit_code`,
         `duration_ms`, `resource_usage`, and the ids of any artifacts the run emitted
         (`artifact_ids`, collected via CC-B #208).
 
@@ -2034,6 +2085,30 @@ paths:
               schema: { $ref: "#/components/schemas/CodeRun" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /code-runs/{codeRunId}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/CodeRunId" }
+    post:
+      operationId: cancelCodeRun
+      summary: Cancel a running code execution and reset its sandbox generation.
+      description: >
+        Owner-only explicit recovery for an unbounded run. Cancellation destroys the
+        run's matching session generation and marks the run `killed`. If that
+        generation is still current, the sandbox generation advances so the next run
+        starts clean; cancelling an older run never destroys a newer reset generation.
+        A foreign run id is 404.
+      tags: [code-runs]
+      responses:
+        "200":
+          description: The resulting code-run record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeRun" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
 
@@ -3839,17 +3914,15 @@ components:
             Whether an invocation still needs approval. Set `false` (with `enabled`
             true) to pre-approve a write-tier tool so the approval gate executes it.
 
-    # --- Sandbox governance policy (per-tenant packages/egress/quotas, #233) --
+    # --- Sandbox governance policy (ADR-0020 enablement/packages + legacy fields) --
     SandboxPolicy:
       type: object
       additionalProperties: false
       description: >
-        The EFFECTIVE per-tenant code-execution sandbox policy (issue #233): the
-        tenant's stored settings already clamped to the deploy-wide `SANDBOX_*` ceiling
-        (a per-tenant policy can only NARROW, never widen). `enabled` is deny-by-default
+        The per-tenant code-execution sandbox policy. `enabled` is deny-by-default
         — a tenant with no stored policy has code execution DISABLED (and every value
-        is the config ceiling). The `*_ceiling` fields report the deploy-wide caps so
-        the admin console can show how far a setting may go.
+        is the config ceiling). ADR-0020 enforces enablement and package policy; egress
+        and cap fields remain compatibility-only and are not enforced for reusable sessions.
       required:
         [
           enabled,
@@ -3877,39 +3950,45 @@ components:
           type: array
           items: { type: string }
           description: >
-            Packages the sandbox may import/install for this tenant (an allowlist). An
-            empty list means the curated base image only (no extra packages).
+            Directly requested package distributions the sandbox may install for this
+            tenant (a top-level allowlist). Dependencies of an admitted requirement are
+            part of that grant. An empty list means the curated base image only.
         denied_packages:
           type: array
           items: { type: string }
-          description: Packages explicitly denied for this tenant (takes precedence over the allowlist).
+          description: Directly requested packages explicitly denied for this tenant (takes precedence over the allowlist).
         egress_allowed:
           type: boolean
+          deprecated: true
           description: >
-            Whether outbound network egress is permitted at all. Deny-by-default:
-            false ⇒ the run gets no network (fully isolated).
+            Compatibility-only ADR-0013 value. ADR-0020 model-code containers are
+            always offline regardless of this value.
         egress_allowlist:
           type: array
+          deprecated: true
           items: { type: string }
           description: >
-            The host:port egress targets a run may reach when `egress_allowed` is true.
-            The cloud-metadata IP is NEVER allowlistable (stripped server-side, G4).
+            Compatibility-only ADR-0013 value; ADR-0020 does not open these targets.
         max_runtime_s:
           type: integer
           minimum: 1
-          description: Per-run wall-clock cap (seconds), clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only value; reusable sessions have no automatic timeout.
         max_memory_mb:
           type: integer
           minimum: 1
-          description: Per-run memory cap (MiB), clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only value; reusable sessions have no memory cap.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          description: Aggregate wall-clock the tenant's runs may consume per day (seconds), clamped.
+          deprecated: true
+          description: Compatibility-only value; reusable sessions have no daily runtime cap.
         max_concurrency:
           type: integer
           minimum: 1
-          description: Max simultaneous runs for the tenant, clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only value; reusable sessions do not enforce this quota.
         is_default:
           type: boolean
           description: >
@@ -3936,11 +4015,9 @@ components:
       type: object
       additionalProperties: false
       description: >
-        Set the per-tenant sandbox policy (issue #233). All fields are required so the
-        stored policy is explicit. The write can only NARROW the deploy-wide `SANDBOX_*`
-        ceiling: a runtime / memory / quota above the config cap is clamped down, and
-        the cloud-metadata IP is stripped from `egress_allowlist` (never reachable). An
-        out-of-range value (a non-positive cap) is **422** (INV-8).
+        Set per-tenant enablement and package policy. All legacy fields remain required
+        for wire compatibility but ADR-0020 does not enforce egress or cap values. An
+        out-of-range compatibility value is still **422** (INV-8).
       required:
         [
           enabled,
@@ -3960,36 +4037,41 @@ components:
         allowed_packages:
           type: array
           items: { type: string, minLength: 1 }
-          description: Packages the sandbox may import/install (an allowlist; empty ⇒ base image only).
+          description: Directly requested packages allowed for install (top-level allowlist; empty ⇒ base image only).
         denied_packages:
           type: array
           items: { type: string, minLength: 1 }
-          description: Packages explicitly denied (takes precedence over the allowlist).
+          description: Directly requested packages explicitly denied (takes precedence over the allowlist).
         egress_allowed:
           type: boolean
-          description: Whether outbound network egress is permitted at all.
+          deprecated: true
+          description: Compatibility-only; ADR-0020 sessions are always offline.
         egress_allowlist:
           type: array
+          deprecated: true
           items: { type: string, minLength: 1 }
           description: >
-            The host:port egress targets a run may reach when `egress_allowed` is true.
-            The cloud-metadata IP is stripped server-side (never reachable, G4).
+            Compatibility-only; ADR-0020 does not open these targets.
         max_runtime_s:
           type: integer
           minimum: 1
-          description: Per-run wall-clock cap (seconds). Clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only; no automatic timeout is enforced.
         max_memory_mb:
           type: integer
           minimum: 1
-          description: Per-run memory cap (MiB). Clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only; no memory cap is enforced.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          description: Aggregate wall-clock per day (seconds). Clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only; no daily runtime cap is enforced.
         max_concurrency:
           type: integer
           minimum: 1
-          description: Max simultaneous runs for the tenant. Clamped to the config ceiling.
+          deprecated: true
+          description: Compatibility-only; no tenant concurrency quota is enforced.
 
     # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
     AutonomyPolicy:
@@ -5104,19 +5186,19 @@ components:
     CodeRunStatus:
       type: string
       description: >
-        Lifecycle of a sandbox code run (ADR-0013 §4 `code_runs.status`). `queued`
-        = enqueued, not yet started; `running` = executing in the ephemeral
-        container; `succeeded` = finished with exit code 0; `failed` = finished with
-        a non-zero exit code; `timeout` = wall-clock-killed (G6); `killed` =
-        OOM-killed / pids-capped (G6); `denied` = refused before execution (e.g.
-        code execution disabled for the tenant, or a policy/quota block — §6).
+        Lifecycle of a sandbox code run (ADR-0020). `queued` = enqueued, not yet
+        started; `running` = executing in the chat's reusable container; `succeeded`
+        = finished with exit code 0; `failed` = finished with a non-zero exit code;
+        `killed` = explicitly cancelled or terminated by the runtime; `denied` =
+        refused before execution. `timeout` remains readable for historical rows;
+        ADR-0020 adds no automatic execution timeout.
       enum: [queued, running, succeeded, failed, timeout, killed, denied]
 
     ResourceUsage:
       type: object
       additionalProperties: false
       description: >
-        Measured resource consumption for a finished run (ADR-0013 §4
+        Measured resource consumption for a finished run (ADR-0020
         `code_runs.resource_usage`). Fields are best-effort — omitted when the
         runtime did not report them; absent entirely while the run is queued/running.
       properties:
@@ -5135,32 +5217,74 @@ components:
         output_bytes:
           type: [integer, "null"]
           minimum: 0
-          description: Total captured stdout+stderr size in bytes (subject to the output-size cap, G7).
+          description: Total captured stdout+stderr size in bytes.
+
+    SandboxSessionStatus:
+      type: string
+      enum: [not_created, active, closed, error]
+      description: Lifecycle of the chat-scoped reusable sandbox (ADR-0020).
+
+    SandboxSession:
+      type: object
+      additionalProperties: false
+      required: [status, enabled, root_access]
+      description: >
+        The caller-visible state of one chat's reusable Python sandbox. Identifiers
+        are opaque and owner/tenant scoped. `root_access=true` means UID 0 inside the
+        isolated container only; model-authored execution remains network-none and
+        receives no host mounts, engine socket, application credentials, or host env.
+      properties:
+        status: { $ref: "#/components/schemas/SandboxSessionStatus" }
+        enabled:
+          type: boolean
+          description: Whether deploy and tenant policy currently admit code execution.
+        sandbox_session_id: { type: [string, "null"], format: uuid }
+        generation: { type: [integer, "null"], minimum: 1 }
+        image_digest: { type: [string, "null"] }
+        root_access: { type: boolean, const: true }
+        created_at: { type: [string, "null"], format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+        closed_at: { type: [string, "null"], format: date-time }
 
     CodeRun:
       type: object
       additionalProperties: false
       description: >
-        One agent-authored sandbox code run, for inspection/history (ADR-0013 §4,
+        One agent-authored sandbox code run, for inspection/history (ADR-0020,
         E15-7 / E6-5). Tenant- and owner-scoped (spec 0004 INV-1/INV-2). Runs are
         created by the `run_python` agent tool off the request path — never by a
-        public execute endpoint. `stdout`/`stderr` are output-size-capped (G7);
-        `exit_code`, `duration_ms`, `resource_usage`, and `artifact_ids` populate as
+        public execute endpoint. `exit_code`, `duration_ms`, `resource_usage`, and `artifact_ids` populate as
         the run finishes (null/empty while queued or running).
       required:
-        [id, status, code, stdout, stderr, artifact_ids, created_at]
+        [id, status, code, requested_packages, stdout, stderr, artifact_ids, created_at]
       properties:
         id: { type: string, format: uuid }
+        session_id:
+          type: [string, "null"]
+          format: uuid
+          description: Parent chat session id.
+        sandbox_session_id:
+          type: [string, "null"]
+          format: uuid
+          description: Opaque reusable sandbox id used for this run.
+        sandbox_generation:
+          type: [integer, "null"]
+          minimum: 1
+          description: Sandbox generation used for this run; changes after reset/cancel.
         status: { $ref: "#/components/schemas/CodeRunStatus" }
         code:
           type: string
           description: The exact Python source that was executed (inspectable, E15-7 / E6-5).
+        requested_packages:
+          type: array
+          description: Policy-admitted PEP-508 requirements requested for this execution.
+          items: { type: string }
         stdout:
           type: string
-          description: Captured standard output (output-size-capped; may be truncated, G7).
+          description: Captured standard output.
         stderr:
           type: string
-          description: Captured standard error (output-size-capped; may be truncated, G7).
+          description: Captured standard error.
         exit_code:
           type: [integer, "null"]
           description: >
@@ -5953,8 +6077,8 @@ tags:
     description: "Saved, governed chat configurations (ADR-0011) \u2014 create/edit drafts, publish\
   \ immutable versions, list versions, and roll back."
   - name: code-runs
-    description: "Inspect agent-authored sandbox code runs (ADR-0013) \u2014 status, code, output,\
-  \ timing, resource usage, and emitted artifacts. Read-only; runs are created by\
+    description: "Inspect and cancel reusable sandbox runs (ADR-0020) \u2014 status, code, output,\
+  \ timing, generation, resource usage, and emitted artifacts. Runs are created by\
   \ the `run_python` agent tool, not a public execute endpoint."
   - name: schedules
     description: "The caller's recurring assistant runs \u2014 create / edit / delete a schedule and\

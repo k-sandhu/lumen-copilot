@@ -4,14 +4,14 @@
  * data: the full record (code, stdout/stderr, timing, resource usage, artifacts)
  * lives in the query cache, fetched from GET /code-runs/{id}. No transport here.
  *
- * Conforms to the FROZEN contract (contracts/openapi.yaml §code-runs, ADR-0013).
+ * Conforms to the contract (contracts/openapi.yaml §code-runs, ADR-0020).
  * Negative paths surface as typed `ApiError`s the components branch on: a
  * non-owned / cross-tenant / unknown id → 404 (existence non-disclosure,
  * INV-1/INV-2); a malformed id → 422 (INV-8); a missing/expired token → 401
  * (INV-4).
  */
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
-import { getCodeRun } from '@/api';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { cancelCodeRun, getCodeRun } from '@/api';
 import type { CodeRun } from '@/api';
 import { isTerminalCodeRun } from './presentation';
 
@@ -41,6 +41,20 @@ export function useCodeRun(
       const status = query.state.data?.status;
       if (!status) return false;
       return isTerminalCodeRun(status) ? false : pollMs;
+    },
+  });
+}
+
+/** Explicit cancellation destroys the active container and returns the killed row. */
+export function useCancelCodeRun(id: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => cancelCodeRun(id),
+    onSuccess: (value) => {
+      client.setQueryData(codeRunKeys.detail(id), value);
+      if (value.session_id) {
+        void client.invalidateQueries({ queryKey: ['chat', 'sandbox', value.session_id] });
+      }
     },
   });
 }

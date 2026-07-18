@@ -3,13 +3,13 @@
 Makes the merged sandbox engine (#230) **user-facing** as a governed agent tool: it
 lets the assistant **write and run Python** to compute results and produce files
 (stories E15-7 / E3-7 — analyse a dataset reproducibly, build a deliverable, not just
-describe it). Given ``code`` (and an optional ``timeout_s`` wall-clock hint), the
+describe it). Given ``code`` and optional governed package requirements, the
 handler submits the code to the sandbox **service/Celery task** through the narrow
 :class:`~app.services.tools.types.SandboxToolRunner` seam (issue #231), awaits the
 terminal ``code_run``, and returns a :class:`ToolResult` summarising the exit status,
 the stdout/stderr tails, the produced artifact ids, and the ``code_run`` id (for
 ``GET /code-runs/{id}`` inspection). The seam streams ``code_output`` chunks and a
-terminal ``code_result`` over the same chat stream (the frozen ADR-0013 contract).
+terminal ``code_result`` over the same chat stream (the additive ADR-0020 contract).
 
 Governance — this is the most consequential tool the platform ships, so it is the
 **highest tier** the platform uses, ``read_only=False``, and **admin-gated**:
@@ -26,9 +26,9 @@ Governance — this is the most consequential tool the platform ships, so it is 
   it is a deliberate allow-list + admin decision (deny-by-default preserved).
 
 **Failure is a result, never a crash** (issue #207 §7). Every non-happy outcome —
-the seam is not wired for this session (``ctx.sandbox is None``), the tenant disabled
-code execution / is over quota (a ``denied`` run), a wall-clock ``timeout``, an
-OOM/pids ``killed``, a non-zero-exit ``failed``, or an unexpected error inside the
+the seam is not wired for this session (``ctx.sandbox is None``), code execution is
+disabled or a package is denied (a ``denied`` run), an explicitly cancelled
+``killed`` run, a non-zero-exit ``failed`` run, or an unexpected error inside the
 seam — is folded into an ``ok=False`` :class:`ToolHandlerResult` the model reads and
 can recover from (fix the code, re-run within the tool-turn budget). The real sandbox
 isolation is #230's live-gated coverage; this handler only submits and renders.
@@ -49,17 +49,17 @@ RUN_PYTHON_TOOL_NAME = "run_python"
 
 # Stable ``ok=False`` codes distinct from the generic runner codes, so the model (and
 # the trace) can tell *why* a run did not succeed — mirroring ``web_search``'s codes.
-#: Code execution is not enabled for this tenant/deploy, or the run was refused
-#: before execution (over quota) — the sandbox never launched (ADR-0013 §6).
+#: Code execution is not enabled for this tenant/deploy, or package policy refused
+#: the request before tenant code launched (ADR-0020 §3).
 ERROR_CODE_EXECUTION_DENIED = "code_execution_denied"
-#: The run exceeded its wall-clock budget and was killed (G6).
+#: Historical compatibility code for a timeout row (ADR-0020 adds no new timeouts).
 ERROR_CODE_EXECUTION_TIMEOUT = "code_execution_timeout"
-#: The run was OOM-/pids-killed, or exited non-zero (a run-level failure).
+#: The run was explicitly killed or exited non-zero (a run-level failure).
 ERROR_CODE_EXECUTION_FAILED = "code_execution_failed"
 
 # How much of each captured stream to surface back to the model. The full,
-# output-size-capped record is inspectable at GET /code-runs/{runId}; the tool reply
-# stays compact so the context budget is not blown by a chatty run.
+# captured record is inspectable at GET /code-runs/{runId}; only the model-facing
+# reply is tailed so a chatty run does not consume the conversation context.
 _TAIL_BUDGET = 2000
 
 
@@ -70,20 +70,15 @@ def _tail(text: str) -> str:
     return "…" + text[-_TAIL_BUDGET:]
 
 
-def _clamp_timeout(value: object) -> int | None:
-    """Coerce the model-supplied ``timeout_s`` to a positive int, or ``None`` (default).
-
-    A missing/garbage value becomes ``None`` so the seam applies the configured
-    wall-clock cap; the seam also clamps a supplied value to that ceiling, so a
-    hostile large value can never widen the cap (G6).
-    """
-    if not isinstance(value, int | float | str) or isinstance(value, bool):
+def _packages(value: object) -> tuple[str, ...] | None:
+    """Return a bounded list of non-empty package requirement strings, or invalid."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > 50:
         return None
-    try:
-        seconds = int(value)
-    except (TypeError, ValueError):
+    if any(not isinstance(item, str) or not item.strip() or len(item) > 300 for item in value):
         return None
-    return seconds if seconds > 0 else None
+    return tuple(item.strip() for item in value)
 
 
 def _rendered(run: SandboxRun) -> str:
@@ -115,6 +110,10 @@ def _payload(run: SandboxRun) -> dict[str, Any]:
         "exitCode": run.exit_code,
         "durationMs": run.duration_ms,
         "artifactIds": [str(a) for a in run.artifact_ids],
+        "sandboxSessionId": (
+            str(run.sandbox_session_id) if run.sandbox_session_id is not None else None
+        ),
+        "sandboxGeneration": run.sandbox_generation,
     }
 
 
@@ -153,16 +152,26 @@ async def _run_python(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
             summary="code execution unavailable",
         )
 
-    timeout_s = _clamp_timeout(args.get("timeout_s"))
+    packages = _packages(args.get("packages"))
+    if packages is None:
+        return ToolHandlerResult(
+            content=(
+                "The 'packages' argument must be an array of at most 50 non-empty "
+                "PEP-508 requirement strings."
+            ),
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="invalid packages",
+        )
 
     # Submit through the narrow seam. The seam owns the whole crash-safe, audited run
     # lifecycle (create the queued code_run linked to the session/message, submit to
     # the merged sandbox service/task, stream code_output/code_result, await the
     # terminal), so tenant isolation (INV-1/INV-2) and the code_run.* audit (INV-6)
-    # hold by delegation. A disabled/over-quota tenant comes back as a ``denied`` run,
+    # hold by delegation. A disabled/package-denied request comes back as a ``denied`` run,
     # NOT a raised exception — but a genuinely unexpected seam error must still be a
     # result, so the runner's bounded-execute wrapper (#207 §7) is the backstop.
-    run = await ctx.sandbox.submit(code=code, timeout_s=timeout_s)
+    run = await ctx.sandbox.submit(code=code, packages=packages)
 
     if run.status is CodeRunStatus.SUCCEEDED:
         return ToolHandlerResult(
@@ -175,7 +184,7 @@ async def _run_python(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
             payload=_payload(run),
         )
 
-    # Every non-success terminal (denied / timeout / killed / failed) is an ok=False
+    # Every non-success terminal (denied / historical timeout / killed / failed) is an ok=False
     # result the model can recover from — fix the code and re-run within the budget.
     return ToolHandlerResult(
         content=_rendered(run),
@@ -192,8 +201,10 @@ TOOLS: tuple[ToolDefinition, ...] = (
         description=(
             "Write and run Python in an isolated sandbox to compute a result or "
             "produce a file (e.g. analyse an uploaded dataset, build a chart or a "
-            "report). The code runs with no network access and a wall-clock/memory "
-            "budget; any files it writes to the output directory become downloadable "
+            "report). The chat reuses one isolated, writable environment across turns. "
+            "Code runs as root inside it, with no model-code network route, host mounts, "
+            "engine socket, or application secrets. Policy-admitted packages persist; "
+            "any files it writes to the output directory become downloadable "
             "artifacts. Returns the exit status, the stdout/stderr tails, and the ids "
             "of any artifacts produced. Use this to actually run analysis, not just "
             "describe it."
@@ -205,13 +216,14 @@ TOOLS: tuple[ToolDefinition, ...] = (
                     "type": "string",
                     "description": "The Python source to execute in the sandbox.",
                 },
-                "timeout_s": {
-                    "type": "integer",
+                "packages": {
+                    "type": "array",
                     "description": (
-                        "Optional wall-clock budget in seconds for this run "
-                        "(clamped to the configured ceiling)."
+                        "Optional PEP-508 package requirements to install as root in "
+                        "the reusable session, subject to the tenant package policy."
                     ),
-                    "minimum": 1,
+                    "maxItems": 50,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 300},
                 },
             },
             "required": ["code"],
@@ -227,6 +239,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
         # allow-list. Offered only via an assistant allow-list, and only when the
         # tenant/deploy enabled code execution (SANDBOX_ENABLED / the #233 enable).
         default_offered=False,
+        # ADR-0020 deliberately has no automatic execution timeout. Explicit
+        # cancellation/reset is the recovery path for an unbounded run.
+        timeout_seconds=None,
     ),
 )
 

@@ -71,6 +71,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "run_steps",
     "schedules",
     "code_runs",
+    "sandbox_sessions",
     "mcp_servers",
     "tenant_tool_policy",
     "tenant_sandbox_policy",
@@ -121,7 +122,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0038_connector_oauth"]
+assert list(script.get_heads()) == ["0039_connector_oauth"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -215,6 +216,32 @@ def test_migration_chain_is_linear_single_head() -> None:
     llm_usage = script.get_revision("0032_llm_usage")
     assert llm_usage is not None
     assert llm_usage.down_revision == "0031_toolinv_ordinal_msg_idx"
+    sandbox_sessions = script.get_revision("0038_sandbox_sessions")
+    assert sandbox_sessions is not None
+    assert sandbox_sessions.down_revision == "0037_session_summaries"
+
+
+def test_offline_reusable_sandbox_session_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0038 creates the scoped lifecycle table and links each code run generation."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0037_session_summaries:0038_sandbox_sessions", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table sandbox_sessions" in up
+    assert "uq_sandbox_sessions_tenant_chat" in up
+    assert "ck_sandbox_sessions_generation" in up
+    assert "add column requested_packages" in up
+    assert "add column sandbox_session_id" in up
+    assert "add column sandbox_generation" in up
+    assert "create policy rls_sandbox_sessions" in up
+
+    command.downgrade(cfg, "0038_sandbox_sessions:0037_session_summaries", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop policy if exists rls_sandbox_sessions" in down
+    assert "drop table sandbox_sessions" in down
 
 
 def test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke(

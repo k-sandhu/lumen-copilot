@@ -2,18 +2,18 @@
 
 The thin Celery wrapper around the sandbox execution core
 (:meth:`app.sandbox.service.SandboxService.execute`), mirroring ``ingest`` /
-``run_assistant`` (ADR-0013 §4): the ``run_python`` tool (#231) / an internal caller
+``run_assistant`` (ADR-0020 §4): the ``run_python`` tool (#231) / an internal caller
 creates a ``queued`` :class:`~app.domain.entities.CodeRun` and enqueues
 ``lumen.run_sandbox(code_run_id, tenant_id)``; the agentic loop never runs code
 inline. **The only place the sandbox task is defined or enqueued** (ADR-0004: tasks
 live in ``tasks/``).
 
 The worker calls the dedicated ``sandbox-runner`` service over its internal HTTP API
-(ADR-0013 §1) — it holds **no** Docker socket. Runs on a fresh event loop via
+(ADR-0020 §2) — it holds **no** Docker socket. Runs on a fresh event loop via
 ``run_task`` (engine disposed after each run so no pooled connection outlives its
 loop, #140).
 
-Crash safety (ADR-0013 §5, INV-8): the execution core always writes a terminal
+Crash safety (ADR-0020 §4, INV-8): the execution core always writes a terminal
 ``code_runs`` status — a defect that escapes it is caught here and the run is failed,
 never left ``running``. Ids are passed as strings (Celery serializes JSON, not UUIDs)
 and parsed back to ``UUID``.
@@ -82,7 +82,7 @@ def run_sandbox(self: object, code_run_id: str, tenant_id: str) -> dict[str, obj
     :func:`app.tasks.runner.run_task`. The core is crash-safe (it writes a terminal
     status on any failure), so the task does not retry: a run's failure is a
     **queryable terminal** (``status=failed``/``timeout``/``killed``/``denied``), not a
-    redelivered message (ADR-0013 §5 — the dead-letter is a row). Returns the terminal.
+    redelivered message (ADR-0020 §4 — the dead-letter is a row). Returns the terminal.
     """
     log = structlog.get_logger(__name__)
     cid = UUID(code_run_id)
