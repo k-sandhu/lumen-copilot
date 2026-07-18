@@ -4637,3 +4637,85 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
     assert not any(
         e["type"] == "event" and e.get("name") == "narration" for e in envs
     )
+
+
+# --- The cache-hit KPI (#411 / ADR-0016 §2.6) --------------------------------
+#
+# One ``llm.cache_kpi`` log event per SUCCESSFUL answer — every terminal,
+# ``ask_user`` included, zero-usage included (``usage_reported=false``, null
+# ratio) — so the series is a denominator over all answers, never a biased
+# selection that drops clarifying answers or usage-less routes.
+
+
+def _cache_kpi_events(cap: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [e for e in cap if e["event"] == "llm.cache_kpi"]
+
+
+async def test_cache_kpi_emitted_once_with_ratio(ctx: _Ctx) -> None:
+    from structlog.testing import capture_logs
+
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(
+                        prompt_tokens=100,
+                        completion_tokens=5,
+                        total_tokens=105,
+                        cached_prompt_tokens=40,
+                        cache_write_tokens=10,
+                    ),
+                ),
+            ]
+        ]
+    )
+    with capture_logs() as cap:
+        _sleeps, recorder = _sleep_recorder()
+        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    kpis = _cache_kpi_events(cap)
+    assert len(kpis) == 1
+    assert kpis[0]["cached_prompt_tokens"] == 40
+    assert kpis[0]["prompt_tokens"] == 100
+    assert kpis[0]["cache_hit_ratio"] == 0.4
+    assert kpis[0]["cache_write_tokens"] == 10
+    assert kpis[0]["usage_reported"] is True
+
+
+async def test_cache_kpi_emitted_on_ask_user_terminal(ctx: _Ctx) -> None:
+    """The clarifying-question terminal is a successful answer and must appear
+    in the KPI series (the round-1 review's major: the early return skipped
+    the only log site, silently excluding every ask_user answer)."""
+    from structlog.testing import capture_logs
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(tool_calls=(_ask_user_call(),), finish_reason="tool_calls")]]
+    )
+    with capture_logs() as cap:
+        _sleeps, recorder = _sleep_recorder()
+        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    done = envs[-1]
+    assert done["type"] == "done"
+    assert done["data"]["finishReason"] == "ask_user"  # type: ignore[index]
+    assert len(_cache_kpi_events(cap)) == 1
+
+
+async def test_cache_kpi_emitted_without_usage_as_unreported(ctx: _Ctx) -> None:
+    """A route that reports no usage still emits — zeros, a null ratio, and
+    ``usage_reported=false`` — never a silent gap in the series."""
+    from structlog.testing import capture_logs
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    with capture_logs() as cap:
+        _sleeps, recorder = _sleep_recorder()
+        envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    kpis = _cache_kpi_events(cap)
+    assert len(kpis) == 1
+    assert kpis[0]["prompt_tokens"] == 0
+    assert kpis[0]["cache_hit_ratio"] is None
+    assert kpis[0]["usage_reported"] is False

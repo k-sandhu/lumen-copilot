@@ -995,34 +995,55 @@ async def test_live_embed_smoke(_live_gateway: LLMGateway) -> None:
 
 @live
 @pytest.mark.live
-async def test_live_prompt_cache_second_turn_reads_cache(_live_gateway: LLMGateway) -> None:
-    """#411 AC-1: two identical-prefix tool turns against a real Anthropic
-    model — the second turn's usage must report cache reads (or, at minimum,
-    the first must report a cache write that the second does not repeat).
+async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway) -> None:
+    """#411 AC-1 against a REAL Anthropic route: a growing tool transcript —
+    the exact append-only shape the runtime's answer loop sends — where each
+    call after the first must report NONZERO cache reads (strict; no
+    disjunction). Three calls prove the write→read→write chain:
 
-    The prefix must clear Anthropic's ~1024-token minimum cacheable size, so
-    the system message is padded well past it. Costs two small haiku calls;
-    gated like every live smoke (RUN_LIVE=1 + key).
+    1. ``[system, question]`` — writes the prefix through the question mark;
+    2. ``+ [assistant(tool_calls), tool(result)]`` — must READ call 1's
+       prefix, then write through the tool result;
+    3. ``+ [assistant(tool_calls), tool(result 2)]`` — must read AT LEAST as
+       much as call 2 did (call 2's mark covered more blocks).
+
+    The padded system message clears the model's minimum cacheable prefix
+    with a wide margin (Haiku-class routes currently require up to 4,096
+    tokens; the assertion demands >6,000 so provider-tokenizer drift cannot
+    quietly fall below the threshold). Gated like every live smoke
+    (RUN_LIVE=1 + key); costs three small haiku calls.
     """
-    from app.domain.llm import ToolSpec
+    from app.domain.llm import ToolCall, ToolSpec
 
     filler = " ".join(
         f"Fact {i}: the lumen copilot cache smoke sentence number {i} pads the prefix."
-        for i in range(220)
+        for i in range(600)
     )
-    messages = [
+    base = [
         ChatMessage(role=Role.SYSTEM, content=f"You answer tersely. Context: {filler}"),
         ChatMessage(role=Role.USER, content="Reply with the single word: pong"),
     ]
     tools = (
         ToolSpec(
-            name="noop",
-            description="never call this",
-            parameters={"type": "object", "properties": {}},
+            name="lookup",
+            description="returns stored notes",
+            parameters={"type": "object", "properties": {"key": {"type": "string"}}},
         ),
     )
 
-    async def _turn_usage() -> TokenUsage | None:
+    def _tool_exchange(call_id: str, result: str) -> list[ChatMessage]:
+        return [
+            ChatMessage(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=(ToolCall(id=call_id, name="lookup", arguments={"key": "n"}),),
+            ),
+            ChatMessage(
+                role=Role.TOOL, content=result, tool_call_id=call_id, name="lookup"
+            ),
+        ]
+
+    async def _turn_usage(messages: list[ChatMessage]) -> TokenUsage:
         usage: TokenUsage | None = None
         async for ev in _live_gateway.stream_tools(
             messages,
@@ -1032,16 +1053,19 @@ async def test_live_prompt_cache_second_turn_reads_cache(_live_gateway: LLMGatew
             cache_key="lumen-cache-smoke",
         ):
             usage = ev.usage or usage
+        assert usage is not None, "live route reported no usage"
         return usage
 
-    first = await _turn_usage()
-    second = await _turn_usage()
-    assert first is not None and second is not None
-    assert first.prompt_tokens > 1024  # the prefix actually clears the minimum
-    # AC-1: the second turn hits the cache written by the first.
-    assert second.cached_prompt_tokens > 0 or (
-        first.cache_write_tokens > 0 and second.cache_write_tokens == 0
-    )
+    first = await _turn_usage(base)
+    grown = [*base, *_tool_exchange("t1", "note: the answer is pong. " * 40)]
+    second = await _turn_usage(grown)
+    third = await _turn_usage([*grown, *_tool_exchange("t2", "second note. " * 40)])
+
+    assert first.prompt_tokens > 6000  # wide margin over the cacheable minimum
+    # AC-1, strict: every call after the first READS the previous call's write.
+    assert second.cached_prompt_tokens > 0
+    assert third.cached_prompt_tokens >= second.cached_prompt_tokens
+    assert third.cached_prompt_tokens > 0
 
 
 # --- #94 regression: the gateway's client-close teardown is real ------------

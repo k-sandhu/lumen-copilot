@@ -33,6 +33,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.core.errors import AppError, DependencyError, ValidationError
@@ -107,17 +108,29 @@ def _retry_after_hint(exc: Exception) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
-def _cache_family(model: str | None) -> str | None:
-    """The provider cache family for a model id — resolved INSIDE the gateway.
+def _cache_family(model: str | None, api_base: str | None) -> str | None:
+    """The provider cache family for a resolved route — decided INSIDE the gateway.
 
     The capability map lives here (ADR-0016 §2.4 / #427 item 14: no provider
-    categories leak above ``llm/``): "anthropic" ⇒ Anthropic-style
-    ``cache_control`` breakpoints; "openai" ⇒ OpenAI-style implicit prefix
-    caching steered by ``prompt_cache_key``; ``None`` ⇒ no cache directives at
-    all (AC-3: an unsupported provider behaves exactly as before #411).
-    Heuristic over the routed id (which may carry gateway prefixes like
-    ``openrouter/``) — conservative: unknown families get nothing.
+    categories leak above ``llm/``), keyed off the resolved route the gateway
+    receives per call — (model id, api_base). The fail-safe comes first: any
+    custom ``api_base`` that is not the known OpenRouter host gets NO directives
+    at all — a tenant provider on a strict OpenAI-compatible endpoint must never
+    receive vendor cache fields merely because its model NAME contains
+    ``claude`` or ``gpt-`` (AC-3). ``None`` api_base is the gateway default:
+    LiteLLM's native OpenRouter route. Then the family heuristic over the
+    routed id: "anthropic" ⇒ ``cache_control`` breakpoints; "openai" ⇒ implicit
+    prefix caching steered by ``prompt_cache_key``; anything unrecognized ⇒
+    ``None`` — conservative both ways (an alias with no family substring gets
+    no steering rather than a guessed one).
     """
+    if api_base is not None:
+        try:
+            host = (urlparse(api_base).hostname or "").lower()
+        except ValueError:
+            return None
+        if host != "openrouter.ai" and not host.endswith(".openrouter.ai"):
+            return None
     if not model:
         return None
     lowered = model.lower()
@@ -137,13 +150,17 @@ def _apply_cache_directives(
     mirror keeps matching the undecorated shape (the ~20 tokens of directive
     framing sit comfortably inside the assembler's 1024-token safety margin).
     Two breakpoints (limit is four): the FIRST message (the stable
-    system/tools prefix boundary) and the SECOND-TO-LAST (the moving per-turn
-    mark — everything up to and including the previous turn's tool results
-    caches; only the newest message is fresh). Only plain-string contents can
-    carry the mark; when the second-to-last message is a tool-call-only
-    assistant turn (content ``""``) the mark walks BACK to the nearest
-    wrappable message so a single-tool turn still refreshes its prefix mark
-    instead of dropping it. Non-Anthropic families return the wire untouched.
+    system/tools prefix boundary) and the LAST cacheable block — the moving
+    mark. Marking the LAST block is what makes the loop cache-first: the mark
+    WRITES the entire request prefix this call, and the next call — append-only
+    by construction (§2.2) — READS it back as its longest cached prefix, then
+    writes its own mark one exchange further. Consecutive calls differ by at
+    most one assistant turn plus a bounded tool batch (≤16, #412), safely
+    inside Anthropic's ~20-block backward window from the new mark. Only
+    plain-string contents can carry a mark, so a tool-call-only assistant tail
+    (content ``""``) walks back to the newest wrappable block (in the runtime's
+    shapes: the latest tool result, or the current question on the first call).
+    Non-Anthropic families return the wire untouched.
     """
     if family != "anthropic" or not wire:
         return wire
@@ -153,7 +170,7 @@ def _apply_cache_directives(
         return isinstance(content, str) and bool(content)
 
     anchors = {0} if _wrappable(0) else set()
-    mark = next((i for i in range(len(wire) - 2, 0, -1) if _wrappable(i)), None)
+    mark = next((i for i in range(len(wire) - 1, 0, -1) if _wrappable(i)), None)
     if mark is not None:
         anchors.add(mark)
     for i in anchors:
@@ -503,7 +520,9 @@ class LLMGateway:
         # session id) via extra_body passthrough. Unknown families — and a
         # disabled kill-switch — send the exact pre-#411 wire (AC-3).
         family = (
-            _cache_family(model_id) if self._settings.chat_prompt_cache_enabled else None
+            _cache_family(model_id, api_base)
+            if self._settings.chat_prompt_cache_enabled
+            else None
         )
         if family == "openai" and cache_key:
             extra["extra_body"] = {"prompt_cache_key": cache_key}

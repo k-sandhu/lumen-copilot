@@ -295,6 +295,29 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
     return total
 
 
+def _log_cache_kpi(answer_usage: _Usage) -> None:
+    """Emit the per-answer cache-hit KPI (#411 / ADR-0016 §2.6) — exactly once
+    per SUCCESSFUL answer, on every terminal (``ask_user`` included). A route
+    that reported no usage still emits, with ``usage_reported=false`` and a
+    null ratio — the series must be a denominator over all answers, never a
+    selection that silently drops the routes operators most need to see.
+    Counts only; no prompt text, ids, or secrets.
+    """
+    reported = bool(answer_usage.prompt_tokens)
+    log.info(
+        "llm.cache_kpi",
+        cached_prompt_tokens=answer_usage.cached_prompt_tokens,
+        prompt_tokens=answer_usage.prompt_tokens,
+        cache_hit_ratio=(
+            round(answer_usage.cached_prompt_tokens / answer_usage.prompt_tokens, 3)
+            if reported
+            else None
+        ),
+        cache_write_tokens=answer_usage.cache_write_tokens,
+        usage_reported=reported,
+    )
+
+
 class ChatRuntime:
     """Runs one grounded answer and streams it over the backplane.
 
@@ -1137,6 +1160,7 @@ class ChatRuntime:
             )
             await self._emit_ask_user(state, assistant_message_id, ask_question)
             answer_usage = _answer_usage_totals(route_state, usage)
+            _log_cache_kpi(answer_usage)
             return _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
@@ -1306,18 +1330,7 @@ class ChatRuntime:
         )
 
         answer_usage = _answer_usage_totals(route_state, usage)
-        # The cache-hit KPI (#411 / ADR-0016 §2.6): per-answer cached/total
-        # input ratio, from the same counters the llm_usage rows persist.
-        if answer_usage.prompt_tokens:
-            log.info(
-                "llm.cache_kpi",
-                cached_prompt_tokens=answer_usage.cached_prompt_tokens,
-                prompt_tokens=answer_usage.prompt_tokens,
-                cache_hit_ratio=round(
-                    answer_usage.cached_prompt_tokens / answer_usage.prompt_tokens, 3
-                ),
-                cache_write_tokens=answer_usage.cache_write_tokens,
-            )
+        _log_cache_kpi(answer_usage)
         return _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
