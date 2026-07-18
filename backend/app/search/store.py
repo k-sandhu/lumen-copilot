@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -63,6 +64,11 @@ class IndexedChunk:
     ingested before embeddings existed) indexes WITHOUT the ``knn_vector`` field
     — it stays lexically searchable via BM25 and simply never matches the kNN
     leg, rather than being invisible or blocking the write.
+
+    The four ACL-mirror fields (ADR-0019 §2) are projected from the owning
+    document row so the engine-side mode-split filter
+    (:class:`~app.search.filters.SearchAllowFilter`) can evaluate them per
+    chunk; defaults are the non-enforced upload/``web`` shape.
     """
 
     chunk_id: UUID
@@ -75,6 +81,10 @@ class IndexedChunk:
     embedding: tuple[float, ...] | None
     char_start: int
     char_end: int
+    acl_enforced: bool = False
+    acl_principals: tuple[str, ...] = ()
+    acl_synced_at: datetime | None = None
+    acl_scope_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +129,15 @@ def _index_body(dimensions: int) -> dict[str, Any]:
                 },
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
+                # Mirrored source ACL (ADR-0019 §2) — the engine half of the
+                # mode-split predicate. ``acl_enforced`` is an explicit boolean
+                # because an empty keyword array is indexed like a missing
+                # field and cannot discriminate "not a connector document"
+                # from "connector document nobody may see".
+                "acl_enforced": {"type": "boolean"},
+                "acl_principals": {"type": "keyword"},
+                "acl_synced_at": {"type": "date"},
+                "acl_scope_ids": {"type": "keyword"},
             },
         },
     }
@@ -164,9 +183,7 @@ def _hybrid_body(
     """
     filters: list[dict[str, Any]] = list(allow.to_engine_filter())
     if collection_ids:
-        filters.append(
-            {"terms": {"collection_id": sorted(str(c) for c in collection_ids)}}
-        )
+        filters.append({"terms": {"collection_id": sorted(str(c) for c in collection_ids)}})
     if document_ids:
         filters.append({"terms": {"document_id": sorted(str(d) for d in document_ids)}})
     return {
@@ -291,9 +308,7 @@ class OpenSearchStore:
                 path=path,
                 status=response.status_code,
             )
-            raise DependencyError(
-                "The search engine rejected the request.", code="search_error"
-            )
+            raise DependencyError("The search engine rejected the request.", code="search_error")
         payload: dict[str, Any] = response.json()
         return payload
 
@@ -325,9 +340,7 @@ class OpenSearchStore:
                 ok_statuses=frozenset({200, 400}),
             )
         elif head.status_code != 200:
-            raise DependencyError(
-                "The search engine is unreachable.", code="search_unavailable"
-            )
+            raise DependencyError("The search engine is unreachable.", code="search_unavailable")
         # PUT of a search pipeline is a full upsert — idempotent by nature.
         await self._request(
             "PUT", f"/_search/pipeline/{self._pipeline}", json_body=_pipeline_body()
@@ -390,6 +403,17 @@ class OpenSearchStore:
                 "text": chunk.text,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
+                # Mirrored source ACL (ADR-0019 §2): always written explicitly
+                # so an enforced document's chunks can never fall back to the
+                # non-enforced branch by omission. ``acl_synced_at`` is null
+                # for never-synced/stale-stamped state — the freshness range
+                # then never admits it (fail closed).
+                "acl_enforced": chunk.acl_enforced,
+                "acl_principals": sorted(chunk.acl_principals),
+                "acl_synced_at": (
+                    chunk.acl_synced_at.isoformat() if chunk.acl_synced_at is not None else None
+                ),
+                "acl_scope_ids": sorted(chunk.acl_scope_ids),
             }
             # A pending-embedding chunk indexes without the knn_vector field —
             # BM25-searchable now, kNN-matchable once re-synced with a vector.
@@ -430,6 +454,56 @@ class OpenSearchStore:
                         ]
                     }
                 }
+            },
+            params=params,
+        )
+
+    async def stamp_acl_stale(
+        self,
+        *,
+        tenant_id: UUID,
+        scope_ids: Sequence[str] | None = None,
+        document_ids: Sequence[UUID] | None = None,
+        refresh: bool = False,
+    ) -> None:
+        """Null ``acl_synced_at`` on matching chunk docs (ADR-0019 §3 cascade).
+
+        The engine-side propagation of the framework's Postgres stale-stamp:
+        an update-by-query (tenant-scoped, routed) sets ``acl_synced_at`` to
+        null via script, so the mode-split filter's freshness range denies the
+        stamped documents at the engine too — not just via the hydration
+        re-check backstop. Selectors: ``scope_ids`` (terms on the persisted
+        ``acl_scope_ids`` chains) and/or ``document_ids`` (the ids the
+        framework's transaction already stamped). At least one selector is
+        required — a bare tenant-wide stamp is unrepresentable (fail closed).
+        Mirrors :meth:`delete_document`'s tenant-term + routing shape.
+        """
+        selectors: list[dict[str, Any]] = []
+        if scope_ids:
+            selectors.append({"terms": {"acl_scope_ids": sorted(scope_ids)}})
+        if document_ids:
+            selectors.append({"terms": {"document_id": sorted(str(d) for d in document_ids)}})
+        if not selectors:
+            raise ValueError("stamp_acl_stale requires scope_ids and/or document_ids")
+        params: dict[str, str] = {"routing": str(tenant_id)}
+        if refresh:
+            params["refresh"] = "true"
+        await self._request(
+            "POST",
+            f"/{self._index}/_update_by_query",
+            json_body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"tenant_id": str(tenant_id)}},
+                            {"bool": {"should": selectors, "minimum_should_match": 1}},
+                        ]
+                    }
+                },
+                "script": {
+                    "source": "ctx._source.acl_synced_at = null",
+                    "lang": "painless",
+                },
             },
             params=params,
         )

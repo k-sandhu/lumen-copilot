@@ -56,7 +56,12 @@ class IndexSyncResult:
 
 
 def _to_indexed(document: Document, chunks: list[Chunk]) -> list[IndexedChunk]:
-    """Project db rows into the engine's write shape (ids + text + vector + spans)."""
+    """Project db rows into the engine's write shape (ids + text + vector + spans).
+
+    The four ACL-mirror fields (ADR-0019 §2) ride along from the document row —
+    Postgres is authoritative, so a re-sync/reindex always converges the engine
+    onto the current mirrored state (incl. a stale-stamped ``acl_synced_at``).
+    """
     return [
         IndexedChunk(
             chunk_id=chunk.id,
@@ -69,6 +74,10 @@ def _to_indexed(document: Document, chunks: list[Chunk]) -> list[IndexedChunk]:
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
+            acl_enforced=document.acl_enforced,
+            acl_principals=document.acl_principals or (),
+            acl_synced_at=document.acl_synced_at,
+            acl_scope_ids=document.acl_scope_ids or (),
         )
         for chunk in chunks
     ]
@@ -111,13 +120,38 @@ async def sync_document_index_async(
     active = store or OpenSearchStore.from_settings(settings)
     try:
         await active.ensure_index()
-        await active.delete_document(
-            tenant_id=tenant_id, document_id=document_id, refresh=refresh
-        )
+        await active.delete_document(tenant_id=tenant_id, document_id=document_id, refresh=refresh)
         if document is None or not chunks:
             return IndexSyncResult(document_id, 0, deleted=True)
         await active.upsert_chunks(_to_indexed(document, chunks), refresh=refresh)
         return IndexSyncResult(document_id, len(chunks), deleted=False)
+    finally:
+        if owns_store:
+            await active.aclose()
+
+
+async def stamp_index_acl_stale_async(
+    tenant_id: UUID,
+    document_ids: list[UUID],
+    *,
+    settings: Settings,
+    store: OpenSearchStore | None = None,
+) -> None:
+    """Propagate a framework ACL stale-stamp to the search index (ADR-0019 §3).
+
+    Update-by-query on the stamped documents' chunk docs (``acl_synced_at →
+    null``) so the engine-side freshness range denies them in the same run —
+    the Postgres hydration re-check remains the enforcing backstop if this
+    write fails. **Best-effort like every derived-index write**: a
+    :class:`DependencyError` is the caller's to log-and-continue (the stamp is
+    already durable in Postgres, and the idempotent reindex repairs the gap).
+    """
+    if not document_ids:
+        return
+    owns_store = store is None
+    active = store or OpenSearchStore.from_settings(settings)
+    try:
+        await active.stamp_acl_stale(tenant_id=tenant_id, document_ids=document_ids)
     finally:
         if owns_store:
             await active.aclose()

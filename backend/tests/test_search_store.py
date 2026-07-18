@@ -65,9 +65,7 @@ def _store(handler: httpx.MockTransport) -> OpenSearchStore:
         base_url="http://opensearch.test:9200",
         index="lumen-test",
         dimensions=_DIMS,
-        client=httpx.AsyncClient(
-            base_url="http://opensearch.test:9200", transport=handler
-        ),
+        client=httpx.AsyncClient(base_url="http://opensearch.test:9200", transport=handler),
     )
 
 
@@ -87,19 +85,25 @@ def test_allow_filter_rejects_empty_owner_set() -> None:
 
 
 def test_engine_filter_shape_owner_only() -> None:
-    """Without grants: exactly [tenant term, owner-should] — deny-by-default."""
+    """Without grants: [tenant term, mode-split bool] — deny-by-default.
+
+    Since ADR-0019 §2 the second clause is the exclusive mode split; the
+    non-enforced branch carries exactly the pre-0019 owner-should terms (the
+    full split shape is pinned in ``tests/test_acl_mode_split.py``).
+    """
     tenant, owner = uuid.uuid4(), uuid.uuid4()
-    clauses = SearchAllowFilter(
-        tenant_id=tenant, owner_ids=frozenset({owner})
-    ).to_engine_filter()
+    clauses = SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({owner})).to_engine_filter()
     assert clauses[0] == {"term": {"tenant_id": str(tenant)}}
-    should = clauses[1]["bool"]["should"]  # type: ignore[index]
+    not_enforced, _enforced = clauses[1]["bool"]["should"]  # type: ignore[index]
+    assert not_enforced["bool"]["filter"][0] == {"term": {"acl_enforced": False}}
+    should = not_enforced["bool"]["filter"][1]["bool"]["should"]
     assert should == [{"terms": {"owner_id": [str(owner)]}}]
     assert clauses[1]["bool"]["minimum_should_match"] == 1  # type: ignore[index]
 
 
 def test_engine_filter_includes_grant_sets_only_when_present() -> None:
-    """Grant clauses appear iff their id-set is non-empty (grants only widen)."""
+    """Grant clauses appear iff their id-set is non-empty (grants only widen
+    the NON-enforced branch — ADR-0019 §2 exclusive modes)."""
     tenant, owner = uuid.uuid4(), uuid.uuid4()
     doc, coll = uuid.uuid4(), uuid.uuid4()
     clauses = SearchAllowFilter(
@@ -108,7 +112,8 @@ def test_engine_filter_includes_grant_sets_only_when_present() -> None:
         granted_document_ids=frozenset({doc}),
         granted_collection_ids=frozenset({coll}),
     ).to_engine_filter()
-    should = clauses[1]["bool"]["should"]  # type: ignore[index]
+    not_enforced, _enforced = clauses[1]["bool"]["should"]  # type: ignore[index]
+    should = not_enforced["bool"]["filter"][1]["bool"]["should"]
     assert {"terms": {"document_id": [str(doc)]}} in should
     assert {"terms": {"collection_id": [str(coll)]}} in should
 
@@ -129,16 +134,25 @@ async def test_hybrid_query_carries_permission_filter_in_both_legs() -> None:
     tenant, owner = uuid.uuid4(), uuid.uuid4()
     allow = SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({owner}))
 
-    await store.hybrid_search(
-        query_text="budget", embedding=[0.0] * _DIMS, allow=allow, k=5
-    )
+    await store.hybrid_search(query_text="budget", embedding=[0.0] * _DIMS, allow=allow, k=5)
 
     assert captured["params"]["search_pipeline"] == "lumen-test-hybrid"
     assert captured["params"]["routing"] == str(tenant)
     legs = captured["body"]["query"]["hybrid"]["queries"]
-    expected = allow.to_engine_filter()
-    assert legs[0]["bool"]["filter"] == expected  # BM25 leg
-    assert legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"] == expected  # kNN leg
+
+    def _normalized(clauses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # The enforced branch's freshness floor is wall-clock derived; pin it
+        # to a placeholder so the two independently-built filters compare.
+        out = json.loads(json.dumps(clauses))
+        split = out[1]["bool"]["should"]
+        split[1]["bool"]["filter"][2]["range"]["acl_synced_at"]["gte"] = "<floor>"
+        return list(out)
+
+    expected = _normalized(allow.to_engine_filter())
+    assert _normalized(legs[0]["bool"]["filter"]) == expected  # BM25 leg
+    assert (
+        _normalized(legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"]) == expected
+    )  # kNN leg
     assert captured["body"]["size"] == 5
 
 
@@ -151,9 +165,7 @@ async def test_unreachable_engine_fails_closed() -> None:
     store = _store(httpx.MockTransport(handler))
     allow = SearchAllowFilter(tenant_id=uuid.uuid4(), owner_ids=frozenset({uuid.uuid4()}))
     with pytest.raises(DependencyError) as excinfo:
-        await store.hybrid_search(
-            query_text="q", embedding=[0.0] * _DIMS, allow=allow, k=3
-        )
+        await store.hybrid_search(query_text="q", embedding=[0.0] * _DIMS, allow=allow, k=3)
     assert excinfo.value.code == "search_unavailable"
 
 
@@ -301,9 +313,7 @@ async def test_live_round_trip_hybrid_is_permission_filtered() -> None:
     dropped in teardown.
     """
     index = f"lumen-test-{uuid.uuid4().hex[:8]}"
-    store = OpenSearchStore(
-        base_url=_OS_URL, index=index, dimensions=_DIMS, timeout_seconds=15.0
-    )
+    store = OpenSearchStore(base_url=_OS_URL, index=index, dimensions=_DIMS, timeout_seconds=15.0)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     u1, u2, u3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     own = _chunk(tenant_id=tenant_a, owner_id=u1, hot=1)
@@ -344,9 +354,7 @@ async def test_live_round_trip_hybrid_is_permission_filtered() -> None:
         assert foreign_tenant.chunk_id not in {h.chunk_id for h in granted_hits}
 
         # Deleting the caller's document removes its chunks from the index.
-        await store.delete_document(
-            tenant_id=tenant_a, document_id=own.document_id, refresh=True
-        )
+        await store.delete_document(tenant_id=tenant_a, document_id=own.document_id, refresh=True)
         after_delete = await store.hybrid_search(
             query_text="annual revenue growth strategy",
             embedding=embedding,

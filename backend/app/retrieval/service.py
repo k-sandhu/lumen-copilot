@@ -114,6 +114,10 @@ class RetrievalService:
             owner_ids=allow_set.owner_ids,
             granted_document_ids=granted_docs,
             granted_collection_ids=granted_colls,
+            # The mirrored-principal identity (ADR-0019 §2) rides the same
+            # allow-set, so the engine's acl_enforced branch and the SQL
+            # predicate can never disagree about who the requester is.
+            acl_principals=allow_set.acl_principals,
         )
 
     # --- core hybrid search -------------------------------------------------
@@ -355,9 +359,7 @@ class RetrievalService:
         if not chunk_ids:
             return {}
         allow_set = AllowSet.for_principal(principal)
-        stmt = queries.valid_chunk_pairs(
-            tenant_id=allow_set.tenant_id, chunk_ids=list(chunk_ids)
-        )
+        stmt = queries.valid_chunk_pairs(tenant_id=allow_set.tenant_id, chunk_ids=list(chunk_ids))
         rows = (await self._session.execute(stmt)).all()
         return {row[0]: row[1] for row in rows}
 
