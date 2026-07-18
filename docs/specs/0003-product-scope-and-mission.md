@@ -2,7 +2,7 @@
 
 > Closes **OD-1** in [0001-open-decisions.md](0001-open-decisions.md). Decided with the human sponsor in session on **2026-06-17**. This spec defines *what Lumen Copilot is*, the *first buildable scope*, and the *decision-filters* that let an agent make novel calls aligned with intent (it fills [AGENTS.md](../../AGENTS.md) §2).
 
-**Status:** adopted. **Last reviewed:** 2026-07-02 *(§4.1 records the [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) committed E6/E7/E15 scope expansion; mission filters and invariants unchanged)*. **Tracking issue:** [#11](https://github.com/k-sandhu/lumen-copilot/issues/11).
+**Status:** adopted. **Last reviewed:** 2026-07-18 *(§4.2 records the [#289](https://github.com/k-sandhu/lumen-copilot/issues/289) committed connector-breadth scope expansion; §4.1 recorded [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) E6/E7/E15; mission filters and invariants unchanged)*. **Tracking issue:** [#11](https://github.com/k-sandhu/lumen-copilot/issues/11).
 
 ---
 
@@ -65,7 +65,21 @@ The full 16-epic vision in [consolidated-structure.md](../product/consolidated-s
 
 **Architecture record.** The five subsystems' costly, non-obvious choices are decided in the [#196](https://github.com/k-sandhu/lumen-copilot/issues/196) spikes — agent runtime ([#202](https://github.com/k-sandhu/lumen-copilot/issues/202)), MCP transport/boundary/egress ([#203](https://github.com/k-sandhu/lumen-copilot/issues/203)), sandbox technology ([#204](https://github.com/k-sandhu/lumen-copilot/issues/204)), web-search provider/egress ([#205](https://github.com/k-sandhu/lumen-copilot/issues/205)), and scheduling/headless-run design ([#206](https://github.com/k-sandhu/lumen-copilot/issues/206)). Each closes to its own ADR (the next sequential slots, **ADR-0011 … ADR-0015**, per [architecture/README.md](../architecture/README.md)); each new external system (MCP, sandbox, search provider) gets **one owning module + a boundary-table row** in the ADR that introduces it ([ADR-0004](../architecture/0004-architecture-boundaries-and-adapters.md) §6). Link the ADRs from here as they land.
 
-**What stays out** (the remainder of E6/E7/E15 — file a sibling issue, never widen): **T2+ external write-back / consequential actions** (E5/CC-7, still approval-gated — see §4 above and [spec 0004](0004-security-and-domain-invariants.md) §2.5); **event-driven / webhook triggers** (E7-2) beyond scheduled runs; **computer use / browser automation** (E16); and **third-party OAuth connectors** (routed via their own ADRs).
+**What stays out** (the remainder of E6/E7/E15 — file a sibling issue, never widen): **T2+ external write-back / consequential actions** (E5/CC-7, still approval-gated — see §4 above and [spec 0004](0004-security-and-domain-invariants.md) §2.5); **event-driven / webhook triggers** (E7-2) beyond scheduled runs; **computer use / browser automation** (E16); and **third-party OAuth connectors** *(committed later — §4.2)*.
+
+### 4.2 Committed scope expansion — connector breadth (epic [#289](https://github.com/k-sandhu/lumen-copilot/issues/289))
+
+**Update (2026-07-18).** The sponsor has committed **Connector Breadth v1** (epic [#289](https://github.com/k-sandhu/lumen-copilot/issues/289)) — the slice of roadmap **E1** that §4.1 explicitly left out as "third-party OAuth connectors, routed via their own ADRs". The committed slice:
+
+- **Managed OAuth connectors, read-only** — OAuth 2.0 per tenant-admin, tokens in the CC-C secrets vault ([#209](https://github.com/k-sandhu/lumen-copilot/issues/209)) (E1-1).
+- **Source-ACL mirroring** — the [spec 0004](0004-security-and-domain-invariants.md) §2.2 mirrored principal-set model, implemented and negative-test-proofed per connector (E1-2), with sync/ACL freshness surfaced to users (E1-3).
+- **Incremental sync** — cursor-based change polling through the existing sync pipeline.
+- **Connector SDK + conformance kit** — the documented capability protocols a next connector implements (E1-5).
+- **First managed connector: Google Drive** (sponsor decision, recorded on [#289](https://github.com/k-sandhu/lumen-copilot/issues/289)).
+
+**Architecture record:** [ADR-0019](../architecture/0019-connector-sdk-and-oauth.md) (from spike [#290](https://github.com/k-sandhu/lumen-copilot/issues/290)) decides the OAuth flow, the concrete ACL-mirror contract, change detection, and the SDK shape. **This slice is governed by the *unchanged* mission filters (§2) and risk tiers ([spec 0004](0004-security-and-domain-invariants.md) §2.5)** — read-only connectors are T0; the OAuth connect/consent is an audited admin action; deny-by-default is preserved (unmapped or stale ACLs deny).
+
+**What stays out** (file a sibling issue, never widen): **write-back into sources** (E5, approval-gated); **webhook/event-driven sync** (E7-2); **third-party / push / SDK-only custom connectors** (isolation must be revisited first — ADR-0019 §4); **SCIM / group expansion** (CC-3 v2 — Google-group ACLs deny until it lands).
 
 ## 5. Personas
 
