@@ -126,6 +126,11 @@ class ConnectorOAuthService:
         # The flow record of the CURRENT callback once state resolves — the
         # catch-all failure handler uses it for tenant-attributed audit.
         self._resolved_record: OAuthFlowRecord | None = None
+        # The one-shot after_commit enqueue listener armed by a successful
+        # flow. A ROLLBACK does not remove it, so every failure path that
+        # later commits on this session (the failure audits) must disarm it
+        # first — or the rolled-back flow's first sync would still fire.
+        self._armed_enqueue: object | None = None
 
     # --- helpers ------------------------------------------------------------
 
@@ -160,6 +165,10 @@ class ConnectorOAuthService:
         session; a failure of even this audit write is logged, never raised —
         the 302 guarantee outranks it.
         """
+        # The failed route commit rolled the flow back but did NOT deregister
+        # a successful flow's after_commit enqueue listener — disarm it before
+        # this handler's own commit, or the rolled-back flow's sync would fire.
+        self._disarm_enqueue_listener()
         record = self._resolved_record
         if record is not None:
             try:
@@ -286,6 +295,9 @@ class ConnectorOAuthService:
                 await self._session.rollback()
             except Exception:  # noqa: BLE001 — rollback is best-effort here
                 log.exception("connector_oauth.callback_rollback_failed")
+            # A successful flow may have armed the first-sync listener before
+            # the exception: the failure-audit commit below must not fire it.
+            self._disarm_enqueue_listener()
             # With a clean transaction, record the failure for the resolved
             # tenant (INV-6) — attribution exists only when state resolved.
             record = self._resolved_record
@@ -535,7 +547,9 @@ class ConnectorOAuthService:
         """First-sync enqueue, after the callback transaction commits.
 
         Mirrors ``SourcesService._enqueue_sync_after_commit`` (the single
-        enqueue seam + off-loop dispatch, #271); never fires on rollback.
+        enqueue seam + off-loop dispatch, #271); never fires on rollback — and
+        the registered listener is retained so a failure path that commits
+        AFTER a rollback (the failure audits) can disarm it first.
         """
         from sqlalchemy import event
 
@@ -548,6 +562,26 @@ class ConnectorOAuthService:
             )
 
         event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
+        self._armed_enqueue = _on_commit
+
+    def _disarm_enqueue_listener(self) -> None:
+        """Remove a still-armed after_commit enqueue listener (fail closed).
+
+        Rollback does NOT deregister ``after_commit`` listeners; without this,
+        a failure-audit commit on the same session would publish the rolled-
+        back flow's first sync. Removal of an already-fired/absent listener is
+        a no-op.
+        """
+        armed = self._armed_enqueue
+        if armed is None:
+            return
+        self._armed_enqueue = None
+        from sqlalchemy import event
+
+        try:
+            event.remove(self._session.sync_session, "after_commit", armed)
+        except Exception:  # noqa: BLE001 — already fired/removed is fine
+            log.debug("connector_oauth.enqueue_listener_already_gone")
 
 
 __all__ = [

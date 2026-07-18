@@ -967,6 +967,7 @@ async def test_callback_commit_fault_rolls_back_and_audits(
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    no_broker: list[tuple[uuid.UUID, uuid.UUID]],
 ) -> None:
     """The route commit failing must not orphan anything — and still leaves a
     tenant-attributed source.connected outcome=error audit."""
@@ -1002,6 +1003,9 @@ async def test_callback_commit_fault_rolls_back_and_audits(
         and (a.event_metadata or {}).get("reason") == "commit_failed"
         for a in audits
     )
+    # The armed after_commit listener was disarmed before the failure-audit
+    # commit — the rolled-back flow's first sync must never fire.
+    assert no_broker == []
 
 
 # --- round-2 sync-path proofs (the Celery task against the same DB) ---------
@@ -1150,3 +1154,105 @@ async def test_sync_rotation_race_secret_deleted_is_reauthorize(
     monkeypatch.setattr(SecretsService, "rotate_secret_value", _gone)
     result = await _run_sync(seeded.tenant_a, source_id)
     assert result.error == "reauthorize_required"  # type: ignore[attr-defined]
+
+
+async def test_barrier_supersede_between_check_and_cas_denies_without_rotation(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    token_endpoint: TokenEndpoint,
+    monkeypatch: pytest.MonkeyPatch,
+    no_broker: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """The round-3 barrier: flow N passes the EARLY generation check, then —
+    inside the same callback, after the checks but before the finalize CAS —
+    the generation advances (flow N+1). N must lose the CAS, rotate NOTHING,
+    and enqueue nothing."""
+    from app.db.repositories import SourceRepository
+    from app.services.connector_oauth_service import ConnectorOAuthService
+
+    alice = await _login(client, seeded.alice_email)
+    source_id, state0 = await _connected_state(client, alice)
+    await client.get("/api/v1/sources/oauth/callback", params={"state": state0, "code": "c"})
+    bound = await _secret_rows(sessionmaker)
+    original_ct = bytes(bound[0].ciphertext)
+    enqueued_before = list(no_broker)
+
+    url_n = (await _connect(client, alice, source_id)).json()["authorization_url"]
+    token_endpoint.refresh_token_value = "rt-late-flow-must-not-land"
+
+    orig_probe = ConnectorOAuthService._probe_account_email
+
+    async def _probe_then_supersede(
+        self: ConnectorOAuthService, connector: object, spec: object, token: object
+    ) -> str | None:
+        # Runs AFTER the early re-authorization checks (which flow N passed)
+        # and BEFORE the finalize CAS: advance the generation as flow N+1
+        # would, in the same transaction the CAS will read.
+        await SourceRepository(self._session, seeded.tenant_a).begin_connect(uuid.UUID(source_id))
+        return await orig_probe(self, connector, spec, token)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ConnectorOAuthService, "_probe_account_email", _probe_then_supersede)
+    resp = await client.get(
+        "/api/v1/sources/oauth/callback",
+        params={"state": _state_of(url_n), "code": "c"},
+    )
+    assert _reason(resp) == "denied"
+    after = await _secret_rows(sessionmaker)
+    assert len(after) == 1
+    assert (
+        bytes(after[0].ciphertext) == original_ct
+    ), "post-CAS-only rotation: the losing flow must not touch the credential"
+    assert no_broker == enqueued_before, "the losing flow must not enqueue a sync"
+
+
+async def test_rotation_deletion_race_through_unmocked_vault(
+    client: AsyncClient,
+    seeded: _Seeded,
+    task_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NEW-1 (round 3): the row is deleted AFTER the vault's authorization
+    read and BEFORE the atomic rotate UPDATE — through the REAL
+    ``rotate_secret_value`` — and the sync task lands on the terminal
+    reauthorize path."""
+    import importlib
+
+    from sqlalchemy import delete as sa_delete
+
+    from app.connectors.oauth import TokenResponse
+    from app.services.secrets_service import SecretsService
+
+    source_id, _token = await _seed_connected_source(client, seeded)
+    sync_mod = importlib.import_module("app.tasks.sync_source")
+
+    async def _rotated(*_a: object, **_k: object) -> TokenResponse:
+        return TokenResponse(
+            access_token=_ACCESS_TOKEN,
+            refresh_token="rt-rotated-by-provider",
+            scope=None,
+            expires_in=3600,
+        )
+
+    orig_load = SecretsService._load_owned_or_404
+
+    async def _load_then_delete(
+        self: SecretsService, secret_id: uuid.UUID, **kwargs: object
+    ) -> object:
+        secret = await orig_load(self, secret_id, **kwargs)  # type: ignore[arg-type]
+        # The racing deletion lands between the authorization read and the
+        # atomic UPDATE — same session, so the UPDATE genuinely finds no row.
+        await self._session.execute(sa_delete(models.Secret).where(models.Secret.id == secret_id))
+        return secret
+
+    monkeypatch.setattr(sync_mod, "refresh_access_token", _rotated)
+    monkeypatch.setattr(SecretsService, "_load_owned_or_404", _load_then_delete)
+    result = await _run_sync(seeded.tenant_a, source_id)
+    assert result.error == "reauthorize_required"  # type: ignore[attr-defined]
+    async with task_db() as session:
+        row = (
+            await session.execute(
+                select(models.Source).where(models.Source.id == uuid.UUID(source_id))
+            )
+        ).scalar_one()
+        assert row.status == "error" and row.last_error == "reauthorize_required"

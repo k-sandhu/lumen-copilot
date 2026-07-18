@@ -2896,22 +2896,29 @@ class SecretRepository(_TenantScopedRepository):
         The by-reference rotation ADR-0019 §1 needs: a bound consumer (a source
         row holding ``auth_secret_ref``) replaces the credential under the SAME
         row regardless of which admin originally stored it — the handle stays
-        stable, no per-owner duplicate is minted. Returns ``None`` when no such
-        secret exists in this tenant.
+        stable, no per-owner duplicate is minted. One atomic
+        ``UPDATE … RETURNING`` (no read-then-write): a row deleted by a racing
+        transaction after the caller's authorization read simply matches
+        nothing here, and the ``None`` return is the caller's race signal.
         """
-        stmt = select(models.Secret).where(
-            models.Secret.tenant_id == self._tenant_id,
-            models.Secret.id == secret_id,
+        stmt = (
+            update(models.Secret)
+            .where(
+                models.Secret.tenant_id == self._tenant_id,
+                models.Secret.id == secret_id,
+            )
+            .values(
+                ciphertext=ciphertext,
+                nonce=nonce,
+                key_version=key_version,
+                hint=hint,
+            )
+            .returning(models.Secret)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        row.ciphertext = ciphertext
-        row.nonce = nonce
-        row.key_version = key_version
-        row.hint = hint
         await self._session.flush()
-        await self._session.refresh(row)
         return _to_secret(row)
 
     async def list_for_owner(self, owner_id: UUID) -> list[Secret]:

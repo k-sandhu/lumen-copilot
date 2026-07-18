@@ -286,7 +286,12 @@ class SecretsService:
             key_version=envelope.key_version,
             hint=_make_hint(plaintext),
         )
-        assert rotated is not None  # loaded above in this transaction  # noqa: S101
+        if rotated is None:
+            # The row vanished between the authorization read and the atomic
+            # UPDATE (a deletion racing this rotation) — the same 404 the
+            # caller gets for any missing secret; consumers (the sync task)
+            # map it to their dead-grant repair path.
+            raise NotFoundError("Secret not found.")
         await self._audit.emit(
             action=AuditAction.SECRET_CREATED,
             actor=actor,
