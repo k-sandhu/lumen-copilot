@@ -917,6 +917,23 @@ class ChatRuntime:
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
             )
+            async def _publish_narration(
+                text: str, *, _turn: int = turn_index + 1
+            ) -> None:
+                # ADR-0016 §6 (#414): a tool-calling turn's visible narration,
+                # streamed live as transient status — NEVER a delta, never
+                # persisted (the #148 invariant is untouched). Runs in the
+                # answer coroutine, so seq mint + publish stay atomic.
+                await self._publish(
+                    state,
+                    envelopes.event(
+                        state.stream_id,
+                        state.next_seq(),
+                        name="narration",
+                        data={"text": text, "turn": _turn},
+                    ),
+                )
+
             turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
                 session=session,
                 route_state=route_state,
@@ -924,6 +941,7 @@ class ChatRuntime:
                 usage=usage,
                 tools=advertised,
                 refit=_refit,
+                narrate=_publish_narration,
             )
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Only now is its text known
@@ -1445,6 +1463,7 @@ class ChatRuntime:
         tool_choice: str | None = None,
         refit: Callable[[str], list[ChatMessage]] | None = None,
         allow_failover: bool = True,
+        narrate: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
 
@@ -1471,6 +1490,17 @@ class ChatRuntime:
         ``usage`` into the running totals — deliberately kept: those tokens
         were genuinely spent, and the usage row is billing-honest.
         """
+        emitted = {"narration": False}
+
+        async def _narrate_and_close_window(text: str) -> None:
+            # ADR-0016 §4/§6 (#414): the FIRST narration emission closes this
+            # turn's retry window — something is already on the wire, so a
+            # retry could duplicate it. Recorded BEFORE the publish so even a
+            # fault mid-publish counts as emitted.
+            emitted["narration"] = True
+            if narrate is not None:
+                await narrate(text)
+
         while True:
             last: LlmProviderError | None = None
             for attempt in range(1 + len(_RETRY_BACKOFF_SECONDS)):
@@ -1487,9 +1517,15 @@ class ChatRuntime:
                         usage=usage,
                         tools=tools,
                         tool_choice=tool_choice,
+                        narrate=(
+                            _narrate_and_close_window if narrate is not None else None
+                        ),
                     )
                 except LlmProviderError as exc:
-                    if not exc.retryable:
+                    if not exc.retryable or emitted["narration"]:
+                        # Terminal — or the turn already emitted narration
+                        # (ADR-0016 §4: the retry window closed at first
+                        # emission; a retry could duplicate wire output).
                         raise
                     last = exc
                     # Class-name-derived detail only — never vendor text (#36 AC-7).
@@ -1608,6 +1644,7 @@ class ChatRuntime:
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
+        narrate: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
@@ -1627,6 +1664,7 @@ class ChatRuntime:
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
+        narrating = False
         async for ev in self._gateway.stream_tools(
             messages,
             tools=list(tools),
@@ -1635,7 +1673,19 @@ class ChatRuntime:
             api_key=route.api_key,
             api_base=route.api_base,
         ):
+            if ev.tool_calls and not narrating and narrate is not None:
+                # The classification point (ADR-0016 §6, #414): the FIRST
+                # tool-call fragment proves this turn is tool-calling, hence
+                # its text is narration. Flush the buffer as narration and
+                # stream the rest live; the caller's callback also CLOSES the
+                # turn's retry window (§4 — an emitting turn never retries).
+                narrating = True
+                buffered = "".join(text_chunks)
+                if buffered:
+                    await narrate(buffered)
             if ev.text:
+                if narrating and narrate is not None:
+                    await narrate(ev.text)
                 text_chunks.append(ev.text)
             if ev.tool_calls:
                 turn_tool_calls = list(ev.tool_calls)

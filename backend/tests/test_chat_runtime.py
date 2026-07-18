@@ -4390,3 +4390,153 @@ async def test_run_reports_answer_outcome_for_enqueue_gating(ctx: _Ctx) -> None:
     )
     await asyncio.wait_for(consumer, timeout=2.0)
     assert answered is False
+
+
+# --- #414 (ADR-0016 §6): narration streaming ---------------------------------
+
+
+async def test_tool_turn_narration_streams_before_tool_events(ctx: _Ctx) -> None:
+    """AC-1 (#414): a tool-calling turn's text streams as event:narration
+    BEFORE its tool_call events; the answer turn's text stays a delta; the
+    stored message carries none of the narration."""
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Let me search the docs… "),
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done"
+    names = [(i, e.get("name")) for i, e in enumerate(envs) if e["type"] == "event"]
+    narration_at = [i for i, n in names if n == "narration"]
+    tool_call_at = [i for i, n in names if n == "tool_call"]
+    assert narration_at and tool_call_at
+    assert max(narration_at) < min(tool_call_at)  # narration precedes the calls
+    narration_text = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "event" and e.get("name") == "narration"
+    )
+    assert narration_text == "Let me search the docs… "
+    assert cast("dict[str, object]", envs[narration_at[0]]["data"])["turn"] == 1
+    # The ANSWER text arrived as deltas only; narration never entered it.
+    deltas = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "delta"
+    )
+    assert deltas == "The answer."
+    async with ctx.sessionmaker() as session:
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in rows if m.role.value == "assistant"]
+        assert assistant[-1].content == "The answer."
+        assert "search the docs" not in assistant[-1].content
+
+
+async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
+    """ADR-0016 §4×§6 (#414): once narration is on the wire, a retryable fault
+    is NOT retried (and never fails over) — it becomes the typed terminal."""
+
+    class _NarrateThenFaultGateway(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])
+            self.calls_made = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls_made += 1
+            yield StreamEvent(text="Narrating… ")
+            yield StreamEvent(
+                tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),)
+            )
+            raise cast(Exception, _retryable())
+
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _NarrateThenFaultGateway()
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == []  # no retry: the window closed at the first narration
+    assert gateway.calls_made == 1  # one attempt, no failover either
+    # The narration that DID stream is on the wire (transient status).
+    assert any(
+        e["type"] == "event" and e.get("name") == "narration" for e in envs
+    )
+
+
+async def test_narration_payload_validates_against_the_contract(ctx: _Ctx) -> None:
+    """The frozen ChatNarration payload (#427 item 11): the runtime-emitted
+    narration event validates against contracts/."""
+    import jsonschema
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    retrieval = _FakeRetrieval([passage])
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Working on it…"),
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="Done."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(ctx, gateway=gateway, retrieval=retrieval, backplane=backplane)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    narrations = [
+        e for e in envs if e["type"] == "event" and e.get("name") == "narration"
+    ]
+    assert narrations
+    schema = _ws_schema()
+    for e in narrations:
+        jsonschema.validate(
+            e["data"],
+            {"$ref": "#/$defs/ChatNarration", "$defs": schema["$defs"]},  # type: ignore[index]
+        )

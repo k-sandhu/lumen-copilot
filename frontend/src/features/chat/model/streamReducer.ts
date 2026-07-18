@@ -97,6 +97,12 @@ export interface StreamState {
    * Transient: exists only while the stream state does.
    */
   steps: ChatStep[];
+  /**
+   * The current turn's live narration (event:narration, ADR-0016 §6 #414):
+   * accumulated text + the turn it belongs to. Transient — reset when a new
+   * turn's narration starts; never part of `text` (the persisted answer).
+   */
+  narration: { turn: number; text: string } | null;
   /** The clarifying question this turn ended with (event:ask_user), if any. */
   askUser: ChatAskUser | null;
   /** Follow-up suggestions for the settled answer (event:suggestions), if any. */
@@ -118,6 +124,7 @@ export const initialStreamState: StreamState = {
   tools: [],
   codeRuns: [],
   steps: [],
+  narration: null,
   askUser: null,
   suggestions: null,
   start: null,
@@ -315,6 +322,20 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
         // Dedupe citations by id (a reconnect may resend).
         if (base.citations.some((c) => c.id === citation.id)) return base;
         return { ...base, citations: [...base.citations, citation] };
+      }
+      if (envelope.name === 'narration') {
+        const d = envelope.data as { text?: unknown; turn?: unknown } | undefined;
+        if (d && typeof d.text === 'string' && typeof d.turn === 'number') {
+          const sameTurn = state.narration?.turn === d.turn;
+          return {
+            ...state,
+            narration: {
+              turn: d.turn,
+              text: (sameTurn ? state.narration!.text : '') + d.text,
+            },
+          };
+        }
+        return state;
       }
       if (envelope.name === 'tool_call') {
         const call = asToolCall(envelope.data);

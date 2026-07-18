@@ -56,7 +56,7 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429). Clients MUST ignore unknown names (forward compatibility)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry sandbox code-run output/outcome, ADR-0013 #229), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414). Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
@@ -196,6 +196,17 @@
             }
           }
         }
+      }
+    },
+
+    "ChatNarration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`event.data` for name=narration (ADR-0016 §6, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
+      "required": ["text", "turn"],
+      "properties": {
+        "text": { "type": "string", "description": "One narration chunk; append-ordered within the turn by seq." },
+        "turn": { "type": "integer", "minimum": 1, "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)." }
       }
     },
 

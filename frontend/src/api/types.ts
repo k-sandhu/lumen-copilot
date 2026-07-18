@@ -1582,6 +1582,17 @@ export interface ChatSuggestions {
   suggestions: string[];
 }
 
+/**
+ * `event.data` for name=narration (ADR-0016 §6, #414): one chunk of a
+ * tool-calling turn's VISIBLE narration text — transient status, never part
+ * of the persisted answer. `turn` is 1-based; clients reset the transient
+ * display when it changes.
+ */
+export interface ChatNarration {
+  text: string;
+  turn: number;
+}
+
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
   messageId: string;

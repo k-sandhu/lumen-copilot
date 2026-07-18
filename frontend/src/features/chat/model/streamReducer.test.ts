@@ -445,3 +445,31 @@ describe('spec 0006 events (#429)', () => {
     expect(bad.suggestions).toEqual(s.suggestions);
   });
 });
+
+describe('narration (ADR-0016 §6, #414)', () => {
+  function narration(seq: number, text: unknown, turn?: unknown): EventEnvelope {
+    return {
+      type: 'event',
+      streamId: SID,
+      seq,
+      name: 'narration',
+      data: { text, turn },
+    } as EventEnvelope;
+  }
+
+  it('accumulates within a turn, resets on a new turn, never touches text', () => {
+    let s = initialStreamState;
+    s = reduceStream(s, narration(1, 'Searching ', 1));
+    s = reduceStream(s, narration(2, 'the docs…', 1));
+    expect(s.narration).toEqual({ turn: 1, text: 'Searching the docs…' });
+    expect(s.text).toBe('');
+    s = reduceStream(s, narration(3, 'Refining.', 2));
+    expect(s.narration).toEqual({ turn: 2, text: 'Refining.' });
+  });
+
+  it('ignores malformed narration payloads', () => {
+    let s = initialStreamState;
+    s = reduceStream(s, narration(1, 42, undefined));
+    expect(s.narration).toBeNull();
+  });
+});
