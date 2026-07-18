@@ -44,7 +44,8 @@ function live(text: string): LiveAnswer {
     tools: [],
     codeRuns: [],
     steps: [],
-    askUser: null,
+    narration: null,
+  askUser: null,
     problem: null,
     model: 'frontier/opus',
   };
@@ -189,5 +190,23 @@ describe('ChatThread', () => {
     };
     render(thread({ messages: [user] }));
     expect(screen.queryByRole('list', { name: /tool activity/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('live narration (#414)', () => {
+  it('renders transient narration while streaming with no answer text', () => {
+    render(thread({ live: { ...live(''), narration: 'Searching the docs…' } }));
+    const status = screen.getByTestId('live-narration');
+    expect(status).toHaveTextContent('Searching the docs…');
+    expect(status).toHaveAttribute('aria-live', 'polite');
+  });
+
+  it('hides narration once answer text streams (never in the bubble)', () => {
+    render(
+      thread({ live: { ...live('The answer begins'), narration: 'Searching…' } }),
+    );
+    expect(screen.queryByTestId('live-narration')).toBeNull();
+    expect(screen.getByText(/The answer begins/)).toBeInTheDocument();
+    expect(screen.queryByText(/Searching…/)).toBeNull();
   });
 });

@@ -817,8 +817,9 @@ class ChatRuntime:
         result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]] = {}
         # The answer is the text of exactly ONE turn: the tool-free turn the model
         # reaches naturally, or the forced synthesis below. A tool-CALLING turn's
-        # text is pre-tool narration ("I'll search…"), not answer content — it is
-        # never streamed as a ``delta`` nor persisted (issue #148). Streaming it
+        # text is pre-tool narration ("I'll search…"), not answer content — it
+        # streams as transient ``event:narration`` (#414), never as a ``delta``
+        # and never persisted (issue #148). Streaming it as answer
         # would diverge the live answer from the stored message and re-expose the
         # narration-as-answer bug for clients that render the stream.
         answer_chunks: list[str] = []
@@ -1000,8 +1001,10 @@ class ChatRuntime:
                 turn=turn_index + 1,
             )
             # The assistant turn that requested tools must be in the transcript
-            # before its tool results (provider protocol). Its narration text is
-            # dropped — neither streamed nor persisted.
+            # before its tool results (provider protocol). Its narration text
+            # already streamed live as transient ``event:narration`` (#414) —
+            # it is dropped from the TRANSCRIPT/persistence, never from the
+            # wire (the #148 answer invariant concerns deltas only).
             messages.append(
                 ChatMessage(role=Role.ASSISTANT, content="", tool_calls=tuple(turn_tool_calls))
             )
@@ -1052,7 +1055,8 @@ class ChatRuntime:
             # tool-free answer (issue #148 — the live empty-answer bug). Force one
             # synthesis turn with tools disabled so the model answers over the
             # gathered tool context, then stream + persist THAT as the answer. The
-            # narration from the exhausted tool turns was never emitted, so the
+            # narration from the exhausted tool turns streamed only as transient
+            # ``event:narration`` (#414) — never as deltas — so the
             # live stream and the stored message agree. Re-fit here too (#424
             # finding 1): the forced-synthesis call sends the full accumulated
             # transcript, so it must respect the budget like every other turn.
@@ -1649,10 +1653,13 @@ class ChatRuntime:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
         Buffers the turn's text chunks and folds token ``usage`` into the running
-        total, but does **not** publish: only the caller knows whether a turn's
-        text is answer content (a tool-free turn, or the forced synthesis) to be
-        streamed, or pre-tool narration (a tool-calling turn) to be dropped (issue
-        #148). ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue
+        total. ANSWER text is never published from here (only the caller knows a
+        tool-free turn's text is the answer — issue #148); a turn PROVEN
+        tool-calling (the first tool fragment, ADR-0016 §6 #414) flushes its
+        buffered text through the optional ``narrate`` callback and streams the
+        rest live as transient narration — the one publishing this method does,
+        and only via that caller-supplied seam. ``tools`` is the run's
+        allow-list rendered as ``ToolSpec``s (issue
         #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
         forces a tool-free turn — the final synthesis once the budget is spent.
 
@@ -1673,7 +1680,11 @@ class ChatRuntime:
             api_key=route.api_key,
             api_base=route.api_base,
         ):
-            if ev.tool_calls and not narrating and narrate is not None:
+            if (
+                (ev.tool_call_started or ev.tool_calls)
+                and not narrating
+                and narrate is not None
+            ):
                 # The classification point (ADR-0016 §6, #414): the FIRST
                 # tool-call fragment proves this turn is tool-calling, hence
                 # its text is narration. Flush the buffer as narration and

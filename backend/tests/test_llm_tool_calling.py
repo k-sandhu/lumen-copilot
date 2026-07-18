@@ -255,3 +255,39 @@ async def test_stream_tools_malformed_arguments_yield_empty_dict(
         ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
     ]
     assert events[-1].tool_calls[0].arguments == {}
+
+
+async def test_first_tool_fragment_emits_the_classification_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0016 §6 (#414, #447 blocker 1): the REAL gateway emits ONE
+    provider-neutral ``tool_call_started`` event at the FIRST tool-call
+    fragment — between the text that precedes it and the text that follows —
+    so the runtime can flush narration and close the retry window mid-stream,
+    not at stream end."""
+    parts = [
+        _Part(content="Let me look. "),
+        _Part(
+            tool_calls=[_ToolCallFrag(index=0, id="call_1", name="search_text", arguments='{"qu')]
+        ),
+        _Part(content="Checking now… "),
+        _Part(tool_calls=[_ToolCallFrag(index=0, id=None, name=None, arguments='ery": "x"}')]),
+        _Part(finish_reason="tool_calls"),
+    ]
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        return _FakeStream(parts)
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    events = [
+        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
+    ]
+    kinds = [
+        "signal" if e.tool_call_started else ("text" if e.text else "terminal")
+        for e in events
+    ]
+    # Exactly one signal, after the first text and before the second.
+    assert kinds == ["text", "signal", "text", "terminal"]
+    # The second fragment did NOT re-signal; the assembled call still arrives.
+    assert events[-1].tool_calls and events[-1].tool_calls[0].name == "search_text"

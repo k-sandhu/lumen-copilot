@@ -4540,3 +4540,46 @@ async def test_narration_payload_validates_against_the_contract(ctx: _Ctx) -> No
             e["data"],
             {"$ref": "#/$defs/ChatNarration", "$defs": schema["$defs"]},  # type: ignore[index]
         )
+
+
+async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: _Ctx) -> None:
+    """#447 blocker 1 (runtime half): a turn that carried the classification
+    SIGNAL (no assembled calls yet) and then faulted retryably must NOT retry
+    — narration already streamed, the window is closed mid-stream."""
+
+    class _SignalThenFaultGateway(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])
+            self.calls_made = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls_made += 1
+            yield StreamEvent(text="Narrating before the fragment… ")
+            yield StreamEvent(tool_call_started=True)  # the mid-stream signal
+            yield StreamEvent(text="and after it ")
+            raise cast(Exception, _retryable())
+
+    retrieval = _FakeRetrieval([])
+    gateway = _SignalThenFaultGateway()
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == [] and gateway.calls_made == 1  # no retry, no failover
+    narration_text = "".join(
+        cast(str, cast("dict[str, object]", e["data"])["text"])
+        for e in envs
+        if e["type"] == "event" and e.get("name") == "narration"
+    )
+    # BOTH the pre-signal buffer flush and the post-signal live chunk streamed.
+    assert narration_text == "Narrating before the fragment… and after it "

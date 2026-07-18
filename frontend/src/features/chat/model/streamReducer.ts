@@ -325,17 +325,26 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
       }
       if (envelope.name === 'narration') {
         const d = envelope.data as { text?: unknown; turn?: unknown } | undefined;
-        if (d && typeof d.text === 'string' && typeof d.turn === 'number') {
-          const sameTurn = state.narration?.turn === d.turn;
+        // The frozen ChatNarration contract: text string + integer turn >= 1.
+        // A malformed payload still CONSUMES its seq (return base, like every
+        // adjacent malformed-event path) so a same-seq replay cannot re-apply.
+        if (
+          d &&
+          typeof d.text === 'string' &&
+          typeof d.turn === 'number' &&
+          Number.isInteger(d.turn) &&
+          d.turn >= 1
+        ) {
+          const sameTurn = base.narration?.turn === d.turn;
           return {
-            ...state,
+            ...base,
             narration: {
               turn: d.turn,
-              text: (sameTurn ? state.narration!.text : '') + d.text,
+              text: (sameTurn && base.narration ? base.narration.text : '') + d.text,
             },
           };
         }
-        return state;
+        return base;
       }
       if (envelope.name === 'tool_call') {
         const call = asToolCall(envelope.data);

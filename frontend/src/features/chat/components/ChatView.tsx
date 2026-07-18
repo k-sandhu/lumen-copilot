@@ -411,6 +411,7 @@ function ActiveSession({
         tools: stream.tools,
         codeRuns: stream.codeRuns,
         steps: stream.steps,
+        narration: stream.narration?.text ?? null,
         askUser: stream.askUser,
         problem: stream.problem,
         model: stream.start?.model ?? model,
