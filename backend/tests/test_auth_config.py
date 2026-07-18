@@ -63,6 +63,11 @@ def test_overridden_secret_boots_in_production() -> None:
         JWT_SECRET="a-real-production-secret",
         # A deployed env must also override the vault key (issue #209).
         SECRETS_ENCRYPTION_KEY=_PROD_SECRETS_KEY,
+        # ...and serve the OAuth callback/return over https (ADR-0019 §1, #452):
+        # state/code must never transit cleartext, so a non-local environment
+        # refuses to boot with the http compose defaults.
+        CONNECTOR_OAUTH_REDIRECT_BASE_URL="https://api.example.com",
+        CONNECTOR_OAUTH_FRONTEND_RETURN_URL="https://app.example.com/sources",
     )
     assert s.environment == "production"
 
