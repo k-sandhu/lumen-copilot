@@ -145,6 +145,10 @@ services:
       # Deployments that put object storage behind a CORS-enabled endpoint or a
       # CDN can flip this to "true" to serve bytes straight from storage.
       DOCUMENT_CONTENT_REDIRECT: ${DOCUMENT_CONTENT_REDIRECT:-false}
+      # Settings defaults to the published host port for a backend launched
+      # directly on the host. Inside Compose, callers must use the service DNS
+      # name; keep an explicit deployment override as the highest precedence.
+      WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
     env_file:
       - .env
     ports:
@@ -226,6 +230,9 @@ services:
       # The dedicated runner's internal API (compose network only). The worker calls
       # this to execute a sandbox code run — it holds NO Docker socket itself.
       SANDBOX_RUNNER_URL: ${SANDBOX_RUNNER_URL:-http://sandbox-runner:8000}
+      # Scheduled/headless chat runs execute in the worker and need the same
+      # Compose-network web-search endpoint as interactive backend turns.
+      WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
     env_file:
       - .env
     volumes:

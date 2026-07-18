@@ -7,7 +7,10 @@ negative fetch-top-n must refuse to boot rather than disable bounding).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from app.core.config import Settings
@@ -47,6 +50,24 @@ def test_web_search_defaults() -> None:
 
 def test_web_search_enable_flag_from_env() -> None:
     assert _settings(WEB_SEARCH_ENABLED=True).web_search_enabled is True
+
+
+def test_compose_runtime_services_use_internal_searxng_endpoint() -> None:
+    """Compose callers reach SearXNG by service name, with an override escape hatch.
+
+    The Settings default intentionally targets the published host port for a
+    backend launched directly on the host.  Inside Compose, however,
+    ``localhost`` is the backend/worker container itself.  Both services that can
+    run chat turns must therefore override that host-side default with the
+    Compose-network address while preserving an explicit deployment override.
+    """
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    expected = "${WEB_SEARCH_ENDPOINT:-http://searxng:8080}"
+
+    for service_name in ("backend", "worker"):
+        environment = compose["services"][service_name]["environment"]
+        assert environment["WEB_SEARCH_ENDPOINT"] == expected
 
 
 @pytest.mark.parametrize(
