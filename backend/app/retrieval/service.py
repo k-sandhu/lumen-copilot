@@ -322,6 +322,45 @@ class RetrievalService:
             for position, row in enumerate(rows)
         ]
 
+    async def permitted_document_names(
+        self, *, principal: Principal, document_ids: list[UUID]
+    ) -> dict[UUID, str]:
+        """The subset of ``document_ids`` the principal may read, with names.
+
+        ONE bounded metadata query (#446 finding 4) under the identical
+        owner-or-grant predicate as every other retrieval chokepoint — the
+        evidence-rehydration path needs names only, never document text. Ids
+        that are missing, foreign, or unpermitted are simply absent (INV-2
+        existence non-disclosure).
+        """
+        if not document_ids:
+            return {}
+        allow_set = AllowSet.for_principal(principal)
+        stmt = queries.permitted_document_names(
+            allow_set=allow_set, document_ids=list(document_ids)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: row[1] for row in rows}
+
+    async def valid_chunk_pairs(
+        self, *, principal: Principal, chunk_ids: list[UUID]
+    ) -> dict[UUID, UUID]:
+        """{chunk_id: document_id} for chunks that exist in the caller's tenant.
+
+        Pairs evidence-digest validation with :meth:`permitted_document_names`
+        (#446 round-2, finding 4): the caller keeps only (doc, chunk) pairs
+        whose chunk genuinely belongs to the permitted document — a corrupt row
+        cannot inject arbitrary chunk ids into a prompt.
+        """
+        if not chunk_ids:
+            return {}
+        allow_set = AllowSet.for_principal(principal)
+        stmt = queries.valid_chunk_pairs(
+            tenant_id=allow_set.tenant_id, chunk_ids=list(chunk_ids)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: row[1] for row in rows}
+
     async def get_document(
         self,
         *,

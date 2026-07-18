@@ -63,6 +63,7 @@ from app.db.repositories import (
     CitationRepository,
     LlmUsageRepository,
     MessageRepository,
+    SessionSummaryRepository,
     TenantRepository,
     ToolInvocationRepository,
 )
@@ -412,7 +413,10 @@ class ChatRuntime:
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
-    ) -> None:
+        summary: str | None = None,
+        evidence: Sequence[tuple[UUID, UUID]] = (),
+        mentioned_documents: Sequence[tuple[UUID, str]] = (),
+    ) -> bool:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
         Publishes ``start``, runs the agentic tool loop (streaming ``delta`` and
@@ -478,6 +482,9 @@ class ChatRuntime:
                     assistant_config=assistant_config,
                     custom_instructions=custom_instructions,
                     simulate_writes=simulate_writes,
+                    summary=summary,
+                    evidence=evidence,
+                    mentioned_documents=mentioned_documents,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -502,19 +509,19 @@ class ChatRuntime:
         except AppError as exc:
             await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
-            return
+            return False
         except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
             # Log the error *type* only (never the message — it may carry vendor
             # details / a key). The client gets an opaque 500 problem envelope.
             log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
             await self._salvage_usage_after_failure(session_id, assistant_message_id)
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
-            return
+            return False
 
         if state.terminal_sent:
             # A terminal already fired (e.g. cancellation mid-commit raced ahead);
             # never publish a second terminal — exactly-one-terminal contract.
-            return
+            return False
         state.terminal_sent = True
         await self._publish(
             state,
@@ -541,6 +548,7 @@ class ChatRuntime:
                 },
             ),
         )
+        return True
 
     # --- the agentic loop ---------------------------------------------------
 
@@ -559,6 +567,9 @@ class ChatRuntime:
         assistant_config: AssistantRunConfig | None = None,
         custom_instructions: str | None = None,
         simulate_writes: bool = False,
+        summary: str | None = None,
+        evidence: Sequence[tuple[UUID, UUID]] = (),
+        mentioned_documents: Sequence[tuple[UUID, str]] = (),
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
@@ -715,6 +726,70 @@ class ChatRuntime:
                 "document(s) to this message; document searches for this answer "
                 "are scoped to them. Search them before answering.]"
             )
+        # Evidence carry-forward rehydration (#416, ADR-0016 §3.2): the stored
+        # digest is IDs ONLY; ONE bounded, permission-filtered metadata query
+        # (#446 finding 4) re-checks every id against the requester's CURRENT
+        # permissions — a revoked/deleted document is silently stripped (INV-2:
+        # "the user saw it last turn" proves nothing about now). The SAME query
+        # also covers the summary's mentioned-document names so a no-longer-
+        # permitted name is REDACTED from the summary text before it can reach
+        # the prompt (#446 finding 1 — revocation-safe memory).
+        evidence_lines: list[str] = []
+        by_doc: dict[UUID, list[UUID]] = {}
+        for doc_id, chunk_id in evidence:
+            by_doc.setdefault(doc_id, []).append(chunk_id)
+        mention_ids = [doc_id for doc_id, _name in mentioned_documents]
+        if by_doc or mention_ids:
+            permitted = await retrieval.permitted_document_names(
+                principal=self._principal,
+                document_ids=[*by_doc.keys(), *mention_ids],
+            )
+            # Chunk-pair membership (#446 round-2, finding 4): only chunk ids
+            # that genuinely belong to their claimed (permitted) document
+            # survive — a corrupt digest cannot inject arbitrary ids.
+            all_chunks = [c for chunks in by_doc.values() for c in chunks]
+            chunk_owner = (
+                await retrieval.valid_chunk_pairs(
+                    principal=self._principal, chunk_ids=all_chunks
+                )
+                if all_chunks
+                else {}
+            )
+            for doc_id, chunk_ids in by_doc.items():
+                name = permitted.get(doc_id)
+                if name is None:
+                    continue  # revoked/deleted — stripped without comment
+                valid_chunks = [c for c in chunk_ids if chunk_owner.get(c) == doc_id]
+                if not valid_chunks:
+                    continue
+                chunks_note = ", ".join(str(c) for c in valid_chunks)
+                evidence_lines.append(
+                    f"{name} (document_id {doc_id}; cited chunk(s): {chunks_note})"
+                )
+            if summary:
+                for doc_id, name in mentioned_documents:
+                    if doc_id not in permitted and name and name in summary:
+                        summary = summary.replace(
+                            name, "[document no longer accessible]"
+                        )
+            # INV-6: rehydration is an audited read-side event — how many ids
+            # were requested vs still permitted (never the content).
+            await audit.emit(
+                action=AuditAction.EVIDENCE_REHYDRATED,
+                actor=AuditActor.user(self._principal.user_id),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    # The UNION of evidence + summary-mention checks — the
+                    # mention-only case must not audit as zero (#446 r2 nit).
+                    "requested_documents": len({*by_doc.keys(), *mention_ids}),
+                    "permitted_documents": len(permitted),
+                },
+            )
+
         assembled = assemble_context(
             model=route_state.route.model,
             system_prompt=system_prompt,
@@ -722,6 +797,8 @@ class ChatRuntime:
             question=question_for_model,
             tools=advertised,
             config=self._context_config,
+            summary=summary,
+            evidence_lines=tuple(evidence_lines),
         )
         messages: list[ChatMessage] = assembled.messages
         await self._emit_step(state, key="prepare", label="Preparing", step_state="completed")
@@ -1121,6 +1198,14 @@ class ChatRuntime:
             model=route_state.model,
             content=answer_text,
             citations=list(cited.values()),
+        )
+        # Evidence carry-forward WRITE (#416): the NEXT answer's digest is this
+        # answer's cited ids — IDs only (ADR-0016 §3.2), replaced wholesale (a
+        # zero-citation answer clears it). Rides the answer transaction; the
+        # rolling summary TEXT updates asynchronously (the Celery task).
+        await SessionSummaryRepository(session, tenant_id).upsert_evidence(
+            session_id,
+            evidence=[(c.document_id, c.chunk_id) for c in cited.values()],
         )
         # Emit a citation event per persisted citation (now carrying its row id).
         # ``cited`` is already deduplicated by chunk_id, so each stored citation is

@@ -21,14 +21,17 @@ touches several repositories commits atomically.
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -84,6 +87,7 @@ from app.domain.entities import (
     ScheduleDelivery,
     Secret,
     SecretKind,
+    SessionSummary,
     Source,
     SourceStatus,
     Tenant,
@@ -2194,6 +2198,58 @@ class MessageRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_message(row) if row is not None else None
 
+    async def list_for_session_after(
+        self,
+        session_id: UUID,
+        *,
+        after_created_at: datetime,
+        after_message_id: UUID,
+        limit: int | None = None,
+    ) -> list[Message]:
+        """Messages STRICTLY NEWER than the coverage cursor, oldest first (#416).
+
+        The cursor is the ``(created_at, id)`` total order (#446 finding 5) —
+        newer means a later timestamp, or the same timestamp with a different,
+        later-inserted id EXCLUDED conservatively: on a timestamp tie only the
+        boundary row itself is excluded (id inequality cannot order same-second
+        peers), so a tied peer is RESENT verbatim rather than silently dropped
+        — duplication-safe, loss-unsafe never. Valid after the boundary row is
+        pruned (the comparison never needs the row).
+        """
+        # The tie branch uses a ±1s TOLERANCE window (SQLite's server-default
+        # timestamps are second-resolution strings while bound params carry
+        # microseconds — an equality can never match) AND the ``(created_at,
+        # id)`` TOTAL ORDER the summary CAS uses (#446 round-3 liveness): the
+        # tie admits only LARGER ids, so batch selection and CAS acceptance
+        # advance in the SAME order — a 100-same-second backlog covers in
+        # id-ordered passes instead of starving. Same-second peers with a
+        # SMALLER id than the boundary were covered by an earlier id-ordered
+        # pass, so their exclusion is exact, not lossy. ``limit`` bounds the
+        # fetch (the task's batch path must not materialize a whole backlog).
+        window_start = after_created_at - timedelta(seconds=1)
+        stmt = (
+            select(models.Message)
+            .where(
+                models.Message.tenant_id == self._tenant_id,
+                models.Message.session_id == session_id,
+                or_(
+                    models.Message.created_at > after_created_at,
+                    and_(
+                        models.Message.created_at > window_start,
+                        models.Message.id > after_message_id,
+                    ),
+                ),
+            )
+            # (created_at, id) — the SAME total order the CAS compares, so a
+            # batch's last element is always the maximum the CAS will accept
+            # (#446 round-3 liveness; #439 tracks a truly chronological key).
+            .order_by(models.Message.created_at.asc(), models.Message.id.asc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_message(r) for r in rows]
+
     async def list_for_session(self, session_id: UUID) -> list[Message]:
         stmt = (
             select(models.Message)
@@ -2313,6 +2369,55 @@ class CitationRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_citation(r) for r in rows]
+
+    async def list_for_messages_hydrated_batch(
+        self, message_ids: list[UUID]
+    ) -> list[CitationView]:
+        """Hydrated citations for MANY messages in ONE query (#446 round-2).
+
+        The summarizer's capture path: a backlog batch must not issue one
+        citation query per covered message. Same shape/joins as
+        :meth:`list_for_message_hydrated`; ordering is by message then span.
+        """
+        if not message_ids:
+            return []
+        stmt = (
+            select(
+                models.Citation.id,
+                models.Citation.message_id,
+                models.Citation.chunk_id,
+                models.Citation.char_start,
+                models.Citation.char_end,
+                models.Citation.score,
+                models.Chunk.text,
+                models.Document.id,
+                models.Document.filename,
+            )
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .join(models.Document, models.Document.id == models.Chunk.document_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id.in_(message_ids),
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Document.tenant_id == self._tenant_id,
+            )
+            .order_by(models.Citation.message_id, models.Citation.char_start.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            CitationView(
+                id=row[0],
+                message_id=row[1],
+                chunk_id=row[2],
+                char_start=row[3],
+                char_end=row[4],
+                score=row[5],
+                snippet=row[6],
+                document_id=row[7],
+                document_name=row[8],
+            )
+            for row in rows
+        ]
 
     async def list_for_message_hydrated(self, message_id: UUID) -> list[CitationView]:
         """Citations for a message, joined to source document + chunk text.
@@ -4801,3 +4906,179 @@ class RecentSearchRepository(_TenantScopedRepository):
         for row in rows:
             await self._session.delete(row)
         await self._session.flush()
+
+
+def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
+    pairs: list[tuple[UUID, UUID]] = []
+    for item in (row.evidence or [])[:_EVIDENCE_MAX_PAIRS]:
+        # Defensive read (the column is data): only well-formed id pairs count,
+        # and the cardinality cap holds on READ too — a corrupt/hostile row
+        # must not fan out into hundreds of permission checks (#446 finding 4).
+        try:
+            pairs.append((UUID(str(item["document_id"])), UUID(str(item["chunk_id"]))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    mentioned: list[tuple[UUID, str]] = []
+    raw_mentioned = (
+        row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
+    )
+    for key, name in list(raw_mentioned.items())[:_MENTIONED_MAX_ENTRIES]:
+        try:
+            mentioned.append((UUID(str(key)), str(name)))
+        except (TypeError, ValueError):
+            continue
+    return SessionSummary(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        session_id=row.session_id,
+        summary=(row.summary[:_SUMMARY_MAX_CHARS] if row.summary else row.summary),
+        covers_through_message_id=row.covers_through_message_id,
+        covers_through_created_at=row.covers_through_created_at,
+        evidence=tuple(pairs),
+        mentioned_documents=tuple(mentioned),
+        version=row.version,
+        updated_at=row.updated_at,
+    )
+
+
+# Bounds on the stored memory state (#446 finding 4): enforced at WRITE and
+# defensively re-applied at READ, so neither a growing session nor a corrupt
+# row can fan out into unbounded permission checks or a context refusal.
+_EVIDENCE_MAX_PAIRS = 20
+_SUMMARY_MAX_CHARS = 6_000
+# The mention map's own cap (#446 round-3): LARGER than the evidence cap —
+# it merges forward across passes, and every name the rolled-forward text may
+# still carry must stay redactable (blocker 1's >20-name gap).
+_MENTIONED_MAX_ENTRIES = 40
+
+
+class SessionSummaryRepository(_TenantScopedRepository):
+    """The per-session rolling summary + evidence digest (#416, ADR-0016 §3.2).
+
+    Tenant-scoped (INV-1). One row per session, maintained by TWO writers with
+    different transactions: the answer path (evidence, its own transaction) and
+    the async summarizer (summary text, a Celery transaction). Every write is
+    an ATOMIC upsert (#446 finding 3): a dialect-native ``INSERT .. ON
+    CONFLICT`` claims the row, and the summary's forward-only rule is a
+    compare-and-swap on the coverage cursor — a unique-key race can neither
+    surface into the answer path nor let a stale task regress coverage.
+    Flushed, not committed — each caller owns its transaction.
+    """
+
+    def _insert(self) -> object:
+        bind = self._session.bind
+        if bind is not None and bind.dialect.name == "sqlite":
+            return sqlite_upsert(models.SessionSummary)
+        return pg_upsert(models.SessionSummary)
+
+    async def get_for_session(self, session_id: UUID) -> SessionSummary | None:
+        stmt = select(models.SessionSummary).where(
+            models.SessionSummary.tenant_id == self._tenant_id,
+            models.SessionSummary.session_id == session_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_session_summary(row) if row is not None else None
+
+    async def upsert_evidence(
+        self, session_id: UUID, *, evidence: list[tuple[UUID, UUID]]
+    ) -> SessionSummary | None:
+        """Replace the session's evidence digest with the LAST answer's ids.
+
+        IDs only (ADR-0016 §3.2), capped at ``_EVIDENCE_MAX_PAIRS`` (first-cited
+        wins), empty clears. ATOMIC: a dialect-native upsert — a concurrent
+        summarizer's row claim degrades this to an UPDATE of the evidence
+        column only, never a unique-key error inside the answer transaction
+        (#446 finding 3). Touches nothing the summarizer owns.
+        """
+        payload = [
+            {"document_id": str(d), "chunk_id": str(c)}
+            for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
+        ]
+        insert = self._insert().values(  # type: ignore[attr-defined]
+            id=uuid_mod.uuid4(),
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            evidence=payload,
+        )
+        stmt = insert.on_conflict_do_update(
+            index_elements=["tenant_id", "session_id"],
+            set_={"evidence": payload},
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+        return await self.get_for_session(session_id)
+
+    async def upsert_summary(
+        self,
+        session_id: UUID,
+        *,
+        summary: str,
+        covers_through_message_id: UUID,
+        covered_created_at: datetime,
+        mentioned_documents: dict[UUID, str] | None = None,
+    ) -> tuple[bool, SessionSummary | None]:
+        """Advance the rolling summary; returns ``(accepted, row)``.
+
+        Forward-only via compare-and-swap on the coverage cursor (#446 findings
+        3/5): the UPDATE lands only where the stored cursor is NULL or older
+        under the ``(created_at, id)`` total order — a stale/racing task's
+        write is a no-op with ``accepted=False``, so its caller neither bumps
+        ``version`` nor emits the summarized audit. Same-timestamp advances to
+        a DIFFERENT boundary id are allowed (second-resolution timestamps);
+        the id inequality keeps an identical rewrite idempotent. The summary
+        text and the mention map are size-capped here (the write chokepoint).
+        """
+        text_value = summary[:_SUMMARY_MAX_CHARS]
+        mentioned_payload = {
+            str(k): str(v)[:200]
+            for k, v in list((mentioned_documents or {}).items())[:_MENTIONED_MAX_ENTRIES]
+        }
+        insert = self._insert().values(  # type: ignore[attr-defined]
+            id=uuid_mod.uuid4(),
+            tenant_id=self._tenant_id,
+            session_id=session_id,
+            summary=text_value,
+            covers_through_message_id=covers_through_message_id,
+            covers_through_created_at=covered_created_at,
+            mentioned_documents=mentioned_payload,
+            version=1,
+        )
+        stmt = insert.on_conflict_do_update(
+            index_elements=["tenant_id", "session_id"],
+            set_={
+                "summary": text_value,
+                "covers_through_message_id": covers_through_message_id,
+                "covers_through_created_at": covered_created_at,
+                "mentioned_documents": mentioned_payload,
+                "version": models.SessionSummary.version + 1,
+            },
+            where=(
+                models.SessionSummary.covers_through_created_at.is_(None)
+                | (models.SessionSummary.covers_through_created_at < covered_created_at)
+                | (
+                    (
+                        models.SessionSummary.covers_through_created_at
+                        == covered_created_at
+                    )
+                    # ORDERED tie-break (#446 round-2 blocker 3): within one
+                    # second, coverage may only advance toward the LARGER
+                    # boundary id — an arbitrary but STABLE total order, so a
+                    # stale A can never be re-accepted after B (the A->B->A
+                    # probe). A same-second boundary with a smaller id waits
+                    # for the next pass (a strictly-newer timestamp) — progress
+                    # converges, regression cannot happen.
+                    & (
+                        models.SessionSummary.covers_through_message_id
+                        < covers_through_message_id
+                    )
+                )
+            ),
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        row = await self.get_for_session(session_id)
+        accepted = bool(getattr(result, "rowcount", 0)) and (
+            row is not None
+            and row.covers_through_message_id == covers_through_message_id
+        )
+        return accepted, row

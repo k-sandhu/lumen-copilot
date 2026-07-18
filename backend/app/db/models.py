@@ -1671,3 +1671,49 @@ class CodeRun(TenantScopedMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class SessionSummary(TenantScopedMixin, TimestampMixin, Base):
+    """One rolling summary + evidence digest per chat session (#416, ADR-0016 §3.2).
+
+    ``summary`` is the rolling text over turns older than the verbatim window —
+    conversational content only, NEVER source-document text (the ADR rule; the
+    summarizer prompt enforces it, and evidence travels as IDs below).
+    ``covers_through_message_id`` marks how far it reaches (no FK — the covered
+    message may be pruned after it is absorbed). ``evidence`` is the last
+    answer's cited-evidence digest as **IDs only** — a JSON list of
+    ``{"document_id": ..., "chunk_id": ...}`` — rehydrated through ``retrieval/``
+    under the requester's CURRENT permissions at the next answer (INV-2).
+    ``version`` increments per summary write so the assembled prefix changes
+    only at summary boundaries (cache-aligned, ADR-0016 §2).
+    """
+
+    __tablename__ = "session_summaries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "session_id", name="uq_session_summaries_session"),
+        Index("ix_session_summaries_tenant_session", "tenant_id", "session_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The coverage cursor (#446 finding 5): (created_at, id) of the newest
+    # covered message — a durable total order for SQL-side filtering and
+    # forward-only compare-and-swap, valid even after the boundary is pruned.
+    covers_through_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    covers_through_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence: Mapped[list[dict[str, str]] | None] = mapped_column(_JSON, nullable=True)
+    # {document_id: name} the summary mentions — captured at write time so the
+    # read path can redact names of no-longer-permitted documents (#446 f.1).
+    mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(
+        _JSON, nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

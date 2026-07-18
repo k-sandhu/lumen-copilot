@@ -1392,3 +1392,27 @@ class CodeRun:
     def is_terminal(self) -> bool:
         """True once the run has reached a terminal status (never transitions again)."""
         return self.status in _TERMINAL_CODE_RUN_STATUSES
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """One session's rolling summary + evidence digest (#416, ADR-0016 §3.2).
+
+    ``summary`` covers turns up to ``covers_through_message_id`` (conversational
+    content only — source text never enters a summary); ``evidence`` is the last
+    answer's cited digest as ID pairs only, rehydrated under the requester's
+    CURRENT permissions at the next answer (INV-2). ``version`` increments per
+    summary write (the assembled prefix changes only at summary boundaries).
+    """
+
+    id: UUID
+    tenant_id: UUID
+    session_id: UUID
+    summary: str | None
+    covers_through_message_id: UUID | None
+    covers_through_created_at: datetime | None
+    evidence: tuple[tuple[UUID, UUID], ...]  # (document_id, chunk_id) pairs
+    #: {document_id: name} the summary text mentions — read-time redaction key.
+    mentioned_documents: tuple[tuple[UUID, str], ...]
+    version: int
+    updated_at: datetime

@@ -47,6 +47,7 @@ from app.db.repositories import (
     LlmProviderRepository,
     LlmUsageRepository,
     MessageRepository,
+    SessionSummaryRepository,
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
@@ -157,6 +158,16 @@ class SendResult:
     history: tuple[Message, ...]
     assistant_config: AssistantRunConfig | None = None
     custom_instructions: str | None = None
+    #: The session's rolling summary text (#416) — ``None`` until the async
+    #: summarizer has produced one. ``history`` then contains only turns NEWER
+    #: than the summary's coverage.
+    summary: str | None = None
+    #: The previous answer's cited-evidence digest — ID pairs only; the runtime
+    #: rehydrates them under the requester's CURRENT permissions (INV-2).
+    evidence: tuple[tuple[UUID, UUID], ...] = ()
+    #: {document_id: name} the summary text mentions — the runtime redacts the
+    #: names of no-longer-permitted documents before the text reaches a prompt.
+    mentioned_documents: tuple[tuple[UUID, str], ...] = ()
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -210,6 +221,7 @@ class ChatService:
         self._citations = CitationRepository(session, tenant_id)
         self._tool_invocations = ToolInvocationRepository(session, tenant_id)
         self._prefs = UserPreferenceRepository(session, tenant_id)
+        self._summaries = SessionSummaryRepository(session, tenant_id)
         self._assistants = AssistantRepository(session, tenant_id)
         self._versions = AssistantVersionRepository(session, tenant_id)
         # The tenant's LLM providers — the DB half of the model allow-list: a
@@ -521,7 +533,33 @@ class ChatService:
         # chat, unchanged). Resolved here where the principal + session are already held,
         # not inside the gateway.
         custom_instructions = await self._resolve_custom_instructions()
-        prior = await self._messages.list_for_session(session_id)
+        # Rolling-summary window (#416, ADR-0016 §3.2): turns the summary
+        # already covers are NOT resent verbatim — the runtime gets
+        # [summary] + [newer turns], filtered IN SQL by the durable coverage
+        # cursor ((created_at, id), #446 finding 5 — valid even after the
+        # boundary row is pruned, and never a full-conversation Python scan).
+        # No summary/cursor ⇒ the full prior list — today's behavior (AC-4).
+        summary_row = await self._summaries.get_for_session(session_id)
+        summary_text: str | None = None
+        evidence: tuple[tuple[UUID, UUID], ...] = ()
+        mentioned: tuple[tuple[UUID, str], ...] = ()
+        if summary_row is not None:
+            summary_text = summary_row.summary
+            evidence = summary_row.evidence
+            mentioned = summary_row.mentioned_documents
+        if (
+            summary_row is not None
+            and summary_text
+            and summary_row.covers_through_created_at is not None
+            and summary_row.covers_through_message_id is not None
+        ):
+            prior = await self._messages.list_for_session_after(
+                session_id,
+                after_created_at=summary_row.covers_through_created_at,
+                after_message_id=summary_row.covers_through_message_id,
+            )
+        else:
+            prior = await self._messages.list_for_session(session_id)
         user_message = await self._messages.add(
             session_id=session_id,
             role=MessageRole.USER,
@@ -541,6 +579,9 @@ class ChatService:
             history=tuple(prior),
             assistant_config=assistant_config,
             custom_instructions=custom_instructions,
+            summary=summary_text,
+            evidence=evidence,
+            mentioned_documents=mentioned,
         )
 
     async def _resolve_custom_instructions(self) -> str | None:

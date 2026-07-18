@@ -395,6 +395,22 @@ class Settings(BaseSettings):
         default=8.0, gt=0, le=60, alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS"
     )
 
+    # Rolling session summary (#416, ADR-0016 §3.2): the async post-answer
+    # summarizer. ``keep_messages`` is the verbatim tail never summarized (the
+    # last M turns stay word-for-word); ``min_batch`` is how many messages
+    # beyond that tail must accumulate before a summarize call is worth its
+    # cost (the task no-ops below it). ``summary_model`` pins the summarizer's
+    # model; empty ⇒ the registry default (tasks run headless with config
+    # credentials — per-tenant ``provider:`` ids are not routable there).
+    chat_summary_enabled: bool = Field(default=True, alias="CHAT_SUMMARY_ENABLED")
+    chat_summary_keep_messages: int = Field(
+        default=8, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
+    )
+    chat_summary_min_batch: int = Field(
+        default=4, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH"
+    )
+    chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
+
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the
     # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).

@@ -39,6 +39,7 @@ from app.api.deps import (
 )
 from app.core.config import Settings
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
 from app.domain.chat import AskUserQuestion
@@ -63,6 +64,9 @@ from app.services.models_service import ChatModelService
 from app.services.provider_models import ModelRouteResolver, build_model_route_resolver
 from app.services.tools.types import SandboxToolRunner, ToolDefinition
 from app.storage import ObjectStore
+from app.tasks.summarize import enqueue_summarize
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -721,7 +725,7 @@ def _schedule_answer(
     history = _to_chat_messages(result.history)
 
     async def _produce() -> None:
-        await runtime.run(
+        answered = await runtime.run(
             stream_id=result.stream_id,
             session_id=session_id,
             question=result.user_message.content,
@@ -731,7 +735,28 @@ def _schedule_answer(
             document_ids=document_ids,
             assistant_config=result.assistant_config,
             custom_instructions=result.custom_instructions,
+            summary=result.summary,
+            evidence=result.evidence,
+            mentioned_documents=result.mentioned_documents,
         )
+        # Rolling-summary refresh (#416, ADR-0016 §3.2): enqueued AFTER a
+        # successful answer, off the event loop (the #401 lesson — a Celery
+        # send is blocking I/O), and best-effort: an enqueue failure must
+        # never fail an answer that already streamed (AC-4). The task itself
+        # no-ops when the uncovered tail is shorter than the verbatim window.
+        if settings.chat_summary_enabled and answered:
+            # Only a SUCCESSFUL answer feeds memory (#446 finding 7): an
+            # errored turn must not fold an unanswered question into the
+            # summary. The enqueue helper is owned by ``tasks/`` (api/ never
+            # speaks to the broker directly).
+            try:
+                await asyncio.to_thread(
+                    enqueue_summarize, principal.tenant_id, session_id
+                )
+            except Exception as exc:  # noqa: BLE001 — nicety, never the answer
+                log.warning(
+                    "chat.summarize_enqueue_failed", error_type=type(exc).__name__
+                )
 
     tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
     task = asyncio.create_task(_produce())

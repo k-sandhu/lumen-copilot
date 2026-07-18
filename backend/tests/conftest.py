@@ -39,6 +39,11 @@ _TEST_ENV = {
     "ENVIRONMENT": "local",
     "LOG_LEVEL": "info",
     "OPENROUTER_API_KEY": "",
+    # #416: the post-answer summarize enqueue would attempt a real broker
+    # publish from API-level tests (unreachable offline; the fail-fast connect
+    # still outlives task-drain assertions). The enqueue seam has its own
+    # coverage; offline answers skip it.
+    "CHAT_SUMMARY_ENABLED": "false",
 }
 
 

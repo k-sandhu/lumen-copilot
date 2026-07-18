@@ -145,6 +145,43 @@ def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
     )
 
 
+def permitted_document_names(
+    *, allow_set: AllowSet, document_ids: list[UUID]
+) -> Select[tuple[UUID, str]]:
+    """A bounded batch of permitted ``(document_id, filename)`` pairs (#446 f.4).
+
+    ONE metadata query for the evidence-rehydration path — the exact
+    tenant + owner-or-grant predicate every retrieval chokepoint uses,
+    without reassembling any document text (this path needs names only).
+    Ids outside the allow-set are simply absent (existence non-disclosure).
+    """
+    stmt = (
+        select(models.Document.id, models.Document.filename)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            models.Document.id.in_(document_ids),
+            _document_permitted(allow_set),
+        )
+    )
+    return stmt
+
+
+def valid_chunk_pairs(
+    *, tenant_id: object, chunk_ids: list[UUID]
+) -> Select[tuple[UUID, UUID]]:
+    """(chunk_id, document_id) for chunks that really exist in this tenant.
+
+    The defense-in-depth half of evidence rehydration (#446 round-2, finding
+    4): a corrupt digest pairing a permitted document with a foreign/fabricated
+    chunk id must not smuggle that id into a prompt — only chunks that belong
+    to the claimed document survive the join at the caller.
+    """
+    return select(models.Chunk.id, models.Chunk.document_id).where(
+        models.Chunk.tenant_id == tenant_id,
+        models.Chunk.id.in_(chunk_ids),
+    )
+
+
 def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT]:
     """Fold the tenant + ownership/grant predicate into a chunk/document ``SELECT``.
 
