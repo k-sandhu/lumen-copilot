@@ -4583,3 +4583,45 @@ async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: 
     )
     # BOTH the pre-signal buffer flush and the post-signal live chunk streamed.
     assert narration_text == "Narrating before the fragment… and after it "
+
+
+async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
+    """#447 round-2, the exact remaining edge: a turn carrying ONLY the
+    classification signal (zero text) that then faults retryably must neither
+    retry nor fail over — the window closes AT classification, not at the
+    first published byte."""
+
+    class _SignalOnlyFaultGateway(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])
+            self.calls_made = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls_made += 1
+            yield StreamEvent(tool_call_started=True)  # NO text at all
+            raise cast(Exception, _retryable())
+
+    fallback = "openrouter/openai/gpt-5.5"
+    await _set_fallbacks(ctx, [fallback])
+    retrieval = _FakeRetrieval([])
+    gateway = _SignalOnlyFaultGateway()
+    sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
+
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == []  # zero backoffs
+    assert gateway.calls_made == 1  # one attempt: no retry, no failover
+    # And no empty narration envelope was emitted for the textless flush.
+    assert not any(
+        e["type"] == "event" and e.get("name") == "narration" for e in envs
+    )

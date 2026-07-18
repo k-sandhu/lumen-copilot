@@ -1471,10 +1471,13 @@ class ChatRuntime:
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
 
-        Safe by construction: :meth:`_stream_one_turn` publishes NOTHING (turns
-        are buffered; only the caller decides what streams) and tools run
+        Safe by construction: an UNCLASSIFIED turn publishes nothing (its text
+        is buffered; only the caller decides what streams) and tools run
         between turns — so a retried or failed-over turn can neither duplicate
-        wire output nor re-execute a tool. Policy, in order:
+        wire output nor re-execute a tool. A turn CLASSIFIED tool-calling
+        (ADR-0016 §6, #414) may publish narration through the ``narrate``
+        seam — and from that classification instant the window below is
+        closed: no retry, no failover. Policy, in order:
 
         * a gateway-classified RETRYABLE fault (timeout / connection / 429 /
           provider 5xx) retries on the SAME route, ≤ ``len(_RETRY_BACKOFF_
@@ -1497,12 +1500,15 @@ class ChatRuntime:
         emitted = {"narration": False}
 
         async def _narrate_and_close_window(text: str) -> None:
-            # ADR-0016 §4/§6 (#414): the FIRST narration emission closes this
-            # turn's retry window — something is already on the wire, so a
-            # retry could duplicate it. Recorded BEFORE the publish so even a
-            # fault mid-publish counts as emitted.
+            # ADR-0016 §4/§6 (#414): the window closes at the CLASSIFICATION
+            # point — the first invocation of this callback — whether or not
+            # any text was buffered yet (#447 round-2: a signal-only turn must
+            # not retry either; the amendment closes the window at the
+            # fragment, not at the first byte). Recorded BEFORE the publish so
+            # a fault mid-publish still counts; empty text closes the window
+            # without emitting a pointless envelope.
             emitted["narration"] = True
-            if narrate is not None:
+            if narrate is not None and text:
                 await narrate(text)
 
         while True:
@@ -1692,8 +1698,11 @@ class ChatRuntime:
                 # turn's retry window (§4 — an emitting turn never retries).
                 narrating = True
                 buffered = "".join(text_chunks)
-                if buffered:
-                    await narrate(buffered)
+                # ALWAYS invoke — an empty buffer still closes the retry
+                # window (the amendment's letter: the window closes AT the
+                # classification point, #447 round-2 blocker-1 edge); the
+                # wrapper's callback skips publishing empty text.
+                await narrate(buffered)
             if ev.text:
                 if narrating and narrate is not None:
                     await narrate(ev.text)
