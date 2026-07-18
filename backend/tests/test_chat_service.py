@@ -757,7 +757,7 @@ async def test_send_filters_summarized_history_and_threads_the_summary(
 
         from app.db import models as _models
 
-        for i, mid in enumerate(ids[:4]):
+        for i, mid in enumerate(ids):
             await session.execute(
                 _upd(_models.Message)
                 .where(_models.Message.id == mid)

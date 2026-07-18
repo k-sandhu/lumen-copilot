@@ -168,6 +168,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "llm_provider.updated",
         "llm_provider.deleted",
         "llm_provider.discovered",
+        # #416 (ADR-0016 §3.2): the rolling-summary write + the next-answer
+        # evidence-rehydration permission check are audited state events.
+        "session.summarized",
+        "retrieval.evidence_rehydrated",
         # Reserved for the write tiers (T2+) — present but unused at MVP.
         "action.requested",
         "action.approved",
