@@ -531,6 +531,9 @@ async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyP
     assert captured["model"] == "openai/baai/bge-m3"
     assert captured["api_key"] == "sk-test-key"
     assert captured["timeout"] == 60.0
+    # OpenRouter's OpenAI-compatible embedding endpoint may otherwise return an
+    # encoded payload that the installed LiteLLM version reports as empty.
+    assert captured["encoding_format"] == "float"
     # #32: embeddings ride OpenRouter's OpenAI-compatible endpoint via api_base.
     assert captured["api_base"] == "https://openrouter.ai/api/v1"
     assert result[0].model == "openai/baai/bge-m3"

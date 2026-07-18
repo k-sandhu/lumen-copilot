@@ -334,9 +334,9 @@ class Settings(BaseSettings):
     # LiteLLM's OpenAI-compatible client pointed at ``llm_embedding_api_base``
     # with the OpenRouter key — chat keeps the native ``openrouter/`` route.
     # Hence the ``openai/<author>/<model>`` form: LiteLLM strips ``openai/`` and
-    # sends ``baai/bge-m3`` to the configured base.
+    # sends the remaining OpenRouter model id to the configured base.
     llm_embedding_model: str = Field(
-        default="openai/baai/bge-m3",
+        default="openai/nvidia/nemotron-3-embed-1b:free",
         alias="LLM_EMBEDDING_MODEL",
     )
     # Base URL embeddings are sent to (OpenRouter's OpenAI-compatible endpoint).
@@ -345,9 +345,9 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         alias="LLM_EMBEDDING_API_BASE",
     )
-    # Output dimension of ``llm_embedding_model`` (bge-m3 = 1024). Pins the
+    # Output dimension of ``llm_embedding_model`` (Nemotron 3 Embed = 2048). Pins the
     # pgvector column width for the ingestion migration; change with the model.
-    llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
+    llm_embedding_dimensions: int = Field(default=2048, alias="LLM_EMBEDDING_DIMENSIONS")
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")

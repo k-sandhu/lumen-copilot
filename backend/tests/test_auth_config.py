@@ -118,6 +118,13 @@ def test_version_is_sourced_from_package_single_source() -> None:
     assert s.version == app.__version__
 
 
+def test_default_embedding_model_matches_persisted_vector_width() -> None:
+    """The default gateway model and fixed database width stay compatible (#449)."""
+    s = Settings(_env_file=None, **_BASE)
+    assert s.llm_embedding_model == "openai/nvidia/nemotron-3-embed-1b:free"
+    assert s.llm_embedding_dimensions == 2048
+
+
 # --- Context-assembler budget guardrails (#410 / #424 review, finding 6) ------
 
 

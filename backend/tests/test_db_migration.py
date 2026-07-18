@@ -121,7 +121,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0037_session_summaries"]
+    assert list(script.get_heads()) == ["0038_embedding_2048"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -1334,3 +1334,33 @@ def test_offline_session_summaries_migration_round_trips(
     down = capsys.readouterr().out.lower()
     assert "drop table session_summaries" in down
     assert "drop policy if exists rls_session_summaries" in down
+
+
+def test_offline_embedding_dimension_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0038 widens stored vectors for Nemotron 3 Embed and is reversible (#449).
+
+    Existing 1,024-dimension values are zero-padded on upgrade so the schema
+    change never destroys relational chunk data; the operational re-embedding
+    pass then replaces those placeholders with native 2,048-dimension vectors.
+    Downgrade restores the original width by taking the leading 1,024 values.
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0037_session_summaries:0038_embedding_2048", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "drop index if exists ix_chunks_embedding_hnsw" in up
+    assert "alter table chunks alter column embedding type vector(2048)" in up
+    assert "array_fill" in up
+    # pgvector HNSW caps indexed vectors at 2,000 dimensions. ADR-0010 retired
+    # this legacy index when OpenSearch became the single retrieval store, so
+    # the 2,048-dimension upgrade must leave it dropped (live regression).
+    assert "create index ix_chunks_embedding_hnsw" not in up
+
+    command.downgrade(cfg, "0038_embedding_2048:0037_session_summaries", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table chunks alter column embedding type vector(1024)" in down
+    assert "subvector" in down
+    assert "create index ix_chunks_embedding_hnsw" in down

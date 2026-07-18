@@ -284,7 +284,7 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
 
     The ``embedding`` column sits beside ``tenant_id`` + ``document_id`` so a
     permission-aware retrieval query is one ``WHERE`` clause. Width =
-    ``LLM_EMBEDDING_DIMENSIONS`` (1024). Nullable so a row can exist before the
+    ``LLM_EMBEDDING_DIMENSIONS`` (2048). Nullable so a row can exist before the
     embedding is computed (two-phase ingestion, #21).
     """
 

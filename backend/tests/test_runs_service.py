@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from ipaddress import ip_address
 
 import pytest
 import pytest_asyncio
@@ -519,6 +520,7 @@ async def test_run_start_and_finish_audited(
     for e in events:
         if e.action in {"run.started", "run.finished"}:
             assert e.actor_id == ctx.alice_id
+            assert ip_address(str(e.source_ip)).is_loopback
 
 
 # --- Duplicate delivery: an already-claimed run is not re-run ---------------
