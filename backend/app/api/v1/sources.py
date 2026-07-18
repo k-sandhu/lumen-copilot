@@ -88,7 +88,7 @@ class GdriveFolderConfigResponse(BaseModel):
 
     mode: Literal["folder"]
     folder_id: str = Field(min_length=1)
-    drive_id: str | None = None
+    drive_id: str | None = Field(default=None, min_length=1)
 
     @model_serializer
     def _contract_shape(self) -> dict[str, str]:
@@ -312,13 +312,16 @@ def _gdrive_config_response(
     drive_id = config.get("drive_id")
     if mode == "my_drive" and folder_id is None and drive_id is None:
         return GdriveMyDriveConfigResponse(mode="my_drive")
-    if mode == "folder" and isinstance(folder_id, str):
-        return GdriveFolderConfigResponse(
-            mode="folder",
-            folder_id=folder_id,
-            drive_id=drive_id if isinstance(drive_id, str) else None,
-        )
-    if mode == "shared_drive" and isinstance(drive_id, str) and folder_id is None:
+    if mode == "folder" and isinstance(folder_id, str) and folder_id:
+        # An empty stored drive_id is malformed, not "absent" — fall through
+        # to the fail-closed raise rather than emitting a contract-invalid id.
+        if drive_id is None or (isinstance(drive_id, str) and drive_id):
+            return GdriveFolderConfigResponse(
+                mode="folder",
+                folder_id=folder_id,
+                drive_id=drive_id,
+            )
+    if mode == "shared_drive" and isinstance(drive_id, str) and drive_id and folder_id is None:
         return GdriveSharedDriveConfigResponse(mode="shared_drive", drive_id=drive_id)
     raise ValueError(f"stored gdrive config fits no contract variant (mode={mode!r})")
 
@@ -644,5 +647,7 @@ async def oauth_callback(
         await session.commit()
     except Exception:  # noqa: BLE001 — the 302 guarantee outranks a commit fault
         await session.rollback()
-        return _callback_redirect(service.failure_redirect_url())
+        # The rolled-back flow still gets its tenant-attributed failure audit
+        # (INV-6) from the now-clean transaction, inside the service.
+        return _callback_redirect(await service.record_route_commit_failure())
     return _callback_redirect(redirect_url)

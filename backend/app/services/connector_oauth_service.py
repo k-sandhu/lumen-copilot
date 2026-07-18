@@ -150,6 +150,35 @@ class ConnectorOAuthService:
         """The generic ``failed`` redirect — the route's last-resort 302 target."""
         return self._error_url(REASON_FAILED)
 
+    async def record_route_commit_failure(self) -> str:
+        """The route's commit itself failed — audit it, return the failed URL.
+
+        Called by the callback route after ITS ``commit()`` raised and rolled
+        back: whatever the flow did is gone, but the failure still deserves a
+        tenant-attributed ``source.connected`` ``outcome=error`` row (INV-6)
+        when the state had resolved. Emitted+committed on the now-clean
+        session; a failure of even this audit write is logged, never raised —
+        the 302 guarantee outranks it.
+        """
+        record = self._resolved_record
+        if record is not None:
+            try:
+                await bind_tenant(self._session, record.tenant_id)
+                await self._audit(record.tenant_id).emit(
+                    action=AuditAction.SOURCE_CONNECTED,
+                    actor=AuditActor.user(record.user_id),
+                    resource_type="source",
+                    resource_id=str(record.source_id),
+                    outcome=AuditOutcome.ERROR,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata={"reason": "commit_failed"},
+                )
+                await self._session.commit()
+            except Exception:  # noqa: BLE001 — the 302 outranks the audit write
+                log.exception("connector_oauth.commit_failure_audit_failed")
+        return self._error_url(REASON_FAILED)
+
     @staticmethod
     def _oauth_connector(source_type: str) -> tuple[Connector, OAuthSpec]:
         """Resolve the connector + its OAuth capability, or raise the typed 409."""
@@ -352,15 +381,23 @@ class ConnectorOAuthService:
                 detail="exchange_failed",
             )
 
-        # 5. Persist the refresh token into the vault. Rotation is **by
-        #    reference** (ADR-0019 §1): a source that already holds a credential
-        #    gets its value replaced under the SAME row regardless of which
-        #    admin originally stored it — a cross-admin reconnect never mints a
-        #    per-owner duplicate or orphans the old row. Only a first-ever
-        #    connect creates a row (tracked so a lost CAS below can remove it —
-        #    nothing half-completed may survive this transaction). A provider
-        #    may omit the refresh token on re-consent; that is fine only when
-        #    the source already holds one (rotation-less reauthorize).
+        # 5. Provider-verified account identity (optional capability) — the
+        #    probe runs over a framework-built, guarded authenticated client;
+        #    connector code never receives the token string (ADR-0019 §4).
+        email = await self._probe_account_email(connector, spec, token)
+
+        # 6. Vault plan — NOTHING an already-bound credential depends on is
+        #    written before the CAS (a losing flow must not be able to alter
+        #    the credential a live binding uses):
+        #    * first-ever connect: a NEW row is created now (invisible to any
+        #      other binding; unwound in this same transaction if the CAS
+        #      loses);
+        #    * reconnect/reauthorize: the existing row is left untouched here —
+        #      its in-place, by-reference rotation happens ONLY after a CAS
+        #      win (step 7), so a superseded flow can never rotate the shared
+        #      credential from under the current one. A provider may omit the
+        #      refresh token on re-consent; that is fine only when the source
+        #      already holds one.
         secrets = build_secrets_service(
             self._session,
             settings=self._settings,
@@ -371,44 +408,36 @@ class ConnectorOAuthService:
             request_id=self._request_id,
             source_ip=self._source_ip,
         )
-        secret_ref = source.auth_secret_ref
-        created_secret_id: UUID | None = None
-        if token.refresh_token is not None:
-            if secret_ref is not None:
-                await secrets.rotate_secret_value(
-                    secret_ref,
-                    plaintext=token.refresh_token,
-                    accessor=AuditActor.user(record.user_id),
-                )
-            else:
-                ref = await secrets.store_secret(
-                    name=f"{_SECRET_NAME_PREFIX}{record.source_id}",
-                    kind=SecretKind.CONNECTOR_OAUTH,
-                    plaintext=token.refresh_token,
-                )
-                secret_ref = ref.id
-                created_secret_id = ref.id
-        if secret_ref is None:
+        existing_ref = source.auth_secret_ref
+        if existing_ref is None and token.refresh_token is None:
             return await _fail(
                 REASON_PROVIDER_ERROR,
                 outcome=AuditOutcome.ERROR,
                 detail="no_refresh_token",
             )
-
-        # 6. Provider-verified account identity (optional capability) + the
-        #    auto-attestation of the connecting admin (ADR-0019 §2). The probe
-        #    runs over a framework-built, host-pinned authenticated client —
-        #    connector code never receives the token string (ADR-0019 §4).
-        email = await self._probe_account_email(connector, spec, token)
+        secret_ref = existing_ref
+        created_secret_id: UUID | None = None
+        if existing_ref is None:
+            assert token.refresh_token is not None  # guarded above  # noqa: S101
+            ref = await secrets.store_secret(
+                name=f"{_SECRET_NAME_PREFIX}{record.source_id}",
+                kind=SecretKind.CONNECTOR_OAUTH,
+                plaintext=token.refresh_token,
+            )
+            secret_ref = ref.id
+            created_secret_id = ref.id
+        assert secret_ref is not None  # both branches above set it  # noqa: S101
 
         # 7. Finalize with a CAS (ADR-0019 §1): one atomic UPDATE guarded on
         #    the flow's exact generation and a connectable status — the single
         #    authority on races. A flow superseded (or a source deleted /
         #    mid-sync) after the earlier checks loses here; the loser unwinds
-        #    any row it created and reports `denied`, committing no credential
-        #    binding. The acting user's admin role is re-read in the same
-        #    transaction right before the CAS.
-        fresh_user = await users.get(record.user_id)
+        #    any row it created, rotates NOTHING, and reports `denied`. The
+        #    acting user's admin role is re-read with an identity-map bypass
+        #    (``refresh=True``) immediately before the CAS, so a demotion
+        #    committed after the earlier check is seen, not masked by the
+        #    session cache.
+        fresh_user = await users.get(record.user_id, refresh=True)
         if fresh_user is None or Role.ADMIN not in fresh_user.roles:
             if created_secret_id is not None:
                 await secrets.delete_secret(created_secret_id)
@@ -424,6 +453,17 @@ class ConnectorOAuthService:
             if created_secret_id is not None:
                 await secrets.delete_secret(created_secret_id)
             return await _fail(REASON_DENIED, outcome=AuditOutcome.DENIED, detail="superseded_flow")
+
+        # CAS won: NOW rotate an existing credential in place (same
+        # transaction — a failure here raises into the catch-all, which rolls
+        # the whole flow back including the CAS, so a half-rotated state can
+        # never commit).
+        if created_secret_id is None and token.refresh_token is not None:
+            await secrets.rotate_secret_value(
+                secret_ref,
+                plaintext=token.refresh_token,
+                accessor=AuditActor.user(record.user_id),
+            )
 
         # 8. The auto-attestation (after the CAS so a losing flow attests
         #    nothing) + the success audit + the first sync.

@@ -864,11 +864,17 @@ class UserRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_user(row)
 
-    async def get(self, user_id: UUID) -> User | None:
+    async def get(self, user_id: UUID, *, refresh: bool = False) -> User | None:
+        """Fetch a user (tenant-scoped). ``refresh=True`` bypasses the identity
+        map (``populate_existing``) so the row reflects the DATABASE's current
+        state — the OAuth callback's final role re-check uses it, where a
+        session-cached row could mask a demotion committed elsewhere."""
         stmt = select(models.User).where(
             models.User.tenant_id == self._tenant_id,
             models.User.id == user_id,
         )
+        if refresh:
+            stmt = stmt.execution_options(populate_existing=True)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 

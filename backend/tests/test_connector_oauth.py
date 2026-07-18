@@ -116,9 +116,11 @@ class FakeDriveConnector:
         )
 
     async def fetch_account_email(self, http: httpx.AsyncClient) -> str | None:
-        # ADR-0019 §4: the probe receives a framework-built AUTHENTICATED client
-        # — never the token string. The bearer rides the client's defaults.
-        assert http.headers.get("Authorization") == f"Bearer {_ACCESS_TOKEN}"
+        # ADR-0019 §4: connector code receives a guarded client and can see NO
+        # credential on it — the bearer lives inside the transport and is
+        # injected per hop after the guard checks (proven by the transport
+        # unit test); reading it off the client must be impossible.
+        assert "Authorization" not in http.headers
         return self.account_email
 
 
@@ -127,6 +129,7 @@ class TokenEndpoint:
 
     def __init__(self) -> None:
         self.mode = "ok"  # ok | error | invalid_grant | no_refresh
+        self.refresh_token_value = _REFRESH_TOKEN
         self.requests: list[dict[str, list[str]]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -139,7 +142,7 @@ class TokenEndpoint:
             return httpx.Response(400, json={"error": "invalid_grant"})
         body = {
             "access_token": _ACCESS_TOKEN,
-            "refresh_token": _REFRESH_TOKEN,
+            "refresh_token": self.refresh_token_value,
             "scope": "drive.readonly",
             "expires_in": 3600,
         }
@@ -315,6 +318,21 @@ async def _connect(client: AsyncClient, token: str, source_id: str) -> httpx.Res
 def _state_of(authorization_url: str) -> str:
     query = parse_qs(urlsplit(authorization_url).query)
     return query["state"][0]
+
+
+async def _audit_rows(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> list[models.AuditEvent]:
+    async with sessionmaker() as session:
+        return list(
+            (
+                await session.execute(
+                    select(models.AuditEvent).where(models.AuditEvent.tenant_id == tenant_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
 
 async def _audit_actions(
@@ -700,13 +718,27 @@ async def test_dockerfile_disables_uvicorn_access_log() -> None:
     query string — `state` and `code` — to stdout; the serve command must ship
     with it disabled."""
     dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(encoding="utf-8")
-    assert "--no-access-log" in dockerfile
+    cmd_lines = [line for line in dockerfile.splitlines() if line.strip().startswith("CMD")]
+    assert cmd_lines, "Dockerfile has no CMD"
+    assert any(
+        "--no-access-log" in line for line in cmd_lines
+    ), "the uvicorn CMD must disable the access log (query strings carry state/code)"
 
 
-async def test_authenticated_client_is_host_pinned() -> None:
+async def test_authenticated_client_is_host_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """ADR-0019 §4: the guard rejects off-allowlist hosts BEFORE the bearer
     header could leave; allowed hosts pass through with the header attached."""
+    # The fixture host does not resolve offline: stub the shared egress
+    # primitive with a public-range answer and a passthrough pin, so the test
+    # exercises the guard ORDER (host check -> resolve -> pin -> auth inject)
+    # without a socket. The blocked-range leg is asserted separately below.
+    import app.net.egress as net_egress
     from app.connectors.oauth import EgressNotAllowedError, build_authenticated_client
+
+    monkeypatch.setattr(net_egress, "resolve_safe_ip", lambda host: "93.184.216.34")
+    monkeypatch.setattr(net_egress, "pin_url_to_ip", lambda url, ip: url)
 
     seen: list[str] = []
 
@@ -727,6 +759,32 @@ async def test_authenticated_client_is_host_pinned() -> None:
         with pytest.raises(EgressNotAllowedError):
             await guarded.get("https://evil.example/exfiltrate")
     assert seen == ["https://provider.test/about"]  # the foreign host never dialled
+
+    # Blocked-range resolution is refused even for a pinned host (fail closed).
+    from app.net.egress import EgressBlockedError
+
+    def _blocked(host: str) -> str:
+        raise EgressBlockedError(f"host {host!r} resolves into a blocked range")
+
+    monkeypatch.setattr(net_egress, "resolve_safe_ip", _blocked)
+    async with build_authenticated_client(
+        spec,
+        access_token="tok",
+        timeout=5.0,
+        inner_transport=httpx.MockTransport(handler),
+    ) as guarded:
+        with pytest.raises(EgressNotAllowedError):
+            await guarded.get("https://provider.test/about")
+
+    # http to a PINNED host is still refused (credentials never in cleartext).
+    async with build_authenticated_client(
+        spec,
+        access_token="tok",
+        timeout=5.0,
+        inner_transport=httpx.MockTransport(handler),
+    ) as guarded:
+        with pytest.raises(EgressNotAllowedError):
+            await guarded.get("http://provider.test/about")
 
 
 async def test_refresh_invalid_grant_maps_to_dead_error(
@@ -847,3 +905,248 @@ async def test_delete_managed_source_deletes_vault_secret(
     assert not await _secret_rows(sessionmaker)
     actions = await _audit_actions(sessionmaker, seeded.tenant_a)
     assert "secret.deleted" in actions and "source.deleted" in actions
+
+
+# --- round-2 behavioral proofs ----------------------------------------------
+
+
+async def test_concurrent_callbacks_consume_state_exactly_once(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Two racing callbacks on ONE state: exactly one wins, one is expired."""
+    import asyncio
+
+    token = await _login(client, seeded.alice_email)
+    _source_id, state = await _connected_state(client, token)
+    r1, r2 = await asyncio.gather(
+        client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"}),
+        client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"}),
+    )
+    outcomes = sorted(
+        "ok" if "connect=ok" in r.headers["location"] else _reason(r) for r in (r1, r2)
+    )
+    assert outcomes == ["expired", "ok"]
+    assert len(await _secret_rows(sessionmaker)) == 1
+
+
+async def test_losing_reconnect_cannot_rotate_current_credential(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    token_endpoint: TokenEndpoint,
+) -> None:
+    """The F5 race proof: flow N is checked, flow N+1 supersedes it, then flow
+    N finalizes WITH a fresh refresh token — it must lose the CAS and the
+    bound credential must be byte-identical (rotation happens only after a
+    CAS win)."""
+    alice = await _login(client, seeded.alice_email)
+    source_id, state0 = await _connected_state(client, alice)
+    await client.get("/api/v1/sources/oauth/callback", params={"state": state0, "code": "c"})
+    bound = await _secret_rows(sessionmaker)
+    assert len(bound) == 1
+    original_ct = bytes(bound[0].ciphertext)
+
+    # Flow N minted... then superseded by flow N+1 before N's callback lands.
+    url_n = (await _connect(client, alice, source_id)).json()["authorization_url"]
+    await _connect(client, alice, source_id)  # N+1 supersedes N
+    token_endpoint.refresh_token_value = "rt-attacker-visible-rotation"
+    resp = await client.get(
+        "/api/v1/sources/oauth/callback",
+        params={"state": _state_of(url_n), "code": "c"},
+    )
+    assert _reason(resp) == "denied"
+    after = await _secret_rows(sessionmaker)
+    assert len(after) == 1
+    assert (
+        bytes(after[0].ciphertext) == original_ct
+    ), "a superseded flow must not alter the bound credential"
+
+
+async def test_callback_commit_fault_rolls_back_and_audits(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route commit failing must not orphan anything — and still leaves a
+    tenant-attributed source.connected outcome=error audit."""
+    token = await _login(client, seeded.alice_email)
+    source_id, state = await _connected_state(client, token)
+
+    real_commit = AsyncSession.commit
+    fired = {"done": False}
+
+    async def _commit_once_broken(self: AsyncSession) -> None:
+        if not fired["done"]:
+            fired["done"] = True
+            raise RuntimeError("injected commit fault")
+        await real_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", _commit_once_broken)
+    resp = await client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"})
+    monkeypatch.setattr(AsyncSession, "commit", real_commit)
+    assert _reason(resp) == "failed"
+    assert not await _secret_rows(sessionmaker), "rolled-back flow must leave no secret"
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(models.Source).where(models.Source.id == uuid.UUID(source_id))
+            )
+        ).scalar_one()
+        assert row.auth_secret_ref is None
+        assert row.status == "pending_auth"
+    audits = await _audit_rows(sessionmaker, seeded.tenant_a)
+    assert any(
+        a.action == "source.connected"
+        and a.outcome == "error"
+        and (a.event_metadata or {}).get("reason") == "commit_failed"
+        for a in audits
+    )
+
+
+# --- round-2 sync-path proofs (the Celery task against the same DB) ---------
+
+
+@pytest_asyncio.fixture
+async def task_db(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Point ``db.session`` globals at THIS module engine so
+    ``tenant_session_scope`` inside the sync task hits the same database."""
+    import app.db.session as db_session
+
+    prev_engine = db_session._engine
+    prev_maker = db_session._sessionmaker
+    db_session._sessionmaker = sessionmaker
+    try:
+        yield sessionmaker
+    finally:
+        db_session._engine = prev_engine
+        db_session._sessionmaker = prev_maker
+
+
+async def _seed_connected_source(client: AsyncClient, seeded: _Seeded) -> tuple[str, str]:
+    """Create + fully connect a gdrive source via the API; return (id, token)."""
+    token = await _login(client, seeded.alice_email)
+    source_id, state = await _connected_state(client, token)
+    resp = await client.get("/api/v1/sources/oauth/callback", params={"state": state, "code": "c"})
+    assert "connect=ok" in resp.headers["location"]
+    return source_id, token
+
+
+async def _run_sync(tenant_id: uuid.UUID, source_id: str) -> object:
+    from app.core.config import get_settings
+    from app.tasks.sync_source import sync_source_async
+
+    class _NullStore:
+        async def put(self, *a: object, **k: object) -> object:
+            raise AssertionError("no docs expected")
+
+        async def delete(self, *a: object) -> None: ...
+
+    class _NullGateway: ...
+
+    return await sync_source_async(
+        tenant_id,
+        uuid.UUID(source_id),
+        settings=get_settings(),
+        object_store=_NullStore(),  # type: ignore[arg-type]
+        gateway=_NullGateway(),  # type: ignore[arg-type]
+    )
+
+
+async def test_sync_dead_grant_marks_reauthorize_and_audits(
+    client: AsyncClient,
+    seeded: _Seeded,
+    task_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from app.connectors.oauth import OAuthGrantDeadError
+
+    source_id, token = await _seed_connected_source(client, seeded)
+    sync_mod = importlib.import_module("app.tasks.sync_source")
+
+    async def _dead(*_a: object, **_k: object) -> object:
+        raise OAuthGrantDeadError()
+
+    monkeypatch.setattr(sync_mod, "refresh_access_token", _dead)
+    result = await _run_sync(seeded.tenant_a, source_id)
+    assert result.error == "reauthorize_required"  # type: ignore[attr-defined]
+    async with task_db() as session:
+        row = (
+            await session.execute(
+                select(models.Source).where(models.Source.id == uuid.UUID(source_id))
+            )
+        ).scalar_one()
+        assert row.status == "error" and row.last_error == "reauthorize_required"
+    audits = await _audit_rows(task_db, seeded.tenant_a)
+    assert any(a.action == "source.synced" and a.outcome == "error" for a in audits)
+    listed = await client.get("/api/v1/sources", headers=_auth(token))
+    item = next(s for s in listed.json()["items"] if s["id"] == source_id)
+    assert item["reauthorize_required"] is True
+
+
+async def test_sync_restores_provider_rotated_refresh_token(
+    client: AsyncClient,
+    seeded: _Seeded,
+    task_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from app.connectors.oauth import TokenResponse
+
+    source_id, _token = await _seed_connected_source(client, seeded)
+    before = await _secret_rows(task_db)
+    assert len(before) == 1
+    original_ct = bytes(before[0].ciphertext)
+    sync_mod = importlib.import_module("app.tasks.sync_source")
+
+    async def _rotated(*_a: object, **_k: object) -> TokenResponse:
+        return TokenResponse(
+            access_token=_ACCESS_TOKEN,
+            refresh_token="rt-rotated-by-provider",
+            scope=None,
+            expires_in=3600,
+        )
+
+    monkeypatch.setattr(sync_mod, "refresh_access_token", _rotated)
+    result = await _run_sync(seeded.tenant_a, source_id)
+    assert result.error is None  # type: ignore[attr-defined]
+    after = await _secret_rows(task_db)
+    assert len(after) == 1 and after[0].id == before[0].id
+    assert bytes(after[0].ciphertext) != original_ct, "rotated token must be re-stored"
+
+
+async def test_sync_rotation_race_secret_deleted_is_reauthorize(
+    client: AsyncClient,
+    seeded: _Seeded,
+    task_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from app.connectors.oauth import TokenResponse
+    from app.core.errors import NotFoundError as NFE
+    from app.services.secrets_service import SecretsService
+
+    source_id, _token = await _seed_connected_source(client, seeded)
+    sync_mod = importlib.import_module("app.tasks.sync_source")
+
+    async def _rotated(*_a: object, **_k: object) -> TokenResponse:
+        return TokenResponse(
+            access_token=_ACCESS_TOKEN,
+            refresh_token="rt-rotated-by-provider",
+            scope=None,
+            expires_in=3600,
+        )
+
+    async def _gone(self: SecretsService, *_a: object, **_k: object) -> object:
+        raise NFE("Secret not found.")
+
+    monkeypatch.setattr(sync_mod, "refresh_access_token", _rotated)
+    monkeypatch.setattr(SecretsService, "rotate_secret_value", _gone)
+    result = await _run_sync(seeded.tenant_a, source_id)
+    assert result.error == "reauthorize_required"  # type: ignore[attr-defined]

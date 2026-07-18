@@ -36,6 +36,7 @@ import httpx
 
 __all__ = [
     "REAUTHORIZE_REQUIRED",
+    "EgressNotAllowedError",
     "InMemoryOAuthStateStore",
     "OAuthExchangeError",
     "OAuthFlowRecord",
@@ -44,6 +45,7 @@ __all__ = [
     "OAuthStateStore",
     "RedisOAuthStateStore",
     "TokenResponse",
+    "build_authenticated_client",
     "build_authorization_url",
     "exchange_code",
     "generate_pkce",
@@ -116,30 +118,80 @@ class OAuthSpec:
 
 
 class EgressNotAllowedError(Exception):
-    """An authenticated connector request targeted a host outside the pinned set.
+    """An authenticated connector request was refused by the run guard.
 
-    Raised by the framework's guard transport before any bytes (or the auth
-    header) leave toward the foreign host — an off-allowlist request is a
-    defect at the ADR-0009 §3 bar, never a silent dial.
+    Raised by the framework's guard transport — off-allowlist host, non-https
+    scheme, or a host resolving into a blocked range — **before** any bytes
+    (or the injected auth header) leave toward the target. An off-guard request
+    is a defect at the ADR-0009 §3 bar, never a silent dial.
     """
 
-    def __init__(self, host: str) -> None:
-        self.host = host
-        super().__init__(f"host {host!r} is not in the connector's pinned allowlist")
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
 
 
-class _HostAllowlistTransport(httpx.AsyncBaseTransport):
-    """Rejects any request whose host is off the pinned set (ADR-0019 §4/§5)."""
+class _AuthenticatedPinnedTransport(httpx.AsyncBaseTransport):
+    """The credential boundary of a connector run (ADR-0019 §4).
 
-    def __init__(self, inner: httpx.AsyncBaseTransport, allowed_hosts: frozenset[str]) -> None:
+    The bearer token lives **inside this transport** — it is injected into the
+    outgoing request only after every check passes, so connector code holding
+    the client can neither read the credential (``client.headers`` carries no
+    auth) nor route it anywhere unchecked. Per request (httpx re-invokes the
+    transport per followed hop, so any redirect is re-checked too):
+
+    * **https-only** — credentials never transit cleartext, even to a pinned
+      host (loopback excepted for local test doubles is deliberately NOT
+      offered here — the pinned sets are real provider hosts);
+    * **pinned host set** — the connector's fixed ``allowed_hosts`` (ADR-0019
+      §5); anything else is refused;
+    * **resolve + range-check + IP-pin** — the shared :mod:`app.net.egress`
+      predicate (one SSRF definition): resolve-all/reject-any, then the socket
+      connects to the validated IP with the original host preserved for
+      routing (Host header) and TLS (SNI), closing the DNS-rebind window —
+      the same mechanics as the MCP guard (ADR-0012 §4).
+    """
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        *,
+        allowed_hosts: frozenset[str],
+        access_token: str,
+    ) -> None:
         self._inner = inner
         self._allowed = allowed_hosts
+        self._access_token = access_token
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        from app.net.egress import EgressBlockedError, pin_url_to_ip, resolve_safe_ip
+
+        url = str(request.url)
+        if request.url.scheme.lower() != "https":
+            raise EgressNotAllowedError(
+                f"scheme {request.url.scheme!r} refused: an authenticated connector "
+                "request must be https"
+            )
         host = (request.url.host or "").casefold()
         if host not in self._allowed:
-            raise EgressNotAllowedError(host)
-        return await self._inner.handle_async_request(request)
+            raise EgressNotAllowedError(f"host {host!r} is not in the connector's pinned allowlist")
+        try:
+            safe_ip = resolve_safe_ip(host)
+        except EgressBlockedError as exc:
+            raise EgressNotAllowedError(str(exc)) from exc
+
+        pinned = pin_url_to_ip(url, safe_ip)
+        pinned_request = httpx.Request(
+            method=request.method,
+            url=pinned,
+            headers=request.headers,
+            stream=request.stream,
+            extensions={**request.extensions, "sni_hostname": host},
+        )
+        pinned_request.headers["Host"] = request.url.netloc.decode("ascii")
+        # The credential is attached HERE — after every check, never before.
+        pinned_request.headers["Authorization"] = f"Bearer {self._access_token}"
+        return await self._inner.handle_async_request(pinned_request)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -152,21 +204,25 @@ def build_authenticated_client(
     timeout: float,
     inner_transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
-    """The framework-owned authenticated, host-pinned client (ADR-0019 §4).
+    """The framework-owned authenticated, guarded client (ADR-0019 §4).
 
-    The ONLY constructor of a credential-bearing connector client: the bearer
-    header rides the client's defaults, and the allowlist guard runs **before**
-    the transport, so an off-allowlist request raises without the header ever
-    leaving. Connector code receives this client (via ``ConnectorRun`` or the
-    identity probe) — never the token string. ``inner_transport`` is the test
-    seam (a MockTransport); production uses the default transport.
+    The ONLY constructor of a credential-bearing connector client. The bearer
+    is held privately by :class:`_AuthenticatedPinnedTransport` and injected
+    per hop after the https / pinned-host / resolve-range checks — the client
+    object itself carries **no** auth header, so connector code (which receives
+    this client via ``ConnectorRun`` or the identity probe, never a token
+    string) cannot read the credential off it. Redirects are NOT auto-followed;
+    a connector following one re-enters the guard. ``inner_transport`` is the
+    test seam (a MockTransport behind the REAL guard); production uses the
+    default transport.
     """
     allowed = frozenset(h.casefold() for h in spec.allowed_hosts)
     inner = inner_transport if inner_transport is not None else httpx.AsyncHTTPTransport()
     return httpx.AsyncClient(
-        transport=_HostAllowlistTransport(inner, allowed),
+        transport=_AuthenticatedPinnedTransport(
+            inner, allowed_hosts=allowed, access_token=access_token
+        ),
         timeout=timeout,
-        headers={"Authorization": f"Bearer {access_token}"},
     )
 
 

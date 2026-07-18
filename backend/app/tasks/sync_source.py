@@ -373,11 +373,17 @@ async def _build_run(
         # (by reference, owner unchanged) or the NEXT sync would refresh with a
         # revoked credential (#452 AC).
         async with tenant_session_scope(tenant_id) as session:
-            await _vault(session).rotate_secret_value(
-                source.auth_secret_ref,
-                plaintext=token.refresh_token,
-                accessor=AuditActor.system(),
-            )
+            try:
+                await _vault(session).rotate_secret_value(
+                    source.auth_secret_ref,
+                    plaintext=token.refresh_token,
+                    accessor=AuditActor.system(),
+                )
+            except NotFoundError as exc:
+                # The credential row was deleted between the read and this
+                # rotation (source/secret deletion racing the sync) — the same
+                # repair as any dead grant: reauthorize (terminal, audited).
+                raise OAuthGrantDeadError() from exc
     # The authenticated client is framework-built and HOST-PINNED to the
     # connector's fixed allowlist (ADR-0019 §4/§5): an off-allowlist request
     # raises inside the guard before the Authorization header could leave.
