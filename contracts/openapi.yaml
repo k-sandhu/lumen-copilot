@@ -4056,6 +4056,30 @@ components:
         `reauthorize_required`).
       enum: [pending_auth, pending, syncing, ready, error]
 
+    SourceConfig:
+      description: >
+        A connector configuration — the additive union of every per-type config,
+        discriminated by `mode` (the one property all variants carry; the web
+        modes and the gdrive modes are disjoint value sets). Pre-0.7.0 clients
+        keep this component; the discriminated `Source` branches bind the
+        specific shapes directly (`WebSource.config` → `WebSourceConfig`,
+        `GdriveSource.config` → `GdriveSourceConfig`), so cross-type mixes stay
+        schema-invalid there.
+      oneOf:
+        - { $ref: "#/components/schemas/WebSourceConfig" }
+        - { $ref: "#/components/schemas/GdriveMyDriveConfig" }
+        - { $ref: "#/components/schemas/GdriveFolderConfig" }
+        - { $ref: "#/components/schemas/GdriveSharedDriveConfig" }
+      discriminator:
+        propertyName: mode
+        mapping:
+          page: "#/components/schemas/WebSourceConfig"
+          feed: "#/components/schemas/WebSourceConfig"
+          sitemap: "#/components/schemas/WebSourceConfig"
+          my_drive: "#/components/schemas/GdriveMyDriveConfig"
+          folder: "#/components/schemas/GdriveFolderConfig"
+          shared_drive: "#/components/schemas/GdriveSharedDriveConfig"
+
     WebSourceConfig:
       type: object
       additionalProperties: false
