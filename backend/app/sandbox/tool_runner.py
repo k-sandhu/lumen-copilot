@@ -7,7 +7,8 @@ sandbox internals directly — it holds only the narrow
 concrete implementation the chat runtime wires into the tool context:
 
 * it **creates** the ``queued`` ``code_run`` linked to the parent chat session +
-  assistant message (``session_id`` / the trace), through the tenant-scoped
+  assistant message (``session_id`` / the trace), in its own short tenant-scoped
+  transaction through the
   :class:`~app.db.repositories.CodeRunRepository` (the only SQL);
 * it **submits** the run to the merged :class:`~app.sandbox.service.SandboxService`
   — the owning module for code execution (ADR-0020 §1). A disabled tenant or
@@ -40,11 +41,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.repositories import CodeRunRepository
+from app.db.tenant_context import bind_tenant
 from app.domain.entities import CodeRun, CodeRunStatus
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
@@ -63,19 +65,22 @@ class ChatSandboxToolRunner:
     """Submit a ``run_python`` code run and stream its output over the chat stream.
 
     Constructed per answer by the chat runtime with the run's collaborators — the
-    runtime's own DB session, the tenant/owner (from the streaming principal, never
-    tool args), the injected :class:`SandboxRunner` (live HTTP client or a test
+    runtime's DB session factory, the tenant/owner (from the streaming principal,
+    never tool args), the injected :class:`SandboxRunner` (live HTTP client or a test
     fake), the object store, the backplane the answer streams over, and the
-    ``stream_id`` / ``session_id`` / ``message_id`` the run links back to. All
-    tenant/owner scoping + the deny-by-default enable/package gate live in the
-    composed :class:`SandboxService`; this class only creates the run row, drives the
-    service, and renders the WS events.
+    ``stream_id`` / ``session_id`` / ``message_id`` the run links back to. The
+    dedicated session keeps code execution out of the answer transaction: the queued
+    row is committed before execution and the running row is committed before the
+    unbounded runner call, so cancellation can observe it. All tenant/owner scoping +
+    the deny-by-default enable/package gate live in the composed
+    :class:`SandboxService`; this class creates the run row, drives the service, and
+    renders the WS events.
     """
 
     def __init__(
         self,
         *,
-        session: AsyncSession,
+        sessionmaker: async_sessionmaker[AsyncSession],
         tenant_id: UUID,
         owner_id: UUID,
         runner: SandboxRunner,
@@ -89,7 +94,7 @@ class ChatSandboxToolRunner:
         session_id: UUID | None = None,
         message_id: UUID | None = None,
     ) -> None:
-        self._session = session
+        self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._runner = runner
@@ -116,36 +121,48 @@ class ChatSandboxToolRunner:
         requirements are policy-checked and installed by the runner before
         tenant inputs are staged. There is no automatic execution timeout.
         """
-        code_runs = CodeRunRepository(self._session, self._tenant_id)
-        run = await code_runs.create(
-            owner_id=self._owner_id,
-            code=code,
-            session_id=self._session_id,
-            # Link the code-run to the parent chat/agent trace: the assistant message
-            # id doubles as the trace id until the agent-trace tables land (mirrors
-            # the code_runs row's documented ``trace_id`` semantics).
-            trace_id=self._message_id,
-            requested_packages=packages,
-        )
-        run_id = run.id
+        async with self._sessionmaker() as session:
+            try:
+                await bind_tenant(session, self._tenant_id)
+                code_runs = CodeRunRepository(session, self._tenant_id)
+                run = await code_runs.create(
+                    owner_id=self._owner_id,
+                    code=code,
+                    session_id=self._session_id,
+                    # Link the code-run to the parent chat/agent trace: the assistant
+                    # message id doubles as the trace id until the agent-trace tables
+                    # land (mirrors the row's documented ``trace_id`` semantics).
+                    trace_id=self._message_id,
+                    requested_packages=packages,
+                )
+                run_id = run.id
+                # Cancellation/reset requests use independent transactions. Make the
+                # queued identity visible before execution, then re-arm the transaction-
+                # local RLS GUC for the execution phase.
+                await session.commit()
+                await bind_tenant(session, self._tenant_id)
 
-        service = SandboxService(
-            tenant_id=self._tenant_id,
-            owner_id=self._owner_id,
-            runner=self._runner,
-            object_store=self._store,
-            settings=self._settings,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-        )
-        # The service walks the row through the deny-by-default gate → running →
-        # terminal, capturing stdout/stderr/exit/artifacts and auditing every
-        # transition. It never raises for a run concern (a crash inside is written as
-        # ``failed``), so the tool always gets a terminal record back.
-        await service.execute(self._session, run_id)
+                service = SandboxService(
+                    tenant_id=self._tenant_id,
+                    owner_id=self._owner_id,
+                    runner=self._runner,
+                    object_store=self._store,
+                    settings=self._settings,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                )
+                # The service walks the row through the deny-by-default gate → running
+                # → terminal, capturing stdout/stderr/exit/artifacts and auditing every
+                # transition. It commits running state before the unbounded runner call
+                # and never raises for a run concern (a crash becomes ``failed``).
+                await service.execute(session, run_id)
+                terminal = await code_runs.get(run_id)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
-        terminal = await code_runs.get(run_id)
-        if terminal is None:  # pragma: no cover — the run was just created in this tx
+        if terminal is None:  # pragma: no cover — durable row vanished unexpectedly
             log.error("sandbox.tool.run_vanished", code_run_id=str(run_id))
             summary = SandboxRun(
                 code_run_id=run_id,

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, get_settings_dep
 from app.auth import hash_password
@@ -25,9 +26,11 @@ from app.db.repositories import (
     TenantSandboxPolicyRepository,
     UserRepository,
 )
-from app.domain.entities import Role
+from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.main import create_app
-from app.sandbox.spec import SandboxSessionSpec
+from app.realtime.backplane import InMemoryBackplane
+from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
+from app.sandbox.tool_runner import ChatSandboxToolRunner
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip
@@ -51,7 +54,12 @@ class _FakeRunner:
         self.resets: list[tuple[SandboxSessionSpec, SandboxSessionSpec]] = []
         self.closed: list[SandboxSessionSpec] = []
         self.cancelled: list[tuple[SandboxSessionSpec, UUID]] = []
+        self.executions: list[tuple[SandboxSessionSpec, RunSpec]] = []
         self.reset_error: Exception | None = None
+        self.close_error: Exception | None = None
+        self.block_execute = False
+        self.execute_started = asyncio.Event()
+        self.execute_release = asyncio.Event()
 
     async def ensure_session(self, value: SandboxSessionSpec) -> None:
         self.ensured.append(value)
@@ -65,16 +73,44 @@ class _FakeRunner:
 
     async def close_session(self, value: SandboxSessionSpec) -> None:
         self.closed.append(value)
+        if self.close_error is not None:
+            raise self.close_error
+
+    async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+        self.executions.append((value, spec))
+        self.execute_started.set()
+        if self.block_execute:
+            await self.execute_release.wait()
+        return RunResult(
+            status=CodeRunStatus.SUCCEEDED,
+            exit_code=0,
+            stdout="finished",
+            stderr="",
+            duration_ms=1,
+            output_files=(),
+            image_digest=value.image,
+            resource_usage=ResourceUsage(),
+        )
 
     async def cancel(self, value: SandboxSessionSpec, execution_id: UUID) -> None:
         self.cancelled.append((value, execution_id))
+        self.execute_release.set()
+
+
+class _FakeStore:
+    """Artifact adapter placeholder; the blocking regression produces no files."""
+
+    async def put_artifact(
+        self, tenant_id: str, data: bytes, content_type: str, filename: str
+    ) -> object:
+        raise AssertionError("the cancellation regression must not persist artifacts")
 
 
 @pytest_asyncio.fixture
 async def sessionmaker_fixture() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    database_file = Path.cwd() / f".test-sandbox-api-{uuid4()}.sqlite3"
     engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
+        f"sqlite+aiosqlite:///{database_file.as_posix()}",
         connect_args={"check_same_thread": False},
     )
     try:
@@ -132,6 +168,7 @@ async def sessionmaker_fixture() -> AsyncIterator[async_sessionmaker[AsyncSessio
         yield factory
     finally:
         await engine.dispose()
+        database_file.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -176,9 +213,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 async def _token(client: AsyncClient, email: str) -> str:
-    response = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": _PASSWORD}
-    )
+    response = await client.post("/api/v1/auth/login", json={"email": email, "password": _PASSWORD})
     assert response.status_code == 200, response.text
     return str(response.json()["access_token"])
 
@@ -275,6 +310,23 @@ async def test_deleting_chat_closes_active_runner_session_first(
     assert (await client.get(sandbox_path, headers=_auth(token))).status_code == 404
 
 
+async def test_deleting_chat_succeeds_when_runner_cleanup_is_unavailable(
+    client: AsyncClient, seeded: _Seeded, fake_runner: _FakeRunner
+) -> None:
+    token = await _token(client, seeded.alice_email)
+    sandbox_path = f"/api/v1/chat/sessions/{seeded.alice_chat}/sandbox"
+    assert (await client.post(f"{sandbox_path}/reset", headers=_auth(token))).status_code == 200
+    fake_runner.close_error = DependencyError("runner unavailable")
+
+    deleted = await client.delete(
+        f"/api/v1/chat/sessions/{seeded.alice_chat}", headers=_auth(token)
+    )
+
+    assert deleted.status_code == 204
+    assert len(fake_runner.closed) == 1
+    assert (await client.get(sandbox_path, headers=_auth(token))).status_code == 404
+
+
 async def test_cancel_kills_run_and_advances_environment_generation(
     client: AsyncClient,
     seeded: _Seeded,
@@ -301,12 +353,54 @@ async def test_cancel_kills_run_and_advances_environment_generation(
         )
         await session.commit()
 
-    response = await client.post(
-        f"/api/v1/code-runs/{run.id}/cancel", headers=_auth(token)
-    )
+    response = await client.post(f"/api/v1/code-runs/{run.id}/cancel", headers=_auth(token))
     current = await client.get(sandbox_path, headers=_auth(token))
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "killed"
     assert response.json()["stderr"] == "Code execution was cancelled."
     assert current.json()["generation"] == 2
     assert fake_runner.cancelled[0][1] == run.id
+
+
+async def test_chat_run_is_durable_and_cancellable_while_execution_is_blocked(
+    client: AsyncClient,
+    seeded: _Seeded,
+    fake_runner: _FakeRunner,
+    sessionmaker_fixture: async_sessionmaker[AsyncSession],
+) -> None:
+    """The chat tool must publish its running row before the unbounded runner call."""
+    token = await _token(client, seeded.alice_email)
+    fake_runner.block_execute = True
+    backplane = InMemoryBackplane()
+
+    seam = ChatSandboxToolRunner(
+        sessionmaker=sessionmaker_fixture,
+        tenant_id=seeded.tenant_id,
+        owner_id=seeded.alice_id,
+        runner=fake_runner,
+        object_store=_FakeStore(),  # type: ignore[arg-type]
+        settings=sandbox_settings(),
+        backplane=backplane,
+        stream_id="cancel-stream",
+        request_id="cancel-request",
+        source_ip="203.0.113.10",
+        next_seq=iter(range(10)).__next__,
+        session_id=seeded.alice_chat,
+        message_id=None,
+    )
+    submission = asyncio.create_task(seam.submit(code="while True: pass"))
+    await asyncio.wait_for(fake_runner.execute_started.wait(), timeout=2)
+    run_id = fake_runner.executions[0][1].execution_id
+
+    response = await client.post(f"/api/v1/code-runs/{run_id}/cancel", headers=_auth(token))
+    fake_runner.execute_release.set()
+    summary = await asyncio.wait_for(submission, timeout=2)
+
+    current = await client.get(
+        f"/api/v1/chat/sessions/{seeded.alice_chat}/sandbox", headers=_auth(token)
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "killed"
+    assert summary.status is CodeRunStatus.KILLED
+    assert current.json()["generation"] == 2
+    assert fake_runner.cancelled == [(fake_runner.executions[0][0], run_id)]

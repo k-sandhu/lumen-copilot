@@ -38,7 +38,8 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import DependencyError, NotFoundError, ValidationError
+from app.core.logging import get_logger
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -74,6 +75,8 @@ from app.services.provider_models import (
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 20
+
+log = get_logger(__name__)
 
 # History is no longer pre-sliced to a fixed count here (#424 re-review): the
 # already-loaded prior messages are handed WHOLE to the runtime's token-budgeted
@@ -464,7 +467,17 @@ class ChatService:
         if existing is None or not self._owns(existing):
             return False
         if self._sandbox_lifecycle is not None:
-            await self._sandbox_lifecycle.close(session_id)
+            try:
+                await self._sandbox_lifecycle.close(session_id)
+            except DependencyError as exc:
+                # Deleting user data must not depend on runner availability. The DB
+                # cascade removes the lifecycle row; the labelled container is safe to
+                # reap later because it has no host mounts, socket, secrets, or network.
+                log.warning(
+                    "chat.sandbox_cleanup_deferred",
+                    chat_session_id=str(session_id),
+                    error_type=type(exc).__name__,
+                )
         return await self._sessions.delete(session_id)
 
     # --- message use-cases --------------------------------------------------

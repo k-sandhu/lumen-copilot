@@ -35,9 +35,18 @@ offline sandbox, and performs the install there as root.
   session UUID and generation; it never receives tenant/user IDs or credentials.
 - Repeated `run_python` calls in the same chat use the same active generation. Different
   chats, users, and tenants never share a row or container.
+- The chat tool creates and commits the queued `code_runs` row in a short transaction
+  independent of the answer transaction. It commits the sandbox identity and `running`
+  transition before the unbounded runner call, then ends that transaction so no pooled
+  database connection remains checked out while model-authored code executes. Terminal
+  state is written in a new tenant-bound transaction. This makes an active run visible
+  to concurrent cancel/reset requests without exposing a partially persisted answer.
 - `POST /chat/sessions/{id}/sandbox/reset` destroys the current container, increments
   the generation, and creates a clean replacement. `DELETE .../sandbox` closes it.
-  Deleting the parent chat closes the sandbox before the database row is removed.
+  Deleting the parent chat attempts to close the sandbox before the database row is
+  removed. A transient runner outage is logged and deletion continues; the database
+  cascade removes the lifecycle row and the isolated, labelled container is left for
+  later operator/janitor reaping rather than blocking deletion of user data.
 - If replacement creation fails after teardown, the advanced generation is committed
   as `error` rather than falsely restoring the old generation. The next reset/use
   advances again and creates a clean recovery generation.

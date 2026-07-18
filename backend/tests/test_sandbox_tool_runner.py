@@ -125,11 +125,13 @@ class _World:
         self,
         *,
         session: AsyncSession,
+        sessionmaker: async_sessionmaker[AsyncSession],
         tenant_id: uuid.UUID,
         user_id: uuid.UUID,
         chat_id: uuid.UUID,
     ) -> None:
         self.session = session
+        self.sessionmaker = sessionmaker
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.chat_id = chat_id
@@ -153,7 +155,7 @@ class _World:
             return s
 
         return ChatSandboxToolRunner(
-            session=self.session,
+            sessionmaker=self.sessionmaker,
             tenant_id=self.tenant_id,
             owner_id=self.user_id,
             runner=runner,  # type: ignore[arg-type]  # structural fake
@@ -206,6 +208,7 @@ async def world() -> AsyncIterator[_World]:
             await session.commit()
             yield _World(
                 session=session,
+                sessionmaker=factory,
                 tenant_id=tenant.id,
                 user_id=user.id,
                 chat_id=chat.id,
@@ -233,9 +236,7 @@ async def test_submit_runs_captures_and_returns_summary(world: _World) -> None:
     chat = await ChatSessionRepository(world.session, world.tenant_id).create(
         owner_id=world.user_id, model="m", title="t"
     )
-    seam = world.seam(
-        runner, backplane=backplane, session_id=chat.id, message_id=message_id
-    )
+    seam = world.seam(runner, backplane=backplane, session_id=chat.id, message_id=message_id)
 
     summary = await seam.submit(code="print('done')")
 
@@ -288,9 +289,7 @@ async def test_streams_code_output_then_one_code_result(world: _World) -> None:
 async def test_disabled_tenant_is_denied_without_calling_runner(world: _World) -> None:
     backplane = InMemoryBackplane()
     runner = _FakeRunner(result=_ok_result())
-    seam = world.seam(
-        runner, backplane=backplane, settings_overrides={"SANDBOX_ENABLED": "false"}
-    )
+    seam = world.seam(runner, backplane=backplane, settings_overrides={"SANDBOX_ENABLED": "false"})
 
     summary = await seam.submit(code="print(1)")
 

@@ -912,7 +912,7 @@ def _build_sandbox_factory(
 
     def _factory(ctx: SandboxContext) -> SandboxToolRunner | None:
         return ChatSandboxToolRunner(
-            session=ctx.session,
+            sessionmaker=get_sessionmaker(),
             tenant_id=principal.tenant_id,
             owner_id=principal.user_id,
             runner=HttpSandboxRunner(settings.sandbox_runner_url),

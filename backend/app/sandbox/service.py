@@ -19,6 +19,7 @@ from app.db.repositories import (
     CodeRunRepository,
     SandboxSessionRepository,
 )
+from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
     ArtifactProducedBy,
@@ -442,6 +443,12 @@ class SandboxService:
                 "packages": list(packages),
             },
         )
+        # The runner call is intentionally unbounded (ADR-0020). Publish the active
+        # identity before crossing that boundary so cancel/reset requests can see it,
+        # and end this transaction so no pooled DB connection remains checked out for
+        # the duration of model-authored code. SET LOCAL is transaction-scoped, so the
+        # tenant GUC is rebound before either terminal path touches the database.
+        await session.commit()
         spec = RunSpec(
             execution_id=run.id,
             code=run.code,
@@ -453,8 +460,10 @@ class SandboxService:
             result = await self._runner.execute(session_spec, spec)
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
             log.error("sandbox.run_failed", code_run_id=str(run.id), error_type=type(exc).__name__)
+            await bind_tenant(session, self._tenant_id)
             return await self._finalize_failure(runs, audit, run.id, started_at)
 
+        await bind_tenant(session, self._tenant_id)
         artifact_ids = await self._capture_outputs(session, result, run.id, run.session_id)
         terminal = await runs.mark_terminal(
             run.id,
