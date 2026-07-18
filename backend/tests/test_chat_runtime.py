@@ -4775,3 +4775,97 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
     envs = await _run_answer(ctx, _FaultGateway(), _FakeRetrieval([]), retry_sleep=recorder)
     assert envs[-1]["type"] == "error"
     assert log_rec.kpis() == []
+
+
+async def test_cache_kpi_not_emitted_when_commit_fails(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 NEW-1: the answer streams fine but the transaction COMMIT
+    fails — the stream ends in the error terminal and the KPI must NOT have
+    been emitted (it fires only after commit + ``done`` publication)."""
+    log_rec = _patch_runtime_log(monkeypatch)
+
+    def _failing_commit_sessionmaker() -> AsyncSession:
+        session = ctx.sessionmaker()
+
+        async def _boom() -> None:
+            raise RuntimeError("simulated commit failure")
+
+        session.commit = _boom  # type: ignore[method-assign]
+        return session
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    _sleeps, recorder = _sleep_recorder()
+    runtime = ChatRuntime(
+        sessionmaker=_failing_commit_sessionmaker,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=ctx.principal,
+        request_id="req-1",
+        source_ip="127.0.0.1",
+        default_max_tool_turns=4,
+        retrieval_factory=lambda _session: _FakeRetrieval([]),  # type: ignore[arg-type,return-value]
+        retry_sleep=recorder,  # type: ignore[arg-type]
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert ok is False
+    assert envs[-1]["type"] == "error"
+    assert not any(e["type"] == "done" for e in envs)
+    assert log_rec.kpis() == []
+
+
+async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
+    """#411: the runtime steers provider-side caching with a per-SESSION key —
+    the gateway must receive ``cache_key == str(session_id)`` on every turn
+    (consecutive answers of one conversation land on one cache shard)."""
+
+    class _CacheKeyCapturingGateway:
+        def __init__(self) -> None:
+            self.cache_keys: list[object] = []
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.cache_keys.append(cache_key)
+            msgs = list(messages)  # type: ignore[arg-type]
+            has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
+            if has_tool_result:
+                yield StreamEvent(text="Answer.")
+                yield StreamEvent(finish_reason="stop")
+            else:
+                yield StreamEvent(
+                    tool_calls=(
+                        ToolCall(id="c1", name="search_text", arguments={"query": "q"}),
+                    ),
+                    finish_reason="tool_calls",
+                )
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _CacheKeyCapturingGateway()
+    _sleeps, recorder = _sleep_recorder()
+    envs = await _run_answer(ctx, gateway, _FakeRetrieval([passage]), retry_sleep=recorder)
+    assert envs[-1]["type"] == "done"
+    # Both loop turns carried the SAME session-scoped key.
+    assert gateway.cache_keys == [str(ctx.session_id)] * 2

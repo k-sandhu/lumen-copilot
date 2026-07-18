@@ -113,17 +113,29 @@ def _cache_family(model: str | None, api_base: str | None) -> str | None:
 
     The capability map lives here (ADR-0016 §2.4 / #427 item 14: no provider
     categories leak above ``llm/``), keyed off the resolved route the gateway
-    receives per call — (model id, api_base). The fail-safe comes first: any
-    custom ``api_base`` that is not the known OpenRouter host gets NO directives
-    at all — a tenant provider on a strict OpenAI-compatible endpoint must never
-    receive vendor cache fields merely because its model NAME contains
-    ``claude`` or ``gpt-`` (AC-3). ``None`` api_base is the gateway default:
-    LiteLLM's native OpenRouter route. Then the family heuristic over the
-    routed id: "anthropic" ⇒ ``cache_control`` breakpoints; "openai" ⇒ implicit
-    prefix caching steered by ``prompt_cache_key``; anything unrecognized ⇒
-    ``None`` — conservative both ways (an alias with no family substring gets
-    no steering rather than a guessed one).
+    receives per call — (model id, api_base). Directives are granted ONLY to
+    routes demonstrably going through OpenRouter — the one transport the
+    pass-through was validated against (live, §2.4 amendment):
+
+    * ``api_base`` given ⇒ its host must BE OpenRouter (a tenant's own
+      OpenRouter key); any other host gets nothing, whatever the model is
+      NAMED — a strict OpenAI-compatible endpoint must never receive vendor
+      cache fields because its model id contains ``claude`` (AC-3).
+    * no ``api_base`` ⇒ the id itself must carry the ``openrouter/`` prefix
+      (LiteLLM's adapter namespace IS the routing decision). A registry id
+      like ``anthropic/claude-...`` or ``openai/my-claude-reranker`` without
+      the prefix routes through a NATIVE LiteLLM adapter we never validated
+      directives against — fail-safe ``None``, never a name-derived guess.
+
+    Within an OpenRouter route, the family is the upstream provider PREFIX of
+    the raw id — the namespace OpenRouter itself routes by — never a substring
+    of the model name: ``anthropic/…`` ⇒ ``cache_control`` breakpoints;
+    ``openai/…`` ⇒ implicit caching steered by ``prompt_cache_key``; every
+    other upstream ⇒ ``None``.
     """
+    if not model:
+        return None
+    lowered = model.lower()
     if api_base is not None:
         try:
             host = (urlparse(api_base).hostname or "").lower()
@@ -131,12 +143,15 @@ def _cache_family(model: str | None, api_base: str | None) -> str | None:
             return None
         if host != "openrouter.ai" and not host.endswith(".openrouter.ai"):
             return None
-    if not model:
+        raw = lowered.removeprefix("openrouter/")
+    elif lowered.startswith("openrouter/"):
+        raw = lowered[len("openrouter/") :]
+    else:
         return None
-    lowered = model.lower()
-    if "claude" in lowered or "anthropic/" in lowered:
+    upstream = raw.split("/", 1)[0]
+    if upstream == "anthropic":
         return "anthropic"
-    if "gpt-" in lowered or "openai/" in lowered:
+    if upstream == "openai":
         return "openai"
     return None
 

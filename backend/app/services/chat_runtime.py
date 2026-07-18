@@ -295,25 +295,29 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
     return total
 
 
-def _log_cache_kpi(answer_usage: _Usage) -> None:
+def _log_cache_kpi(result: _RunResult) -> None:
     """Emit the per-answer cache-hit KPI (#411 / ADR-0016 §2.6) — exactly once
-    per SUCCESSFUL answer, on every terminal (``ask_user`` included). A route
-    that reported no usage still emits, with ``usage_reported=false`` and a
-    null ratio — the series must be a denominator over all answers, never a
-    selection that silently drops the routes operators most need to see.
-    Counts only; no prompt text, ids, or secrets.
+    per SUCCESSFUL answer, on every success terminal (``ask_user`` included).
+    Called from ``run()`` AFTER the commit and the ``done`` publication — an
+    answer that fails to commit or to publish its terminal takes the error arm
+    and must never appear in the series (its spend is the salvage ledger's
+    job). A route that reported no usage still emits, with
+    ``usage_reported=false`` and a null ratio — the series must be a
+    denominator over all successful answers, never a selection that silently
+    drops the routes operators most need to see. Counts only; no prompt text,
+    ids, or secrets.
     """
-    reported = bool(answer_usage.prompt_tokens)
+    reported = bool(result.prompt_tokens)
     log.info(
         "llm.cache_kpi",
-        cached_prompt_tokens=answer_usage.cached_prompt_tokens,
-        prompt_tokens=answer_usage.prompt_tokens,
+        cached_prompt_tokens=result.cached_prompt_tokens,
+        prompt_tokens=result.prompt_tokens,
         cache_hit_ratio=(
-            round(answer_usage.cached_prompt_tokens / answer_usage.prompt_tokens, 3)
+            round(result.cached_prompt_tokens / result.prompt_tokens, 3)
             if reported
             else None
         ),
-        cache_write_tokens=answer_usage.cache_write_tokens,
+        cache_write_tokens=result.cache_write_tokens,
         usage_reported=reported,
     )
 
@@ -574,6 +578,10 @@ class ChatRuntime:
                 },
             ),
         )
+        # The KPI emits ONLY here — after the commit above and the successful
+        # ``done`` publication — so a failed answer can never appear in the
+        # per-successful-answer series (round-2 review, NEW-1).
+        _log_cache_kpi(result)
         return True
 
     # --- the agentic loop ---------------------------------------------------
@@ -1160,7 +1168,6 @@ class ChatRuntime:
             )
             await self._emit_ask_user(state, assistant_message_id, ask_question)
             answer_usage = _answer_usage_totals(route_state, usage)
-            _log_cache_kpi(answer_usage)
             return _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
@@ -1330,7 +1337,6 @@ class ChatRuntime:
         )
 
         answer_usage = _answer_usage_totals(route_state, usage)
-        _log_cache_kpi(answer_usage)
         return _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,

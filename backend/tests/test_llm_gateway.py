@@ -1004,8 +1004,12 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
     1. ``[system, question]`` — writes the prefix through the question mark;
     2. ``+ [assistant(tool_calls), tool(result)]`` — must READ call 1's
        prefix, then write through the tool result;
-    3. ``+ [assistant(tool_calls), tool(result 2)]`` — must read AT LEAST as
-       much as call 2 did (call 2's mark covered more blocks).
+    3. ``+ [assistant(tool_calls), tool(result 2)]`` — must read STRICTLY
+       MORE than call 2 did: call 2's moving mark covered the first tool
+       exchange (~1k tokens), so equal counts would mean only the stable
+       message-0 breakpoint survived and the moving mark was stripped —
+       exactly the regression the strict inequality exists to catch
+       (round-2 review, finding 5).
 
     The padded system message clears the model's minimum cacheable prefix
     with a wide margin (Haiku-class routes currently require up to 4,096
@@ -1057,15 +1061,17 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
         return usage
 
     first = await _turn_usage(base)
-    grown = [*base, *_tool_exchange("t1", "note: the answer is pong. " * 40)]
+    grown = [*base, *_tool_exchange("t1", "note: the answer is pong. " * 160)]
     second = await _turn_usage(grown)
-    third = await _turn_usage([*grown, *_tool_exchange("t2", "second note. " * 40)])
+    third = await _turn_usage([*grown, *_tool_exchange("t2", "second note. " * 160)])
 
     assert first.prompt_tokens > 6000  # wide margin over the cacheable minimum
-    # AC-1, strict: every call after the first READS the previous call's write.
+    # AC-1, strict: every call after the first READS the previous call's write,
+    # and call 3 reads STRICTLY more — the moving mark advanced over the ~1k
+    # tokens of the first tool exchange (equality = stable-prefix-only hit =
+    # the moving mark was dropped somewhere in the stack).
     assert second.cached_prompt_tokens > 0
-    assert third.cached_prompt_tokens >= second.cached_prompt_tokens
-    assert third.cached_prompt_tokens > 0
+    assert third.cached_prompt_tokens > second.cached_prompt_tokens
 
 
 # --- #94 regression: the gateway's client-close teardown is real ------------

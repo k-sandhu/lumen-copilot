@@ -586,7 +586,22 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
     ]
     assert "extra_body" not in captured
 
-    # A tenant provider whose base IS OpenRouter: directives stay on.
+    # The fail-safe is NOT conditioned on a cache key: same custom host with
+    # cache_key=None must be equally bare (round-2 review, finding 5).
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            model="anthropic/claude-opus-4.8",
+            api_base="https://strict.example/v1",
+            api_key="tenant-key",
+        )
+    ]
+    assert all(isinstance(m.get("content"), str) for m in captured["messages"])
+
+    # A tenant provider whose base IS OpenRouter: directives stay on — family
+    # from the raw id's upstream PREFIX (the namespace OpenRouter routes by).
     _ = [
         ev
         async for ev in gw.stream_tools(
@@ -599,6 +614,71 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
     ]
     wire = captured["messages"]
     assert [_has_cache_control(m) for m in wire] == [True, False, False, True]
+
+
+async def test_no_base_route_needs_openrouter_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 blocker: ``api_base=None`` does NOT mean OpenRouter — the
+    config registry accepts any LiteLLM id (``anthropic/claude-…``,
+    ``openai/my-claude-reranker``) which routes through a NATIVE adapter the
+    directives were never validated against. Without the ``openrouter/``
+    prefix a no-base route gets NOTHING, whatever its name contains; family
+    is the upstream PREFIX, never a name substring."""
+    captured = _capture_acompletion(monkeypatch)
+    gw = LLMGateway(_settings())
+
+    # Direct-adapter ids with deceptive/real vendor names: bare wire.
+    for model in (
+        "openai/my-claude-reranker",  # openai adapter, claude in the NAME
+        "anthropic/claude-opus-4.8",  # native anthropic adapter — unvalidated
+        "azure/gpt-4o",
+        "gpt-4o",
+    ):
+        _ = [
+            ev
+            async for ev in gw.stream_tools(
+                _CONVO, tools=_TOOLS, model=model, cache_key="sess-3"
+            )
+        ]
+        assert all(
+            isinstance(m.get("content"), str) for m in captured["messages"]
+        ), model
+        assert "extra_body" not in captured, model
+
+    # The openrouter/-prefixed forms of the same upstreams: directives on.
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO, tools=_TOOLS, model="openrouter/anthropic/claude-opus-4.8"
+        )
+    ]
+    assert [_has_cache_control(m) for m in captured["messages"]] == [
+        True,
+        False,
+        False,
+        True,
+    ]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO, tools=_TOOLS, model="openrouter/openai/gpt-5.5", cache_key="sess-3"
+        )
+    ]
+    assert captured["extra_body"] == {"prompt_cache_key": "sess-3"}
+    # The reranker name under the openrouter/openai/ namespace steers by
+    # PREFIX (openai), not by the "claude" substring: prompt_cache_key, no marks.
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            model="openrouter/openai/my-claude-reranker",
+            cache_key="sess-3",
+        )
+    ]
+    assert captured["extra_body"] == {"prompt_cache_key": "sess-3"}
+    assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
 
 async def test_family_re_resolves_per_call_across_failover(
