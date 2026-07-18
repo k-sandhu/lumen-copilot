@@ -18,6 +18,7 @@ export { SandboxGovernancePanel } from './components/SandboxGovernancePanel';
 export { DataMinimizationPanel } from './components/DataMinimizationPanel';
 export {
   useMembers,
+  useAttestMemberIdentity,
   useModelGovernance,
   useRiskTiers,
   useToolPolicy,
