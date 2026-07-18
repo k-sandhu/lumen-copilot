@@ -1,0 +1,1381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Lumen Copilot codebase audit: FastAPI performance, scalability, resilience, frontend contract discipline, and production readiness.">
+  <link rel="icon" href="data:,">
+  <title>Lumen Copilot — Performance &amp; Scalability Audit</title>
+  <style>
+    :root {
+      --ink: #101820;
+      --muted: #52616d;
+      --soft: #eef3f6;
+      --line: #cfd9df;
+      --blue: #3d8dff;
+      --blue-soft: #dff3ff;
+      --cyan: #6dcbf4;
+      --green: #178a5b;
+      --green-soft: #e4f5ed;
+      --amber: #b8660b;
+      --amber-soft: #fff0da;
+      --red: #bb3e36;
+      --red-soft: #fce8e6;
+      --gray: #6a7780;
+      --gray-soft: #e8edf0;
+      --canvas: #ffffff;
+      --shadow: 0 24px 70px rgba(16, 24, 32, 0.18);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #dfe6ea;
+      color: var(--ink);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, a { font: inherit; }
+    a { color: inherit; text-underline-offset: 3px; }
+
+    #stage {
+      position: fixed;
+      width: 1280px;
+      height: 720px;
+      transform-origin: 0 0;
+      background: var(--canvas);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      padding: 44px 58px 38px;
+      background: var(--canvas);
+      overflow: hidden;
+    }
+
+    .slide.active { display: flex; }
+
+    .slide::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 7px;
+      background: linear-gradient(90deg, var(--blue) 0 22%, var(--cyan) 22% 34%, #d8e2e8 34% 100%);
+    }
+
+    .slide.dark {
+      color: white;
+      background: #101820;
+    }
+
+    .slide.dark::before { background: linear-gradient(90deg, var(--cyan), var(--blue)); }
+
+    .section-label {
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--blue);
+      margin: 0 0 11px;
+    }
+
+    .dark .section-label { color: var(--cyan); }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: 64px; line-height: .98; letter-spacing: -.042em; margin-bottom: 24px; }
+    h2 { font-size: 39px; line-height: 1.08; letter-spacing: -.028em; margin-bottom: 18px; }
+    h3 { font-size: 23px; line-height: 1.15; letter-spacing: -.012em; margin-bottom: 10px; }
+    p, li, td, th { font-size: 17px; line-height: 1.38; }
+    .lead { font-size: 25px; line-height: 1.28; letter-spacing: -.012em; color: #33424c; }
+    .dark .lead { color: #d9e5eb; }
+    .small { font-size: 14px; line-height: 1.35; }
+    .tiny { font-size: 12px; line-height: 1.32; }
+    .muted { color: var(--muted); }
+    .dark .muted { color: #aebdc6; }
+    .accent { color: var(--blue); }
+    .critical-text { color: var(--red); }
+    .good-text { color: var(--green); }
+    .amber-text { color: var(--amber); }
+    .mono { font-family: Consolas, "SFMono-Regular", monospace; }
+
+    ul, ol { margin: 8px 0 0; padding-left: 22px; }
+    li { margin: 0 0 8px; }
+    li::marker { color: var(--blue); }
+
+    .grow { flex: 1; min-height: 0; }
+    .row { display: flex; gap: 26px; align-items: stretch; }
+    .col { flex: 1 1 0; min-width: 0; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; }
+    .split-58 { display: grid; grid-template-columns: 1.42fr 1fr; gap: 28px; }
+    .split-42 { display: grid; grid-template-columns: 1fr 1.42fr; gap: 28px; }
+
+    .panel {
+      background: var(--soft);
+      border: 1px solid #dbe4e9;
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+
+    .panel.white { background: white; }
+    .panel.blue { background: var(--blue-soft); border-color: #b8e1fa; }
+    .panel.green { background: var(--green-soft); border-color: #b9e4cf; }
+    .panel.amber { background: var(--amber-soft); border-color: #f3d5a4; }
+    .panel.red { background: var(--red-soft); border-color: #efc4c0; }
+    .panel.dark-panel { background: #192731; border-color: #31434f; color: white; }
+
+    .callout {
+      border-left: 5px solid var(--blue);
+      padding: 10px 0 10px 18px;
+      margin-top: 12px;
+    }
+
+    .callout.red { border-left-color: var(--red); }
+    .callout.green { border-left-color: var(--green); }
+    .callout.amber { border-left-color: var(--amber); }
+
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: #185f91;
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: .02em;
+    }
+
+    .severity {
+      display: inline-block;
+      min-width: 86px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    .sev-strong { background: var(--green-soft); color: var(--green); }
+    .sev-sound { background: var(--blue-soft); color: #176c9f; }
+    .sev-mixed { background: var(--amber-soft); color: var(--amber); }
+    .sev-risk { background: var(--red-soft); color: var(--red); }
+    .sev-missing { background: var(--gray-soft); color: #52616d; }
+
+    .metric {
+      padding: 12px 0 10px;
+      border-top: 1px solid var(--line);
+    }
+
+    .metric:first-child { border-top: 0; }
+    .metric .value { font-size: 42px; line-height: 1; font-weight: 800; letter-spacing: -.035em; }
+    .metric .label { margin-top: 7px; font-size: 14px; line-height: 1.25; color: var(--muted); }
+
+    .score-list { display: grid; gap: 9px; }
+    .score-row {
+      display: grid;
+      grid-template-columns: 270px 1fr 130px;
+      gap: 14px;
+      align-items: center;
+      padding-bottom: 9px;
+      border-bottom: 1px solid #e1e8ec;
+    }
+    .score-row:last-child { border-bottom: 0; }
+    .score-name { font-size: 16px; font-weight: 700; }
+    .score-track { height: 9px; background: #e3eaee; border-radius: 999px; overflow: hidden; }
+    .score-fill { height: 100%; width: var(--w); background: var(--bar, var(--blue)); border-radius: inherit; }
+
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th {
+      text-align: left;
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 9px 10px;
+      border-bottom: 2px solid var(--ink);
+    }
+    td { vertical-align: top; padding: 9px 10px; border-bottom: 1px solid #dce4e9; }
+    tr:last-child td { border-bottom: 0; }
+    .dense td { font-size: 13px; line-height: 1.28; padding: 7px 8px; }
+    .dense th { font-size: 11px; padding: 7px 8px; }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin: 18px 0;
+    }
+    .node {
+      min-width: 138px;
+      padding: 15px 16px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: white;
+      text-align: center;
+      font-size: 14px;
+      font-weight: 750;
+    }
+    .node.blue { background: var(--blue-soft); border-color: #9ed7f4; }
+    .node.red { background: var(--red-soft); border-color: #eab3ae; }
+    .node.green { background: var(--green-soft); border-color: #aadcc4; }
+    .arrow { color: var(--blue); font-size: 26px; font-weight: 800; }
+
+    .timeline { position: relative; padding-left: 35px; }
+    .timeline::before { content: ""; position: absolute; left: 12px; top: 6px; bottom: 8px; width: 2px; background: #bcd7e6; }
+    .step { position: relative; margin-bottom: 14px; }
+    .step::before { content: ""; position: absolute; left: -29px; top: 5px; width: 13px; height: 13px; border-radius: 50%; background: var(--blue); border: 3px solid white; box-shadow: 0 0 0 1px #a9c8d8; }
+    .step.red::before { background: var(--red); }
+    .step strong { display: block; font-size: 16px; margin-bottom: 2px; }
+    .step span { display: block; font-size: 14px; line-height: 1.32; color: var(--muted); }
+
+    .code {
+      margin: 0;
+      padding: 15px 17px;
+      border-radius: 8px;
+      background: #15222b;
+      color: #e8f2f7;
+      font: 14px/1.5 Consolas, "SFMono-Regular", monospace;
+      white-space: pre-wrap;
+    }
+    .code .hot { color: #ffb2ac; }
+    .code .cool { color: #9edfff; }
+
+    .stat-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .stat-strip > div { padding: 15px 14px; border-right: 1px solid var(--line); }
+    .stat-strip > div:last-child { border-right: 0; }
+    .stat-strip b { display: block; font-size: 29px; line-height: 1; letter-spacing: -.03em; }
+    .stat-strip span { display: block; margin-top: 7px; font-size: 12px; color: var(--muted); line-height: 1.25; }
+
+    .risk-number { font-size: 78px; font-weight: 850; line-height: .9; letter-spacing: -.06em; }
+    .equation {
+      padding: 18px 20px;
+      border: 2px solid var(--blue);
+      border-radius: 10px;
+      font: 700 22px/1.35 Consolas, monospace;
+      color: #145f95;
+      background: #f3fbff;
+      text-align: center;
+    }
+
+    .checklist { list-style: none; padding-left: 0; margin-top: 5px; }
+    .checklist li { position: relative; padding-left: 27px; }
+    .checklist li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: 900; }
+    .checklist.warn li::before { content: "!"; color: var(--amber); }
+    .checklist.bad li::before { content: "×"; color: var(--red); }
+
+    .source {
+      position: absolute;
+      left: 58px;
+      right: 270px;
+      bottom: 18px;
+      font-size: 10.5px;
+      line-height: 1.22;
+      color: #6d7c86;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dark .source { color: #9fb1bc; }
+
+    .slide-num {
+      position: absolute;
+      right: 58px;
+      bottom: 16px;
+      font-size: 12px;
+      font-weight: 750;
+      color: #7b8a93;
+    }
+
+    #progress {
+      position: fixed;
+      left: 0;
+      bottom: 0;
+      height: 4px;
+      background: var(--blue);
+      width: 0;
+      z-index: 20;
+      transition: width 160ms ease;
+    }
+
+    #controls {
+      position: fixed;
+      right: 18px;
+      bottom: 15px;
+      z-index: 25;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px;
+      border-radius: 999px;
+      background: rgba(16, 24, 32, .82);
+      backdrop-filter: blur(8px);
+      color: white;
+    }
+    #controls button {
+      width: 31px;
+      height: 31px;
+      border: 0;
+      border-radius: 50%;
+      color: white;
+      background: transparent;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    #controls button:hover, #controls button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
+    #counter { min-width: 58px; text-align: center; font-size: 12px; font-weight: 700; }
+
+    #help {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      place-items: center;
+      background: rgba(10, 16, 22, .68);
+    }
+    #help.open { display: grid; }
+    #help .help-card { width: 470px; padding: 26px 28px; border-radius: 13px; background: white; box-shadow: var(--shadow); }
+    #help kbd { display: inline-block; min-width: 30px; padding: 3px 7px; border: 1px solid #bdc9d0; border-bottom-width: 2px; border-radius: 5px; background: #f4f7f9; text-align: center; font: 12px Consolas, monospace; }
+
+    @media print {
+      html, body { overflow: visible; background: white; }
+      #stage { position: static; width: auto; height: auto; transform: none !important; box-shadow: none; }
+      .slide { position: relative; display: flex !important; width: 1280px; height: 720px; page-break-after: always; break-after: page; }
+      #controls, #progress, #help { display: none !important; }
+      @page { size: 16in 9in; margin: 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #progress { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main id="stage" aria-label="Lumen Copilot performance and scalability audit presentation">
+
+    <section class="slide dark active" aria-labelledby="s1-title">
+      <p class="section-label">Codebase audit · 18 July 2026</p>
+      <div class="grow" style="display:flex; flex-direction:column; justify-content:center; max-width:1020px;">
+        <div class="kicker" style="margin-bottom:22px; background:#203643; color:#9ee3ff;">FastAPI · React · PostgreSQL · Redis · Celery · OpenSearch</div>
+        <h1 id="s1-title">Performance &amp;<br>scalability audit</h1>
+        <p class="lead" style="max-width:900px;">Lumen Copilot has a strong enterprise architecture skeleton. A small set of hot-path resource and operational gaps currently prevents a credible production-scale claim.</p>
+      </div>
+      <div class="row" style="border-top:1px solid #344752; padding-top:18px;">
+        <div class="col small"><b>Assessment baseline</b><br><span class="muted mono">74de85d · branch docs/463-fastapi-scalability-audit</span></div>
+        <div class="col small"><b>Tracked work</b><br><span class="muted">GitHub issue #463</span></div>
+        <div class="col small"><b>Scope</b><br><span class="muted">API, data, jobs, realtime, UI contract, deployment, tests</span></div>
+      </div>
+      <div class="source">Internal engineering assessment. Findings are static-code and executable-gate evidence, not production traffic measurements.</div>
+      <div class="slide-num">01</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s2-title">
+      <p class="section-label">Executive verdict</p>
+      <h2 id="s2-title">Structurally strong; operationally unproven</h2>
+      <div class="split-58 grow">
+        <div>
+          <p class="lead">The architecture is thoughtfully shaped for enterprise correctness. The dominant risks are not “rewrite the system” problems—they are concentrated capacity, lifecycle, and observability problems.</p>
+          <div class="callout red">
+            <h3>Do not claim production scalability yet</h3>
+            <p style="margin:0;">A Redis client is created per stream envelope, chat transactions can hold database connections across model/tool latency, and answer production has no global or tenant admission limit.</p>
+          </div>
+          <div class="callout green">
+            <h3>The foundation is worth preserving</h3>
+            <p style="margin:0;">Async adapters, RLS-backed tenancy, contract-first APIs, bounded public pagination, durable workers, typed errors, and extensive negative tests are all sound starting points.</p>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="metric"><div class="value critical-text">3</div><div class="label">hot-path blockers to address first</div></div>
+          <div class="metric"><div class="value amber-text">7</div><div class="label">high-value hardening workstreams</div></div>
+          <div class="metric"><div class="value good-text">2,653</div><div class="label">discovered backend + frontend test cases/functions</div></div>
+          <div class="metric"><div class="value">0</div><div class="label">load/soak suites or production telemetry systems found</div></div>
+        </div>
+      </div>
+      <div class="source">Verdict synthesizes slides 5–23. “Unproven” means no production topology, saturation metrics, or load evidence—not that the system cannot scale.</div>
+      <div class="slide-num">02</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s3-title">
+      <p class="section-label">Method</p>
+      <h2 id="s3-title">The review covered code paths, not just folder names</h2>
+      <div class="grid-3 grow">
+        <div class="panel blue">
+          <h3>Runtime path</h3>
+          <ul>
+            <li>FastAPI lifecycle and dependencies</li>
+            <li>Chat streaming and tool fan-out</li>
+            <li>Redis replay/pub-sub</li>
+            <li>Uploads, downloads, search and auth</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Data &amp; work</h3>
+          <ul>
+            <li>SQLAlchemy sessions and transactions</li>
+            <li>Repository pagination and indexes</li>
+            <li>Celery retries, idempotency and rate limits</li>
+            <li>Reconcile/sweep behavior</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Delivery &amp; proof</h3>
+          <ul>
+            <li>React query usage and contract types</li>
+            <li>Build output and bundle warnings</li>
+            <li>Compose / container topology</li>
+            <li>Static, unit and targeted runtime gates</li>
+          </ul>
+        </div>
+      </div>
+      <div class="stat-strip" style="margin-top:18px;">
+        <div><b>163</b><span>backend application modules</span></div>
+        <div><b>42.3k</b><span>backend app lines</span></div>
+        <div><b>52.8k</b><span>frontend source lines</span></div>
+        <div><b>5.7k</b><span>contract YAML/JSON lines</span></div>
+        <div><b>15</b><span>scored design criteria</span></div>
+      </div>
+      <div class="source">Counts from repository inventory on 2026-07-18. The review did not run production traffic or modify application behavior.</div>
+      <div class="slide-num">03</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s4-title">
+      <p class="section-label">Architecture baseline</p>
+      <h2 id="s4-title">The major system boundaries are coherent</h2>
+      <div class="flow" style="margin-top:3px;">
+        <div class="node blue">React SPA<br><span class="tiny muted">REST + WebSocket</span></div><div class="arrow">→</div>
+        <div class="node blue">FastAPI<br><span class="tiny muted">api → services → domain</span></div><div class="arrow">→</div>
+        <div class="node">Adapters<br><span class="tiny muted">LLM · retrieval · storage</span></div>
+      </div>
+      <div class="flow" style="margin-top:0;">
+        <div class="node green">PostgreSQL<br><span class="tiny muted">RLS + relational state</span></div>
+        <div class="node green">OpenSearch<br><span class="tiny muted">BM25 + kNN</span></div>
+        <div class="node green">Redis<br><span class="tiny muted">broker + realtime</span></div>
+        <div class="node green">MinIO<br><span class="tiny muted">objects</span></div>
+        <div class="node green">Celery<br><span class="tiny muted">durable work</span></div>
+      </div>
+      <div class="grid-3" style="margin-top:15px;">
+        <div class="callout green"><h3>Correct chokepoints</h3><p class="small">Retrieval permissions, LLM provider access, storage, realtime, auth and audit each have named owners.</p></div>
+        <div class="callout green"><h3>Externalized state</h3><p class="small">Persistent state is outside the API process; Redis provides cross-instance stream fan-out and replay.</p></div>
+        <div class="callout green"><h3>Defence in depth</h3><p class="small">Application authorization is backed by tenant-bound sessions and PostgreSQL RLS tests.</p></div>
+      </div>
+      <div class="source">AGENTS.md §3/§6; docs/architecture/0003-application-stack.md; docs/architecture/0004-architecture-boundaries-and-adapters.md.</div>
+      <div class="slide-num">04</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s5-title">
+      <p class="section-label">Scorecard · 1 of 2</p>
+      <h2 id="s5-title">Correctness is stronger than capacity control</h2>
+      <p class="muted small">Rating reflects implementation + enforcement + operational evidence. Bars communicate maturity, not a benchmark score.</p>
+      <div class="score-list grow" style="margin-top:10px;">
+        <div class="score-row"><div class="score-name">Security &amp; tenant isolation</div><div class="score-track"><div class="score-fill" style="--w:95%;--bar:var(--green)"></div></div><span class="severity sev-strong">Strong</span></div>
+        <div class="score-row"><div class="score-name">Architecture boundaries</div><div class="score-track"><div class="score-fill" style="--w:72%"></div></div><span class="severity sev-sound">Sound</span></div>
+        <div class="score-row"><div class="score-name">Async / event-loop hygiene</div><div class="score-track"><div class="score-fill" style="--w:72%"></div></div><span class="severity sev-sound">Sound</span></div>
+        <div class="score-row"><div class="score-name">Durable background work</div><div class="score-track"><div class="score-fill" style="--w:70%"></div></div><span class="severity sev-sound">Sound</span></div>
+        <div class="score-row"><div class="score-name">Caching strategy</div><div class="score-track"><div class="score-fill" style="--w:66%"></div></div><span class="severity sev-sound">Sound</span></div>
+        <div class="score-row"><div class="score-name">Query bounds &amp; pagination</div><div class="score-track"><div class="score-fill" style="--w:57%;--bar:var(--amber)"></div></div><span class="severity sev-mixed">Mixed</span></div>
+        <div class="score-row"><div class="score-name">Horizontal / stateless scale</div><div class="score-track"><div class="score-fill" style="--w:56%;--bar:var(--amber)"></div></div><span class="severity sev-mixed">Mixed</span></div>
+        <div class="score-row"><div class="score-name">Frontend / API contract</div><div class="score-track"><div class="score-fill" style="--w:55%;--bar:var(--amber)"></div></div><span class="severity sev-mixed">Mixed</span></div>
+      </div>
+      <div class="source">Assessment rubric: Strong = enforced and verified; Sound = implemented with contained gaps; Mixed = important strengths and scaling debt coexist.</div>
+      <div class="slide-num">05</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s6-title">
+      <p class="section-label">Scorecard · 2 of 2</p>
+      <h2 id="s6-title">The weakest areas are exactly what production traffic tests</h2>
+      <div class="score-list grow" style="margin-top:17px;">
+        <div class="score-row"><div class="score-name">Payload / serialization efficiency</div><div class="score-track"><div class="score-fill" style="--w:48%;--bar:var(--amber)"></div></div><span class="severity sev-mixed">Mixed</span></div>
+        <div class="score-row"><div class="score-name">Resource reuse &amp; lifecycle</div><div class="score-track"><div class="score-fill" style="--w:36%;--bar:var(--red)"></div></div><span class="severity sev-risk">At risk</span></div>
+        <div class="score-row"><div class="score-name">Database pools &amp; transactions</div><div class="score-track"><div class="score-fill" style="--w:31%;--bar:var(--red)"></div></div><span class="severity sev-risk">At risk</span></div>
+        <div class="score-row"><div class="score-name">Resilience &amp; backpressure</div><div class="score-track"><div class="score-fill" style="--w:38%;--bar:var(--red)"></div></div><span class="severity sev-risk">At risk</span></div>
+        <div class="score-row"><div class="score-name">Production deployment posture</div><div class="score-track"><div class="score-fill" style="--w:20%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
+        <div class="score-row"><div class="score-name">Metrics &amp; distributed tracing</div><div class="score-track"><div class="score-fill" style="--w:16%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
+        <div class="score-row"><div class="score-name">Load / soak / saturation testing</div><div class="score-track"><div class="score-fill" style="--w:14%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
+      </div>
+      <div class="panel red" style="margin-top:12px; padding:14px 18px;"><b>Interpretation:</b> the application demonstrates correctness under tests, but it cannot yet show where throughput flattens, how it sheds load, or which dependency saturates first.</div>
+      <div class="source">“Not proven” is an evidence rating. The repository contains structured logs and health endpoints, but no metrics/traces/load harness or production deployment manifest.</div>
+      <div class="slide-num">06</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s7-title">
+      <p class="section-label">Criterion 1 · Layering</p>
+      <h2 id="s7-title">Clear module ownership is weakened by transaction leakage</h2>
+      <div class="split-58 grow">
+        <div>
+          <div class="panel green">
+            <h3>What is working</h3>
+            <ul class="checklist">
+              <li>Vendor access is concentrated behind named adapters.</li>
+              <li>Domain modules are mostly pure and provider-agnostic.</li>
+              <li>Architecture tests enforce several sensitive import seams.</li>
+              <li>Routers consistently use service objects rather than raw clients.</li>
+            </ul>
+          </div>
+          <div class="panel red" style="margin-top:16px;">
+            <h3>What breaks the promised direction</h3>
+            <ul class="checklist bad">
+              <li>67 explicit commit/rollback calls appear across 17 router files.</li>
+              <li>Services and a task import SQLAlchemy/model types directly in 3 modules.</li>
+              <li>Request-scoped <span class="mono">AsyncSession</span> is exposed through service constructors.</li>
+            </ul>
+          </div>
+        </div>
+        <div>
+          <p class="lead" style="font-size:22px;">Transaction ownership is part of architecture. When routers decide commits and services issue SQL, business use-cases cannot guarantee a single consistent unit of work.</p>
+          <div class="equation" style="margin:22px 0;">router → use-case → repositories<br><span style="font-size:15px; font-weight:600;">one transaction boundary per use-case</span></div>
+          <h3>Recommendation</h3>
+          <p>Introduce application use-case functions that own <span class="mono">session_scope</span>, commits, rollbacks, and after-commit events. Keep repositories as the only SQL surface and return domain values—not sessions—to the API layer.</p>
+          <p class="small muted">This is an incremental refactor. Start with chat/send, document upload, and admin mutations where transaction semantics affect reliability.</p>
+        </div>
+      </div>
+      <div class="source">AGENTS.md §6; backend/AGENTS.md; backend/app/api/v1/*.py; backend/app/services/admin_service.py; audit_query_service.py; tasks/sync_source.py.</div>
+      <div class="slide-num">07</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s8-title">
+      <p class="section-label">Criterion 2 · Async</p>
+      <h2 id="s8-title">The async model is sound, with one exploitable CPU exception</h2>
+      <div class="grid-2 grow">
+        <div class="panel green">
+          <h3>Good event-loop discipline</h3>
+          <ul class="checklist">
+            <li>FastAPI, SQLAlchemy, Redis, HTTP, S3 and OpenSearch paths are async.</li>
+            <li>Celery broker publishing is explicitly moved through <span class="mono">asyncio.to_thread</span>.</li>
+            <li>CPU-heavy document parsing runs in Celery workers.</li>
+            <li>Parallel tool calls are capped per answer with a semaphore.</li>
+            <li>Ruff enables <span class="mono">flake8-async</span>; tracked code passes.</li>
+          </ul>
+        </div>
+        <div class="panel red">
+          <h3>Blocking authentication path</h3>
+          <p><span class="mono">AuthService.login()</span> calls Argon2 password verification—and a dummy Argon2 verification for unknown users—directly inside an async request.</p>
+          <p>That protects against account enumeration, but CPU/memory-hard verification occupies the event-loop thread. A login flood can delay unrelated requests served by the same worker.</p>
+          <div class="callout red"><b>Fix:</b> run verification in a bounded thread executor, cap concurrent verifications per process/tenant/IP, and rate-limit login attempts.</div>
+        </div>
+      </div>
+      <div class="panel amber" style="margin-top:16px; padding:14px 18px;"><b>Secondary issue:</b> several outbound adapters create short-lived HTTP clients per call. They are non-blocking, but repeated TLS/DNS/connection setup sacrifices pooling and increases tail latency.</div>
+      <div class="source">backend/app/services/auth_service.py:99–146; backend/app/auth/hashing.py:24–61; backend/app/api/v1/chat.py:742–755; backend/pyproject.toml Ruff ASYNC rules.</div>
+      <div class="slide-num">08</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s9-title">
+      <p class="section-label">Criterion 3 · Resource lifecycle</p>
+      <h2 id="s9-title">A new Redis client is built for every streamed envelope</h2>
+      <div class="split-58 grow">
+        <div>
+          <pre class="code"><span class="cool">async def publish(...):</span>
+    <span class="hot">client = aioredis.from_url(self._redis_url)</span>
+    async with client.pipeline(...) as pipe:
+        pipe.rpush(...)
+        pipe.ltrim(...)
+        pipe.expire(...)
+        pipe.publish(...)
+        await pipe.execute()
+    <span class="hot">await client.aclose()</span></pre>
+          <div class="flow" style="justify-content:flex-start; margin-top:24px;">
+            <div class="node blue">token Δ 1</div><div class="arrow">→</div><div class="node red">client / pool 1</div>
+          </div>
+          <div class="flow" style="justify-content:flex-start; margin-top:-8px;">
+            <div class="node blue">token Δ 2</div><div class="arrow">→</div><div class="node red">client / pool 2</div>
+          </div>
+          <div class="flow" style="justify-content:flex-start; margin-top:-8px;">
+            <div class="node blue">token Δ N</div><div class="arrow">→</div><div class="node red">client / pool N</div>
+          </div>
+        </div>
+        <div>
+          <span class="severity sev-risk">Critical hot path</span>
+          <p class="lead" style="margin-top:15px; font-size:22px;">Streaming output multiplies connection-pool construction and teardown by the number of envelopes, not by the number of requests.</p>
+          <h3>Impact under load</h3>
+          <ul>
+            <li>Redis handshake and pool churn on the highest-frequency path.</li>
+            <li>Extra sockets, allocations and garbage collection.</li>
+            <li>Tail latency grows with response length and concurrency.</li>
+            <li>Redis becomes a bottleneck before its command throughput is reached.</li>
+          </ul>
+          <h3 style="margin-top:18px;">Remediation</h3>
+          <p>Construct one process-wide Redis client/pool in lifespan, inject it into <span class="mono">RedisBackplane</span>, reuse it for publish/owner operations, and close once at shutdown. Preserve one dedicated pub/sub connection per subscription.</p>
+        </div>
+      </div>
+      <div class="source">backend/app/realtime/backplane.py:156–271. OpenSearch and the SQLAlchemy engine already demonstrate the desired process-lifetime pattern.</div>
+      <div class="slide-num">09</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s10-title">
+      <p class="section-label">Criterion 4 · Transactions</p>
+      <h2 id="s10-title">Chat holds a database transaction across model and tool latency</h2>
+      <div class="split-42 grow">
+        <div class="timeline">
+          <div class="step"><strong>Open runtime session</strong><span>A fresh <span class="mono">AsyncSession</span> is created after the HTTP response.</span></div>
+          <div class="step red"><strong>Bind tenant / begin transaction</strong><span><span class="mono">SET LOCAL</span> executes and checks out a connection.</span></div>
+          <div class="step red"><strong>Wait for LLM + tools</strong><span>Streaming, provider failover, retrieval and tool turns happen before commit.</span></div>
+          <div class="step"><strong>Persist answer + citations + audit</strong><span>Atomicity is strong, but the connection has already been occupied.</span></div>
+          <div class="step"><strong>Commit once</strong><span>The transaction ends only after the whole answer succeeds.</span></div>
+        </div>
+        <div>
+          <div class="panel red">
+            <h3>The trade-off is currently too expensive</h3>
+            <p>Atomic “all-or-nothing answer” persistence is valuable. It does not require holding the same database transaction open while waiting on external model and tool calls.</p>
+          </div>
+          <h3 style="margin-top:18px;">Target transaction shape</h3>
+          <ol>
+            <li><b>Short transaction:</b> authorize, persist user turn, reserve stream/run record.</li>
+            <li><b>No DB transaction:</b> call models and tools; use short isolated reads as needed.</li>
+            <li><b>Short transaction:</b> persist answer, citations, usage, terminal state and audit atomically.</li>
+          </ol>
+          <p class="small muted">If exact answer/audit atomicity across steps is required, specify it in an ADR and use explicit state transitions or an outbox—not an implicit long-lived ORM transaction.</p>
+        </div>
+      </div>
+      <div class="source">backend/app/services/chat_runtime.py:434–520; bind_tenant executes before _answer; commit follows all external work.</div>
+      <div class="slide-num">10</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s11-title">
+      <p class="section-label">Criterion 4 · Pool capacity</p>
+      <h2 id="s11-title">One answer can consume five database connections</h2>
+      <div class="row grow" style="align-items:center;">
+        <div class="col" style="max-width:390px;">
+          <div class="risk-number critical-text">1 + 4</div>
+          <h3 style="margin-top:15px;">runtime session + tool sessions</h3>
+          <p>The answer keeps its base session while up to four read-only tool scopes each open a tenant-bound session.</p>
+          <p class="small muted">The per-answer semaphore is good local hygiene, but there is no process-wide admission semaphore tied to the database pool.</p>
+        </div>
+        <div class="col">
+          <div class="panel red" style="text-align:center; padding:24px;">
+            <div style="display:flex; justify-content:center; gap:18px; align-items:end;">
+              <div><b style="font-size:58px;">3</b><br><span class="small">busy answers</span></div>
+              <div style="font-size:38px; color:var(--red);">×</div>
+              <div><b style="font-size:58px;">5</b><br><span class="small">checkouts each</span></div>
+              <div style="font-size:38px; color:var(--red);">=</div>
+              <div><b style="font-size:58px;">15</b><br><span class="small">connections</span></div>
+            </div>
+          </div>
+          <p class="lead" style="font-size:21px; margin-top:20px;">The engine config sets only <span class="mono">pool_pre_ping</span>. Pool size, overflow, timeout, recycle, server statement timeout, worker budgets and Postgres headroom are not configured together.</p>
+          <div class="equation">instances × pool budget + worker budget<br>≤ Postgres max connections − operator reserve</div>
+        </div>
+      </div>
+      <div class="source">backend/app/db/session.py:31–54; backend/app/services/chat_runtime.py:1832–1858; Settings.chat_tool_concurrency default = 4. Capacity example assumes all four tool scopes reach SQL.</div>
+      <div class="slide-num">11</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s12-title">
+      <p class="section-label">Criteria 4–5 · Queries &amp; bounds</p>
+      <h2 id="s12-title">Public pagination is disciplined; several consumers bypass it</h2>
+      <div class="grid-3 grow">
+        <div class="panel green">
+          <h3>Strong API behavior</h3>
+          <ul class="checklist">
+            <li>Most list limits are validated in the 1–100 range.</li>
+            <li>Stable keyset cursors use timestamp + UUID tiebreakers.</li>
+            <li>Citation hydration has batch queries.</li>
+            <li>Chat context is token-bounded and summarized.</li>
+          </ul>
+        </div>
+        <div class="panel amber">
+          <h3>Unbounded internal paths</h3>
+          <ul class="checklist warn">
+            <li>Pre-summary chat history can materialize a full session.</li>
+            <li>Enabled schedule reconciliation scans the fleet.</li>
+            <li>Pending-digest tenant discovery is unpaged.</li>
+            <li>Several per-resource repository lists have no explicit cap.</li>
+          </ul>
+        </div>
+        <div class="panel amber">
+          <h3>Frontend stops at page one</h3>
+          <ul class="checklist warn">
+            <li>Document list does not consume <span class="mono">next_cursor</span>.</li>
+            <li>Chat sessions/messages request only the first page.</li>
+            <li>Search accepts a cursor in the API layer but has no navigation UI.</li>
+            <li>Tracked debt already exists in issues #274, #275 and #281.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="panel red" style="margin-top:16px; padding:14px 18px;"><b>Index concern:</b> multiple keyset queries filter by <span class="mono">tenant_id + owner_id</span> and sort by <span class="mono">created_at/updated_at + id</span>, while their indexes often cover only the filter prefix. Validate with real PostgreSQL <span class="mono">EXPLAIN (ANALYZE, BUFFERS)</span> and add composite order-aligned indexes where proven.</div>
+      <div class="source">backend/app/db/repositories.py:1414–1475, 1862–1908, 4118–4172, 4726–4775, 4793–4800; frontend feature query modules; backend/app/db/models.py.</div>
+      <div class="slide-num">12</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s13-title">
+      <p class="section-label">Criteria 5 &amp; 8 · Backpressure</p>
+      <h2 id="s13-title">Answer production is detached—and admitted without a ceiling</h2>
+      <div class="split-58 grow">
+        <div>
+          <div class="flow" style="justify-content:flex-start;">
+            <div class="node blue">POST message</div><div class="arrow">→</div><div class="node">202 response</div><div class="arrow">→</div><div class="node red">create_task()</div>
+          </div>
+          <div class="panel red">
+            <h3>Current behavior</h3>
+            <ul>
+              <li>Every accepted send creates an in-process <span class="mono">asyncio.Task</span>.</li>
+              <li>The process-wide task set is self-cleaning but unbounded.</li>
+              <li>No global, per-tenant or per-user concurrent-answer limit was found.</li>
+              <li>A WebSocket disconnect stops relay but intentionally does not stop model production.</li>
+            </ul>
+          </div>
+        </div>
+        <div>
+          <p class="lead" style="font-size:22px;">Reconnection-friendly detached work is a reasonable product choice. Without admission control, it converts bursts into simultaneous DB, Redis and LLM pressure.</p>
+          <h3>Required control plane</h3>
+          <ol>
+            <li>Bound concurrent answers per API process.</li>
+            <li>Enforce per-tenant/user quotas in Redis.</li>
+            <li>Return 429/503 + <span class="mono">Retry-After</span> before work starts.</li>
+            <li>Record queued/running/terminal state outside process memory.</li>
+            <li>Make continue-on-disconnect explicit; cancel abandoned work when policy says so.</li>
+          </ol>
+          <div class="callout amber"><b>Do not use Celery blindly for token streaming.</b> Preserve realtime latency, but put a bounded admission layer in front of the in-process producer.</div>
+        </div>
+      </div>
+      <div class="source">backend/app/api/v1/chat.py:648–764; backend/app/main.py:75–125; realtime subscriber disconnect behavior in backend/app/api/v1/chat.py.</div>
+      <div class="slide-num">13</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s14-title">
+      <p class="section-label">Criterion 9 · Payloads</p>
+      <h2 id="s14-title">The API “streams” only after loading the whole object</h2>
+      <div class="grid-2 grow">
+        <div class="panel red">
+          <h3>Upload path</h3>
+          <pre class="code"><span class="hot">data = await file.read()</span>
+...
+validate_upload(size_bytes=len(data))
+await client.put_object(Body=data)</pre>
+          <p style="margin-top:15px;">The 50 MiB limit is checked after the router materializes the entire file. Content addressing hashes the same in-memory bytes. Concurrent uploads multiply memory pressure.</p>
+          <div class="equation" style="font-size:19px;">20 × 50 MiB = 1 GiB raw payload memory</div>
+        </div>
+        <div class="panel amber">
+          <h3>Download path</h3>
+          <pre class="code">response = await client.get_object(...)
+<span class="hot">body = await stream.read()</span>
+return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
+          <p style="margin-top:15px;">The scale-safe path already exists: a presigned redirect is the configuration default. Local Compose overrides it to inline mode, which reads the object fully and yields one in-memory chunk.</p>
+          <div class="callout green"><b>Good seam:</b> presigned GET and PUT methods exist in the storage adapter; the direct-upload PUT path is not yet used by the UI.</div>
+        </div>
+      </div>
+      <div class="panel blue" style="margin-top:15px; padding:14px 18px;"><b>Fix:</b> use direct-to-object-storage uploads or chunked reads with an enforced running byte cap; stream hashing; keep production downloads redirected/CDN-backed; bound any unavoidable proxy stream.</div>
+      <div class="source">backend/app/api/v1/documents.py:205–245, 282–337; backend/app/storage/object_store.py:155–209; backend/app/core/config.py:298–309; docker-compose.yml:140–147.</div>
+      <div class="slide-num">14</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s15-title">
+      <p class="section-label">Criteria 6 &amp; 11 · Background work</p>
+      <h2 id="s15-title">Celery semantics are thoughtful, but worker containment is incomplete</h2>
+      <div class="split-58 grow">
+        <div class="panel green">
+          <h3>Strong worker design</h3>
+          <ul class="checklist">
+            <li>JSON-only serialization; no pickle.</li>
+            <li><span class="mono">acks_late</span> and prefetch = 1.</li>
+            <li>Idempotent state machines and bounded retry counters.</li>
+            <li>Redis-backed per-tenant rate limiters for outbound work.</li>
+            <li>Explicit event-loop lifecycle tests for repeated task execution.</li>
+            <li>Sandbox work is isolated behind a dedicated service.</li>
+          </ul>
+        </div>
+        <div>
+          <div class="panel red">
+            <h3>Missing containment controls</h3>
+            <ul class="checklist bad">
+              <li>No global soft/hard task time limits.</li>
+              <li>No <span class="mono">task_reject_on_worker_lost</span> setting.</li>
+              <li>No explicit Redis visibility timeout.</li>
+              <li>No worker concurrency, max-tasks, or max-memory policy.</li>
+              <li>Retry backoff is often deterministic, without jitter.</li>
+            </ul>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Delivery atomicity gap</h3>
+            <p>Several API flows commit durable state and then publish to Celery best-effort. A broker failure can leave a committed row with no job unless a later reaper repairs it.</p>
+            <p style="margin-bottom:0;"><b>Fix:</b> transactional outbox + dispatcher, or an explicitly proven reconciliation loop for each job type.</p>
+          </div>
+        </div>
+      </div>
+      <div class="source">backend/app/tasks/celery_app.py; tasks/ingest.py; tasks/index_sync.py; tasks/rate_limit.py; tasks/run_assistant.py; docker-compose.yml:227–272.</div>
+      <div class="slide-num">15</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s16-title">
+      <p class="section-label">Criterion 7 · Horizontal scale</p>
+      <h2 id="s16-title">The data plane scales out better than the work-control plane</h2>
+      <div class="grid-2 grow">
+        <div class="panel green">
+          <h3>Scale-out enablers</h3>
+          <ul class="checklist">
+            <li>Postgres, OpenSearch, MinIO and Redis own durable/shared state.</li>
+            <li>Redis pub/sub supports cross-instance WebSocket delivery.</li>
+            <li>Replay is capped at 512 envelopes and expires after 15 minutes.</li>
+            <li>Stream owner bindings are externalized with TTL.</li>
+            <li>The API can be replicated without sticky HTTP sessions.</li>
+          </ul>
+        </div>
+        <div class="panel amber">
+          <h3>Replica-level gaps</h3>
+          <ul class="checklist warn">
+            <li>Answer tasks and shutdown cancellation live only in one process.</li>
+            <li>No durable cross-replica answer queue/lease/cancel state.</li>
+            <li>Embedding cache is bounded but process-local and duplicated.</li>
+            <li>Each container entrypoint runs migrations; multi-replica startup would race.</li>
+            <li>Redis carries broker + realtime + rate limits, increasing blast radius.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout amber" style="margin-top:17px;"><h3>Design implication</h3><p style="margin:0;">The API is close to stateless for request/response traffic, but detached chat work needs an explicit ownership model before replicas can be treated as interchangeable during deploys, crashes, and cancellation.</p></div>
+      <div class="source">backend/app/realtime/backplane.py; backend/app/main.py lifespan; backend/app/api/v1/chat.py; backend/docker-entrypoint.sh.</div>
+      <div class="slide-num">16</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s17-title">
+      <p class="section-label">Criterion 10 · Caching</p>
+      <h2 id="s17-title">Caching is deliberate—and should stay measurement-led</h2>
+      <div class="grid-3 grow">
+        <div class="panel green">
+          <h3>Provider prompt cache</h3>
+          <p>Stable per-session keys and cache-aware prompt layout preserve reusable prefixes. Usage extraction records cached and written token counts.</p>
+        </div>
+        <div class="panel green">
+          <h3>Embedding cache</h3>
+          <p>Single-query embeddings use an opt-in, namespaced, hashed-key LRU + TTL. Capacity and TTL are bounded by settings.</p>
+        </div>
+        <div class="panel blue">
+          <h3>Client cache</h3>
+          <p>TanStack Query centralizes server-state caching and request cancellation for the SPA.</p>
+        </div>
+      </div>
+      <div class="split-58" style="margin-top:18px;">
+        <div class="panel amber">
+          <h3>Gaps</h3>
+          <ul>
+            <li>Embedding cache duplicates across API/worker replicas.</li>
+            <li>Cache KPI is a structured log, not a queryable service metric.</li>
+            <li>No end-to-end cache hit, cost, latency or eviction SLO.</li>
+            <li>Redis is described as a cache but is used mostly for coordination/replay.</li>
+          </ul>
+        </div>
+        <div>
+          <p class="lead" style="font-size:22px;">Do not add broad response caching to conceal slow queries. First fix transaction scope, resource reuse and query plans; then cache only stable, permission-safe data with explicit invalidation.</p>
+          <div class="callout green"><b>Security rule:</b> every shared cache key must include tenant + authorization-relevant scope, or cache only post-permission public metadata.</div>
+        </div>
+      </div>
+      <div class="source">backend/app/llm/gateway.py:111–198, 258–302, 531–547, 633–679; backend/app/services/chat_runtime.py:298–321; frontend/src/queryClient.ts.</div>
+      <div class="slide-num">17</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s18-title">
+      <p class="section-label">Criterion 8 · Resilience</p>
+      <h2 id="s18-title">Timeouts exist; coordinated overload behavior does not</h2>
+      <div class="split-58 grow">
+        <div>
+          <div class="panel green">
+            <h3>Good failure hygiene</h3>
+            <ul class="checklist">
+              <li>LLM, MCP, web search, sandbox and broker paths have explicit timeouts.</li>
+              <li>Vendor failures map to typed internal problems.</li>
+              <li>Tool turns, tool concurrency, search results and replay are bounded.</li>
+              <li>Shutdown drains/cancels answer tasks under a grace window.</li>
+            </ul>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Readiness is incomplete</h3>
+            <p>Postgres, Redis and MinIO are checked concurrently. OpenSearch—the required retrieval store—is omitted, and individual checks have no outer timeout budget.</p>
+          </div>
+        </div>
+        <div class="panel red">
+          <h3>Missing overload mechanisms</h3>
+          <ul class="checklist bad">
+            <li>No Uvicorn <span class="mono">limit-concurrency</span> or backlog policy.</li>
+            <li>No global answer or database checkout budget.</li>
+            <li>No bulkheads separating chat, admin and health capacity.</li>
+            <li>No circuit breaker around failing providers/dependencies.</li>
+            <li>No standard 429/503 + Retry-After load-shed response.</li>
+            <li>No dependency latency/error metric to drive circuit decisions.</li>
+          </ul>
+          <div class="callout red"><b>Principle:</b> a scalable service must reject some work predictably before accepting more work than it can finish.</div>
+        </div>
+      </div>
+      <div class="source">backend/app/api/health.py:63–129; backend/app/core/config.py timeout settings; backend/Dockerfile CMD; backend/app/main.py lifespan.</div>
+      <div class="slide-num">18</div>
+    </section>
+
+    <section class="slide dark" aria-labelledby="s19-title">
+      <p class="section-label">Criterion 12 · Observability</p>
+      <h2 id="s19-title">Logs can explain an incident; metrics cannot warn one is forming</h2>
+      <div class="grid-2 grow">
+        <div class="panel dark-panel">
+          <h3 style="color:#9ee3ff;">Already present</h3>
+          <ul class="checklist">
+            <li>Structured JSON logging outside local mode.</li>
+            <li>Request, tenant, path and method context.</li>
+            <li>Explicit audit events for security-sensitive actions.</li>
+            <li>Typed application errors and degraded readiness logs.</li>
+            <li>Per-answer model/cache accounting logs.</li>
+          </ul>
+        </div>
+        <div class="panel dark-panel" style="border-color:#7d3834;">
+          <h3 style="color:#ffb2ac;">Not found</h3>
+          <ul class="checklist bad">
+            <li>Prometheus/OpenTelemetry metrics export.</li>
+            <li>Distributed traces across API → LLM/tools → database/jobs.</li>
+            <li>Request p50/p95/p99 and error-rate dashboards.</li>
+            <li>DB pool wait, checkout count and query duration.</li>
+            <li>Event-loop lag and answer concurrency.</li>
+            <li>Celery queue age/depth, retries and dead tasks.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout" style="border-left-color:var(--cyan); margin-top:17px;">
+        <h3>First dashboard</h3>
+        <p style="margin:0; color:#d9e5eb;">RED for API/WS (rate, errors, duration), USE for Postgres/Redis/workers (utilization, saturation, errors), plus LLM first-token/total latency, cache hit ratio, tool latency and per-tenant concurrency.</p>
+      </div>
+      <div class="source">backend/app/core/logging.py; backend/app/main.py CorrelationMiddleware; no OpenTelemetry/Prometheus dependency or instrumentation found in backend/pyproject.toml or app/.</div>
+      <div class="slide-num">19</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s20-title">
+      <p class="section-label">Criterion 11 · Deployment</p>
+      <h2 id="s20-title">The shipped topology is an excellent dev stack—not a production plan</h2>
+      <div class="split-58 grow">
+        <div class="panel green">
+          <h3>Local developer experience</h3>
+          <ul class="checklist">
+            <li>One command starts the complete system.</li>
+            <li>Images are pinned; dependencies are explicit.</li>
+            <li>Health checks and service dependencies are defined.</li>
+            <li>The backend uses exec-form startup and graceful app lifespan.</li>
+            <li>OpenSearch memory is intentionally laptop-bounded.</li>
+          </ul>
+        </div>
+        <div class="panel red">
+          <h3>Production gaps</h3>
+          <ul class="checklist bad">
+            <li>Uvicorn runs with <span class="mono">--reload</span>; no worker/process policy.</li>
+            <li>No API/worker CPU or memory limits in the base stack.</li>
+            <li>Celery concurrency defaults to host CPU count.</li>
+            <li>Every API/worker/beat container runs Alembic on startup.</li>
+            <li>Backend health check uses liveness, not readiness.</li>
+            <li>No rolling-deploy, autoscaling, secret, TLS or backup topology is specified.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="panel blue" style="margin-top:16px;">
+        <h3>Target split</h3>
+        <div class="flow" style="margin:8px 0 0;">
+          <div class="node">one migration job</div><div class="arrow">→</div><div class="node blue">N API replicas</div><div class="arrow">+</div><div class="node blue">bounded worker pools</div><div class="arrow">+</div><div class="node">single scheduler leader</div>
+        </div>
+      </div>
+      <div class="source">docker-compose.yml:126–171, 227–272; backend/Dockerfile; backend/docker-entrypoint.sh. ADR-0005 explicitly describes the local-run path.</div>
+      <div class="slide-num">20</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s21-title">
+      <p class="section-label">Frontend &amp; wire contract</p>
+      <h2 id="s21-title">The SPA builds cleanly, but contract and bundle debt are visible</h2>
+      <div class="grid-2 grow">
+        <div>
+          <div class="panel green">
+            <h3>Strengths</h3>
+            <ul class="checklist">
+              <li>Static React/Vite SPA—no second application server.</li>
+              <li>Backend access is concentrated in <span class="mono">src/api</span>.</li>
+              <li>TypeScript strict build, ESLint and 1,155 tests pass.</li>
+              <li>Route-level chunks exist for several feature areas.</li>
+            </ul>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Contract drift exposure</h3>
+            <p><span class="mono">pnpm gen:api</span> exists, but the application still relies on a ~1,900-line hand-authored <span class="mono">api/types.ts</span> mirror. Generated output is ignored and no CI drift gate exists.</p>
+          </div>
+        </div>
+        <div>
+          <div class="panel red">
+            <span class="severity sev-risk">Build warning</span>
+            <div class="risk-number" style="font-size:62px; margin-top:16px;">794.62 kB</div>
+            <p>largest minified JavaScript entry chunk<br><span class="muted">246.47 kB gzip</span></p>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Circular chunk dependency</h3>
+            <p>Rollup warns that <span class="mono">DefaultModelSetting</span> is re-exported through a barrel while the modules depend on each other and land in different chunks—potentially breaking execution order.</p>
+          </div>
+        </div>
+      </div>
+      <div class="source">frontend build output 2026-07-18; frontend/AGENTS.md:23–30; frontend/src/api/types.ts; frontend/package.json; feature query modules for cursor consumption.</div>
+      <div class="slide-num">21</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s22-title">
+      <p class="section-label">Criterion 13 · Verification</p>
+      <h2 id="s22-title">Correctness evidence is deep; performance evidence is absent</h2>
+      <div class="grid-4" style="margin-top:4px;">
+        <div class="panel green"><div class="metric"><div class="value">✓</div><div class="label">Ruff: app + tests</div></div></div>
+        <div class="panel green"><div class="metric"><div class="value">163</div><div class="label">strict-mypy modules clean</div></div></div>
+        <div class="panel green"><div class="metric"><div class="value">171</div><div class="label">targeted backend hot-path tests passed</div></div></div>
+        <div class="panel green"><div class="metric"><div class="value">1,155</div><div class="label">frontend tests passed in 165 files</div></div></div>
+      </div>
+      <div class="grid-2 grow" style="margin-top:17px;">
+        <div class="panel blue">
+          <h3>What the suite proves well</h3>
+          <ul class="checklist">
+            <li>Tenant/RLS and permission-negative behavior.</li>
+            <li>WebSocket lifecycle and replay correctness.</li>
+            <li>Tool concurrency ordering and cancellation.</li>
+            <li>Repository cursors, migrations and task loop safety.</li>
+            <li>Frontend state/error/stream rendering.</li>
+          </ul>
+        </div>
+        <div class="panel red">
+          <h3>What remains unproven</h3>
+          <ul class="checklist bad">
+            <li>No k6/Locust/JMeter load suite.</li>
+            <li>No soak, burst, failure-injection or saturation gate.</li>
+            <li>No CI workflow runs the local gates.</li>
+            <li>No EXPLAIN-plan regression tests on production-like data.</li>
+            <li>The complete 1,498-function backend suite exceeded the five-minute audit run; this is not a failure result.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="source">Executed 2026-07-18: Ruff pass; mypy pass; targeted pytest 171 passed / 212.42s; Vitest 165 files / 1,155 tests; frontend build pass with warnings; docker compose config pass.</div>
+      <div class="slide-num">22</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s23-title">
+      <p class="section-label">Prioritized risk register</p>
+      <h2 id="s23-title">Five issues dominate near-term scale risk</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:10%">Priority</th><th style="width:24%">Risk</th><th style="width:24%">Failure mode</th><th style="width:22%">Primary owner</th><th style="width:20%">First control</th></tr></thead>
+        <tbody>
+          <tr><td><span class="severity sev-risk">P0</span></td><td><b>Redis client per envelope</b></td><td>Socket/pool churn scales with token count.</td><td class="mono">realtime/</td><td>One lifespan-owned client.</td></tr>
+          <tr><td><span class="severity sev-risk">P0</span></td><td><b>Long chat DB transaction</b></td><td>Pool exhaustion and long snapshots during model latency.</td><td class="mono">services/chat_runtime.py</td><td>Short pre/post transactions.</td></tr>
+          <tr><td><span class="severity sev-risk">P0</span></td><td><b>Unbounded answer admission</b></td><td>Burst fan-out overwhelms DB, Redis and LLM.</td><td class="mono">api/v1/chat.py</td><td>Global + tenant concurrency caps.</td></tr>
+          <tr><td><span class="severity sev-risk">P0</span></td><td><b>No runtime telemetry</b></td><td>Saturation remains invisible until user impact.</td><td class="mono">core/ + deployment</td><td>OTel + RED/USE metrics.</td></tr>
+          <tr><td><span class="severity sev-risk">P0</span></td><td><b>Whole-file memory paths</b></td><td>Concurrent uploads/downloads cause memory spikes.</td><td class="mono">storage/ + documents</td><td>Direct/chunked transfer.</td></tr>
+          <tr><td><span class="severity sev-mixed">P1</span></td><td>Pool/index budgets absent</td><td>Query latency and checkouts degrade unpredictably.</td><td class="mono">db/</td><td>Capacity formula + EXPLAIN plans.</td></tr>
+          <tr><td><span class="severity sev-mixed">P1</span></td><td>Worker containment gaps</td><td>Stuck/lost tasks consume finite worker capacity.</td><td class="mono">tasks/</td><td>Time limits + worker policies.</td></tr>
+          <tr><td><span class="severity sev-mixed">P1</span></td><td>Dev-only topology</td><td>Unsafe replica startup and unbounded processes.</td><td>deployment</td><td>Separate migrations + limits.</td></tr>
+          <tr><td><span class="severity sev-mixed">P1</span></td><td>Frontend bundle/contract debt</td><td>Slow startup, chunk-order risk, schema drift.</td><td class="mono">frontend/src/api</td><td>Generated types + chunk cleanup.</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Priority combines likelihood, blast radius, hot-path frequency and detectability. Validate order after baseline load metrics exist.</div>
+      <div class="slide-num">23</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s24-title">
+      <p class="section-label">Roadmap · 0–30 days</p>
+      <h2 id="s24-title">Remove hot-path multipliers before tuning infrastructure</h2>
+      <div class="timeline grow" style="max-width:1080px; margin-top:8px;">
+        <div class="step red"><strong>Days 1–3 · Reuse Redis connections</strong><span>Move the Redis client to app lifespan; inject it; add a test asserting many publishes use one client; measure connections and publish latency.</span></div>
+        <div class="step red"><strong>Days 4–10 · Shorten chat transactions</strong><span>Write an ADR for atomicity/state transitions; isolate external waits from DB transactions; configure pool size/overflow/timeout/recycle and statement timeout.</span></div>
+        <div class="step red"><strong>Days 8–13 · Add admission control</strong><span>Bound concurrent answers per process and tenant; return Retry-After; expose queue/running gauges; decide disconnect cancellation policy.</span></div>
+        <div class="step red"><strong>Days 11–17 · Eliminate whole-file memory paths</strong><span>Adopt presigned PUT/direct upload or bounded chunking; production redirect/CDN downloads; test at configured maximum size and concurrency.</span></div>
+        <div class="step"><strong>Days 15–23 · Instrument the critical path</strong><span>OpenTelemetry traces; API/WS, DB pool, Redis, LLM/tool and Celery metrics; correlation from request to answer and job.</span></div>
+        <div class="step"><strong>Days 22–30 · Establish a repeatable load baseline</strong><span>Run browse/search/chat/upload mixes; ramp until saturation; record the first bottleneck; capture EXPLAIN plans on realistic tenant cardinalities.</span></div>
+      </div>
+      <div class="source">Each item should be a separate tracked issue/PR with a measurable acceptance gate. Architecture-changing transaction semantics require an ADR before implementation.</div>
+      <div class="slide-num">24</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s25-title">
+      <p class="section-label">Roadmap · 31–90 days</p>
+      <h2 id="s25-title">Turn the strong local system into an operable service</h2>
+      <div class="grid-3 grow">
+        <div class="panel blue">
+          <h3>Reliability</h3>
+          <ul>
+            <li>Transactional outbox for jobs/events.</li>
+            <li>Celery soft/hard time limits.</li>
+            <li>Worker-lost redelivery policy.</li>
+            <li>Retry jitter and dead-task visibility.</li>
+            <li>Paged reconcile/sweep jobs.</li>
+          </ul>
+        </div>
+        <div class="panel blue">
+          <h3>Production topology</h3>
+          <ul>
+            <li>One migration job per release.</li>
+            <li>Bounded API and worker replicas.</li>
+            <li>Readiness includes OpenSearch.</li>
+            <li>Rolling-deploy drain tests.</li>
+            <li>Redis/DB capacity and HA runbooks.</li>
+          </ul>
+        </div>
+        <div class="panel blue">
+          <h3>Client &amp; contract</h3>
+          <ul>
+            <li>Use generated OpenAPI types directly.</li>
+            <li>Add contract-drift CI gate.</li>
+            <li>Consume cursors in documents/chat/search.</li>
+            <li>Break barrel cycle and split large entry chunk.</li>
+            <li>Add Web Vitals / SPA error telemetry.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="panel green" style="margin-top:17px;">
+        <h3>Institutionalize the proof</h3>
+        <p style="margin:0;">Create the promised <span class="mono">/verify</span> chain and CI workflow: lint → typecheck → contract generation/drift → unit/integration → compose config → targeted performance smoke. Run scheduled soak tests outside PR CI.</p>
+      </div>
+      <div class="source">AGENTS.md identifies CI (OD-7) and the remaining verification harness (OD-6) as open decisions. Confirm those decisions before adding mechanisms.</div>
+      <div class="slide-num">25</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s26-title">
+      <p class="section-label">Exit criteria</p>
+      <h2 id="s26-title">Production readiness should be demonstrated with guardrails</h2>
+      <div class="grid-3 grow">
+        <div class="panel">
+          <h3>Latency</h3>
+          <ul>
+            <li>REST p95/p99 by route class</li>
+            <li>WS first-token and total time</li>
+            <li>DB pool wait p95/p99</li>
+            <li>Redis publish p95/p99</li>
+            <li>LLM/tool dependency time</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Saturation</h3>
+          <ul>
+            <li>Active/queued answers</li>
+            <li>Pool checked-out / overflow</li>
+            <li>Event-loop lag</li>
+            <li>Worker queue age and depth</li>
+            <li>Process memory under max uploads</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>Correct load shedding</h3>
+          <ul>
+            <li>Bounded 429/503 rates at capacity</li>
+            <li>Retry-After honored by client</li>
+            <li>No cross-tenant degradation</li>
+            <li>No orphaned answer/job state</li>
+            <li>Graceful rolling deploy drain</li>
+          </ul>
+        </div>
+      </div>
+      <div class="panel blue" style="margin-top:17px;">
+        <h3>Suggested release gate—not a guessed SLO</h3>
+        <p style="margin:0;">Choose a representative concurrency and corpus, sustain it for 60 minutes, survive a dependency slowdown and one replica termination, remain within agreed p95/error/memory budgets, and produce enough telemetry to explain every controlled rejection.</p>
+      </div>
+      <div class="source">Final numeric SLOs require product traffic assumptions and cost constraints. The audit intentionally avoids inventing them.</div>
+      <div class="slide-num">26</div>
+    </section>
+
+    <section class="slide dark" aria-labelledby="s27-title">
+      <p class="section-label">Decision</p>
+      <div class="grow" style="display:flex; flex-direction:column; justify-content:center; max-width:1080px;">
+        <h2 id="s27-title" style="font-size:52px;">Keep the architecture.<br><span style="color:var(--cyan);">Fix the hot paths.</span><br>Then measure the system.</h2>
+        <p class="lead" style="max-width:930px; margin-top:15px;">Lumen Copilot does not need a framework rewrite. It needs disciplined resource lifetimes, short database transactions, bounded admission, memory-safe object transfer, and observability tied to a repeatable load model.</p>
+        <div class="row" style="margin-top:24px;">
+          <div class="panel dark-panel col"><h3 style="color:#9ee3ff;">Preserve</h3><p class="small">RLS, adapter chokepoints, contract-first design, typed errors, durable jobs, negative tests.</p></div>
+          <div class="panel dark-panel col" style="border-color:#7d3834;"><h3 style="color:#ffb2ac;">Fix first</h3><p class="small">Redis reuse, chat transactions, admission control, payload streaming, telemetry.</p></div>
+          <div class="panel dark-panel col"><h3 style="color:#b9f0d5;">Prove next</h3><p class="small">Capacity, graceful shedding, failure recovery, production deployment and cost.</p></div>
+        </div>
+      </div>
+      <div class="source">Recommended decision: authorize the P0 hardening program before adding substantial new chat/tool workload.</div>
+      <div class="slide-num">27</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s28-title">
+      <p class="section-label">Appendix A · P0 evidence</p>
+      <h2 id="s28-title">Exact evidence behind the highest-priority findings</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:23%">Finding</th><th style="width:41%">Repository evidence</th><th style="width:36%">Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td><b>Redis client per envelope</b></td><td class="mono">backend/app/realtime/backplane.py:162–189</td><td><span class="mono">from_url()</span> and <span class="mono">aclose()</span> occur inside every publish.</td></tr>
+          <tr><td><b>Long chat transaction</b></td><td class="mono">backend/app/services/chat_runtime.py:496–520</td><td>Tenant binding precedes the complete answer loop; commit follows it.</td></tr>
+          <tr><td><b>Extra tool sessions</b></td><td class="mono">chat_runtime.py:1832–1858</td><td>Semaphore default 4 bounds per answer, not process-wide DB usage.</td></tr>
+          <tr><td><b>No pool budget</b></td><td class="mono">backend/app/db/session.py:31–54</td><td>Only <span class="mono">pool_pre_ping</span> is configured.</td></tr>
+          <tr><td><b>Unbounded answer tasks</b></td><td class="mono">backend/app/api/v1/chat.py:648–764</td><td>Each accepted send creates a task and adds it to an unbounded set.</td></tr>
+          <tr><td><b>Whole-file upload</b></td><td class="mono">backend/app/api/v1/documents.py:224</td><td>Request body is materialized before max-size validation.</td></tr>
+          <tr><td><b>Whole-object download</b></td><td class="mono">storage/object_store.py:191–210; api/v1/documents.py:320–337</td><td>Storage body is read fully; StreamingResponse receives one bytes object.</td></tr>
+          <tr><td><b>No runtime metrics/traces</b></td><td class="mono">backend/pyproject.toml; backend/app/core/logging.py</td><td>Structured logging exists; no OTel/Prometheus instrumentation dependency found.</td></tr>
+          <tr><td><b>No load harness</b></td><td class="mono">repository-wide tool/config search</td><td>No Locust, k6, JMeter, benchmark or soak suite found.</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Line numbers refer to baseline commit 74de85d as inspected on 2026-07-18.</div>
+      <div class="slide-num">28</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s29-title">
+      <p class="section-label">Appendix B · Additional evidence</p>
+      <h2 id="s29-title">P1/P2 findings are traceable too</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:25%">Finding</th><th style="width:43%">Repository evidence</th><th style="width:32%">Observed condition</th></tr></thead>
+        <tbody>
+          <tr><td><b>Router transaction leakage</b></td><td class="mono">backend/app/api/v1/*.py</td><td>67 commit/rollback calls across 17 router modules.</td></tr>
+          <tr><td><b>SQL outside db owner</b></td><td class="mono">services/admin_service.py; audit_query_service.py; tasks/sync_source.py</td><td>Direct model/SQLAlchemy select imports.</td></tr>
+          <tr><td><b>Blocking password verify</b></td><td class="mono">services/auth_service.py:119–146; auth/hashing.py</td><td>Argon2 verify/dummy verify run directly in async login.</td></tr>
+          <tr><td><b>Incomplete readiness</b></td><td class="mono">backend/app/api/health.py:63–129</td><td>Postgres/Redis/MinIO checked; OpenSearch omitted.</td></tr>
+          <tr><td><b>Unpaged sweeps</b></td><td class="mono">db/repositories.py:4401–4412, 4793–4800</td><td>Pending digest tenants and enabled schedules materialize full result sets.</td></tr>
+          <tr><td><b>Index/query mismatch risk</b></td><td class="mono">db/models.py; repositories.py keyset list methods</td><td>Several filters/sorts lack an aligned composite index.</td></tr>
+          <tr><td><b>Worker controls absent</b></td><td class="mono">tasks/celery_app.py; docker-compose.yml:227–255</td><td>No time limits, worker-lost reject, or explicit concurrency/memory policy.</td></tr>
+          <tr><td><b>Generated types not authoritative</b></td><td class="mono">frontend/AGENTS.md:23–30; src/api/types.ts</td><td>Generated schema is ignored; hand-authored mirror remains.</td></tr>
+          <tr><td><b>Frontend page-one behavior</b></td><td class="mono">features/documents/chat/search query modules</td><td>Backends expose cursors; primary screens do not advance them.</td></tr>
+          <tr><td><b>Bundle/cycle warnings</b></td><td class="mono">pnpm build output, 2026-07-18</td><td>794.62 kB entry chunk; Rollup circular chunk warning.</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Counts and build values are reproducible with the commands summarized on slide 22.</div>
+      <div class="slide-num">29</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s30-title">
+      <p class="section-label">Appendix C · Assessment standard</p>
+      <h2 id="s30-title">Criteria and external reference points</h2>
+      <div class="grid-2 grow">
+        <div class="panel">
+          <h3>Criteria evaluated</h3>
+          <ol style="columns:2; column-gap:30px;">
+            <li>Layered architecture</li>
+            <li>Async hygiene</li>
+            <li>Resource reuse</li>
+            <li>Database design</li>
+            <li>Bounded operations</li>
+            <li>Durable queues</li>
+            <li>Stateless scale</li>
+            <li>Resilience/backpressure</li>
+            <li>Payload efficiency</li>
+            <li>Caching</li>
+            <li>Worker/deployment model</li>
+            <li>Observability</li>
+            <li>Scalability tests</li>
+            <li>Security/tenancy</li>
+            <li>Frontend/API contract</li>
+          </ol>
+        </div>
+        <div>
+          <h3>Primary external guidance</h3>
+          <ul>
+            <li><a href="https://fastapi.tiangolo.com/async/">FastAPI: concurrency and async/await</a></li>
+            <li><a href="https://www.starlette.io/threadpool/">Starlette: thread-pool behavior</a></li>
+            <li><a href="https://docs.sqlalchemy.org/en/21/orm/extensions/asyncio.html">SQLAlchemy: asyncio ORM guidance</a></li>
+            <li><a href="https://docs.sqlalchemy.org/en/20/core/pooling.html">SQLAlchemy: connection pooling</a></li>
+            <li><a href="https://www.uvicorn.org/settings/">Uvicorn: resource and concurrency settings</a></li>
+            <li><a href="https://fastapi.tiangolo.com/deployment/server-workers/">FastAPI: server workers</a></li>
+          </ul>
+          <div class="panel blue" style="margin-top:18px;">
+            <h3>Audit limitation</h3>
+            <p style="margin:0;">This is a code-and-gates assessment. Production readiness must be confirmed with representative data, real PostgreSQL/OpenSearch plans, dependency behavior, load, cost, and telemetry.</p>
+          </div>
+        </div>
+      </div>
+      <div class="source">Internal source-of-truth precedence remains: user instructions → security invariants → specs/ADRs → AGENTS.md → existing code/tests.</div>
+      <div class="slide-num">30</div>
+    </section>
+
+  </main>
+
+  <div id="progress" aria-hidden="true"></div>
+  <nav id="controls" aria-label="Presentation controls">
+    <button id="prev" type="button" aria-label="Previous slide">←</button>
+    <span id="counter" aria-live="polite">1 / 30</span>
+    <button id="next" type="button" aria-label="Next slide">→</button>
+    <button id="full" type="button" aria-label="Toggle fullscreen">⛶</button>
+    <button id="helpBtn" type="button" aria-label="Show keyboard shortcuts">?</button>
+  </nav>
+
+  <aside id="help" aria-hidden="true">
+    <div class="help-card" role="dialog" aria-modal="true" aria-labelledby="help-title">
+      <h3 id="help-title">Keyboard shortcuts</h3>
+      <table>
+        <tr><td><kbd>→</kbd> <kbd>Space</kbd></td><td>Next slide</td></tr>
+        <tr><td><kbd>←</kbd></td><td>Previous slide</td></tr>
+        <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>First / last slide</td></tr>
+        <tr><td><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
+        <tr><td><kbd>?</kbd> / <kbd>Esc</kbd></td><td>Show / close help</td></tr>
+      </table>
+      <p class="small muted" style="margin:16px 0 0;">Print from the browser to export one 16:9 page per slide.</p>
+    </div>
+  </aside>
+
+  <script>
+    (() => {
+      const stage = document.getElementById('stage');
+      const slides = [...document.querySelectorAll('.slide')];
+      const counter = document.getElementById('counter');
+      const progress = document.getElementById('progress');
+      const help = document.getElementById('help');
+      let current = 0;
+
+      const clamp = (n) => Math.max(0, Math.min(slides.length - 1, n));
+
+      function fitStage() {
+        const scale = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+        const left = (window.innerWidth - 1280 * scale) / 2;
+        const top = (window.innerHeight - 720 * scale) / 2;
+        stage.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
+      }
+
+      function show(index, updateHash = true) {
+        current = clamp(index);
+        slides.forEach((slide, i) => slide.classList.toggle('active', i === current));
+        counter.textContent = `${current + 1} / ${slides.length}`;
+        progress.style.width = `${((current + 1) / slides.length) * 100}%`;
+        document.title = `${current + 1}/${slides.length} · Lumen Copilot Scalability Audit`;
+        if (updateHash) history.replaceState(null, '', `#slide=${current + 1}`);
+      }
+
+      function fromHash() {
+        const match = location.hash.match(/slide=(\d+)/);
+        return match ? Number(match[1]) - 1 : 0;
+      }
+
+      function toggleHelp(force) {
+        const open = typeof force === 'boolean' ? force : !help.classList.contains('open');
+        help.classList.toggle('open', open);
+        help.setAttribute('aria-hidden', String(!open));
+      }
+
+      async function toggleFullscreen() {
+        if (!document.fullscreenElement) await document.documentElement.requestFullscreen?.();
+        else await document.exitFullscreen?.();
+      }
+
+      document.getElementById('prev').addEventListener('click', () => show(current - 1));
+      document.getElementById('next').addEventListener('click', () => show(current + 1));
+      document.getElementById('full').addEventListener('click', toggleFullscreen);
+      document.getElementById('helpBtn').addEventListener('click', () => toggleHelp());
+      help.addEventListener('click', (event) => { if (event.target === help) toggleHelp(false); });
+
+      window.addEventListener('keydown', (event) => {
+        if (help.classList.contains('open')) {
+          if (event.key === 'Escape' || event.key === '?') toggleHelp(false);
+          return;
+        }
+        if (['ArrowRight', 'PageDown', ' '].includes(event.key)) { event.preventDefault(); show(current + 1); }
+        else if (['ArrowLeft', 'PageUp'].includes(event.key)) { event.preventDefault(); show(current - 1); }
+        else if (event.key === 'Home') { event.preventDefault(); show(0); }
+        else if (event.key === 'End') { event.preventDefault(); show(slides.length - 1); }
+        else if (event.key.toLowerCase() === 'f') toggleFullscreen();
+        else if (event.key === '?') toggleHelp(true);
+      });
+
+      window.addEventListener('hashchange', () => show(fromHash(), false));
+      window.addEventListener('resize', fitStage);
+      document.addEventListener('fullscreenchange', fitStage);
+      fitStage();
+      show(fromHash(), false);
+    })();
+  </script>
+</body>
+</html>
