@@ -1133,9 +1133,12 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422":
           description: >
-            Malformed body, an unsupported `type`, or an invalid / SSRF-blocked
-            URL (INV-8, ADR-0009 §3). `code` distinguishes the cases (e.g.
-            `url_blocked` for an SSRF rejection).
+            Malformed body or invalid configuration (INV-8). `Problem.code` is
+            one of the **stable codes**: `unsupported_source_type` (a `type` no
+            registered connector serves), `url_blocked` (web: SSRF-rejected URL,
+            ADR-0009 §3), `invalid_url` (web: malformed URL), `invalid_config`
+            (gdrive: a config violating the mode-discriminated schema — missing
+            `folder_id`/`drive_id`, or an id the mode does not take).
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1194,7 +1197,9 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: The source is awaiting OAuth consent (`pending_auth`) and cannot sync.
+          description: >
+            The source is awaiting OAuth consent (`pending_auth`) and cannot
+            sync (INV-8). `Problem.code` is the stable `source_pending_auth`.
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1229,7 +1234,11 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: The source's type has no OAuth flow (e.g. `web`), or it is in a non-connectable state.
+          description: >
+            Illegal transition (INV-8). `Problem.code` is one of the **stable
+            codes**: `oauth_not_supported` (the source's type has no OAuth flow,
+            e.g. `web`) or `not_connectable` (the source is in a state that
+            cannot start a flow).
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1247,20 +1256,37 @@ paths:
         consumed atomically. The server re-authorizes from current state
         (caller still admin, source connectable, generation current), exchanges
         the code server-side, stores the refresh token in the secrets vault,
-        and **always responds 302** to the SPA sources route: on success with
-        `?connect=ok&source=<id>`, on any failure with
-        `?connect=error&reason=<code>` — where `reason` is a coarse category
-        (`denied`, `expired`, `provider_error`, `failed`), never provider
-        detail, token, code, or verifier material. A callback whose `state`
-        does not resolve gets the same generic error redirect (no existence
-        disclosure, INV-1/INV-4/INV-8).
+        and **always responds 302** — there is no other status. Every query
+        parameter is therefore *syntactically* optional (a missing/garbled
+        `state` must reach the fail-closed handler and produce the generic
+        error redirect, never a validation error); `state` and `code` are
+        semantically required for success. The redirect target is the
+        deployment-configured SPA sources route (config
+        `CONNECTOR_OAUTH_FRONTEND_RETURN_URL`, e.g.
+        `https://app.example.com/sources`); the **frozen query contract** on
+        top of it is exactly:
+
+          * success — `{return_url}?connect=ok&source={sourceId}`
+          * failure — `{return_url}?connect=error&reason={reason}`
+
+        with `reason` one of the closed set: `expired` (missing, unknown,
+        already-consumed, or expired `state` — indistinguishable by design, no
+        existence disclosure), `denied` (callback re-authorization failed:
+        acting user no longer admin, source deleted/not connectable, or a
+        superseded connect generation), `provider_error` (the provider returned
+        an `error`, or the code exchange failed), `failed` (any other internal
+        failure). No provider detail, token, code, or verifier material ever
+        appears in the redirect (INV-1/INV-4/INV-8).
       tags: [sources]
       parameters:
         - name: state
           in: query
-          required: true
+          required: false
           schema: { type: string }
-          description: The opaque single-use flow handle issued by connectSource.
+          description: >
+            The opaque single-use flow handle issued by connectSource.
+            Semantically required — its absence yields the `expired` error
+            redirect, never a 4xx.
         - name: code
           in: query
           required: false
@@ -1274,12 +1300,16 @@ paths:
       responses:
         "302":
           description: >
-            Always — Location is the SPA sources route with `connect=ok` or
-            `connect=error&reason=<code>`. No response body.
+            Always — success and every failure mode. No response body; the
+            outcome rides the frozen `connect`/`source`/`reason` query
+            parameters on the Location target above.
           headers:
             Location:
+              required: true
               schema: { type: string }
-              description: SPA sources route with the outcome query parameters.
+              description: >
+                `{return_url}?connect=ok&source={sourceId}` or
+                `{return_url}?connect=error&reason={expired|denied|provider_error|failed}`.
 
   # --- User preferences (spec 0005 §3; epic #144) ----------------------------
   /preferences:
@@ -4026,16 +4056,6 @@ components:
         `reauthorize_required`).
       enum: [pending_auth, pending, syncing, ready, error]
 
-    SourceConfig:
-      description: >
-        Connector configuration (ADR-0009 §4 `config` jsonb), discriminated by
-        the source's `type`: `web` sources carry a `WebSourceConfig`, `gdrive`
-        sources a `GdriveSourceConfig`. Both are closed shapes (INV-8): unknown
-        keys — or a `web` key on a `gdrive` config — are invalid.
-      oneOf:
-        - { $ref: "#/components/schemas/WebSourceConfig" }
-        - { $ref: "#/components/schemas/GdriveSourceConfig" }
-
     WebSourceConfig:
       type: object
       additionalProperties: false
@@ -4049,50 +4069,120 @@ components:
           description: The public URL this source ingests (http/https only; SSRF-checked).
         mode: { $ref: "#/components/schemas/WebSourceMode" }
 
-    GdriveSourceMode:
-      type: string
-      description: >
-        What a `gdrive` source syncs (ADR-0019 §5): the connected account's
-        entire My Drive, a single folder, or a Shared Drive.
-      enum: [my_drive, folder, shared_drive]
-
     GdriveSourceConfig:
+      description: >
+        `gdrive` connector configuration (ADR-0019 §5), discriminated by `mode`
+        — each variant is a closed shape, so a missing conditional id, or an id
+        on a mode that does not take it, is schema-invalid (422 `invalid_config`,
+        INV-8).
+      oneOf:
+        - { $ref: "#/components/schemas/GdriveMyDriveConfig" }
+        - { $ref: "#/components/schemas/GdriveFolderConfig" }
+        - { $ref: "#/components/schemas/GdriveSharedDriveConfig" }
+      discriminator:
+        propertyName: mode
+        mapping:
+          my_drive: "#/components/schemas/GdriveMyDriveConfig"
+          folder: "#/components/schemas/GdriveFolderConfig"
+          shared_drive: "#/components/schemas/GdriveSharedDriveConfig"
+
+    GdriveMyDriveConfig:
       type: object
       additionalProperties: false
-      description: >
-        `gdrive` connector configuration (ADR-0019 §5). `folder_id` is required
-        when `mode` is `folder`; `drive_id` is required when `mode` is
-        `shared_drive` (and also scopes a `folder` inside a Shared Drive).
-        A missing conditional id — or an id present for `my_drive` — is a 422
-        (INV-8).
+      description: Sync the connected account's entire My Drive (no ids permitted).
       required: [mode]
       properties:
-        mode: { $ref: "#/components/schemas/GdriveSourceMode" }
-        folder_id:
-          type: string
-          description: Drive folder id to sync (mode `folder` only).
-        drive_id:
-          type: string
-          description: Shared Drive id (mode `shared_drive`, or a `folder` within one).
+        mode: { type: string, enum: [my_drive] }
 
-    Source:
+    GdriveFolderConfig:
       type: object
       additionalProperties: false
       description: >
+        Sync a single folder. `folder_id` is required; `drive_id` additionally
+        scopes a folder that lives inside a Shared Drive (its change log is then
+        that drive's — ADR-0019 §3).
+      required: [mode, folder_id]
+      properties:
+        mode: { type: string, enum: [folder] }
+        folder_id:
+          type: string
+          minLength: 1
+          description: The Drive folder id to sync.
+        drive_id:
+          type: string
+          minLength: 1
+          description: The containing Shared Drive id, when the folder is in one.
+
+    GdriveSharedDriveConfig:
+      type: object
+      additionalProperties: false
+      description: Sync a whole Shared Drive. `drive_id` is required; `folder_id` is not permitted.
+      required: [mode, drive_id]
+      properties:
+        mode: { type: string, enum: [shared_drive] }
+        drive_id:
+          type: string
+          minLength: 1
+          description: The Shared Drive id to sync.
+
+    Source:
+      description: >
         One connected source, tenant-scoped (ADR-0009 §4/§5, spec 0004
-        INV-1/INV-2). `web` sources are owner-scoped: their content is
-        retrievable only by the owner. **Managed sources (`gdrive`) are
-        ACL-mirrored** (ADR-0019 §2): their content is retrievable only via the
-        fresh mirrored source ACL — ownership and Lumen grants do not widen it.
-        The `connected_account` / `acl_synced_at` / `unmapped_acl_count` /
-        `reauthorize_required` fields form the managed-source health surface
-        (null / false for `web` sources).
+        INV-1/INV-2) — **discriminated by `type`**. The `web` branch is the
+        pre-0.7.0 wire, byte-compatible (no new fields). The `gdrive` branch is
+        ACL-mirrored (ADR-0019 §2) — its content is retrievable only via the
+        fresh mirrored source ACL; ownership and Lumen grants do not widen it —
+        and carries the managed-source health surface as **required** fields.
+      oneOf:
+        - { $ref: "#/components/schemas/WebSource" }
+        - { $ref: "#/components/schemas/GdriveSource" }
+      discriminator:
+        propertyName: type
+        mapping:
+          web: "#/components/schemas/WebSource"
+          gdrive: "#/components/schemas/GdriveSource"
+
+    WebSource:
+      type: object
+      additionalProperties: false
+      description: >
+        A `web` source — owner-scoped (only the owner retrieves its content).
+        Exactly the pre-0.7.0 `Source` shape with `type` pinned to `web`.
+      required: [id, type, config, status, indexed_count, owner_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [web] }
+        config: { $ref: "#/components/schemas/WebSourceConfig" }
+        status: { $ref: "#/components/schemas/SourceStatus" }
+        indexed_count:
+          type: integer
+          minimum: 0
+          description: Number of documents this source has ingested (0 until the first sync completes).
+        last_synced_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last successful sync finished (null before the first sync).
+        last_error:
+          type: string
+          description: Failure reason when status is error.
+        owner_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    GdriveSource:
+      type: object
+      additionalProperties: false
+      description: >
+        A managed `gdrive` source (ADR-0019). The health-surface fields are
+        required (nullable where the value can be absent) so a generated client
+        can rely on their presence without narrowing hacks.
       required: [id, type, config, status, indexed_count, owner_id,
+                 connected_account, acl_synced_at, unmapped_acl_count,
                  reauthorize_required, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        type: { $ref: "#/components/schemas/SourceType" }
-        config: { $ref: "#/components/schemas/SourceConfig" }
+        type: { type: string, enum: [gdrive] }
+        config: { $ref: "#/components/schemas/GdriveSourceConfig" }
         status: { $ref: "#/components/schemas/SourceStatus" }
         indexed_count:
           type: integer
@@ -4110,28 +4200,27 @@ components:
             - { $ref: "#/components/schemas/ConnectedAccount" }
             - type: "null"
           description: >
-            The provider account this managed source is connected as (null for
-            `web` sources, and before OAuth completes). Never carries tokens.
+            The provider account this source is connected as (null before OAuth
+            completes). Never carries tokens.
         acl_synced_at:
           type: [string, "null"]
           format: date-time
           description: >
             When the source's mirrored ACLs were last refreshed (ADR-0019 §2;
-            null for `web` sources / before the first sync). Content whose ACL
-            is older than the freshness window is denied at retrieval.
+            null before the first sync). Content whose ACL is older than the
+            freshness window is denied at retrieval.
         unmapped_acl_count:
           type: [integer, "null"]
           minimum: 0
           description: >
             Documents whose mirrored ACL mapped to no Lumen principal (ADR-0019
             §2 — ingested but invisible; identity attestation lights them up).
-            Null for `web` sources.
+            Null before the first sync.
         reauthorize_required:
           type: boolean
           description: >
             True when the OAuth grant is dead (revoked/expired refresh token,
-            ADR-0019 §1) — re-run `connectSource` to repair. Always false for
-            `web` sources.
+            ADR-0019 §1) — re-run `connectSource` to repair.
         owner_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -4170,6 +4259,11 @@ components:
       oneOf:
         - { $ref: "#/components/schemas/WebSourceCreate" }
         - { $ref: "#/components/schemas/GdriveSourceCreate" }
+      discriminator:
+        propertyName: type
+        mapping:
+          web: "#/components/schemas/WebSourceCreate"
+          gdrive: "#/components/schemas/GdriveSourceCreate"
 
     WebSourceCreate:
       type: object
