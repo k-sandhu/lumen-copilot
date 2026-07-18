@@ -7,4 +7,11 @@ export { SourcesPage } from './components/SourcesPage';
 export { SourcesPanel } from './components/SourcesPanel';
 export { SourceCard } from './components/SourceCard';
 export { AddSourceModal } from './components/AddSourceModal';
-export { useSources, useCreateSource, useSyncSource, useDeleteSource } from './model/queries';
+export {
+  useSources,
+  useCreateSource,
+  useConnectSource,
+  useSyncSource,
+  useDeleteSource,
+} from './model/queries';
+export { useConnectReturn } from './model/useConnectReturn';

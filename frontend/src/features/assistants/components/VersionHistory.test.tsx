@@ -33,7 +33,7 @@ function problem(status: number, title: string): Response {
   });
 }
 
-const members: Member[] = [{ id: 'u1', email: 'ada@acme.com', role: ['member'] }];
+const members: Member[] = [{ id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null }];
 
 function makeConfig(overrides: Partial<AssistantVersionConfig> = {}): AssistantVersionConfig {
   return {

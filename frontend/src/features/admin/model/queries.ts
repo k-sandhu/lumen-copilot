@@ -22,6 +22,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
+  attestMemberIdentity,
   getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
@@ -48,6 +49,7 @@ import type {
   TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
+  Member,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -70,6 +72,31 @@ export function useMembers(): UseQueryResult<MemberList> {
     queryKey: membersQueryKey,
     queryFn: ({ signal }) => listMembers({}, signal),
     staleTime: 30_000,
+  });
+}
+
+/**
+ * Attest a member's email identity for connector-ACL mapping (#455, ADR-0019
+ * §2; admin only, audited server-side as `user.identity_attested`). Mirrored
+ * connector ACLs map to a Lumen user ONLY when their email is attested, so this
+ * is the action that "lights up" a source's unmapped documents at its next
+ * sync. On success we seed the returned member into the roster cache (no
+ * flash) and invalidate so the panel re-reads authoritative state. A 403
+ * (non-admin, INV-5) / 404 (cross-tenant, INV-1) propagates as an `ApiError`
+ * the panel surfaces inline — it is NOT swallowed here.
+ */
+export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, string> {
+  const qc = useQueryClient();
+  return useMutation<Member, unknown, string>({
+    mutationFn: (memberId) => attestMemberIdentity(memberId),
+    onSuccess: (member) => {
+      qc.setQueryData<MemberList>(membersQueryKey, (prev) =>
+        prev
+          ? { ...prev, items: prev.items.map((m) => (m.id === member.id ? member : m)) }
+          : prev,
+      );
+      void qc.invalidateQueries({ queryKey: membersQueryKey });
+    },
   });
 }
 
