@@ -377,11 +377,14 @@ async def test_anthropic_single_message_gets_one_breakpoint(
     ]
 
 
-async def test_anthropic_skips_empty_content_anchor(
+async def test_anthropic_moving_mark_walks_back_over_empty_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool-call-only assistant message (content ``""``) at an anchor index is
-    left untouched — there is no text part to hang ``cache_control`` on."""
+    """When message[len-2] is a tool-call-only assistant turn (content ``""``,
+    the single-tool-result shape) there is no text part to hang the mark on —
+    the mark walks BACK to the nearest wrappable message instead of being
+    dropped, so the turn's prefix still refreshes. The empty message itself is
+    never wrapped (its ``tool_calls`` stay intact)."""
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
     messages = [
@@ -396,8 +399,8 @@ async def test_anthropic_skips_empty_content_anchor(
     ]
     _ = [ev async for ev in gw.stream_tools(messages, tools=_TOOLS)]
     wire = captured["messages"]
-    # message[0] decorated; message[2] (the empty tool-call turn) skipped.
-    assert _has_cache_control(wire[0])
+    # len-2 (the empty tool-call turn) untouched; the mark landed on index 1.
+    assert [_has_cache_control(m) for m in wire] == [True, True, False, False]
     assert wire[2]["content"] == ""
     assert wire[2]["tool_calls"][0]["function"]["name"] == "search_text"
 

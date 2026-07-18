@@ -139,28 +139,34 @@ def _apply_cache_directives(
     Two breakpoints (limit is four): the FIRST message (the stable
     system/tools prefix boundary) and the SECOND-TO-LAST (the moving per-turn
     mark — everything up to and including the previous turn's tool results
-    caches; only the newest message is fresh). Only plain-string contents are
-    wrapped; tool-call-only messages with empty content are skipped (nothing
-    to anchor). Non-Anthropic families return the wire untouched.
+    caches; only the newest message is fresh). Only plain-string contents can
+    carry the mark; when the second-to-last message is a tool-call-only
+    assistant turn (content ``""``) the mark walks BACK to the nearest
+    wrappable message so a single-tool turn still refreshes its prefix mark
+    instead of dropping it. Non-Anthropic families return the wire untouched.
     """
     if family != "anthropic" or not wire:
         return wire
-    anchors = {0}
-    if len(wire) >= 2:
-        anchors.add(len(wire) - 2)
-    for i in anchors:
+
+    def _wrappable(i: int) -> bool:
         content = wire[i].get("content")
-        if isinstance(content, str) and content:
-            wire[i] = {
-                **wire[i],
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-            }
+        return isinstance(content, str) and bool(content)
+
+    anchors = {0} if _wrappable(0) else set()
+    mark = next((i for i in range(len(wire) - 2, 0, -1) if _wrappable(i)), None)
+    if mark is not None:
+        anchors.add(mark)
+    for i in anchors:
+        wire[i] = {
+            **wire[i],
+            "content": [
+                {
+                    "type": "text",
+                    "text": wire[i]["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
     return wire
 
 
