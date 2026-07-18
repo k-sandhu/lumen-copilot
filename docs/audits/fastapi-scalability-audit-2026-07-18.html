@@ -386,8 +386,8 @@
       </div>
       <div class="row" style="border-top:1px solid #344752; padding-top:18px;">
         <div class="col small"><b>Assessment baseline</b><br><span class="muted mono">74de85d · branch docs/463-fastapi-scalability-audit</span></div>
-        <div class="col small"><b>Tracked work</b><br><span class="muted">GitHub issue #463</span></div>
-        <div class="col small"><b>Scope</b><br><span class="muted">API, data, jobs, realtime, UI contract, deployment, tests</span></div>
+        <div class="col small"><b>Tracked work</b><br><span class="muted">GitHub issues #463 + #465</span></div>
+        <div class="col small"><b>Scope</b><br><span class="muted">API, data, jobs, realtime, UI contract, deployment, tests, code hygiene</span></div>
       </div>
       <div class="source">Internal engineering assessment. Findings are static-code and executable-gate evidence, not production traffic measurements.</div>
       <div class="slide-num">01</div>
@@ -415,7 +415,7 @@
           <div class="metric"><div class="value">0</div><div class="label">load/soak suites or production telemetry systems found</div></div>
         </div>
       </div>
-      <div class="source">Verdict synthesizes slides 5–23. “Unproven” means no production topology, saturation metrics, or load evidence—not that the system cannot scale.</div>
+      <div class="source">Verdict synthesizes slides 5–30. “Unproven” means no production topology, saturation metrics, or load evidence—not that the system cannot scale.</div>
       <div class="slide-num">02</div>
     </section>
 
@@ -448,6 +448,7 @@
             <li>Build output and bundle warnings</li>
             <li>Compose / container topology</li>
             <li>Static, unit and targeted runtime gates</li>
+            <li>Unused-code, dependency and clone analysis</li>
           </ul>
         </div>
       </div>
@@ -456,7 +457,7 @@
         <div><b>42.3k</b><span>backend app lines</span></div>
         <div><b>52.8k</b><span>frontend source lines</span></div>
         <div><b>5.7k</b><span>contract YAML/JSON lines</span></div>
-        <div><b>15</b><span>scored design criteria</span></div>
+        <div><b>16</b><span>scored design criteria</span></div>
       </div>
       <div class="source">Counts from repository inventory on 2026-07-18. The review did not run production traffic or modify application behavior.</div>
       <div class="slide-num">03</div>
@@ -515,6 +516,7 @@
         <div class="score-row"><div class="score-name">Production deployment posture</div><div class="score-track"><div class="score-fill" style="--w:20%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
         <div class="score-row"><div class="score-name">Metrics &amp; distributed tracing</div><div class="score-track"><div class="score-fill" style="--w:16%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
         <div class="score-row"><div class="score-name">Load / soak / saturation testing</div><div class="score-track"><div class="score-fill" style="--w:14%;--bar:var(--gray)"></div></div><span class="severity sev-missing">Not proven</span></div>
+        <div class="score-row"><div class="score-name">Dead-code &amp; duplication hygiene</div><div class="score-track"><div class="score-fill" style="--w:64%;--bar:var(--amber)"></div></div><span class="severity sev-mixed">Mixed</span></div>
       </div>
       <div class="panel red" style="margin-top:12px; padding:14px 18px;"><b>Interpretation:</b> the application demonstrates correctness under tests, but it cannot yet show where throughput flattens, how it sheds load, or which dependency saturates first.</div>
       <div class="source">“Not proven” is an evidence rating. The repository contains structured logs and health endpoints, but no metrics/traces/load harness or production deployment manifest.</div>
@@ -1059,9 +1061,210 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
       <div class="slide-num">22</div>
     </section>
 
-    <section class="slide" aria-labelledby="s23-title">
+    <section class="slide dark" aria-labelledby="s23-title">
+      <p class="section-label">Criterion 16 · Code hygiene</p>
+      <h2 id="s23-title">Low runtime bloat; meaningful maintenance drag</h2>
+      <div class="grid-4" style="margin-top:4px;">
+        <div class="panel dark-panel"><div class="metric"><div class="value good-text">0</div><div class="label">true backend findings at ≥80% confidence</div></div></div>
+        <div class="panel dark-panel"><div class="metric"><div class="value amber-text">6</div><div class="label">confirmed graph-unused frontend files</div></div></div>
+        <div class="panel dark-panel"><div class="metric"><div class="value good-text">0</div><div class="label">byte-identical tracked file groups</div></div></div>
+        <div class="panel dark-panel"><div class="metric"><div class="value amber-text">9.02%</div><div class="label">duplicated backend test lines</div></div></div>
+      </div>
+      <div class="grid-2 grow" style="margin-top:18px;">
+        <div class="panel dark-panel">
+          <h3 style="color:#b9f0d5;">What is healthy</h3>
+          <ul class="checklist">
+            <li>Ruff and strict TypeScript already block unused imports, locals and parameters.</li>
+            <li>Production exact-clone rates are contained: backend 0.96%, frontend 2.22%.</li>
+            <li>No whole tracked files are exact copies.</li>
+            <li>Most scanner noise maps to known framework discovery mechanisms.</li>
+          </ul>
+        </div>
+        <div class="panel dark-panel" style="border-color:#8a6830;">
+          <h3 style="color:#ffd28a;">What needs ownership</h3>
+          <ul class="checklist warn">
+            <li>Pre-OpenSearch retrieval code remains beside the live path.</li>
+            <li>Preference resolution exists twice; one public implementation is unused.</li>
+            <li>Dormant frontend barrels and wire wrappers widen the apparent API.</li>
+            <li>Repeated test bootstrapping raises change cost and obscures intent.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="source">Static evidence: Vulture 2.14, Knip 5.63.0, Deptry 0.23.1, jscpd 4.0.5, compiler/linter gates, exact SHA-256 file grouping, and manual call-site review.</div>
+      <div class="slide-num">23</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s24-title">
+      <p class="section-label">Unused code · Backend</p>
+      <h2 id="s24-title">Backend: 338 static leads become five decisions</h2>
+      <div class="split-58 grow">
+        <table class="dense">
+          <thead><tr><th style="width:29%">Candidate group</th><th style="width:31%">Production reachability</th><th style="width:40%">Disposition</th></tr></thead>
+          <tbody>
+            <tr><td><b>Obsolete answer type</b><br><span class="mono tiny">AnswerResult</span></td><td>Definition only; no app or test caller.</td><td>Delete with its unused <span class="mono">is_grounded</span> property.</td></tr>
+            <tr><td><b>Retired SQL retrieval</b><br><span class="mono tiny">semantic_search · lexical_search</span></td><td>Definitions only after the OpenSearch cutover.</td><td>Remove; ADR-0010 explicitly retires pgvector + Postgres FTS.</td></tr>
+            <tr><td><b>Retired fusion seam</b><br><span class="mono tiny">reciprocal_rank_fusion · rerank</span></td><td>Only their unit test imports them; live code uses only <span class="mono">rrf_score</span>.</td><td>Delete obsolete functions/tests; retain or relocate the live scoring helper.</td></tr>
+            <tr><td><b>Duplicate preference path</b></td><td>Three service methods have no caller; chat reimplements resolution privately.</td><td>Choose one owner, route chat through it, then delete the duplicate chain.</td></tr>
+            <tr><td><b>Latent grant listing</b><br><span class="mono tiny">GrantService.list_grants</span></td><td>Definition only; create/revoke are test-only foundations.</td><td>Confirm product/API intent before removal—security behavior is not safe to infer.</td></tr>
+          </tbody>
+        </table>
+        <div>
+          <div class="panel green">
+            <h3>High-confidence scan</h3>
+            <p><b>3</b> reports at ≥80% confidence; all are required callback parameters in <span class="mono">HTMLParser</span> / async context-manager signatures. Result: <b>zero true ordinary unused symbols</b>.</p>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Test-only does not automatically mean dead</h3>
+            <p>Repository lookup helpers, permission predicates, secret listing and presigned PUT are exercised only by tests today. Several are documented adapter or future-scale seams; remove them only with the owning spec/ADR.</p>
+          </div>
+          <div class="panel blue" style="margin-top:15px;">
+            <h3>Why 338 became few</h3>
+            <p class="small">FastAPI routes, Pydantic validators/config, SQLAlchemy descriptors/type hooks, Celery tasks, enum members and protocol callbacks are runtime-discovered—not statically called.</p>
+          </div>
+        </div>
+      </div>
+      <div class="source">backend/app/domain/chat.py:65–84; retrieval/queries.py:220–279; retrieval/fusion.py:35–102; services/preferences_service.py:126–201; services/chat_service.py:272–287, 587–597; ADR-0010 §2/§7.</div>
+      <div class="slide-num">24</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s25-title">
+      <p class="section-label">Unused code · Frontend</p>
+      <h2 id="s25-title">Dynamic route discovery explains most “unused file” reports</h2>
+      <div class="grid-4" style="margin-top:4px;">
+        <div class="panel"><div class="metric"><div class="value">28</div><div class="label">raw Knip unused-file reports</div></div></div>
+        <div class="panel green"><div class="metric"><div class="value">22</div><div class="label">validated dynamic-discovery false positives</div></div></div>
+        <div class="panel amber"><div class="metric"><div class="value">6</div><div class="label">confirmed unused files</div></div></div>
+        <div class="panel red"><div class="metric"><div class="value">1</div><div class="label">confirmed unused package</div></div></div>
+      </div>
+      <div class="grid-2 grow" style="margin-top:17px;">
+        <div>
+          <div class="panel green">
+            <h3>The 22 false positives are live</h3>
+            <p><span class="mono">routes/discovery.ts</span> eagerly discovers <span class="mono">features/*/route.tsx</span> and <span class="mono">nav.ts</span> with <span class="mono">import.meta.glob</span>. Their lazy descendants include <span class="mono">App</span>, route shells, page components, and two feature indexes.</p>
+          </div>
+          <div class="panel amber" style="margin-top:15px;">
+            <h3>Six graph-unused files</h3>
+            <ul class="checklist warn">
+              <li><span class="mono">routes/welcomeNote.ts</span>—old skeleton copy, no importer.</li>
+              <li>Five dormant feature barrels: assistants, MCP servers, search, sources, system status.</li>
+            </ul>
+          </div>
+        </div>
+        <div>
+          <div class="panel red">
+            <h3>Nine authored API wrappers have no consumer</h3>
+            <p class="small">Health GET; saved-search GET/update; six assistant-governance operations. They mirror real endpoints, but no component, hook or test imports them.</p>
+          </div>
+          <div class="panel blue" style="margin-top:15px;">
+            <h3>Public-surface bloat—not 112 dead implementations</h3>
+            <p>Knip also reports <b>43 unused exports</b> and <b>69 unused exported types</b>. Many are barrel re-exports, component prop types, or the hand-authored contract mirror. Prefer removing export modifiers/barrel entries or completing generated-client adoption over deleting working internals.</p>
+          </div>
+        </div>
+      </div>
+      <div class="source">frontend/src/routes/discovery.ts; Knip full graph with test entrypoints; manual import search for every raw file and API function. TypeScript noUnusedLocals/noUnusedParameters and the production build remain clean.</div>
+      <div class="slide-num">25</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s26-title">
+      <p class="section-label">Dependency hygiene</p>
+      <h2 id="s26-title">One package can go; three transitive imports should become explicit</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:21%">Scanner lead</th><th style="width:24%">Manual verdict</th><th style="width:33%">Evidence</th><th style="width:22%">Action</th></tr></thead>
+        <tbody>
+          <tr><td><span class="severity sev-risk">Remove</span><br><span class="mono">@radix-ui/react-slot</span></td><td><b>Confirmed unused</b></td><td>Declared in <span class="mono">frontend/package.json</span>; no source or test import.</td><td>Remove and refresh the lockfile; run full frontend gates.</td></tr>
+          <tr><td><span class="severity sev-mixed">Declare</span><br><span class="mono">starlette</span></td><td><b>Directly imported, transitively installed</b></td><td>Middleware and response imports in <span class="mono">app/main.py</span>.</td><td>Add a compatible direct dependency or import through the declared FastAPI surface where appropriate.</td></tr>
+          <tr><td><span class="severity sev-mixed">Declare</span><br><span class="mono">botocore</span></td><td><b>Directly imported, transitively installed</b></td><td>Exception/config types in <span class="mono">storage/object_store.py</span>.</td><td>Declare it directly; do not rely on boto3's dependency graph.</td></tr>
+          <tr><td><span class="severity sev-mixed">Declare</span><br><span class="mono">kombu</span></td><td><b>Directly imported, transitively installed</b></td><td>Operational-error handling in five task modules.</td><td>Declare and pin compatibly with Celery.</td></tr>
+          <tr><td><span class="severity sev-sound">Keep</span><br>8 Python packages</td><td><b>Deptry false positives</b></td><td><span class="mono">python-multipart</span>, Uvicorn, asyncpg, pytest/plugins, Ruff, mypy and aiosqlite are runtime entrypoints, drivers or tooling.</td><td>Configure exclusions by role; do not remove.</td></tr>
+        </tbody>
+      </table>
+      <div class="callout blue" style="margin-top:15px;"><b>Ownership principle:</b> importing a package makes it part of this application’s compatibility surface. Declare it directly even when another framework currently brings it along.</div>
+      <div class="source">Deptry: 17 raw issues = 9 direct-import sites across 3 transitive packages + 8 validated runtime/tooling false positives. Knip: 1 confirmed unused frontend dependency.</div>
+      <div class="slide-num">26</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s27-title">
+      <p class="section-label">Exact-clone analysis</p>
+      <h2 id="s27-title">Production duplication is contained; backend tests need a seam</h2>
+      <table class="dense" style="margin-top:5px;">
+        <thead><tr><th style="width:23%">Scope</th><th>Analyzed lines</th><th>Clone pairs</th><th>Duplicated lines</th><th>Rate</th><th style="width:28%">Interpretation</th></tr></thead>
+        <tbody>
+          <tr><td><b>Backend application</b></td><td>41,664</td><td>32</td><td>399</td><td><span class="severity sev-strong">0.96%</span></td><td>Low; a few repeated utilities dominate.</td></tr>
+          <tr><td><b>Frontend production</b></td><td>49,074</td><td>62</td><td>1,090</td><td><span class="severity sev-mixed">2.22%</span></td><td>Moderate; parallel features and manual API code.</td></tr>
+          <tr><td><b>Backend tests</b></td><td>44,241</td><td>238</td><td>3,992</td><td><span class="severity sev-risk">9.02%</span></td><td>High maintenance drag; setup/fixtures repeat widely.</td></tr>
+          <tr><td><b>Frontend tests</b></td><td>21,848</td><td>50</td><td>814</td><td><span class="severity sev-sound">3.73%</span></td><td>Manageable; API mocks and state matrices dominate.</td></tr>
+        </tbody>
+      </table>
+      <div class="grid-3 grow" style="margin-top:18px;">
+        <div class="panel green"><h3>Conservative threshold</h3><p>Only exact clones of at least <b>8 lines</b> and <b>60 tokens</b> were counted. Small syntax repetition is excluded.</p></div>
+        <div class="panel blue"><h3>No copy-pasted files</h3><p>SHA-256 grouping over all non-empty tracked files found <b>zero</b> byte-identical groups.</p></div>
+        <div class="panel amber"><h3>Do not chase one number</h3><p>CSS theme matrices, ORM columns and explicit security tests can be intentionally repetitive. Trend actionable families, not the global percentage alone.</p></div>
+      </div>
+      <div class="source">jscpd 4.0.5 in mild mode; production and test scopes analyzed separately. Percentages are duplicated source lines / analyzed source lines.</div>
+      <div class="slide-num">27</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s28-title">
+      <p class="section-label">Clone families</p>
+      <h2 id="s28-title">Extract stable policy; leave descriptive repetition explicit</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:23%">Family</th><th style="width:28%">Observed concentration</th><th style="width:29%">Recommended seam</th><th style="width:20%">Judgment</th></tr></thead>
+        <tbody>
+          <tr><td><b>Backend cursor policy</b></td><td>Encode/decode/clamp blocks recur across at least six services; one source file anchors 8 clone pairs.</td><td>Typed pagination utility carrying prefix, UUID parsing, limit clamp and stable error code.</td><td><span class="severity sev-mixed">Extract</span></td></tr>
+          <tr><td><b>Backend API test setup</b></td><td>238 pairs / 3,992 lines; tenant, session, auth and app-client bootstrapping repeat across endpoint suites.</td><td>Small factories under a stable <span class="mono">tests/support</span> seam; keep assertions feature-local.</td><td><span class="severity sev-risk">Prioritize</span></td></tr>
+          <tr><td><b>Sources ↔ MCP screens</b></td><td>73-line panel shell + 35-line modal form + presentation mapping clones.</td><td>Shared resource-list state/view primitives and form-field components—not one generic mega-feature.</td><td><span class="severity sev-mixed">Extract selectively</span></td></tr>
+          <tr><td><b>Manual API client</b></td><td>Repeated page parsing, query building and blob download code across source/document/artifact/admin clients.</td><td>Finish generated-client adoption; centralize only transport policies absent from generation.</td><td><span class="severity sev-mixed">Replace</span></td></tr>
+          <tr><td><b>Admin policy editors</b></td><td>Largest clone is 101 lines across provider/tool panels; several 23–28 line state/form blocks overlap.</td><td>Reusable policy-card and async-state primitives after comparing behavior and accessibility.</td><td><span class="severity sev-mixed">Investigate</span></td></tr>
+          <tr><td><b>Schema/theme/security matrices</b></td><td>Repeated ORM columns, CSS token overrides and negative-test cases.</td><td>Keep explicit unless a generator/data table preserves readability and failure locality.</td><td><span class="severity sev-sound">Accept</span></td></tr>
+        </tbody>
+      </table>
+      <div class="source">Top pairs: backend services cursor decoding; frontend ProvidersPanel ↔ ToolGovernancePanel (101 lines), ServersPanel ↔ SourcesPanel (73), RegisterServerModal ↔ AddSourceModal (35); backend test fixture/setup families.</div>
+      <div class="slide-num">28</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s29-title">
+      <p class="section-label">Code-hygiene program</p>
+      <h2 id="s29-title">Delete with proof, consolidate by ownership, ratchet from today</h2>
+      <div class="grid-3 grow">
+        <div class="panel green">
+          <h3>1 · Low-risk cleanup</h3>
+          <ul>
+            <li>Delete the stale welcome note.</li>
+            <li>Remove the unused Radix package.</li>
+            <li>Choose and enforce a barrel policy.</li>
+            <li>Remove obsolete SQL retrieval/fusion code after focused regression tests.</li>
+            <li>Close preference-resolution duplication through one service owner.</li>
+          </ul>
+        </div>
+        <div class="panel blue">
+          <h3>2 · Stable shared seams</h3>
+          <ul>
+            <li>One typed cursor/pagination utility.</li>
+            <li>Generated OpenAPI client as wire owner.</li>
+            <li>Focused source/MCP list primitives.</li>
+            <li>Backend test world/client factories.</li>
+            <li>Direct declarations for imported packages.</li>
+          </ul>
+        </div>
+        <div class="panel amber">
+          <h3>3 · Automated ratchet</h3>
+          <ul>
+            <li>Vulture ≥80% with callback allowlist.</li>
+            <li>Knip entrypoints for Vite glob routes/nav.</li>
+            <li>Deptry runtime/tooling exclusions.</li>
+            <li>jscpd baseline by prod/test scope.</li>
+            <li>Fail only on new unexplained debt—not the inherited baseline.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout red" style="margin-top:16px;"><b>Avoid a DRY campaign.</b> Do not abstract merely similar business screens, ORM declarations, theme token matrices, or tenant/security negatives unless the shared policy is stable and the result remains easier to test and change.</div>
+      <div class="source">Sequence hygiene behind the P0 performance blockers except for trivial dependency/file deletion. Every behavioral removal still follows issue → spec/ADR check → regression test → focused gates.</div>
+      <div class="slide-num">29</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s30-title">
       <p class="section-label">Prioritized risk register</p>
-      <h2 id="s23-title">Five issues dominate near-term scale risk</h2>
+      <h2 id="s30-title">Five issues dominate near-term scale risk</h2>
       <table class="dense grow">
         <thead><tr><th style="width:10%">Priority</th><th style="width:24%">Risk</th><th style="width:24%">Failure mode</th><th style="width:22%">Primary owner</th><th style="width:20%">First control</th></tr></thead>
         <tbody>
@@ -1074,15 +1277,16 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
           <tr><td><span class="severity sev-mixed">P1</span></td><td>Worker containment gaps</td><td>Stuck/lost tasks consume finite worker capacity.</td><td class="mono">tasks/</td><td>Time limits + worker policies.</td></tr>
           <tr><td><span class="severity sev-mixed">P1</span></td><td>Dev-only topology</td><td>Unsafe replica startup and unbounded processes.</td><td>deployment</td><td>Separate migrations + limits.</td></tr>
           <tr><td><span class="severity sev-mixed">P1</span></td><td>Frontend bundle/contract debt</td><td>Slow startup, chunk-order risk, schema drift.</td><td class="mono">frontend/src/api</td><td>Generated types + chunk cleanup.</td></tr>
+          <tr><td><span class="severity sev-mixed">P1</span></td><td>Legacy seams + test clones</td><td>Old paths drift; shared behavior needs multi-file edits.</td><td>retrieval / preferences / tests</td><td>Proven deletion + stable test factories.</td></tr>
         </tbody>
       </table>
       <div class="source">Priority combines likelihood, blast radius, hot-path frequency and detectability. Validate order after baseline load metrics exist.</div>
-      <div class="slide-num">23</div>
+      <div class="slide-num">30</div>
     </section>
 
-    <section class="slide" aria-labelledby="s24-title">
+    <section class="slide" aria-labelledby="s31-title">
       <p class="section-label">Roadmap · 0–30 days</p>
-      <h2 id="s24-title">Remove hot-path multipliers before tuning infrastructure</h2>
+      <h2 id="s31-title">Remove hot-path multipliers before tuning infrastructure</h2>
       <div class="timeline grow" style="max-width:1080px; margin-top:8px;">
         <div class="step red"><strong>Days 1–3 · Reuse Redis connections</strong><span>Move the Redis client to app lifespan; inject it; add a test asserting many publishes use one client; measure connections and publish latency.</span></div>
         <div class="step red"><strong>Days 4–10 · Shorten chat transactions</strong><span>Write an ADR for atomicity/state transitions; isolate external waits from DB transactions; configure pool size/overflow/timeout/recycle and statement timeout.</span></div>
@@ -1092,12 +1296,12 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
         <div class="step"><strong>Days 22–30 · Establish a repeatable load baseline</strong><span>Run browse/search/chat/upload mixes; ramp until saturation; record the first bottleneck; capture EXPLAIN plans on realistic tenant cardinalities.</span></div>
       </div>
       <div class="source">Each item should be a separate tracked issue/PR with a measurable acceptance gate. Architecture-changing transaction semantics require an ADR before implementation.</div>
-      <div class="slide-num">24</div>
+      <div class="slide-num">31</div>
     </section>
 
-    <section class="slide" aria-labelledby="s25-title">
+    <section class="slide" aria-labelledby="s32-title">
       <p class="section-label">Roadmap · 31–90 days</p>
-      <h2 id="s25-title">Turn the strong local system into an operable service</h2>
+      <h2 id="s32-title">Turn the strong local system into an operable service</h2>
       <div class="grid-3 grow">
         <div class="panel blue">
           <h3>Reliability</h3>
@@ -1119,28 +1323,28 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
             <li>Redis/DB capacity and HA runbooks.</li>
           </ul>
         </div>
-        <div class="panel blue">
-          <h3>Client &amp; contract</h3>
-          <ul>
-            <li>Use generated OpenAPI types directly.</li>
-            <li>Add contract-drift CI gate.</li>
-            <li>Consume cursors in documents/chat/search.</li>
-            <li>Break barrel cycle and split large entry chunk.</li>
-            <li>Add Web Vitals / SPA error telemetry.</li>
-          </ul>
-        </div>
+          <div class="panel blue">
+            <h3>Client &amp; contract</h3>
+            <ul>
+              <li>Use generated OpenAPI types directly.</li>
+              <li>Add contract-drift CI gate.</li>
+              <li>Consume cursors in documents/chat/search.</li>
+              <li>Break barrel cycle and split large entry chunk.</li>
+              <li>Delete validated dead surfaces; add a configured Knip ratchet.</li>
+            </ul>
+          </div>
       </div>
       <div class="panel green" style="margin-top:17px;">
         <h3>Institutionalize the proof</h3>
         <p style="margin:0;">Create the promised <span class="mono">/verify</span> chain and CI workflow: lint → typecheck → contract generation/drift → unit/integration → compose config → targeted performance smoke. Run scheduled soak tests outside PR CI.</p>
       </div>
       <div class="source">AGENTS.md identifies CI (OD-7) and the remaining verification harness (OD-6) as open decisions. Confirm those decisions before adding mechanisms.</div>
-      <div class="slide-num">25</div>
+      <div class="slide-num">32</div>
     </section>
 
-    <section class="slide" aria-labelledby="s26-title">
+    <section class="slide" aria-labelledby="s33-title">
       <p class="section-label">Exit criteria</p>
-      <h2 id="s26-title">Production readiness should be demonstrated with guardrails</h2>
+      <h2 id="s33-title">Production readiness should be demonstrated with guardrails</h2>
       <div class="grid-3 grow">
         <div class="panel">
           <h3>Latency</h3>
@@ -1178,27 +1382,27 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
         <p style="margin:0;">Choose a representative concurrency and corpus, sustain it for 60 minutes, survive a dependency slowdown and one replica termination, remain within agreed p95/error/memory budgets, and produce enough telemetry to explain every controlled rejection.</p>
       </div>
       <div class="source">Final numeric SLOs require product traffic assumptions and cost constraints. The audit intentionally avoids inventing them.</div>
-      <div class="slide-num">26</div>
+      <div class="slide-num">33</div>
     </section>
 
-    <section class="slide dark" aria-labelledby="s27-title">
+    <section class="slide dark" aria-labelledby="s34-title">
       <p class="section-label">Decision</p>
       <div class="grow" style="display:flex; flex-direction:column; justify-content:center; max-width:1080px;">
-        <h2 id="s27-title" style="font-size:52px;">Keep the architecture.<br><span style="color:var(--cyan);">Fix the hot paths.</span><br>Then measure the system.</h2>
-        <p class="lead" style="max-width:930px; margin-top:15px;">Lumen Copilot does not need a framework rewrite. It needs disciplined resource lifetimes, short database transactions, bounded admission, memory-safe object transfer, and observability tied to a repeatable load model.</p>
+        <h2 id="s34-title" style="font-size:52px;">Keep the architecture.<br><span style="color:var(--cyan);">Fix the hot paths.</span><br>Then measure the system.</h2>
+        <p class="lead" style="max-width:930px; margin-top:15px;">Lumen Copilot does not need a framework rewrite—or a blanket DRY rewrite. It needs disciplined resource lifetimes, short database transactions, bounded admission, memory-safe transfer, observable load, and evidence-led cleanup of legacy seams.</p>
         <div class="row" style="margin-top:24px;">
           <div class="panel dark-panel col"><h3 style="color:#9ee3ff;">Preserve</h3><p class="small">RLS, adapter chokepoints, contract-first design, typed errors, durable jobs, negative tests.</p></div>
           <div class="panel dark-panel col" style="border-color:#7d3834;"><h3 style="color:#ffb2ac;">Fix first</h3><p class="small">Redis reuse, chat transactions, admission control, payload streaming, telemetry.</p></div>
-          <div class="panel dark-panel col"><h3 style="color:#b9f0d5;">Prove next</h3><p class="small">Capacity, graceful shedding, failure recovery, production deployment and cost.</p></div>
+          <div class="panel dark-panel col"><h3 style="color:#b9f0d5;">Prove next</h3><p class="small">Capacity, graceful shedding, failure recovery, safe dead-code removal, production deployment and cost.</p></div>
         </div>
       </div>
       <div class="source">Recommended decision: authorize the P0 hardening program before adding substantial new chat/tool workload.</div>
-      <div class="slide-num">27</div>
+      <div class="slide-num">34</div>
     </section>
 
-    <section class="slide" aria-labelledby="s28-title">
+    <section class="slide" aria-labelledby="s35-title">
       <p class="section-label">Appendix A · P0 evidence</p>
-      <h2 id="s28-title">Exact evidence behind the highest-priority findings</h2>
+      <h2 id="s35-title">Exact evidence behind the highest-priority findings</h2>
       <table class="dense grow">
         <thead><tr><th style="width:23%">Finding</th><th style="width:41%">Repository evidence</th><th style="width:36%">Why it matters</th></tr></thead>
         <tbody>
@@ -1214,12 +1418,12 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
         </tbody>
       </table>
       <div class="source">Line numbers refer to baseline commit 74de85d as inspected on 2026-07-18.</div>
-      <div class="slide-num">28</div>
+      <div class="slide-num">35</div>
     </section>
 
-    <section class="slide" aria-labelledby="s29-title">
+    <section class="slide" aria-labelledby="s36-title">
       <p class="section-label">Appendix B · Additional evidence</p>
-      <h2 id="s29-title">P1/P2 findings are traceable too</h2>
+      <h2 id="s36-title">P1/P2 findings are traceable too</h2>
       <table class="dense grow">
         <thead><tr><th style="width:25%">Finding</th><th style="width:43%">Repository evidence</th><th style="width:32%">Observed condition</th></tr></thead>
         <tbody>
@@ -1235,13 +1439,13 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
           <tr><td><b>Bundle/cycle warnings</b></td><td class="mono">pnpm build output, 2026-07-18</td><td>794.62 kB entry chunk; Rollup circular chunk warning.</td></tr>
         </tbody>
       </table>
-      <div class="source">Counts and build values are reproducible with the commands summarized on slide 22.</div>
-      <div class="slide-num">29</div>
+      <div class="source">Counts and build values are reproducible with the gates on slide 22 and the hygiene methods on slides 23–29.</div>
+      <div class="slide-num">36</div>
     </section>
 
-    <section class="slide" aria-labelledby="s30-title">
+    <section class="slide" aria-labelledby="s37-title">
       <p class="section-label">Appendix C · Assessment standard</p>
-      <h2 id="s30-title">Criteria and external reference points</h2>
+      <h2 id="s37-title">Criteria and external reference points</h2>
       <div class="grid-2 grow">
         <div class="panel">
           <h3>Criteria evaluated</h3>
@@ -1260,7 +1464,8 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
             <li>Observability</li>
             <li>Scalability tests</li>
             <li>Security/tenancy</li>
-            <li>Frontend/API contract</li>
+             <li>Frontend/API contract</li>
+             <li>Dead-code &amp; duplication hygiene</li>
           </ol>
         </div>
         <div>
@@ -1280,7 +1485,7 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
         </div>
       </div>
       <div class="source">Internal source-of-truth precedence remains: user instructions → security invariants → specs/ADRs → AGENTS.md → existing code/tests.</div>
-      <div class="slide-num">30</div>
+      <div class="slide-num">37</div>
     </section>
 
   </main>
@@ -1288,7 +1493,7 @@ return StreamingResponse(<span class="hot">iter((content.data,))</span>)</pre>
   <div id="progress" aria-hidden="true"></div>
   <nav id="controls" aria-label="Presentation controls">
     <button id="prev" type="button" aria-label="Previous slide">←</button>
-    <span id="counter" aria-live="polite">1 / 30</span>
+    <span id="counter" aria-live="polite">1 / 37</span>
     <button id="next" type="button" aria-label="Next slide">→</button>
     <button id="full" type="button" aria-label="Toggle fullscreen">⛶</button>
     <button id="helpBtn" type="button" aria-label="Show keyboard shortcuts">?</button>
