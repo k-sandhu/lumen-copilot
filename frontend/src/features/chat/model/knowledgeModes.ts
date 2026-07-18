@@ -38,7 +38,12 @@ export const MODE_CONFIG: Record<KnowledgeMode, ModeConfig> = {
 };
 
 /** Render order — company/uploaded (corpus) first, then web, then model. */
-export const MODE_ORDER: readonly KnowledgeMode[] = ['company', 'uploaded', 'web', 'model'] as const;
+export const MODE_ORDER: readonly KnowledgeMode[] = [
+  'company',
+  'uploaded',
+  'web',
+  'model',
+] as const;
 
 /** Whether a mode may be toggled at all, and why not when it can't. */
 export interface ModeAvailability {

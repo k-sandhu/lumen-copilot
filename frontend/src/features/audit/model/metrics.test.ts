@@ -125,7 +125,9 @@ describe('eventsToCsv', () => {
   });
 
   it('quotes fields containing commas or quotes (RFC 4180)', () => {
-    const csv = eventsToCsv([ev({ id: 'evt_2', resource_id: 'a,"b"', event_type: 'retrieval.query' })]);
+    const csv = eventsToCsv([
+      ev({ id: 'evt_2', resource_id: 'a,"b"', event_type: 'retrieval.query' }),
+    ]);
     expect(csv).toContain('"a,""b"""');
   });
 

@@ -13,7 +13,11 @@ export function SkeletonRows({ count = 5, label }: { count?: number; label: stri
     <div role="status" aria-live="polite" aria-busy="true" className="space-y-2">
       <span className="sr-only">{label}</span>
       {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="h-16 animate-pulse rounded-md bg-surface-muted" aria-hidden="true" />
+        <div
+          key={i}
+          className="h-16 animate-pulse rounded-md bg-surface-muted"
+          aria-hidden="true"
+        />
       ))}
     </div>
   );

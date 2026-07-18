@@ -55,18 +55,18 @@ export function DirectAnswerBlock({ answer, resultsById }: DirectAnswerBlockProp
   const resolved = useMemo<ResolvedCitation[]>(
     () =>
       answer.citations
-        .map((citation, i) => ({ citation, result: resultsById.get(citation.result_id), ordinal: i + 1 }))
+        .map((citation, i) => ({
+          citation,
+          result: resultsById.get(citation.result_id),
+          ordinal: i + 1,
+        }))
         .filter((entry): entry is ResolvedCitation => Boolean(entry.result)),
     [answer.citations, resultsById],
   );
 
-  const resolvedByOrdinal = useMemo(
-    () => new Map(resolved.map((r) => [r.ordinal, r])),
-    [resolved],
-  );
+  const resolvedByOrdinal = useMemo(() => new Map(resolved.map((r) => [r.ordinal, r])), [resolved]);
 
-  const toggle = (ordinal: number) =>
-    setOpenIndex((cur) => (cur === ordinal ? null : ordinal));
+  const toggle = (ordinal: number) => setOpenIndex((cur) => (cur === ordinal ? null : ordinal));
 
   const open = openIndex === null ? null : (resolvedByOrdinal.get(openIndex) ?? null);
 

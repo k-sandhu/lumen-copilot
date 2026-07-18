@@ -19,10 +19,7 @@ export function RunInbox() {
   const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined]);
 
   const cursor = cursorStack[cursorStack.length - 1];
-  const query = useMemo(
-    () => ({ unread: unreadOnly || undefined, cursor }),
-    [unreadOnly, cursor],
-  );
+  const query = useMemo(() => ({ unread: unreadOnly || undefined, cursor }), [unreadOnly, cursor]);
 
   const deliveries = useRunDeliveries(query);
   const markRead = useMarkDeliveryRead();

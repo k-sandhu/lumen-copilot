@@ -53,9 +53,7 @@ export default defineConfig(({ mode }) => {
   // git-ignored). `vite build` never runs in 'test' mode, so this never relaxes
   // the production default; the OFF build is proven by `dist-no-dev-pages.test.ts`.
   const devPagesEnabled =
-    mode === 'test' && rawDevPagesFlag === undefined
-      ? true
-      : parseDevPagesFlag(rawDevPagesFlag);
+    mode === 'test' && rawDevPagesFlag === undefined ? true : parseDevPagesFlag(rawDevPagesFlag);
 
   return {
     plugins: [react()],

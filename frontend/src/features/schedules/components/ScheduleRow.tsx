@@ -11,7 +11,12 @@ import { Link } from 'react-router-dom';
 import type { Schedule } from '@/api';
 import { Icon, StatusDot } from '@/ui';
 import { describeCadence } from '../model/cadence';
-import { formatDateTime, lastStatusLabel, lastStatusTone, relativeTime } from '../model/presentation';
+import {
+  formatDateTime,
+  lastStatusLabel,
+  lastStatusTone,
+  relativeTime,
+} from '../model/presentation';
 
 interface ScheduleRowProps {
   schedule: Schedule;
@@ -55,7 +60,9 @@ export function ScheduleRow({
           </div>
           <div className="flex gap-1">
             <dt className="font-medium">Last run:</dt>
-            <dd title={formatDateTime(schedule.last_run_at)}>{relativeTime(schedule.last_run_at)}</dd>
+            <dd title={formatDateTime(schedule.last_run_at)}>
+              {relativeTime(schedule.last_run_at)}
+            </dd>
           </div>
         </dl>
       </div>

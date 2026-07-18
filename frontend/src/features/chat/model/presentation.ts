@@ -327,9 +327,7 @@ export function groupSessionsByDay(
   sessions: ChatSession[],
   now: number = Date.now(),
 ): SessionGroup[] {
-  const sorted = [...sessions].sort(
-    (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
-  );
+  const sorted = [...sessions].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
   const byBucket = new Map<DayBucket, ChatSession[]>();
   for (const s of sorted) {
     const bucket = dayBucket(s.updated_at, now);
@@ -400,9 +398,7 @@ export function modeAvailability(
 ): Partial<Record<KnowledgeMode, ModeAvailability>> {
   const webAllowed = (scopeModes ?? []).includes('web');
   return {
-    web: webAllowed
-      ? { available: true }
-      : { available: false, reason: WEB_DISABLED_REASON },
+    web: webAllowed ? { available: true } : { available: false, reason: WEB_DISABLED_REASON },
   };
 }
 

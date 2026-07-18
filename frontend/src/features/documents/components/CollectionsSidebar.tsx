@@ -286,7 +286,9 @@ function CreateCollectionForm() {
       </div>
       {create.isError && (
         <p role="alert" className="text-xs text-danger">
-          {create.error instanceof ApiError ? create.error.displayMessage : 'Could not create the collection.'}
+          {create.error instanceof ApiError
+            ? create.error.displayMessage
+            : 'Could not create the collection.'}
         </p>
       )}
     </form>

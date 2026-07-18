@@ -39,14 +39,15 @@ export function SystemStatusPanel() {
 type ReadinessQuery = ReturnType<typeof useReadiness>;
 
 function OverallBadge({ query }: { query: ReadinessQuery }) {
-  if (query.isPending) return <StatusBadge tone="pending" pulse>Checking</StatusBadge>;
+  if (query.isPending)
+    return (
+      <StatusBadge tone="pending" pulse>
+        Checking
+      </StatusBadge>
+    );
   if (query.isError) return <StatusBadge tone="danger">Unreachable</StatusBadge>;
   const ready = query.data?.status === 'ready';
-  return (
-    <StatusBadge tone={ready ? 'ok' : 'degraded'}>
-      {ready ? 'Ready' : 'Degraded'}
-    </StatusBadge>
-  );
+  return <StatusBadge tone={ready ? 'ok' : 'degraded'}>{ready ? 'Ready' : 'Degraded'}</StatusBadge>;
 }
 
 function StatusBody({ query }: { query: ReadinessQuery }) {
@@ -56,11 +57,7 @@ function StatusBody({ query }: { query: ReadinessQuery }) {
       <div role="status" aria-live="polite" className="space-y-2" aria-busy="true">
         <p className="text-sm text-foreground-muted">Checking backend readiness…</p>
         {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="h-8 animate-pulse rounded bg-surface-muted"
-            aria-hidden="true"
-          />
+          <div key={i} className="h-8 animate-pulse rounded bg-surface-muted" aria-hidden="true" />
         ))}
       </div>
     );

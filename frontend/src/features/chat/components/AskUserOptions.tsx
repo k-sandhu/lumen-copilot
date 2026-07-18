@@ -27,7 +27,8 @@ export function AskUserOptions({ question, active, chosenAnswer, onChoose }: Ask
   return (
     <div className="lc-askuser" role="group" aria-label="Answer options">
       {question.options.map((option) => {
-        const chosen = chosenKey !== undefined && option.label.trim().toLocaleLowerCase() === chosenKey;
+        const chosen =
+          chosenKey !== undefined && option.label.trim().toLocaleLowerCase() === chosenKey;
         return (
           <button
             key={option.label}

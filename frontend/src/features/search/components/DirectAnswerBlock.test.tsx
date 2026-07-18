@@ -80,7 +80,9 @@ describe('DirectAnswerBlock', () => {
     render(<DirectAnswerBlock answer={answer} resultsById={byId(result, second)} />);
 
     // Two inline citation chips, named for their sources — not a trailing "Sources" row.
-    expect(screen.getByRole('button', { name: /citation 1: PTO Policy 2026/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /citation 1: PTO Policy 2026/i }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /citation 2: Pricing Guardrails/i }),
     ).toBeInTheDocument();

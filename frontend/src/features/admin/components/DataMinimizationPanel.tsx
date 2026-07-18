@@ -22,10 +22,7 @@ import { Icon } from '@/ui';
 
 export function DataMinimizationPanel() {
   return (
-    <section
-      aria-labelledby="admin-datamin-heading"
-      className="rounded-lg border border-border"
-    >
+    <section aria-labelledby="admin-datamin-heading" className="rounded-lg border border-border">
       <header className="border-b border-border px-4 py-3">
         <h2 id="admin-datamin-heading" className="text-sm font-semibold text-foreground">
           Data minimization
@@ -43,15 +40,15 @@ export function DataMinimizationPanel() {
           <p className="flex items-start gap-2">
             <Icon name="lock" aria-hidden="true" className="mt-0.5 text-foreground" />
             <span>
-              The data-minimization policy controls (which sources are indexed, what is
-              excluded) are a <span className="text-foreground">write</span> surface that is
-              not yet defined in the contract or served by the backend. They are coming soon.
+              The data-minimization policy controls (which sources are indexed, what is excluded)
+              are a <span className="text-foreground">write</span> surface that is not yet defined
+              in the contract or served by the backend. They are coming soon.
             </span>
           </p>
           <p className="mt-3 pl-7">
             When the policy API lands, this panel will display the tenant&rsquo;s current policy
-            read-only here. Until then there is nothing to fabricate — no policy data is served,
-            so none is shown.
+            read-only here. Until then there is nothing to fabricate — no policy data is served, so
+            none is shown.
           </p>
         </div>
       </div>

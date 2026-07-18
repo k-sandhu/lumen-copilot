@@ -50,8 +50,12 @@ export function RunRow({ run, assistantName }: { run: Run; assistantName: string
       ) : null}
 
       {flagged ? (
-        <p className={`mt-1.5 text-xs font-medium ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}>
-          {run.status === 'failed' ? 'This run failed — open it for the reason.' : 'This run needs a human — open it to review.'}
+        <p
+          className={`mt-1.5 text-xs font-medium ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}
+        >
+          {run.status === 'failed'
+            ? 'This run failed — open it for the reason.'
+            : 'This run needs a human — open it to review.'}
         </p>
       ) : null}
     </Link>

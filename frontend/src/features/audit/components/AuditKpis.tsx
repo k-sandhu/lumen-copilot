@@ -22,7 +22,11 @@ interface AuditKpisProps {
 export function AuditKpis({ metrics, loading = false }: AuditKpisProps) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="Audit summary">
-      <KpiCard label="Events (this page)" value={loading ? undefined : metrics.total} loading={loading} />
+      <KpiCard
+        label="Events (this page)"
+        value={loading ? undefined : metrics.total}
+        loading={loading}
+      />
       <KpiCard
         label="Access denied"
         value={loading ? undefined : metrics.denied}

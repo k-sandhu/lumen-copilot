@@ -165,10 +165,7 @@ export function SourcesPanel() {
 
       {/* OAuth consent return banner (the frozen ?connect=ok|error contract) */}
       {connectReturn.result ? (
-        <ConnectReturnBanner
-          result={connectReturn.result}
-          onDismiss={connectReturn.dismiss}
-        />
+        <ConnectReturnBanner result={connectReturn.result} onDismiss={connectReturn.dismiss} />
       ) : null}
 
       <div className="min-h-0 flex-1">
@@ -276,7 +273,13 @@ function Body({
 }) {
   if (query.isPending) return <LoadingGrid />;
   if (query.isError) {
-    return <ErrorState error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />;
+    return (
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        busy={query.isFetching}
+      />
+    );
   }
   if (items.length === 0) return <EmptyState onAdd={onAdd} isAdmin={isAdmin} />;
 
@@ -365,7 +368,11 @@ function LoadingGrid() {
       <span className="sr-only">Loading connected sources…</span>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="rounded-xl border border-border bg-surface p-4" aria-hidden="true">
+          <div
+            key={i}
+            className="rounded-xl border border-border bg-surface p-4"
+            aria-hidden="true"
+          >
             <div className="lc-skeleton" style={{ width: '60%' }} />
             <div className="lc-skeleton" style={{ width: '40%', marginTop: 12, height: 24 }} />
           </div>
@@ -434,12 +441,11 @@ function ErrorState({
   // message it honestly. Everything else is transient — offer a retry.
   const status = error instanceof ApiError ? error.status : 0;
   const unauthorized = status === 401;
-  const message =
-    unauthorized
-      ? 'Your session expired. Sign in again to manage your sources.'
-      : error instanceof ApiError
-        ? error.displayMessage || 'Could not load your sources.'
-        : 'Could not load your sources.';
+  const message = unauthorized
+    ? 'Your session expired. Sign in again to manage your sources.'
+    : error instanceof ApiError
+      ? error.displayMessage || 'Could not load your sources.'
+      : 'Could not load your sources.';
 
   return (
     <div

@@ -90,7 +90,12 @@ describe('MessageBubble', () => {
       charEnd: i * 10 + 5,
     }));
     render(
-      <MessageBubble role="assistant" content="Answer." citations={many} onOpenCitation={() => {}} />,
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={many}
+        onOpenCitation={() => {}}
+      />,
     );
     const list = screen.getByRole('list');
     expect(within(list).getAllByRole('listitem')).toHaveLength(1); // one document card

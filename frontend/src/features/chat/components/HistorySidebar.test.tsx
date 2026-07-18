@@ -118,9 +118,7 @@ describe('HistorySidebar', () => {
     await screen.findByText('Budget questions');
     await user.click(screen.getByRole('button', { name: /new chat/i }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith('s-new'));
-    const createCall = fetchSpy.mock.calls.find(
-      (c) => (c[1] as RequestInit)?.method === 'POST',
-    );
+    const createCall = fetchSpy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'POST');
     expect(createCall).toBeTruthy();
   });
 

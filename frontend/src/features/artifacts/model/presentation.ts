@@ -56,12 +56,7 @@ export function producedByLabel(origin: ArtifactProducedBy): string {
  */
 export type PreviewKind = 'image' | 'text' | 'download';
 
-const TEXT_MIME = new Set([
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'application/json',
-]);
+const TEXT_MIME = new Set(['text/plain', 'text/markdown', 'text/csv', 'application/json']);
 
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 

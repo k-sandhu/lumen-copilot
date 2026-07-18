@@ -21,7 +21,11 @@ export function LedgerFooter({ shown }: LedgerFooterProps) {
       <span>
         Showing {shown} event{shown === 1 ? '' : 's'} on this page · tamper-evident
       </span>
-      <StatusDot tone="ok" label="Append-only ledger" title="Append-only ledger — events are never mutated" />
+      <StatusDot
+        tone="ok"
+        label="Append-only ledger"
+        title="Append-only ledger — events are never mutated"
+      />
     </div>
   );
 }

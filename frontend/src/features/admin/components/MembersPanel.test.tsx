@@ -28,7 +28,12 @@ vi.mock('@/api', async (importOriginal) => {
 
 const ROSTER: MemberList = {
   items: [
-    { id: 'u1', email: 'admin@acme.test', role: ['admin'], email_attested_at: '2026-07-01T09:00:00Z' },
+    {
+      id: 'u1',
+      email: 'admin@acme.test',
+      role: ['admin'],
+      email_attested_at: '2026-07-01T09:00:00Z',
+    },
     { id: 'u2', email: 'sec@acme.test', role: ['security', 'member'], email_attested_at: null },
     { id: 'u3', email: 'plain@acme.test', role: ['member'], email_attested_at: null },
   ],

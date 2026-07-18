@@ -182,11 +182,7 @@ export function ToolGovernancePanel() {
   const [toast, setToast] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null);
   const tools = query.data?.items ?? [];
 
-  const handleSet = (next: {
-    tool_name: string;
-    enabled: boolean;
-    requires_approval: boolean;
-  }) => {
+  const handleSet = (next: { tool_name: string; enabled: boolean; requires_approval: boolean }) => {
     setToast(null);
     mutation.mutate(next, {
       onSuccess: () => setToast({ kind: 'ok', message: `Updated ${next.tool_name}.` }),

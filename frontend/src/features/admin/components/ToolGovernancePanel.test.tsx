@@ -66,9 +66,7 @@ describe('ToolGovernancePanel', () => {
     expect(screen.getByLabelText(/risk tier T0/i)).toBeInTheDocument();
     // A write-tier tool exposes an enable AND an approval toggle.
     expect(screen.getByRole('switch', { name: /disable run_python/i })).toBeInTheDocument();
-    expect(
-      screen.getByRole('switch', { name: /pre-approve run_python/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /pre-approve run_python/i })).toBeInTheDocument();
   });
 
   it('offers no approval control for a read-only (T0) tool', async () => {

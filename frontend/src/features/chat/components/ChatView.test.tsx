@@ -18,10 +18,7 @@ import { setAccessToken, clearAccessToken } from '@/api';
 import type { WsClientOptions, WsEnvelope } from '@/api';
 import { ChatView } from './ChatView';
 import { useChatStore } from '../model/chatStore';
-import {
-  setDefaultStreamClientFactory,
-  type StreamSocket,
-} from '../model/useChatStream';
+import { setDefaultStreamClientFactory, type StreamSocket } from '../model/useChatStream';
 
 // --- a controllable fake WS socket (captures the latest instance) ---
 let liveSocket: FakeSocket | null = null;
@@ -56,7 +53,13 @@ function json(body: unknown, status = 200): Response {
 
 const MODELS = {
   items: [
-    { id: 'frontier/opus', label: 'Opus', provider: 'anthropic', tier: 'frontier', is_default: true },
+    {
+      id: 'frontier/opus',
+      label: 'Opus',
+      provider: 'anthropic',
+      tier: 'frontier',
+      is_default: true,
+    },
     { id: 'fast/haiku', label: 'Haiku', provider: 'anthropic', tier: 'fast', is_default: false },
   ],
 };
@@ -116,14 +119,13 @@ const RELOADED_MESSAGES = {
 /** Route a mocked fetch by URL + method. `messages` flips after the stream done. */
 function installFetch(getMessages: () => unknown) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
-    const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+    const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
     if (url.includes('/models')) return Promise.resolve(json(MODELS));
     if (url.endsWith('/chat/sessions') && method === 'GET') return Promise.resolve(json(SESSIONS));
     if (url.includes('/messages') && method === 'POST')
       return Promise.resolve(json(sendResponse, 202));
-    if (url.includes('/messages') && method === 'GET')
-      return Promise.resolve(json(getMessages()));
+    if (url.includes('/messages') && method === 'GET') return Promise.resolve(json(getMessages()));
     if (url.includes('/chat/sessions/') && method === 'PATCH')
       return Promise.resolve(json({ ...SESSIONS.items[0] }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
@@ -209,7 +211,12 @@ describe('ChatView (critical flow)', () => {
         data: { callId: 't1', tool: 'search_text', hitCount: 2 },
       });
       liveSocket!.emit({ type: 'delta', streamId: 'stream-1', seq: 3, data: { text: 'Revenue ' } });
-      liveSocket!.emit({ type: 'delta', streamId: 'stream-1', seq: 4, data: { text: 'was up 12%.' } });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 4,
+        data: { text: 'was up 12%.' },
+      });
       liveSocket!.emit({
         type: 'event',
         streamId: 'stream-1',

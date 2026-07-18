@@ -143,7 +143,9 @@ export function AddSourceModal({ open, onClose, isAdmin = false }: AddSourceModa
         return null;
       }
       const drive = driveId.trim();
-      return drive ? { mode: 'folder', folder_id: folder, drive_id: drive } : { mode: 'folder', folder_id: folder };
+      return drive
+        ? { mode: 'folder', folder_id: folder, drive_id: drive }
+        : { mode: 'folder', folder_id: folder };
     }
     const drive = driveId.trim();
     if (!drive) {
@@ -327,7 +329,10 @@ export function AddSourceModal({ open, onClose, isAdmin = false }: AddSourceModa
                 {mode === 'folder' ? (
                   <>
                     <div>
-                      <label htmlFor={`${titleId}-folder`} className="mb-1 block text-xs font-medium">
+                      <label
+                        htmlFor={`${titleId}-folder`}
+                        className="mb-1 block text-xs font-medium"
+                      >
                         Folder id
                       </label>
                       <input
@@ -350,7 +355,10 @@ export function AddSourceModal({ open, onClose, isAdmin = false }: AddSourceModa
                       />
                     </div>
                     <div>
-                      <label htmlFor={`${titleId}-folder-drive`} className="mb-1 block text-xs font-medium">
+                      <label
+                        htmlFor={`${titleId}-folder-drive`}
+                        className="mb-1 block text-xs font-medium"
+                      >
                         Shared Drive id{' '}
                         <span className="font-normal text-foreground-muted">
                           (only if the folder lives in a Shared Drive)
@@ -404,7 +412,11 @@ export function AddSourceModal({ open, onClose, isAdmin = false }: AddSourceModa
             )}
 
             {error ? (
-              <p id={errorId} role="alert" className="mt-1.5 flex items-start gap-1.5 text-xs text-danger">
+              <p
+                id={errorId}
+                role="alert"
+                className="mt-1.5 flex items-start gap-1.5 text-xs text-danger"
+              >
                 <Icon name="alert-triangle" className="mt-px shrink-0" />
                 <span>{error}</span>
               </p>

@@ -62,7 +62,13 @@ describe('validateTimezone', () => {
 
 describe('draft ↔ wire round-trip', () => {
   it('maps a structured weekly cadence to the wire and back', () => {
-    const draft = { ...emptyCadence(), mode: 'structured' as const, every: 'week' as const, at: '09:30', dayOfWeek: 3 };
+    const draft = {
+      ...emptyCadence(),
+      mode: 'structured' as const,
+      every: 'week' as const,
+      at: '09:30',
+      dayOfWeek: 3,
+    };
     const wire = draftToCadence(draft);
     expect(wire).toEqual({ structured: { every: 'week', at: '09:30', day_of_week: 3 } });
     const back = cadenceToDraft(wire);
@@ -80,7 +86,12 @@ describe('draft ↔ wire round-trip', () => {
   });
 
   it('omits day_of_week/day_of_month for a daily cadence', () => {
-    const draft = { ...emptyCadence(), mode: 'structured' as const, every: 'day' as const, at: '06:00' };
+    const draft = {
+      ...emptyCadence(),
+      mode: 'structured' as const,
+      every: 'day' as const,
+      at: '06:00',
+    };
     expect(draftToCadence(draft)).toEqual({ structured: { every: 'day', at: '06:00' } });
   });
 
@@ -99,9 +110,15 @@ describe('validateCadence', () => {
 
 describe('describeCadence', () => {
   it('describes each structured period', () => {
-    expect(describeCadence({ structured: { every: 'day', at: '08:00' } })).toBe('Every day at 08:00');
-    expect(describeCadence({ structured: { every: 'week', at: '08:00', day_of_week: 1 } })).toMatch(/Monday/);
-    expect(describeCadence({ structured: { every: 'month', at: '08:00', day_of_month: 15 } })).toMatch(/day 15/);
+    expect(describeCadence({ structured: { every: 'day', at: '08:00' } })).toBe(
+      'Every day at 08:00',
+    );
+    expect(describeCadence({ structured: { every: 'week', at: '08:00', day_of_week: 1 } })).toMatch(
+      /Monday/,
+    );
+    expect(
+      describeCadence({ structured: { every: 'month', at: '08:00', day_of_month: 15 } }),
+    ).toMatch(/day 15/);
   });
   it('describes a cron cadence verbatim', () => {
     expect(describeCadence({ cron: '0 8 * * 1' })).toBe('cron: 0 8 * * 1');

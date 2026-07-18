@@ -67,7 +67,8 @@ function mockRoutes(opts: { onDraft?: () => Response }) {
       return Promise.resolve(json({ items: [], next_cursor: null }));
     }
     if (url.includes('/models')) return Promise.resolve(json({ items: [] }));
-    if (url.includes('/collections')) return Promise.resolve(json({ items: [], next_cursor: null }));
+    if (url.includes('/collections'))
+      return Promise.resolve(json({ items: [], next_cursor: null }));
     if (url.includes('/sources')) return Promise.resolve(json({ items: [], next_cursor: null }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
   });
@@ -136,7 +137,9 @@ describe('DescribeAssistant — draft → editor (E6-1, #213)', () => {
               toolAllowlist: ['write_file'],
               autonomyLevel: 'suggest',
             },
-            warnings: ["'write_file' is a higher-risk (T1) tool that can take consequential actions."],
+            warnings: [
+              "'write_file' is a higher-risk (T1) tool that can take consequential actions.",
+            ],
             clarifications: ['Do you acknowledge the risk and want to keep it?'],
           }),
         ),
@@ -189,7 +192,9 @@ describe('DescribeAssistant — draft → editor (E6-1, #213)', () => {
   });
 
   it('surfaces an actionable error on a transient draft failure (not a crash)', async () => {
-    mockRoutes({ onDraft: () => problem(503, 'Service Unavailable', 'The model provider is unavailable.') });
+    mockRoutes({
+      onDraft: () => problem(503, 'Service Unavailable', 'The model provider is unavailable.'),
+    });
     renderDescribe();
     const user = userEvent.setup();
 

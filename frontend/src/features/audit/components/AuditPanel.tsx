@@ -31,11 +31,7 @@ import {
   isEmptyDraft,
   type AuditFilterDraft,
 } from '../model/filterDraft';
-import {
-  summarizeEvents,
-  filterBySegment,
-  type AuditSegment,
-} from '../model/metrics';
+import { summarizeEvents, filterBySegment, type AuditSegment } from '../model/metrics';
 import { AuditFilters } from './AuditFilters';
 import { AuditKpis } from './AuditKpis';
 import { AuditSegmented } from './AuditSegmented';
@@ -82,10 +78,7 @@ export function AuditPanel() {
   const pageEvents = query.data?.items ?? EMPTY_EVENTS;
   const metrics = useMemo(() => summarizeEvents(pageEvents), [pageEvents]);
   const counts = useMemo(() => segmentCounts(pageEvents), [pageEvents]);
-  const visibleEvents = useMemo(
-    () => filterBySegment(pageEvents, segment),
-    [pageEvents, segment],
-  );
+  const visibleEvents = useMemo(() => filterBySegment(pageEvents, segment), [pageEvents, segment]);
 
   const apply = (): void => {
     setApplied(draft);
@@ -164,7 +157,11 @@ export function AuditPanel() {
 
       <LedgerFooter shown={visibleEvents.length} />
 
-      <ProvenanceDrawer open={selected !== null} detail={detail} onClose={() => setSelected(null)} />
+      <ProvenanceDrawer
+        open={selected !== null}
+        detail={detail}
+        onClose={() => setSelected(null)}
+      />
     </div>
   );
 }
@@ -203,7 +200,13 @@ function AuditTableBody({
   }
 
   if (query.isError) {
-    return <AuditError error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />;
+    return (
+      <AuditError
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        busy={query.isFetching}
+      />
+    );
   }
 
   const pageEmpty = query.data.items.length === 0;
@@ -234,7 +237,9 @@ function AuditTableBody({
             event={toKitRow(event)}
             onSelect={() => onSelect(event)}
             className={
-              selectedId === event.id ? 'ring-2 ring-accent ring-offset-1 ring-offset-surface' : undefined
+              selectedId === event.id
+                ? 'ring-2 ring-accent ring-offset-1 ring-offset-surface'
+                : undefined
             }
           />
         </li>
@@ -267,9 +272,7 @@ function AuditError({
         {forbidden ? 'You don’t have access to the audit log' : 'Couldn’t load the audit log'}
       </p>
       <p className="text-foreground-muted">
-        {forbidden
-          ? 'The audit trail is restricted to admin and security roles.'
-          : message}
+        {forbidden ? 'The audit trail is restricted to admin and security roles.' : message}
       </p>
       {!forbidden ? (
         <button

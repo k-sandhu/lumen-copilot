@@ -12,9 +12,17 @@ import type { Assistant, ChatModelInfo, Member } from '@/api';
 import { AssistantCard } from './AssistantCard';
 
 const models: ChatModelInfo[] = [
-  { id: 'anthropic/claude', label: 'Claude', provider: 'anthropic', tier: 'frontier', is_default: true },
+  {
+    id: 'anthropic/claude',
+    label: 'Claude',
+    provider: 'anthropic',
+    tier: 'frontier',
+    is_default: true,
+  },
 ];
-const members: Member[] = [{ id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null }];
+const members: Member[] = [
+  { id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null },
+];
 
 function makeAssistant(overrides: Partial<Assistant> = {}): Assistant {
   return {

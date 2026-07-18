@@ -65,8 +65,7 @@ describe('SourceCard — web', () => {
   });
 
   it('truncates the URL line rather than breaking layout', () => {
-    const longUrl =
-      'https://example.com/' + 'very-long-path-segment-'.repeat(12) + 'end';
+    const longUrl = 'https://example.com/' + 'very-long-path-segment-'.repeat(12) + 'end';
     render(
       <SourceCard
         source={makeSource({ config: { url: longUrl, mode: 'page' } })}
@@ -103,14 +102,14 @@ describe('SourceCard — web', () => {
   });
 
   it('disables the sync button while a sync is in flight', () => {
-    render(
-      <SourceCard source={makeSource()} syncing onSync={() => {}} onRemove={() => {}} />,
-    );
+    render(<SourceCard source={makeSource()} syncing onSync={() => {}} onRemove={() => {}} />);
     expect(screen.getByRole('button', { name: /syncing/i })).toBeDisabled();
   });
 
   it('keeps web actions for a NON-admin (web sources stay owner-scoped)', () => {
-    render(<SourceCard source={makeSource()} isAdmin={false} onSync={() => {}} onRemove={() => {}} />);
+    render(
+      <SourceCard source={makeSource()} isAdmin={false} onSync={() => {}} onRemove={() => {}} />,
+    );
     expect(screen.getByRole('button', { name: /sync now/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /remove/i })).toBeInTheDocument();
   });
@@ -118,9 +117,7 @@ describe('SourceCard — web', () => {
 
 describe('SourceCard — gdrive health surface (ADR-0019 §5)', () => {
   it('shows the connected account email, ACL freshness, and the mirrored-permission pill', () => {
-    render(
-      <SourceCard source={makeGdrive()} isAdmin onSync={() => {}} onRemove={() => {}} />,
-    );
+    render(<SourceCard source={makeGdrive()} isAdmin onSync={() => {}} onRemove={() => {}} />);
     const card = screen.getByRole('article', { name: /google drive/i });
     expect(within(card).getByText('drive-ops@acme.com')).toBeInTheDocument();
     expect(within(card).getByText(/permissions mirrored/i)).toBeInTheDocument();
@@ -164,12 +161,22 @@ describe('SourceCard — gdrive health surface (ADR-0019 §5)', () => {
     // The field is a required contract health reading: 0 and null are
     // meaningful states, never hidden.
     const { rerender } = render(
-      <SourceCard source={makeGdrive({ unmapped_acl_count: 0 })} isAdmin onSync={() => {}} onRemove={() => {}} />,
+      <SourceCard
+        source={makeGdrive({ unmapped_acl_count: 0 })}
+        isAdmin
+        onSync={() => {}}
+        onRemove={() => {}}
+      />,
     );
     expect(screen.getByText(/unmapped access/i)).toBeInTheDocument();
     expect(screen.getByText(/every mirrored permission maps to a member/i)).toBeInTheDocument();
     rerender(
-      <SourceCard source={makeGdrive({ unmapped_acl_count: null })} isAdmin onSync={() => {}} onRemove={() => {}} />,
+      <SourceCard
+        source={makeGdrive({ unmapped_acl_count: null })}
+        isAdmin
+        onSync={() => {}}
+        onRemove={() => {}}
+      />,
     );
     expect(screen.getByText(/unmapped access/i)).toBeInTheDocument();
     expect(screen.getByText(/not available until the first permissions sync/i)).toBeInTheDocument();
@@ -182,7 +189,13 @@ describe('SourceCard — connect / reauthorize visibility', () => {
     const user = userEvent.setup();
     const source = makeGdrive({ status: 'pending_auth', connected_account: null });
     render(
-      <SourceCard source={source} isAdmin onSync={() => {}} onRemove={() => {}} onConnect={onConnect} />,
+      <SourceCard
+        source={source}
+        isAdmin
+        onSync={() => {}}
+        onRemove={() => {}}
+        onConnect={onConnect}
+      />,
     );
     expect(screen.queryByRole('button', { name: /sync now/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /connect/i }));
@@ -194,7 +207,13 @@ describe('SourceCard — connect / reauthorize visibility', () => {
     const user = userEvent.setup();
     const source = makeGdrive({ status: 'error', reauthorize_required: true });
     render(
-      <SourceCard source={source} isAdmin onSync={() => {}} onRemove={() => {}} onConnect={onConnect} />,
+      <SourceCard
+        source={source}
+        isAdmin
+        onSync={() => {}}
+        onRemove={() => {}}
+        onConnect={onConnect}
+      />,
     );
     expect(screen.getByText(/expired or was revoked/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /reauthorize/i }));
@@ -202,7 +221,15 @@ describe('SourceCard — connect / reauthorize visibility', () => {
   });
 
   it('shows NO Reauthorize action on a healthy gdrive card (reauthorize_required false)', () => {
-    render(<SourceCard source={makeGdrive()} isAdmin onSync={() => {}} onRemove={() => {}} onConnect={() => {}} />);
+    render(
+      <SourceCard
+        source={makeGdrive()}
+        isAdmin
+        onSync={() => {}}
+        onRemove={() => {}}
+        onConnect={() => {}}
+      />,
+    );
     expect(screen.queryByRole('button', { name: /reauthorize/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /sync now/i })).toBeInTheDocument();
   });

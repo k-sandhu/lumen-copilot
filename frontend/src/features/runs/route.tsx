@@ -15,9 +15,7 @@ import { lazy, Suspense } from 'react';
 import { RouteFallback } from '@/routes/RouteFallback';
 import type { FeatureRoute } from '@/routes/types';
 
-const RunsPage = lazy(() =>
-  import('@/features/schedules').then((m) => ({ default: m.RunsPage })),
-);
+const RunsPage = lazy(() => import('@/features/schedules').then((m) => ({ default: m.RunsPage })));
 
 export const route: FeatureRoute = {
   path: '/runs/*',

@@ -13,12 +13,7 @@
  * `ApiError`s the components branch on (a 422 → inline form error, INV-8; a 404 →
  * existence non-disclosure, INV-1/INV-2; a 401 → re-auth, INV-4).
  */
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type UseQueryResult,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   deleteMcpServer,
   getMcpServer,

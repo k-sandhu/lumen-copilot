@@ -14,12 +14,7 @@
  */
 import { request } from './client';
 import type { PageParams } from './chat';
-import type {
-  SavedSearch,
-  SavedSearchCreate,
-  SavedSearchList,
-  SavedSearchUpdate,
-} from './types';
+import type { SavedSearch, SavedSearchCreate, SavedSearchList, SavedSearchUpdate } from './types';
 
 function pageQuery(params?: PageParams): string {
   if (!params) return '';

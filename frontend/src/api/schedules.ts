@@ -22,13 +22,7 @@
  * state → 409 (INV-8).
  */
 import { request } from './client';
-import type {
-  RunEnqueued,
-  Schedule,
-  ScheduleCreate,
-  ScheduleList,
-  ScheduleUpdate,
-} from './types';
+import type { RunEnqueued, Schedule, ScheduleCreate, ScheduleList, ScheduleUpdate } from './types';
 
 /** List filters + cursor page params for GET /schedules. */
 export interface SchedulePageQuery {

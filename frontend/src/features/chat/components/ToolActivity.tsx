@@ -42,10 +42,7 @@ export function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
         const failed = item.ok === false;
         return (
           <li key={item.callId}>
-            <StatusBadge
-              tone={running ? 'pending' : failed ? 'danger' : 'ok'}
-              pulse={running}
-            >
+            <StatusBadge tone={running ? 'pending' : failed ? 'danger' : 'ok'} pulse={running}>
               {describe(item)}
             </StatusBadge>
           </li>

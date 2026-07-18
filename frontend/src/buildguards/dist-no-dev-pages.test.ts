@@ -101,12 +101,9 @@ describe('dev-pages build-time elimination (issue #40)', () => {
     onBundle = '';
   });
 
-  it.each(FORBIDDEN_IN_OFF_BUILD)(
-    'a flag-OFF production build does NOT emit %j',
-    (needle) => {
-      expect(offBundle).not.toContain(needle);
-    },
-  );
+  it.each(FORBIDDEN_IN_OFF_BUILD)('a flag-OFF production build does NOT emit %j', (needle) => {
+    expect(offBundle).not.toContain(needle);
+  });
 
   it('a flag-OFF build sanity check: it actually produced assets', () => {
     // Guards against a false pass where the build emitted nothing and every

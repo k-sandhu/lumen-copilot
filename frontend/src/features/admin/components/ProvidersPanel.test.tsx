@@ -111,10 +111,7 @@ describe('ProvidersPanel', () => {
     await screen.findByText(/no llm providers registered/i);
     const form = screen.getByRole('form', { name: /add llm provider/i });
     await userEvent.type(within(form).getByLabelText(/^name$/i), 'OpenRouter');
-    await userEvent.type(
-      within(form).getByLabelText(/base url/i),
-      'https://openrouter.ai/api/v1',
-    );
+    await userEvent.type(within(form).getByLabelText(/base url/i), 'https://openrouter.ai/api/v1');
     await userEvent.type(within(form).getByLabelText(/api key/i), 'sk-secret-1234567890');
     await userEvent.click(within(form).getByRole('button', { name: /add provider/i }));
 

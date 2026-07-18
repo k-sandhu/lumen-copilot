@@ -45,7 +45,7 @@ function live(text: string): LiveAnswer {
     codeRuns: [],
     steps: [],
     narration: null,
-  askUser: null,
+    askUser: null,
     problem: null,
     model: 'frontier/opus',
   };
@@ -202,9 +202,7 @@ describe('live narration (#414)', () => {
   });
 
   it('hides narration once answer text streams (never in the bubble)', () => {
-    render(
-      thread({ live: { ...live('The answer begins'), narration: 'Searching…' } }),
-    );
+    render(thread({ live: { ...live('The answer begins'), narration: 'Searching…' } }));
     expect(screen.queryByTestId('live-narration')).toBeNull();
     expect(screen.getByText(/The answer begins/)).toBeInTheDocument();
     expect(screen.queryByText(/Searching…/)).toBeNull();

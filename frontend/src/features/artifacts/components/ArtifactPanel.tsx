@@ -25,7 +25,13 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ScrollArea } from '@/components/ScrollArea';
 import { Icon } from '@/ui';
 import { useArtifacts, useDeleteArtifact, type ArtifactFilters } from '../model/queries';
-import { fileKind, formatBytes, previewKind, producedByLabel, relativeTime } from '../model/presentation';
+import {
+  fileKind,
+  formatBytes,
+  previewKind,
+  producedByLabel,
+  relativeTime,
+} from '../model/presentation';
 import { ArtifactPreview } from './ArtifactPreview';
 
 const ORIGIN_FILTERS: { value: ArtifactProducedBy | 'all'; label: string }[] = [
@@ -206,7 +212,11 @@ function ArtifactListBody({
       <div role="status" aria-live="polite" aria-busy="true" className="space-y-1.5 p-1.5">
         <span className="sr-only">Loading artifacts…</span>
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-12 animate-pulse rounded-md bg-surface-muted" aria-hidden="true" />
+          <div
+            key={i}
+            className="h-12 animate-pulse rounded-md bg-surface-muted"
+            aria-hidden="true"
+          />
         ))}
       </div>
     );
@@ -337,7 +347,10 @@ function ArtifactDetail({
       </div>
 
       {downloadError ? (
-        <p role="alert" className="shrink-0 border-b border-border bg-danger/10 px-4 py-2 text-xs text-danger">
+        <p
+          role="alert"
+          className="shrink-0 border-b border-border bg-danger/10 px-4 py-2 text-xs text-danger"
+        >
           {downloadError}
         </p>
       ) : null}

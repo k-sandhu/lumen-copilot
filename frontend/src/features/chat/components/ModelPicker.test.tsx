@@ -9,9 +9,21 @@ import { ModelPicker } from './ModelPicker';
 import type { ChatModelInfo } from '@/api';
 
 const MODELS: ChatModelInfo[] = [
-  { id: 'anthropic/opus', label: 'Claude Opus', provider: 'anthropic', tier: 'frontier', is_default: true },
+  {
+    id: 'anthropic/opus',
+    label: 'Claude Opus',
+    provider: 'anthropic',
+    tier: 'frontier',
+    is_default: true,
+  },
   { id: 'openai/gpt', label: 'GPT', provider: 'openai', tier: 'frontier', is_default: false },
-  { id: 'anthropic/haiku', label: 'Claude Haiku', provider: 'anthropic', tier: 'fast', is_default: false },
+  {
+    id: 'anthropic/haiku',
+    label: 'Claude Haiku',
+    provider: 'anthropic',
+    tier: 'fast',
+    is_default: false,
+  },
   { id: 'qwen/qwen', label: 'Qwen', provider: 'qwen', tier: 'oss', is_default: false },
 ];
 

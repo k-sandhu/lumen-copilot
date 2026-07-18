@@ -24,9 +24,7 @@ describe('ToolActivity', () => {
     // checks typeof tool === 'string') — and persisted invocations (#377) carry
     // arbitrary governed tool names (run_python, MCP tools). Showing the actual
     // name is honest; the guard against a literal "undefined…" stays.
-    render(
-      <ToolActivity tools={[item({ tool: 'run_python' as ToolActivityItem['tool'] })]} />,
-    );
+    render(<ToolActivity tools={[item({ tool: 'run_python' as ToolActivityItem['tool'] })]} />);
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
     expect(screen.getByText('run_python…')).toBeInTheDocument();
   });
@@ -34,7 +32,9 @@ describe('ToolActivity', () => {
   it('falls back for an unknown DONE tool too (with the passage count)', () => {
     render(
       <ToolActivity
-        tools={[item({ tool: 'search_web' as ToolActivityItem['tool'], status: 'done', hitCount: 3 })]}
+        tools={[
+          item({ tool: 'search_web' as ToolActivityItem['tool'], status: 'done', hitCount: 3 }),
+        ]}
       />,
     );
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();

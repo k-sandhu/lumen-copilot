@@ -261,11 +261,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
             </div>
 
             {error ? (
-              <p
-                id={errorId}
-                role="alert"
-                className="flex items-start gap-1.5 text-xs text-danger"
-              >
+              <p id={errorId} role="alert" className="flex items-start gap-1.5 text-xs text-danger">
                 <Icon name="alert-triangle" className="mt-px shrink-0" />
                 <span>{error}</span>
               </p>

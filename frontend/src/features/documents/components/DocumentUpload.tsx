@@ -58,9 +58,7 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
         )}
       >
         <p className="text-sm">
-          {disabled
-            ? 'Select a collection to upload documents into.'
-            : 'Drag files here, or'}
+          {disabled ? 'Select a collection to upload documents into.' : 'Drag files here, or'}
         </p>
         {!disabled && (
           <button

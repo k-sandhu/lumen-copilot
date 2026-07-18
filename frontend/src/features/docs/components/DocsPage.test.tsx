@@ -26,9 +26,7 @@ describe('DocsPage', () => {
 
     renderAt(`/docs/${adr.slug}`);
 
-    expect(
-      await screen.findByRole('navigation', { name: /documentation/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('navigation', { name: /documentation/i })).toBeInTheDocument();
     // The doc's H1 renders as a heading (the nav shows the same text as a link).
     expect(screen.getByRole('heading', { name: adr.title })).toBeInTheDocument();
   });
@@ -44,9 +42,7 @@ describe('DocsPage', () => {
   it('redirects the bare /docs index to a real default doc', async () => {
     renderAt('/docs');
 
-    expect(
-      await screen.findByRole('navigation', { name: /documentation/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('navigation', { name: /documentation/i })).toBeInTheDocument();
     expect(screen.queryByText(/document not found/i)).not.toBeInTheDocument();
   });
 });

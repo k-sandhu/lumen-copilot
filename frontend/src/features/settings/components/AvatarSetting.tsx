@@ -26,7 +26,8 @@ const MAX_AVATAR_BYTES = 1 * 1024 * 1024;
 function describeWriteError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 401) return 'Your session has expired. Sign in again.';
-    if (error.status === 413) return 'That image is too large. The avatar must be 1 MiB or smaller.';
+    if (error.status === 413)
+      return 'That image is too large. The avatar must be 1 MiB or smaller.';
     if (error.status === 415) return 'Unsupported image type. Use a PNG, JPEG, or SVG.';
     return error.displayMessage;
   }
@@ -130,8 +131,8 @@ export function AvatarSetting() {
           Profile picture
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Shown next to your account in the app. PNG, JPEG, or SVG, up to 1 MiB. Remove
-          it to fall back to your initials.
+          Shown next to your account in the app. PNG, JPEG, or SVG, up to 1 MiB. Remove it to fall
+          back to your initials.
         </p>
       </header>
 

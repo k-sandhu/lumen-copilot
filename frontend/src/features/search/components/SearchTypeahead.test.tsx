@@ -47,7 +47,10 @@ function mockApi() {
   });
 }
 
-function setup(value: string, overrides: Partial<React.ComponentProps<typeof SearchTypeahead>> = {}) {
+function setup(
+  value: string,
+  overrides: Partial<React.ComponentProps<typeof SearchTypeahead>> = {},
+) {
   const onRunQuery = vi.fn();
   const onApplySaved = vi.fn();
   renderWithQuery(
@@ -86,7 +89,9 @@ describe('SearchTypeahead', () => {
     await user.click(screen.getByRole('combobox'));
     const saved = await screen.findByRole('option', { name: /acme deals/i });
     await user.click(saved);
-    expect(onApplySaved).toHaveBeenCalledWith(expect.objectContaining({ name: 'Acme deals', query: 'acme' }));
+    expect(onApplySaved).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Acme deals', query: 'acme' }),
+    );
   });
 
   it('typing shows server suggestions; choosing a document runs its title', async () => {

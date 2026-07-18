@@ -15,9 +15,7 @@ import { lazy, Suspense } from 'react';
 import { RouteFallback } from '@/routes/RouteFallback';
 import type { FeatureRoute } from '@/routes/types';
 
-const SettingsPage = lazy(() =>
-  import('./index').then((m) => ({ default: m.SettingsPage })),
-);
+const SettingsPage = lazy(() => import('./index').then((m) => ({ default: m.SettingsPage })));
 
 export const route: FeatureRoute = {
   path: '/settings',

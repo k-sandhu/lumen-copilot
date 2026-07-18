@@ -60,9 +60,7 @@ describe('ContextMeter', () => {
       last: undefined as never,
     });
     renderWithQuery(<ContextMeter sessionId="s1" />);
-    await waitFor(() =>
-      expect(screen.getByText(/Context 191\.0k available/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Context 191\.0k available/)).toBeInTheDocument());
   });
 
   it('renders nothing on a failed read (silent nicety)', async () => {

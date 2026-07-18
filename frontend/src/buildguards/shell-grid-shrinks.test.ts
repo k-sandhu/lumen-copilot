@@ -28,9 +28,7 @@ const shellCss = readFileSync(
 
 describe('app-shell grid can shrink its content track (#246)', () => {
   it('uses minmax(0, 1fr) for the content column on the default grid', () => {
-    expect(shellCss).toMatch(
-      /grid-template-columns:\s*var\(--lc-rail-w\)\s+minmax\(0,\s*1fr\)/,
-    );
+    expect(shellCss).toMatch(/grid-template-columns:\s*var\(--lc-rail-w\)\s+minmax\(0,\s*1fr\)/);
   });
 
   it('uses minmax(0, 1fr) for the content column on the collapsed-rail grid', () => {

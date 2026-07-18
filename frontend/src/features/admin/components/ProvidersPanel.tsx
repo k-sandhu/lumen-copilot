@@ -330,12 +330,18 @@ export function ProvidersPanel() {
   const providers = query.data?.items ?? [];
 
   const onOk = (message: string) => setToast({ kind: 'ok', message });
-  const onError = (error: unknown) => setToast({ kind: 'error', message: describeWriteError(error) });
+  const onError = (error: unknown) =>
+    setToast({ kind: 'error', message: describeWriteError(error) });
 
   const handleCreate = (body: { name: string; base_url: string; api_key?: string }) => {
     setToast(null);
     createMutation.mutate(
-      { name: body.name, provider_type: 'openai_compatible', base_url: body.base_url, api_key: body.api_key },
+      {
+        name: body.name,
+        provider_type: 'openai_compatible',
+        base_url: body.base_url,
+        api_key: body.api_key,
+      },
       {
         onSuccess: (p) => onOk(`Added ${p.name} (${p.status}).`),
         onError,

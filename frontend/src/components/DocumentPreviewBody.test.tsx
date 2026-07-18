@@ -53,9 +53,15 @@ describe('DocumentPreviewBody', () => {
   it('renders markdown as server-extracted text — not a blob iframe', async () => {
     // A blob iframe renders text/* blank under a restrictive sandbox, so text
     // types go through GET /documents/{id}/text just like office types.
-    fetchDocumentText.mockResolvedValue({ text: '# PRD\n\nBody', chunk_count: 2, truncated: false });
+    fetchDocumentText.mockResolvedValue({
+      text: '# PRD\n\nBody',
+      chunk_count: 2,
+      truncated: false,
+    });
 
-    render(<DocumentPreviewBody documentId="doc-md" filename="notes.md" mimeType="text/markdown" />);
+    render(
+      <DocumentPreviewBody documentId="doc-md" filename="notes.md" mimeType="text/markdown" />,
+    );
 
     expect(await screen.findByText(/# PRD/)).toBeInTheDocument();
     expect(screen.getByText(/extracted text preview/i)).toBeInTheDocument();
@@ -75,7 +81,11 @@ describe('DocumentPreviewBody', () => {
   });
 
   it('renders a PDF chat citation (no mime, blob type pdf) in the unsandboxed iframe', async () => {
-    fetchDocumentContent.mockResolvedValue({ url: 'blob:pdf-x', type: 'application/pdf', revoke: vi.fn() });
+    fetchDocumentContent.mockResolvedValue({
+      url: 'blob:pdf-x',
+      type: 'application/pdf',
+      revoke: vi.fn(),
+    });
 
     render(<DocumentPreviewBody documentId="doc-x" filename="Q4 strategy.pdf" />);
 
@@ -85,7 +95,11 @@ describe('DocumentPreviewBody', () => {
   });
 
   it('renders extracted text for a known office type without fetching bytes', async () => {
-    fetchDocumentText.mockResolvedValue({ text: 'quarterly numbers', chunk_count: 3, truncated: false });
+    fetchDocumentText.mockResolvedValue({
+      text: 'quarterly numbers',
+      chunk_count: 3,
+      truncated: false,
+    });
 
     render(<DocumentPreviewBody documentId="doc-2" filename="plan.docx" mimeType={DOCX} />);
 
@@ -97,7 +111,11 @@ describe('DocumentPreviewBody', () => {
   it('falls back to the blob content-type when no mime type is supplied (chat citations)', async () => {
     const revoke = vi.fn();
     fetchDocumentContent.mockResolvedValue({ url: 'blob:docx-1', type: DOCX, revoke });
-    fetchDocumentText.mockResolvedValue({ text: 'from the wire', chunk_count: 1, truncated: false });
+    fetchDocumentText.mockResolvedValue({
+      text: 'from the wire',
+      chunk_count: 1,
+      truncated: false,
+    });
 
     render(<DocumentPreviewBody documentId="doc-3" filename="plan.docx" />);
 

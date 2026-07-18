@@ -46,9 +46,7 @@ describe('LoginScreen', () => {
     // Brand cell names the product (never "Beacon") and the heading frames the
     // unauthenticated front door.
     expect(screen.getByText(/lumen copilot/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole('heading', { name: /sign in to your workspace/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /sign in to your workspace/i })).toBeInTheDocument();
   });
 
   it('submits credentials, stores the token, and marks authenticated (AC-1)', async () => {

@@ -84,7 +84,12 @@ describe('usageRows', () => {
     expect(usageRows(undefined)).toBeNull();
   });
   it('renders every field, with "—" for absent best-effort measurements', () => {
-    const rows = usageRows({ peak_memory_bytes: 2048, cpu_time_ms: null, max_pids: 3, output_bytes: null });
+    const rows = usageRows({
+      peak_memory_bytes: 2048,
+      cpu_time_ms: null,
+      max_pids: 3,
+      output_bytes: null,
+    });
     expect(rows).not.toBeNull();
     const byLabel = Object.fromEntries((rows ?? []).map((r) => [r.label, r.value]));
     expect(byLabel['Peak memory']).toBe('2.0 KB');

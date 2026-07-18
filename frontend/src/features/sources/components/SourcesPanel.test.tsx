@@ -155,7 +155,9 @@ describe('SourcesPanel — states', () => {
     renderPanel();
     expect(await screen.findByText(/loading connected sources/i)).toBeInTheDocument();
     resolve(json(list([makeSource()])));
-    expect(await screen.findByRole('article', { name: /handbook\.acme\.com/i })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('article', { name: /handbook\.acme\.com/i }),
+    ).toBeInTheDocument();
   });
 
   it('renders the EMPTY state with a primary CTA when there are no sources', async () => {
@@ -185,7 +187,12 @@ describe('SourcesPanel — states', () => {
         json(
           list([
             makeSource(),
-            makeSource({ id: 's2', status: 'error', last_error: 'Fetch failed: 503', indexed_count: 0 }),
+            makeSource({
+              id: 's2',
+              status: 'error',
+              last_error: 'Fetch failed: 503',
+              indexed_count: 0,
+            }),
           ]),
         ),
     });
@@ -230,7 +237,10 @@ describe('SourcesPanel — actions', () => {
         json(
           list([
             makeSource(),
-            makeSource({ id: 's2', config: { url: 'https://wiki.acme.com/runbook', mode: 'page' } }),
+            makeSource({
+              id: 's2',
+              config: { url: 'https://wiki.acme.com/runbook', mode: 'page' },
+            }),
           ]),
         ),
       extra: (url, init) =>
@@ -279,9 +289,7 @@ describe('SourcesPanel — actions', () => {
       roles: ['member', 'admin'],
       sources: () => json(list([makeGdrive()])),
       extra: (url, init) =>
-        init?.method === 'DELETE' && url.includes('/sources/g1')
-          ? problem(403, 'Forbidden')
-          : null,
+        init?.method === 'DELETE' && url.includes('/sources/g1') ? problem(403, 'Forbidden') : null,
     });
     const user = userEvent.setup();
     renderPanel();
@@ -308,9 +316,7 @@ describe('SourcesPanel — actions', () => {
       roles: ['member', 'admin'],
       sources: () => json(list([makeGdrive()])),
       extra: (url, init) =>
-        init?.method === 'DELETE' && url.includes('/sources/g1')
-          ? problem(403, 'Forbidden')
-          : null,
+        init?.method === 'DELETE' && url.includes('/sources/g1') ? problem(403, 'Forbidden') : null,
     });
     const user = userEvent.setup();
     renderPanel();
@@ -426,9 +432,7 @@ describe('SourcesPanel — OAuth return states (the frozen ?connect contract)', 
     renderPanel('/sources?connect=ok&source=g1');
 
     expect(await screen.findByText(/google drive connected/i)).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/),
-    );
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/));
   });
 
   it.each([
@@ -442,9 +446,7 @@ describe('SourcesPanel — OAuth return states (the frozen ?connect contract)', 
 
     const banner = await screen.findByRole('alert');
     expect(banner).toHaveTextContent(expected);
-    await waitFor(() =>
-      expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/),
-    );
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/sources$/));
   });
 
   it('falls back to the generic failure copy on an unknown reason (never blank)', async () => {

@@ -60,7 +60,13 @@ function lastCall(spy: FetchSpy) {
 describe('runs api boundary', () => {
   it('GET /runs is bearer-authenticated and serializes filters + pagination', async () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [] }));
-    await listRuns({ assistant_id: 'a1', schedule_id: 's1', status: 'failed', cursor: 'pg2', limit: 20 });
+    await listRuns({
+      assistant_id: 'a1',
+      schedule_id: 's1',
+      status: 'failed',
+      cursor: 'pg2',
+      limit: 20,
+    });
     const { url, init } = lastCall(spy);
     expect(url).toContain('/runs');
     expect(url).toContain('assistant_id=a1');
@@ -114,7 +120,9 @@ describe('runs api boundary', () => {
   it('POST /runs/{id}/cancel closes an escalated run', async () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(json({ ...RUN, status: 'failed', error: { code: 'cancelled', message: 'x' } }));
+      .mockResolvedValue(
+        json({ ...RUN, status: 'failed', error: { code: 'cancelled', message: 'x' } }),
+      );
     const res = await cancelRun('r1');
     expect(lastCall(spy).url).toContain('/runs/r1/cancel');
     expect(res.error?.code).toBe('cancelled');

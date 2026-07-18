@@ -35,7 +35,16 @@ import { BrandingPanel } from './BrandingPanel';
 
 const TAB_PREFIX = 'admin';
 
-type TabId = 'members' | 'models' | 'providers' | 'approvals' | 'tools' | 'sandbox' | 'autonomy' | 'data' | 'branding';
+type TabId =
+  | 'members'
+  | 'models'
+  | 'providers'
+  | 'approvals'
+  | 'tools'
+  | 'sandbox'
+  | 'autonomy'
+  | 'data'
+  | 'branding';
 
 const TABS: AdminTab[] = [
   { id: 'members', label: 'Members & roles', icon: 'user' },

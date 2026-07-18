@@ -89,7 +89,9 @@ describe('artifacts api boundary', () => {
   });
 
   it('DELETE /artifacts/{id} issues a DELETE', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
     await deleteArtifact('art-1');
     const { url, init } = lastCall(spy);
     expect(url).toContain('/artifacts/art-1');
@@ -97,12 +99,12 @@ describe('artifacts api boundary', () => {
   });
 
   it('GET /artifacts/{id}/content fetches bytes with the bearer and returns a blob URL', async () => {
-    const createSpy = vi
-      .spyOn(URL, 'createObjectURL')
-      .mockReturnValue('blob:artifact');
+    const createSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:artifact');
     const spy = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response(new Blob(['a,b\n1,2'], { type: 'text/csv' }), { status: 200 }));
+      .mockResolvedValue(
+        new Response(new Blob(['a,b\n1,2'], { type: 'text/csv' }), { status: 200 }),
+      );
     const content = await fetchArtifactContent('art-1');
     const { url, init } = lastCall(spy);
     expect(url).toContain('/artifacts/art-1/content');

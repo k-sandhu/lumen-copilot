@@ -126,8 +126,8 @@ export function BrandingPanel() {
           Application logo
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Upload a logo shown in the top-left of the app for everyone in this tenant. PNG,
-          JPEG, or SVG, up to 1 MiB. Remove it to fall back to the default mark.
+          Upload a logo shown in the top-left of the app for everyone in this tenant. PNG, JPEG, or
+          SVG, up to 1 MiB. Remove it to fall back to the default mark.
         </p>
       </header>
 

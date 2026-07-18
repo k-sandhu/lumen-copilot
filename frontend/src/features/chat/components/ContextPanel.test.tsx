@@ -100,11 +100,7 @@ const ARTIFACTS = {
 function mockRouter() {
   vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = String(input);
-    const body = url.includes('/usage')
-      ? USAGE
-      : url.includes('/artifacts')
-        ? ARTIFACTS
-        : MESSAGES;
+    const body = url.includes('/usage') ? USAGE : url.includes('/artifacts') ? ARTIFACTS : MESSAGES;
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status: 200,
@@ -135,9 +131,7 @@ describe('ContextPanel', () => {
     const docRow = await screen.findByRole('button', { name: 'Open Budget FY26.xlsx' });
     expect(docRow).toHaveTextContent('2 citations');
     await user.click(docRow);
-    expect(onOpenCitation).toHaveBeenCalledWith(
-      expect.objectContaining({ document_id: 'doc-1' }),
-    );
+    expect(onOpenCitation).toHaveBeenCalledWith(expect.objectContaining({ document_id: 'doc-1' }));
 
     // Tools aggregate with failure counts.
     expect(screen.getByText('search_text')).toBeInTheDocument();
@@ -214,7 +208,9 @@ describe('#434 round-1: retryable failures', () => {
       2,
     );
     expect(screen.queryByText('No tools invoked yet.')).not.toBeInTheDocument();
-    expect(await screen.findByText('Could not load artifacts.', { exact: false })).toBeInTheDocument();
+    expect(
+      await screen.findByText('Could not load artifacts.', { exact: false }),
+    ).toBeInTheDocument();
     const retries = screen.getAllByRole('button', { name: 'Retry' });
     expect(retries.length).toBeGreaterThanOrEqual(2);
     // Retrying messages after the backend recovers renders the documents list.

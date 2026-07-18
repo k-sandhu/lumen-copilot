@@ -30,10 +30,7 @@ import { AskUserOptions } from './AskUserOptions';
 import { StepTimeline } from './StepTimeline';
 import { CodeRunPanel } from '@/features/codeRuns';
 import { artifactHref } from '@/features/artifacts';
-import type {
-  ToolActivity as ToolActivityItem,
-  CodeRunActivity,
-} from '../model/streamReducer';
+import type { ToolActivity as ToolActivityItem, CodeRunActivity } from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
 export interface SourceMeta {

@@ -47,9 +47,7 @@ describe('AnswerFooter', () => {
   });
 
   it('renders nothing when there is no status and no answer time (no empty rule)', () => {
-    const { container } = render(
-      <AnswerFooter answerText={ANSWER} permissionChecked={false} />,
-    );
+    const { container } = render(<AnswerFooter answerText={ANSWER} permissionChecked={false} />);
     expect(container).toBeEmptyDOMElement();
   });
 

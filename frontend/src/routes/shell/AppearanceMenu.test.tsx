@@ -63,8 +63,6 @@ describe('AppearanceMenu', () => {
     expect(screen.queryByRole('menu')).toBeNull();
     // The account-level default-model control is part of the popover (#167);
     // awaiting it also flushes its on-open queries within act().
-    expect(
-      await screen.findByRole('combobox', { name: /default model/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: /default model/i })).toBeInTheDocument();
   });
 });

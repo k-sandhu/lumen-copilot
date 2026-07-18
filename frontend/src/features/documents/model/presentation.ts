@@ -94,7 +94,11 @@ export function fileKindTone(doc: Pick<Document, 'filename' | 'mime_type'>): Fil
   const mime = doc.mime_type.toLowerCase();
   if (kind === 'pdf' || mime.includes('pdf')) return 'pdf';
   if (['doc', 'docx', 'rtf', 'odt'].includes(kind) || mime.includes('word')) return 'doc';
-  if (['xls', 'xlsx', 'csv', 'ods'].includes(kind) || mime.includes('sheet') || mime.includes('csv'))
+  if (
+    ['xls', 'xlsx', 'csv', 'ods'].includes(kind) ||
+    mime.includes('sheet') ||
+    mime.includes('csv')
+  )
     return 'sheet';
   if (['ppt', 'pptx', 'odp'].includes(kind) || mime.includes('presentation')) return 'slide';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(kind) || mime.startsWith('image/'))
