@@ -298,10 +298,11 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
 def _log_cache_kpi(result: _RunResult) -> None:
     """Emit the per-answer cache-hit KPI (#411 / ADR-0016 §2.6) — exactly once
     per SUCCESSFUL answer, on every success terminal (``ask_user`` included).
-    Called from ``run()`` AFTER the commit and the ``done`` publication — an
-    answer that fails to commit or to publish its terminal takes the error arm
-    and must never appear in the series (its spend is the salvage ledger's
-    job). A route that reported no usage still emits, with
+    Called from ``run()`` AFTER the commit and the ``done`` publication — a
+    commit failure takes the error arm, and a failed ``done`` publication
+    propagates out of ``run()``; either way control never reaches the KPI
+    site, so a failed answer can never appear in the series (its spend is
+    the salvage ledger's job). A route that reported no usage still emits, with
     ``usage_reported=false`` and a null ratio — the series must be a
     denominator over all successful answers, never a selection that silently
     drops the routes operators most need to see. Counts only; no prompt text,
