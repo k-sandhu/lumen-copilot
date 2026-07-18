@@ -149,6 +149,26 @@ class Settings(BaseSettings):
         alias="SECRETS_ENCRYPTION_KEY",
     )
 
+    # --- Managed-connector OAuth (ADR-0019 §1, issue #452) ---
+    # TTL of the server-side single-use state record (the ADR caps it at 10
+    # minutes — the flow is an interactive browser round-trip, not a session).
+    connector_oauth_state_ttl_seconds: int = Field(
+        default=600, alias="CONNECTOR_OAUTH_STATE_TTL_SECONDS"
+    )
+    # Externally-reachable base of THIS API — the provider redirects the browser
+    # to ``{base}/api/v1/sources/oauth/callback``, so it must be the URL the
+    # browser (and the provider's allowlist) sees, not an in-network address.
+    # Default = the local compose host port (ADR-0005).
+    connector_oauth_redirect_base_url: str = Field(
+        default="http://localhost:47181", alias="CONNECTOR_OAUTH_REDIRECT_BASE_URL"
+    )
+    # The SPA sources route the callback 302s back to (the contract's frozen
+    # ``{return_url}?connect=...`` target). Default = the local compose SPA.
+    connector_oauth_frontend_return_url: str = Field(
+        default="http://localhost:47180/sources",
+        alias="CONNECTOR_OAUTH_FRONTEND_RETURN_URL",
+    )
+
     @field_validator("access_token_ttl_seconds")
     @classmethod
     def _cap_access_ttl(cls, value: int) -> int:
@@ -355,9 +375,7 @@ class Settings(BaseSettings):
     # #395 — operational/cost controls for the search path (config-driven per
     # backend/AGENTS.md: limits are never hardcoded at call sites).
     # Query-embedding cache (single-text, default-credential, namespaced calls).
-    llm_embed_cache_max_entries: int = Field(
-        default=512, gt=0, alias="LLM_EMBED_CACHE_MAX_ENTRIES"
-    )
+    llm_embed_cache_max_entries: int = Field(default=512, gt=0, alias="LLM_EMBED_CACHE_MAX_ENTRIES")
     llm_embed_cache_ttl_seconds: float = Field(
         default=900.0, gt=0, alias="LLM_EMBED_CACHE_TTL_SECONDS"
     )
@@ -388,9 +406,7 @@ class Settings(BaseSettings):
     # skip — an answer never degrades because suggestions did. Count is capped
     # at the contract's ChatSuggestions maxItems (5).
     chat_suggestions_enabled: bool = Field(default=True, alias="CHAT_SUGGESTIONS_ENABLED")
-    chat_suggestions_count: int = Field(
-        default=3, ge=1, le=5, alias="CHAT_SUGGESTIONS_COUNT"
-    )
+    chat_suggestions_count: int = Field(default=3, ge=1, le=5, alias="CHAT_SUGGESTIONS_COUNT")
     chat_suggestions_timeout_seconds: float = Field(
         default=8.0, gt=0, le=60, alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS"
     )
@@ -406,18 +422,14 @@ class Settings(BaseSettings):
     chat_summary_keep_messages: int = Field(
         default=8, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
     )
-    chat_summary_min_batch: int = Field(
-        default=4, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH"
-    )
+    chat_summary_min_batch: int = Field(default=4, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
     chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
 
     # Prompt caching (ADR-0016 §2, #411): provider cache directives on the
     # answer loop's repeated prefixes (Anthropic cache_control breakpoints /
     # OpenAI prompt_cache_key). A kill-switch, not a tuning knob — off means
     # the exact pre-#411 wire shape everywhere.
-    chat_prompt_cache_enabled: bool = Field(
-        default=True, alias="CHAT_PROMPT_CACHE_ENABLED"
-    )
+    chat_prompt_cache_enabled: bool = Field(default=True, alias="CHAT_PROMPT_CACHE_ENABLED")
 
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the

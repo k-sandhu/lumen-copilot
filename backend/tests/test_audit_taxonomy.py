@@ -48,6 +48,9 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "source.added",
         "source.synced",
         "source.deleted",
+        # Managed-connector OAuth + identity attestation (ADR-0019 §1/§2, #452).
+        "source.connected",
+        "user.identity_attested",
         "retrieval.query",
         "answer.generated",
         "permission.denied",

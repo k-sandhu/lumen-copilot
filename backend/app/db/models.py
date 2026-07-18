@@ -137,6 +137,14 @@ class User(TenantScopedMixin, TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     # RBAC roles (spec 0004 §2.3); a string array — empty = no privileges.
     roles: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
+    # Identity attestation for connector-ACL mapping (ADR-0019 §2): a tenant
+    # admin attested that this email is the person it names. NULL = unattested —
+    # the ACL mapper never emits a principal for this user. Any future
+    # email-mutation path MUST clear both columns in the same write.
+    email_attested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    email_attested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     # Per-user profile avatar (object-store key); NULL ⇒ the initials fallback in the
     # shell. Keyed ``{tenant_id}/{user_id}/{sha}/{filename}`` — the tenant prefix is
     # the isolation seam, the user_id segment scopes it to the owning user. The user
@@ -229,6 +237,21 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     indexed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Managed-connector OAuth surface (ADR-0019 §1; NULL/0 for `web` sources).
+    # ``auth_secret_ref`` → the CC-C ``secrets`` row holding the refresh token
+    # (SET NULL on secret delete: the source then reports reauthorize-required
+    # rather than dangling); never token material. ``connect_generation`` is the
+    # monotonic flow counter the OAuth callback compares (stale flow ⇒ reject).
+    # ``connected_account`` is provider-account metadata ({"email": ...}).
+    # ``sync_cursor`` is the incremental-sync resume point (ADR-0019 §3).
+    auth_secret_ref: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("secrets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    connect_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    connected_account: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    sync_cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="source")
 
@@ -706,7 +729,7 @@ class Secret(TenantScopedMixin, TimestampMixin, Base):
         UniqueConstraint("tenant_id", "owner_id", "name", name="uq_secrets_owner_name"),
         Index("ix_secrets_tenant_owner", "tenant_id", "owner_id"),
         CheckConstraint(
-            "kind in ('mcp_auth', 'search_api', 'other')",
+            "kind in ('mcp_auth', 'search_api', 'connector_oauth', 'other')",
             name="ck_secrets_kind",
         ),
         CheckConstraint("key_version >= 1", name="ck_secrets_key_version_positive"),
@@ -789,9 +812,7 @@ class McpServer(TenantScopedMixin, TimestampMixin, Base):
     secret_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    last_health_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_health_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The last list_tools() snapshot (names + schemas + read-only annotations).
     discovered_tools: Mapped[list[dict[str, object]]] = mapped_column(
@@ -895,9 +916,7 @@ class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):
 
     __tablename__ = "tenant_tool_policy"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "tool_name", name="uq_tenant_tool_policy_tenant_tool"
-        ),
+        UniqueConstraint("tenant_id", "tool_name", name="uq_tenant_tool_policy_tenant_tool"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -940,9 +959,7 @@ class TenantSandboxPolicy(TenantScopedMixin, TimestampMixin, Base):
         CheckConstraint("max_runtime_s > 0", name="ck_tenant_sandbox_policy_runtime_pos"),
         CheckConstraint("max_memory_mb > 0", name="ck_tenant_sandbox_policy_memory_pos"),
         CheckConstraint("daily_runtime_cap_s > 0", name="ck_tenant_sandbox_policy_daily_pos"),
-        CheckConstraint(
-            "max_concurrency > 0", name="ck_tenant_sandbox_policy_concurrency_pos"
-        ),
+        CheckConstraint("max_concurrency > 0", name="ck_tenant_sandbox_policy_concurrency_pos"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -1262,9 +1279,7 @@ class Assistant(TenantScopedMixin, TimestampMixin, Base):
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Set (in lockstep with status=disabled) when an admin disables the assistant so
     # the "only a published assistant may start" gate blocks it; NULL ⇒ not disabled.
-    disabled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     versions: Mapped[list[AssistantVersion]] = relationship(
         back_populates="assistant", cascade="all, delete-orphan"
@@ -1410,9 +1425,7 @@ class Run(TenantScopedMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    steps: Mapped[list[RunStep]] = relationship(
-        back_populates="run", cascade="all, delete-orphan"
-    )
+    steps: Mapped[list[RunStep]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
 class RunStep(TenantScopedMixin, Base):
@@ -1713,7 +1726,5 @@ class SessionSummary(TenantScopedMixin, TimestampMixin, Base):
     evidence: Mapped[list[dict[str, str]] | None] = mapped_column(_JSON, nullable=True)
     # {document_id: name} the summary mentions — captured at write time so the
     # read path can redact names of no-longer-permitted documents (#446 f.1).
-    mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(
-        _JSON, nullable=True
-    )
+    mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(_JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

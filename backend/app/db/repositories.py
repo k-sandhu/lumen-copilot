@@ -147,6 +147,8 @@ def _to_user(row: models.User) -> User:
         created_at=row.created_at,
         updated_at=row.updated_at,
         avatar_key=row.avatar_key,
+        email_attested_at=row.email_attested_at,
+        email_attested_by=row.email_attested_by,
     )
 
 
@@ -187,6 +189,12 @@ def _to_source(row: models.Source) -> Source:
         last_error=row.last_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        auth_secret_ref=row.auth_secret_ref,
+        connect_generation=row.connect_generation,
+        connected_account=dict(row.connected_account)
+        if row.connected_account is not None
+        else None,
+        sync_cursor=row.sync_cursor,
     )
 
 
@@ -872,6 +880,27 @@ class UserRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
+    async def attest_email(self, user_id: UUID, *, attested_by: UUID) -> User | None:
+        """Record a tenant admin's identity attestation for this user (ADR-0019 §2).
+
+        Idempotent from the caller's view: re-attesting refreshes
+        ``email_attested_at``. Tenant-scoped (INV-1): a foreign-tenant user is
+        invisible → ``None`` (the service maps that to 404). The audited event
+        (``user.identity_attested``) is emitted by the calling service, not here.
+        """
+        stmt = select(models.User).where(
+            models.User.tenant_id == self._tenant_id,
+            models.User.id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.email_attested_at = datetime.now(UTC)
+        row.email_attested_by = attested_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_user(row)
+
     async def set_avatar_key(self, user_id: UUID, *, avatar_key: str | None) -> User | None:
         """Set (or clear) the user's per-user profile-avatar key.
 
@@ -1215,6 +1244,54 @@ class SourceRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_source(row) if row is not None else None
+
+    async def begin_connect(self, source_id: UUID) -> Source | None:
+        """Atomically advance the source's connect generation (ADR-0019 §1).
+
+        Starting flow N+1 invalidates flow N: the incremented value is stamped
+        into the new state record, and the callback rejects any record whose
+        generation no longer equals the row's. Returns the updated entity (with
+        the new generation), or ``None`` when the source is not in this tenant.
+        """
+        stmt = select(models.Source).where(
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.id == source_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.connect_generation = row.connect_generation + 1
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_source(row)
+
+    async def complete_connect(
+        self,
+        source_id: UUID,
+        *,
+        auth_secret_ref: UUID,
+        connected_account: dict[str, object],
+    ) -> Source | None:
+        """Record a completed OAuth consent (ADR-0019 §1).
+
+        Binds the vault credential reference + provider-account metadata (never
+        token material), clears any prior failure, and moves the source to
+        ``pending`` — ready for its first sync. Tenant-scoped (INV-1).
+        """
+        stmt = select(models.Source).where(
+            models.Source.tenant_id == self._tenant_id,
+            models.Source.id == source_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.auth_secret_ref = auth_secret_ref
+        row.connected_account = connected_account
+        row.status = SourceStatus.PENDING.value
+        row.last_error = None
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_source(row)
 
     async def list_for_owner_page(
         self,
@@ -2370,9 +2447,7 @@ class CitationRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_citation(r) for r in rows]
 
-    async def list_for_messages_hydrated_batch(
-        self, message_ids: list[UUID]
-    ) -> list[CitationView]:
+    async def list_for_messages_hydrated_batch(self, message_ids: list[UUID]) -> list[CitationView]:
         """Hydrated citations for MANY messages in ONE query (#446 round-2).
 
         The summarizer's capture path: a backlog batch must not issue one
@@ -3577,9 +3652,7 @@ class LlmUsageRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_llm_usage(row)
 
-    async def list_for_session(
-        self, session_id: UUID, *, limit: int = 200
-    ) -> list[LlmUsageRecord]:
+    async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[LlmUsageRecord]:
         """The usage records for one chat session (tenant-scoped), oldest first."""
         stmt = (
             select(models.LlmUsage)
@@ -3894,9 +3967,7 @@ class AssistantVersionRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant_version(row) if row is not None else None
 
-    async def get_by_number(
-        self, assistant_id: UUID, version: int
-    ) -> AssistantVersion | None:
+    async def get_by_number(self, assistant_id: UUID, version: int) -> AssistantVersion | None:
         """The specific numbered version of an assistant (for rollback), tenant-scoped."""
         stmt = select(models.AssistantVersion).where(
             models.AssistantVersion.tenant_id == self._tenant_id,
@@ -4023,9 +4094,7 @@ class RunRepository(_TenantScopedRepository):
             .where(
                 models.Run.tenant_id == self._tenant_id,
                 models.Run.schedule_id == schedule_id,
-                models.Run.status.in_(
-                    [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
-                ),
+                models.Run.status.in_([RunStatus.QUEUED.value, RunStatus.RUNNING.value]),
             )
         )
         return int((await self._session.execute(stmt)).scalar_one())
@@ -4919,9 +4988,7 @@ def _to_session_summary(row: models.SessionSummary) -> SessionSummary:
         except (KeyError, TypeError, ValueError):
             continue
     mentioned: list[tuple[UUID, str]] = []
-    raw_mentioned = (
-        row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
-    )
+    raw_mentioned = row.mentioned_documents if isinstance(row.mentioned_documents, dict) else {}
     for key, name in list(raw_mentioned.items())[:_MENTIONED_MAX_ENTRIES]:
         try:
             mentioned.append((UUID(str(key)), str(name)))
@@ -4991,8 +5058,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
         (#446 finding 3). Touches nothing the summarizer owns.
         """
         payload = [
-            {"document_id": str(d), "chunk_id": str(c)}
-            for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
+            {"document_id": str(d), "chunk_id": str(c)} for d, c in evidence[:_EVIDENCE_MAX_PAIRS]
         ]
         insert = self._insert().values(  # type: ignore[attr-defined]
             id=uuid_mod.uuid4(),
@@ -5056,10 +5122,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
                 models.SessionSummary.covers_through_created_at.is_(None)
                 | (models.SessionSummary.covers_through_created_at < covered_created_at)
                 | (
-                    (
-                        models.SessionSummary.covers_through_created_at
-                        == covered_created_at
-                    )
+                    (models.SessionSummary.covers_through_created_at == covered_created_at)
                     # ORDERED tie-break (#446 round-2 blocker 3): within one
                     # second, coverage may only advance toward the LARGER
                     # boundary id — an arbitrary but STABLE total order, so a
@@ -5067,10 +5130,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
                     # probe). A same-second boundary with a smaller id waits
                     # for the next pass (a strictly-newer timestamp) — progress
                     # converges, regression cannot happen.
-                    & (
-                        models.SessionSummary.covers_through_message_id
-                        < covers_through_message_id
-                    )
+                    & (models.SessionSummary.covers_through_message_id < covers_through_message_id)
                 )
             ),
         )
@@ -5078,7 +5138,6 @@ class SessionSummaryRepository(_TenantScopedRepository):
         await self._session.flush()
         row = await self.get_for_session(session_id)
         accepted = bool(getattr(result, "rowcount", 0)) and (
-            row is not None
-            and row.covers_through_message_id == covers_through_message_id
+            row is not None and row.covers_through_message_id == covers_through_message_id
         )
         return accepted, row

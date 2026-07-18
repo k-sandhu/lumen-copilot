@@ -28,6 +28,7 @@ from app.connectors.base import (
     ConnectorConfigError,
     ConnectorError,
     ConnectorHealth,
+    ConnectorRun,
     FetchedDoc,
 )
 from app.connectors.web.extract import (
@@ -82,7 +83,7 @@ class WebConnector:
         validate_url_syntactic(normalized)
         return {"url": normalized, "mode": mode_from_url(normalized).value}
 
-    async def sync(self, source: Source) -> Iterable[FetchedDoc]:
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
         """Fetch the source URL, detect the mode, and yield its documents.
 
         Detection order (ADR-0009 §2): feed → sitemap → single page. For a feed or
@@ -103,7 +104,7 @@ class WebConnector:
             docs = await self._expand(root, client, user_agent)
         return docs
 
-    async def health(self, source: Source) -> ConnectorHealth:
+    async def health(self, source: Source, run: ConnectorRun) -> ConnectorHealth:
         """Probe the source URL: a successful guarded fetch is healthy.
 
         A cheap reachability/validity check for the connector grid (ADR-0009 §4).

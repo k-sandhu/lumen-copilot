@@ -54,11 +54,11 @@ _ADMIN_PATHS = (
 )
 
 
-
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
     "890000000a49444154789c6360000002000154a24f1e0000000049454e44ae426082"
 )
+
 
 class _Seeded:
     """Identifiers for the seeded fixture graph (two tenants, several roles)."""
@@ -151,11 +151,13 @@ def app(
     yield application
     application.dependency_overrides.clear()
 
+
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
 
 async def _login(client: AsyncClient, email: str) -> str:
     resp = await client.post("/api/v1/auth/login", json={"email": email, "password": _PASSWORD})
@@ -198,7 +200,10 @@ async def test_members_lists_tenant_roster_with_roles(client: AsyncClient, seede
     # Exactly the three tenant-A users — never tenant B's admin (INV-1).
     assert set(by_email) == {"admin@acme.test", "member@acme.test", "security@acme.test"}
     for member in body["items"]:
-        assert set(member) == {"id", "email", "role"}
+        # #452 (ADR-0019 §2): every member states its (nullable, required)
+        # identity-attestation timestamp — a fresh seed is unattested.
+        assert set(member) == {"id", "email", "role", "email_attested_at"}
+        assert member["email_attested_at"] is None
         assert isinstance(member["id"], str) and member["id"]
         assert isinstance(member["role"], list)
         assert all(r in {"member", "admin", "security"} for r in member["role"])
@@ -557,9 +562,7 @@ async def test_patch_tool_policy_enables_and_preapproves_run_python(
     assert _entry(got.json(), "run_python")["requires_approval"] is False
 
 
-async def test_patch_tool_policy_unknown_tool_is_422(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_patch_tool_policy_unknown_tool_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
         "/api/v1/admin/tool-policy",
@@ -569,9 +572,7 @@ async def test_patch_tool_policy_unknown_tool_is_422(
     assert resp.status_code == 422, resp.text
 
 
-async def test_patch_tool_policy_missing_field_is_422(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_patch_tool_policy_missing_field_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
         "/api/v1/admin/tool-policy",
@@ -794,9 +795,7 @@ async def test_patch_sandbox_policy_unknown_field_is_422(
     token = await _login(client, seeded.admin_a_email)
     body = _sandbox_body()
     body["not_a_real_field"] = True
-    resp = await client.patch(
-        "/api/v1/admin/sandbox-policy", headers=_auth(token), json=body
-    )
+    resp = await client.patch("/api/v1/admin/sandbox-policy", headers=_auth(token), json=body)
     assert resp.status_code == 422, resp.text
 
 
@@ -950,15 +949,11 @@ async def test_patch_autonomy_policy_forbidden_for_non_admin(
 
 
 async def test_patch_autonomy_policy_unauthenticated_is_401(client: AsyncClient) -> None:
-    resp = await client.patch(
-        "/api/v1/admin/autonomy-policy", json={"max_autonomy": "draft"}
-    )
+    resp = await client.patch("/api/v1/admin/autonomy-policy", json={"max_autonomy": "draft"})
     assert resp.status_code == 401
 
 
-async def test_autonomy_policy_is_tenant_scoped(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_autonomy_policy_is_tenant_scoped(client: AsyncClient, seeded: _Seeded) -> None:
     """INV-1 (#218): admin A sets a cap; admin B's tenant stays at the no-ceiling default."""
     token_a = await _login(client, seeded.admin_a_email)
     await client.patch(
@@ -1049,9 +1044,7 @@ async def test_put_branding_uploads_logo_and_returns_url(
     client: AsyncClient, seeded: _Seeded, store: FakeObjectStore
 ) -> None:
     token = await _login(client, seeded.admin_a_email)
-    resp = await client.put(
-        "/api/v1/admin/branding", headers=_auth(token), files=_logo_file()
-    )
+    resp = await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert set(body) == {"logo_url"}
@@ -1095,9 +1088,7 @@ async def test_delete_branding_is_idempotent(client: AsyncClient, seeded: _Seede
     assert resp.status_code == 204, resp.text
 
 
-async def test_put_branding_rejects_non_image_415(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_put_branding_rejects_non_image_415(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.admin_a_email)
     resp = await client.put(
         "/api/v1/admin/branding",
@@ -1108,9 +1099,7 @@ async def test_put_branding_rejects_non_image_415(
     assert resp.status_code == 415, resp.text
 
 
-async def test_put_branding_rejects_oversize_413(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_put_branding_rejects_oversize_413(client: AsyncClient, seeded: _Seeded) -> None:
     from app.core.config import get_settings
 
     token = await _login(client, seeded.admin_a_email)
@@ -1130,9 +1119,7 @@ async def test_put_branding_forbidden_for_non_admin(
 ) -> None:
     # The branding write is admin-only (INV-5) — member/security are 403.
     token = await _login(client, getattr(seeded, email_attr))
-    resp = await client.put(
-        "/api/v1/admin/branding", headers=_auth(token), files=_logo_file()
-    )
+    resp = await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
     assert resp.status_code == 403, resp.text
 
 
@@ -1280,9 +1267,7 @@ async def test_tenant_settings_wire_shapes_validate_against_openapi(
     schemas = spec["components"]["schemas"]
 
     def validate(payload: object, name: str) -> None:
-        jsonschema.validate(
-            payload, {**schemas[name], "components": {"schemas": schemas}}
-        )
+        jsonschema.validate(payload, {**schemas[name], "components": {"schemas": schemas}})
 
     token = await _login(client, seeded.admin_a_email)
     got = await client.get("/api/v1/admin/settings", headers=_auth(token))
@@ -1294,8 +1279,6 @@ async def test_tenant_settings_wire_shapes_validate_against_openapi(
     valid = [m.id for m in get_settings().chat_model_registry[:1]]
     patch_body = {"max_tool_turns": 5, "fallback_models": valid}
     validate(patch_body, "TenantSettingsUpdate")
-    resp = await client.patch(
-        "/api/v1/admin/settings", headers=_auth(token), json=patch_body
-    )
+    resp = await client.patch("/api/v1/admin/settings", headers=_auth(token), json=patch_body)
     assert resp.status_code == 200, resp.text
     validate(resp.json(), "TenantSettings")

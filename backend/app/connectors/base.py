@@ -25,9 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+import httpx
 
 from app.domain.entities import Source
+
+if TYPE_CHECKING:
+    from app.connectors.oauth import OAuthSpec
 
 
 class ConnectorError(Exception):
@@ -82,6 +87,39 @@ class ConnectorHealth:
     detail: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectorRun:
+    """The framework-supplied per-run execution context (ADR-0019 §4).
+
+    Constructed by the **framework** (the sync task / health probe), never by
+    connector code: for an OAuth connector, ``http`` is an already-authenticated,
+    bounded HTTP client — the framework resolved the source's vault-held
+    credential and attached it, so **a raw token is never handed to connector
+    code** and a connector never reads the vault, the DB, or module state.
+    For credential-less connectors (``web``) the context is anonymous and may be
+    ignored — the web connector keeps using its own SSRF-guarded fetch
+    chokepoint. The framework owns the client's lifecycle (close after the run).
+    """
+
+    http: httpx.AsyncClient
+
+
+def get_oauth_spec(connector: Connector) -> OAuthSpec | None:
+    """The connector's OAuth capability, or ``None`` (ADR-0019 §4).
+
+    A connector opts into the framework-driven OAuth flow by exposing
+    ``oauth_spec() -> OAuthSpec``; presence marks its sources **managed**
+    (admin-gated mutations, vault-held credentials). Absence — the ``web``
+    connector — means the source type has no connect flow (the API maps that to
+    409 ``oauth_not_supported``).
+    """
+    probe = getattr(connector, "oauth_spec", None)
+    if probe is None or not callable(probe):
+        return None
+    spec: OAuthSpec = probe()
+    return spec
+
+
 @runtime_checkable
 class Connector(Protocol):
     """The interface every external-source connector implements (ADR-0009 §1).
@@ -104,16 +142,19 @@ class Connector(Protocol):
         """
         ...
 
-    async def sync(self, source: Source) -> Iterable[FetchedDoc]:
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
         """Fetch the source and return its documents as :class:`FetchedDoc`.
 
-        Runs only inside the Celery sync task (never the request path). Raises
-        :class:`ConnectorError` on a fetch fault. May re-validate (SSRF) as it
-        fetches — for the web connector every redirect hop is re-checked.
+        Runs only inside the Celery sync task (never the request path), against
+        the framework-supplied :class:`ConnectorRun` (ADR-0019 §4 — an OAuth
+        connector's ``run.http`` is already authenticated; credential-less
+        connectors may ignore it). Raises :class:`ConnectorError` on a fetch
+        fault. May re-validate (SSRF) as it fetches — for the web connector
+        every redirect hop is re-checked.
         """
         ...
 
-    async def health(self, source: Source) -> ConnectorHealth:
+    async def health(self, source: Source, run: ConnectorRun) -> ConnectorHealth:
         """A cheap reachability/validity probe for the connector grid."""
         ...
 
@@ -128,5 +169,7 @@ __all__ = [
     "ConnectorConfigError",
     "ConnectorError",
     "ConnectorHealth",
+    "ConnectorRun",
     "FetchedDoc",
+    "get_oauth_spec",
 ]
