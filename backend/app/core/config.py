@@ -171,6 +171,31 @@ class Settings(BaseSettings):
         alias="CONNECTOR_OAUTH_FRONTEND_RETURN_URL",
     )
 
+    # --- Google Drive connector (ADR-0019 §5, issue #453) ---
+    # The platform's Google OAuth app registration (deployment-level config —
+    # per-tenant bring-your-own-client is a recorded follow-up, not v1). Blank
+    # defaults let the skeleton boot locally without a Google registration;
+    # OUTSIDE ``local`` a blank value refuses to start (validator below) — the
+    # JWT/vault-key fail-fast rule applied to the connector's client secret.
+    gdrive_oauth_client_id: str = Field(default="", alias="GDRIVE_OAUTH_CLIENT_ID")
+    gdrive_oauth_client_secret: str = Field(default="", alias="GDRIVE_OAUTH_CLIENT_SECRET")
+    # Per-file download/export size cap for the Drive connector (bytes). Files
+    # over the cap are skipped and counted in sync health, never truncated.
+    gdrive_fetch_max_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1, alias="GDRIVE_FETCH_MAX_BYTES"
+    )
+    # Mirrored-ACL freshness window (ADR-0019 §2, spec 0004 §2.2): a mirrored
+    # ACL older than this is DENIED at retrieval — a stalled sync progressively
+    # hides connector content rather than serving stale rights. This is also the
+    # recorded worst-case revocation-to-enforcement bound.
+    connector_acl_max_age_hours: int = Field(default=24, ge=1, alias="CONNECTOR_ACL_MAX_AGE_HOURS")
+    # Periodic connector sync-poll interval (ADR-0019 §3 cadence): the Beat
+    # enqueues a sync for every connected managed source this often, through
+    # the existing per-tenant rate-limited enqueue seam.
+    connector_sync_interval_minutes: int = Field(
+        default=60, ge=1, alias="CONNECTOR_SYNC_INTERVAL_MINUTES"
+    )
+
     @field_validator("access_token_ttl_seconds")
     @classmethod
     def _cap_access_ttl(cls, value: int) -> int:
@@ -1012,6 +1037,26 @@ class Settings(BaseSettings):
                 "SECRETS_ENCRYPTION_KEY must be overridden outside the local environment "
                 "(issue #209)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_gdrive_oauth_client_in_prod(self) -> Settings:
+        """Blank Google OAuth client config is refused outside local (ADR-0019 §1).
+
+        The blank defaults exist only so the local skeleton boots without a
+        Google Cloud registration; a deployed environment shipping without a
+        client id/secret would fail deep inside the first connect flow instead
+        of at boot — fail fast like ``JWT_SECRET``/``SECRETS_ENCRYPTION_KEY``.
+        """
+        if self.environment != "local":
+            for value, name in (
+                (self.gdrive_oauth_client_id, "GDRIVE_OAUTH_CLIENT_ID"),
+                (self.gdrive_oauth_client_secret, "GDRIVE_OAUTH_CLIENT_SECRET"),
+            ):
+                if not value:
+                    raise ValueError(
+                        f"{name} must be set outside the local environment (ADR-0019 §1)"
+                    )
         return self
 
     @model_validator(mode="after")

@@ -38,7 +38,19 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.connectors.base import Connector, ConnectorError, ConnectorRun, FetchedDoc, get_oauth_spec
+from app.connectors.base import (
+    AclMappingContext,
+    Connector,
+    ConnectorError,
+    ConnectorRun,
+    CursorExpiredError,
+    FetchedDoc,
+    FullSyncResult,
+    PageIntegrity,
+    get_fetch_changes,
+    get_map_acl,
+    get_oauth_spec,
+)
 from app.connectors.oauth import (
     REAUTHORIZE_REQUIRED,
     OAuthExchangeError,
@@ -50,11 +62,17 @@ from app.connectors.registry import UnknownConnectorError, get_connector
 from app.core.config import Settings, get_settings
 from app.core.errors import DependencyError, NotFoundError
 from app.db import models
-from app.db.repositories import AuditEventRepository, DocumentRepository, SourceRepository
+from app.db.repositories import (
+    AuditEventRepository,
+    DocumentRepository,
+    SourceRepository,
+    UserRepository,
+)
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
     AuditOutcome,
+    Document,
     DocumentStatus,
     Role,
     Source,
@@ -66,7 +84,7 @@ from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
-from app.tasks.index_sync import sync_document_index_async
+from app.tasks.index_sync import stamp_index_acl_stale_async, sync_document_index_async
 from app.tasks.ingest import ingest_document_async
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 from app.tasks.runner import run_task
@@ -74,6 +92,8 @@ from app.tasks.runner import run_task
 # A fetched web document is stored as plain text for the ingestion pipeline (its
 # parser handles text/plain natively, no library needed).
 _TEXT_MIME = "text/plain"
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,18 +162,55 @@ async def sync_source_async(
     # resolving the vault-held refresh token and running the refresh grant HERE —
     # connector code never sees a raw token, only an authenticated client. A dead
     # grant fails the sync closed as *reauthorize required* (ADR-0019 §1),
-    # audited as the sync-stage ``source.synced`` outcome=error.
+    # audited as the sync-stage ``source.synced`` outcome=error. For a
+    # ``map_acl``-declaring connector the framework also freezes the attested-
+    # identity snapshot into the run (ADR-0019 §2 — sync-time snapshot).
+    enforce_acl = get_map_acl(connector) is not None
+    acl_context = await _build_acl_context(tenant_id) if enforce_acl else None
     try:
-        run = await _build_run(connector, source, tenant_id=tenant_id, settings=settings)
+        run = await _build_run(
+            connector, source, tenant_id=tenant_id, settings=settings, acl_context=acl_context
+        )
     except OAuthGrantDeadError:
         return await _fail_reauthorize(tenant_id, source_id, source_type=source_type)
     except OAuthExchangeError as exc:
         return await _fail(tenant_id, source_id, f"token refresh failed: {exc.code}")
+
+    baseline_cursor: str | None = None
     try:
-        fetched = list(await connector.sync(source, run))
-    except ConnectorError as exc:
-        # Includes UrlBlockedError (SSRF) — a permanent rejection of this source.
-        return await _fail(tenant_id, source_id, f"fetch failed: {exc.detail}")
+        # --- Incremental path (ADR-0019 §3): capability + a stored cursor. ---
+        if get_fetch_changes(connector) is not None and source.sync_cursor:
+            try:
+                return await _sync_incremental(
+                    tenant_id,
+                    source,
+                    connector,
+                    run,
+                    settings=settings,
+                    object_store=object_store,
+                    gateway=gateway,
+                    collection_id=collection_id,
+                    enforce_acl=enforce_acl,
+                )
+            except CursorExpiredError:
+                # HTTP 410: clear the cursor and fall through to a full resync
+                # in this same run (ADR-0019 §3).
+                log.info("source_sync.cursor_expired", source_id=str(source_id))
+                async with tenant_session_scope(tenant_id) as session:
+                    await SourceRepository(session, tenant_id).set_sync_cursor(source_id, None)
+            except ConnectorError as exc:
+                # Pages committed so far (mutations + cursor) stand — the next
+                # run resumes from the last committed token (never a skip).
+                return await _fail(tenant_id, source_id, f"fetch failed: {exc.detail}")
+
+        try:
+            sync_result = await connector.sync(source, run)
+            fetched = list(sync_result)
+            if isinstance(sync_result, FullSyncResult):
+                baseline_cursor = sync_result.baseline_cursor
+        except ConnectorError as exc:
+            # Includes UrlBlockedError (SSRF) — a permanent rejection of this source.
+            return await _fail(tenant_id, source_id, f"fetch failed: {exc.detail}")
     finally:
         await run.http.aclose()
 
@@ -222,6 +279,7 @@ async def sync_source_async(
                 collection_id=collection_id,
                 fetched=fetched_doc,
                 index=index,
+                acl_enforced=enforce_acl,
                 settings=settings,
                 object_store=object_store,
                 gateway=gateway,
@@ -244,18 +302,30 @@ async def sync_source_async(
         )
 
     # --- Phase 4: advance the source to ready. -------------------------------
+    now = datetime.now(UTC)
     async with tenant_session_scope(tenant_id) as session:
-        await SourceRepository(session, tenant_id).update_status(
+        sources = SourceRepository(session, tenant_id)
+        await sources.update_status(
             source_id,
             status=SourceStatus.READY,
             indexed_count=indexed,
             last_error=None,
             set_last_error=True,
-            last_synced_at=datetime.now(UTC),
+            last_synced_at=now,
             set_last_synced_at=True,
         )
         # Persist the detected mode so the grid shows page/feed/sitemap.
         await _record_mode(session, tenant_id, source_id, detected_mode)
+        if baseline_cursor is not None:
+            # The pre-enumeration change-log baseline (ADR-0019 §3): the next
+            # sync replays incrementally from here, covering the enumeration
+            # window.
+            await sources.set_sync_cursor(source_id, baseline_cursor)
+        if enforce_acl:
+            unmapped = await _count_unmapped(session, tenant_id, source_id)
+            await sources.record_acl_health(
+                source_id, acl_synced_at=now, unmapped_acl_count=unmapped
+            )
 
     return SyncResult(source_id, SourceStatus.READY, indexed)
 
@@ -268,34 +338,50 @@ async def _ingest_one(
     collection_id: UUID,
     fetched: FetchedDoc,
     index: int,
+    acl_enforced: bool,
     settings: Settings,
     object_store: ObjectStore,
     gateway: LLMGateway,
 ) -> None:
     """Store one fetched doc + register a Document + run the ingestion pipeline.
 
-    Reuses the existing pipeline end-to-end: the text is stored as a ``text/plain``
-    object (#22), a ``Document`` linked to ``source_id`` is created ``pending``,
-    and :func:`ingest_document_async` parses → chunks → embeds → indexes it. All
-    tenant/owner-scoped.
+    Reuses the existing pipeline end-to-end: the payload is stored as an object
+    (#22 — extracted text as ``text/plain``, or the connector's binary
+    pass-through under its own MIME type), a ``Document`` linked to
+    ``source_id`` is created ``pending``, and :func:`ingest_document_async`
+    parses → chunks → embeds → indexes it. All tenant/owner-scoped.
+
+    ``acl_enforced`` is the **mandatory write-mode argument** (ADR-0019 §2):
+    derived structurally by the caller from the connector's ``map_acl``
+    capability, never defaulted — a managed-source document written
+    ``acl_enforced=False`` is a defect. The mirrored ACL (principals + scope
+    chain) rides ``fetched.acl``; its ``acl_synced_at`` advances only because
+    this sync examined it (§2 refresh cadence).
     """
-    data = fetched.text.encode("utf-8")
+    payload = fetched.data if fetched.data is not None else fetched.text.encode("utf-8")
+    mime_type = fetched.mime_type if fetched.data is not None else _TEXT_MIME
     stored = await object_store.put(
         tenant_id=str(tenant_id),
-        data=data,
-        content_type=_TEXT_MIME,
+        data=payload,
+        content_type=mime_type,
         filename=_safe_filename(fetched.title, index),
     )
+    acl = fetched.acl
     async with tenant_session_scope(tenant_id) as session:
         document = await DocumentRepository(session, tenant_id).create(
             owner_id=owner_id,
             collection_id=collection_id,
             filename=_safe_filename(fetched.title, index),
-            mime_type=_TEXT_MIME,
+            mime_type=mime_type,
             size_bytes=stored.size_bytes,
             storage_key=stored.key,
+            acl_enforced=acl_enforced,
             status=DocumentStatus.PENDING,
             source_id=source_id,
+            external_id=fetched.external_id,
+            acl_principals=sorted(acl.principals) if acl is not None else None,
+            acl_synced_at=datetime.now(UTC) if acl is not None else None,
+            acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
         )
         document_id = document.id
 
@@ -309,6 +395,30 @@ async def _ingest_one(
     )
 
 
+async def _count_unmapped(session: AsyncSession, tenant_id: UUID, source_id: UUID) -> int:
+    """Documents whose mirrored ACL admits no one (ADR-0019 §2 health count).
+
+    Counted from the source of truth after the run so full and incremental
+    syncs report identically: an ``acl_enforced`` document with an **empty**
+    mirrored set is ingested but invisible (fail closed) — an admin sees the
+    silent-deny volume, and attestation lights these up on a later sync.
+    """
+    documents = await DocumentRepository(session, tenant_id).list_for_source(source_id)
+    return sum(1 for d in documents if d.acl_enforced and not d.acl_principals)
+
+
+async def _build_acl_context(tenant_id: UUID) -> AclMappingContext:
+    """Freeze the sync-time attested-identity snapshot (ADR-0019 §2/§4).
+
+    Attested users only — an unattested email maps to nothing. Built by the
+    framework and handed to the connector via the run context; connector code
+    never reads the DB.
+    """
+    async with tenant_session_scope(tenant_id) as session:
+        emails = await UserRepository(session, tenant_id).attested_email_map()
+    return AclMappingContext(email_to_user_id=emails, evaluated_at=datetime.now(UTC))
+
+
 # Bounded default timeout for an authenticated connector run's client.
 _RUN_TIMEOUT_SECONDS = 30.0
 
@@ -319,6 +429,7 @@ async def _build_run(
     *,
     tenant_id: UUID,
     settings: Settings,
+    acl_context: AclMappingContext | None = None,
 ) -> ConnectorRun:
     """Construct the per-run execution context (ADR-0019 §4) — framework-only.
 
@@ -337,7 +448,9 @@ async def _build_run(
     """
     spec = get_oauth_spec(connector)
     if spec is None:
-        return ConnectorRun(http=httpx.AsyncClient(timeout=_RUN_TIMEOUT_SECONDS))
+        return ConnectorRun(
+            http=httpx.AsyncClient(timeout=_RUN_TIMEOUT_SECONDS), acl_context=acl_context
+        )
     if source.auth_secret_ref is None:
         raise OAuthGrantDeadError()
 
@@ -390,8 +503,222 @@ async def _build_run(
     return ConnectorRun(
         http=build_authenticated_client(
             spec, access_token=token.access_token, timeout=_RUN_TIMEOUT_SECONDS
-        )
+        ),
+        acl_context=acl_context,
     )
+
+
+async def _sync_incremental(
+    tenant_id: UUID,
+    source: Source,
+    connector: Connector,
+    run: ConnectorRun,
+    *,
+    settings: Settings,
+    object_store: ObjectStore,
+    gateway: LLMGateway,
+    collection_id: UUID,
+    enforce_acl: bool,
+) -> SyncResult:
+    """Drain the connector's change pages with per-page atomic commits (ADR-0019 §3).
+
+    For each :class:`~app.connectors.base.SyncPage`, ONE tenant-scoped
+    transaction applies, in order: identity **deletions** → the
+    **stale-stamp** (the page's ``stale_scope_ids`` matched against persisted
+    scope chains; ``integrity=incomplete`` ⇒ every ``acl_enforced`` document of
+    the source) → identity **upserts** (which restore per-document freshness as
+    each is re-examined) → ``sync_cursor = page.next_cursor``. A crash between
+    pages therefore resumes from the last committed token — never skipping a
+    page, never re-serving half-applied state.
+
+    Chunk/embedding/index writes happen **after** each page commit (the reused
+    ingestion pipeline owns its own transactions and is idempotent; an
+    un-ingested upsert is a ``pending`` document with no retrievable chunks —
+    fail closed, converged by the next run or the reindex backfill). The index
+    stale-stamp propagates by update-by-query in the same run; the Postgres
+    hydration re-check remains the enforcing backstop (ADR-0010 §4).
+
+    Raises:
+        CursorExpiredError: the provider rejected the cursor (HTTP 410) — the
+            caller clears it and falls back to a full resync.
+        ConnectorError: a replay fault; pages already committed stand.
+    """
+    fetch_changes = get_fetch_changes(connector)
+    assert fetch_changes is not None  # capability checked by the caller  # noqa: S101
+    source_id = source.id
+    owner_id = source.owner_id
+    upserted = 0
+    deleted_count = 0
+
+    async for page in fetch_changes(source, str(source.sync_cursor), run):
+        deleted_docs: list[Document] = []
+        page_doc_ids: list[UUID] = []
+        stale_ids: list[UUID] = []
+        orphaned_keys: list[str] = []
+        async with tenant_session_scope(tenant_id) as session:
+            documents = DocumentRepository(session, tenant_id)
+            sources = SourceRepository(session, tenant_id)
+
+            # 1. Identity deletions (reconcile by external id, not wholesale).
+            for external_id in sorted(page.deleted_external_ids):
+                existing = await documents.get_by_external_id(source_id, external_id)
+                if existing is None:
+                    continue
+                await documents.delete(existing.id)
+                deleted_docs.append(existing)
+            if deleted_docs:
+                await session.flush()
+                for storage_key in {d.storage_key for d in deleted_docs}:
+                    if await documents.count_by_storage_key(storage_key) == 0:
+                        orphaned_keys.append(storage_key)
+
+            # 2. The cascade stale-stamp (§3): immediate deny for every known
+            #    descendant of a replayed container change — BEFORE the page's
+            #    upserts, so a re-examined document ends the page fresh.
+            if page.stale_scope_ids:
+                stale_ids = await documents.stamp_acl_stale_by_scope(
+                    source_id, page.stale_scope_ids
+                )
+            if page.integrity is PageIntegrity.INCOMPLETE:
+                # Unprovable affected set ⇒ fail closed source-wide.
+                stale_ids = await documents.stamp_acl_stale_for_source(source_id)
+
+            # 3. Identity upserts — by (source_id, external_id), keeping row
+            #    ids stable so the index converges without orphans.
+            for index, fetched_doc in enumerate(page.upserts):
+                payload = (
+                    fetched_doc.data
+                    if fetched_doc.data is not None
+                    else fetched_doc.text.encode("utf-8")
+                )
+                mime_type = fetched_doc.mime_type if fetched_doc.data is not None else _TEXT_MIME
+                stored = await object_store.put(
+                    tenant_id=str(tenant_id),
+                    data=payload,
+                    content_type=mime_type,
+                    filename=_safe_filename(fetched_doc.title, index),
+                )
+                acl = fetched_doc.acl
+                acl_stamp = datetime.now(UTC) if acl is not None else None
+                existing = (
+                    await documents.get_by_external_id(source_id, fetched_doc.external_id)
+                    if fetched_doc.external_id is not None
+                    else None
+                )
+                if existing is not None:
+                    updated = await documents.update_from_sync(
+                        existing.id,
+                        filename=_safe_filename(fetched_doc.title, index),
+                        mime_type=mime_type,
+                        size_bytes=stored.size_bytes,
+                        storage_key=stored.key,
+                        status=DocumentStatus.PENDING,
+                        acl_principals=sorted(acl.principals) if acl is not None else None,
+                        acl_synced_at=acl_stamp,
+                        acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                    )
+                    assert updated is not None  # row read in this txn  # noqa: S101
+                    page_doc_ids.append(existing.id)
+                else:
+                    created = await documents.create(
+                        owner_id=owner_id,
+                        collection_id=collection_id,
+                        filename=_safe_filename(fetched_doc.title, index),
+                        mime_type=mime_type,
+                        size_bytes=stored.size_bytes,
+                        storage_key=stored.key,
+                        acl_enforced=enforce_acl,
+                        status=DocumentStatus.PENDING,
+                        source_id=source_id,
+                        external_id=fetched_doc.external_id,
+                        acl_principals=sorted(acl.principals) if acl is not None else None,
+                        acl_synced_at=acl_stamp,
+                        acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                    )
+                    page_doc_ids.append(created.id)
+
+            # 4. The advancing cursor — SAME transaction as the mutations, so
+            #    the stored token is always the exact resume point.
+            await sources.set_sync_cursor(source_id, page.next_cursor)
+
+        # --- Post-commit, idempotent derived-state maintenance. --------------
+        for storage_key in orphaned_keys:
+            try:
+                await object_store.delete(str(tenant_id), storage_key)
+            except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                log.warning(
+                    "source_sync.object_cleanup_failed",
+                    source_id=str(source_id),
+                    storage_key=storage_key,
+                    error=type(exc).__name__,
+                )
+        for doc in deleted_docs:
+            try:
+                await sync_document_index_async(tenant_id, doc.id, settings=settings)
+            except DependencyError as exc:
+                log.warning(
+                    "source_sync.index_cleanup_failed",
+                    source_id=str(source_id),
+                    document_id=str(doc.id),
+                    error=exc.code,
+                )
+        if stale_ids:
+            try:
+                await stamp_index_acl_stale_async(tenant_id, stale_ids, settings=settings)
+            except DependencyError as exc:
+                # The Postgres stamp already committed; the hydration re-check
+                # is the enforcing backstop until the reindex repairs this.
+                log.warning(
+                    "source_sync.index_stale_stamp_failed",
+                    source_id=str(source_id),
+                    error=exc.code,
+                )
+        for document_id in page_doc_ids:
+            try:
+                await ingest_document_async(
+                    tenant_id,
+                    document_id,
+                    settings=settings,
+                    object_store=object_store,
+                    gateway=gateway,
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad doc must not fail the sync
+                log.warning(
+                    "source_sync.doc_failed",
+                    source_id=str(source_id),
+                    document_id=str(document_id),
+                    error=type(exc).__name__,
+                )
+        upserted += len(page_doc_ids)
+        deleted_count += len(deleted_docs)
+
+    # --- Terminal: the drained replay left the new baseline as the cursor. ----
+    now = datetime.now(UTC)
+    async with tenant_session_scope(tenant_id) as session:
+        documents = DocumentRepository(session, tenant_id)
+        indexed = len(await documents.list_for_source(source_id))
+        sources = SourceRepository(session, tenant_id)
+        await sources.update_status(
+            source_id,
+            status=SourceStatus.READY,
+            indexed_count=indexed,
+            last_error=None,
+            set_last_error=True,
+            last_synced_at=now,
+            set_last_synced_at=True,
+        )
+        if enforce_acl:
+            unmapped = await _count_unmapped(session, tenant_id, source_id)
+            await sources.record_acl_health(
+                source_id, acl_synced_at=now, unmapped_acl_count=unmapped
+            )
+    log.info(
+        "source_sync.incremental_done",
+        source_id=str(source_id),
+        upserted=upserted,
+        deleted=deleted_count,
+    )
+    return SyncResult(source_id, SourceStatus.READY, indexed)
 
 
 async def _fail_reauthorize(tenant_id: UUID, source_id: UUID, *, source_type: str) -> SyncResult:
