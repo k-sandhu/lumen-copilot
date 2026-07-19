@@ -262,6 +262,7 @@ async def _setup_and_seed(url: str, *, count: int) -> list[tuple[uuid.UUID, uuid
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key=f"key-{n}",
+                acl_enforced=False,
             )
             seeded.append((tenant.id, doc.id, doc.storage_key))
         await session.commit()

@@ -196,13 +196,14 @@ async def test_delete_removes_distinct_backing_objects(
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key=key,
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
         await session.commit()
 
-        ok = await _service(
-            session, tenant_id=tenant_id, owner_id=owner_id, store=store
-        ).delete(collection.id)
+        ok = await _service(session, tenant_id=tenant_id, owner_id=owner_id, store=store).delete(
+            collection.id
+        )
         await session.commit()
 
     assert ok is True
@@ -233,14 +234,15 @@ async def test_delete_removes_shared_object_exactly_once(
                 filename=name,
                 mime_type="text/plain",
                 size_bytes=1,
-                storage_key=shared,  # identical content-addressed key
+                storage_key=shared,
+                acl_enforced=False,  # identical content-addressed key
                 status=DocumentStatus.READY,
             )
         await session.commit()
 
-        ok = await _service(
-            session, tenant_id=tenant_id, owner_id=owner_id, store=store
-        ).delete(collection.id)
+        ok = await _service(session, tenant_id=tenant_id, owner_id=owner_id, store=store).delete(
+            collection.id
+        )
         await session.commit()
 
     assert ok is True
@@ -271,6 +273,7 @@ async def test_delete_keeps_object_referenced_by_survivor_in_other_collection(
             mime_type="text/plain",
             size_bytes=1,
             storage_key=shared,
+            acl_enforced=False,
             status=DocumentStatus.READY,
         )
         await documents.create(
@@ -279,14 +282,15 @@ async def test_delete_keeps_object_referenced_by_survivor_in_other_collection(
             filename="in-b.txt",
             mime_type="text/plain",
             size_bytes=1,
-            storage_key=shared,  # survivor in the OTHER collection
+            storage_key=shared,
+            acl_enforced=False,  # survivor in the OTHER collection
             status=DocumentStatus.READY,
         )
         await session.commit()
 
-        ok = await _service(
-            session, tenant_id=tenant_id, owner_id=owner_id, store=store
-        ).delete(coll_a.id)
+        ok = await _service(session, tenant_id=tenant_id, owner_id=owner_id, store=store).delete(
+            coll_a.id
+        )
         await session.commit()
 
         # The object is kept: coll_b's document still references the shared key.

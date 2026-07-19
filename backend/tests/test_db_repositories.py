@@ -155,6 +155,7 @@ async def test_collection_and_document_and_chunk_chain(
         mime_type="application/pdf",
         size_bytes=1234,
         storage_key=f"{tenant_a}/abc/report.pdf",
+        acl_enforced=False,
     )
     assert doc.status is DocumentStatus.PENDING
 
@@ -189,6 +190,7 @@ async def test_chunk_embedding_may_be_null_until_ingested(
         mime_type="text/plain",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
     )
     chunk = await ChunkRepository(session, tenant_a).add(
         document_id=doc.id, ord=0, text="t", char_start=0, char_end=1
@@ -212,6 +214,7 @@ async def test_document_set_status(
         mime_type="text/plain",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
     )
     updated = await documents.set_status(doc.id, DocumentStatus.FAILED, error="boom")
     assert updated is not None
@@ -234,6 +237,7 @@ async def test_chat_session_messages_and_citations(
         mime_type="text/plain",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
     )
     chunk = await ChunkRepository(session, tenant_a).add(
         document_id=doc.id, ord=0, text="grounding passage", char_start=0, char_end=17
@@ -338,6 +342,7 @@ async def test_inv1_document_and_chunk_get_is_tenant_scoped(
         mime_type="application/pdf",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
     )
     chunk = await ChunkRepository(session, tenant_a).add(
         document_id=doc.id, ord=0, text="secret", char_start=0, char_end=6
@@ -425,6 +430,7 @@ async def test_collection_count_documents(
             mime_type="text/plain",
             size_bytes=1,
             storage_key=f"k{i}",
+            acl_enforced=False,
         )
     assert await collections.count_documents(coll.id) == 3
 
@@ -447,12 +453,22 @@ async def test_document_count_by_storage_key(
     assert await docs_a.count_by_storage_key(shared) == 0
 
     d1 = await docs_a.create(
-        owner_id=user_a.id, collection_id=coll_a.id, filename="a.txt",
-        mime_type="text/plain", size_bytes=1, storage_key=shared,
+        owner_id=user_a.id,
+        collection_id=coll_a.id,
+        filename="a.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        storage_key=shared,
+        acl_enforced=False,
     )
     await docs_a.create(
-        owner_id=user_a.id, collection_id=coll_a.id, filename="b.txt",
-        mime_type="text/plain", size_bytes=1, storage_key=shared,
+        owner_id=user_a.id,
+        collection_id=coll_a.id,
+        filename="b.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        storage_key=shared,
+        acl_enforced=False,
     )
     assert await docs_a.count_by_storage_key(shared) == 2  # two docs share it
 
@@ -462,8 +478,13 @@ async def test_document_count_by_storage_key(
     )
     coll_b = await CollectionRepository(session, tenant_b).create(owner_id=user_b.id, name="c")
     await DocumentRepository(session, tenant_b).create(
-        owner_id=user_b.id, collection_id=coll_b.id, filename="c.txt",
-        mime_type="text/plain", size_bytes=1, storage_key=shared,
+        owner_id=user_b.id,
+        collection_id=coll_b.id,
+        filename="c.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        storage_key=shared,
+        acl_enforced=False,
     )
     assert await docs_a.count_by_storage_key(shared) == 2  # unchanged by tenant B
 
@@ -575,6 +596,7 @@ async def _seed_doc_for_chunks(session: AsyncSession, tenant_id: uuid.UUID) -> u
         mime_type="text/plain",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
     )
     return doc.id
 
@@ -715,9 +737,7 @@ async def test_llm_usage_one_row_per_message_is_structural(
         owner_id=user.id, model="m", title="t"
     )
     messages = MessageRepository(session, tenant_a)
-    msg = await messages.add(
-        session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="m"
-    )
+    msg = await messages.add(session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="m")
     await session.flush()
 
     repo = LlmUsageRepository(session, tenant_a)

@@ -22,7 +22,7 @@ touches several repositories commits atomically.
 from __future__ import annotations
 
 import uuid as uuid_mod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -198,6 +198,8 @@ def _to_source(row: models.Source) -> Source:
         if row.connected_account is not None
         else None,
         sync_cursor=row.sync_cursor,
+        acl_synced_at=row.acl_synced_at,
+        unmapped_acl_count=row.unmapped_acl_count,
     )
 
 
@@ -215,6 +217,11 @@ def _to_document(row: models.Document) -> Document:
         error=row.error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        acl_enforced=row.acl_enforced,
+        acl_principals=tuple(row.acl_principals) if row.acl_principals is not None else None,
+        acl_synced_at=row.acl_synced_at,
+        acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
+        external_id=row.external_id,
     )
 
 
@@ -928,6 +935,22 @@ class UserRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return _to_user(row)
 
+    async def attested_email_map(self) -> dict[str, UUID]:
+        """Case-folded email → user id, **attested users only** (ADR-0019 §2/§4).
+
+        The sync-time identity snapshot the framework freezes into the
+        :class:`~app.connectors.base.AclMappingContext`: only users carrying an
+        audited identity attestation (``email_attested_at`` set) participate in
+        connector-ACL mapping — an unattested email maps to nothing (the
+        deliberate under-share). Tenant-scoped (INV-1).
+        """
+        stmt = select(models.User.email, models.User.id).where(
+            models.User.tenant_id == self._tenant_id,
+            models.User.email_attested_at.is_not(None),
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {str(row[0]).casefold(): row[1] for row in rows}
+
     async def set_avatar_key(self, user_id: UUID, *, avatar_key: str | None) -> User | None:
         """Set (or clear) the user's per-user profile-avatar key.
 
@@ -1436,6 +1459,51 @@ class SourceRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return _to_source(row)
 
+    async def set_sync_cursor(self, source_id: UUID, cursor: str | None) -> None:
+        """Persist the incremental-sync resume point (ADR-0019 §3).
+
+        Called by the framework inside each page transaction (mutations + the
+        advancing token commit atomically) and after a successful full sync
+        (the pre-enumeration baseline). ``None`` clears the cursor — the next
+        sync is a full resync (the HTTP-410 fallback). Tenant-scoped (INV-1);
+        a missing row is a no-op (the sync task already owns the source).
+        """
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+            )
+            .values(sync_cursor=cursor)
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
+    async def record_acl_health(
+        self,
+        source_id: UUID,
+        *,
+        acl_synced_at: datetime | None,
+        unmapped_acl_count: int | None,
+    ) -> None:
+        """Record the ACL-mirror health surface after a sync (ADR-0019 §2).
+
+        ``acl_synced_at`` is the source-level "mirrored ACLs last refreshed"
+        stamp; ``unmapped_acl_count`` is how many documents mapped to no Lumen
+        principal (ingested but invisible — surfaced so an admin sees the
+        silent-deny volume). Serialized onto the wire by the sources router.
+        """
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+            )
+            .values(acl_synced_at=acl_synced_at, unmapped_acl_count=unmapped_acl_count)
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
     async def delete(self, source_id: UUID) -> bool:
         """Delete the source **row** (tenant-scoped); ADR-0009 §5.
 
@@ -1473,9 +1541,23 @@ class DocumentRepository(_TenantScopedRepository):
         mime_type: str,
         size_bytes: int,
         storage_key: str,
+        acl_enforced: bool,
         status: DocumentStatus = DocumentStatus.PENDING,
         source_id: UUID | None = None,
+        external_id: str | None = None,
+        acl_principals: Sequence[str] | None = None,
+        acl_synced_at: datetime | None = None,
+        acl_scope_ids: Sequence[str] | None = None,
     ) -> Document:
+        """Create a document row — the ACL-mode write seam (ADR-0019 §2).
+
+        ``acl_enforced`` is deliberately **mandatory with no default**: the
+        enforcement mode is never defaulted at write time. Callers derive it
+        structurally — ``False`` for uploads/``web`` (owner-or-grant), ``True``
+        for any document originating from a ``map_acl``-declaring connector
+        (mirror-only; ownership/grants do not apply). A managed-source document
+        persisted ``acl_enforced=False`` is a defect the write-mode tests pin.
+        """
         row = models.Document(
             tenant_id=self._tenant_id,
             owner_id=owner_id,
@@ -1486,10 +1568,127 @@ class DocumentRepository(_TenantScopedRepository):
             storage_key=storage_key,
             status=status.value,
             source_id=source_id,
+            acl_enforced=acl_enforced,
+            acl_principals=list(acl_principals) if acl_principals is not None else None,
+            acl_synced_at=acl_synced_at,
+            acl_scope_ids=list(acl_scope_ids) if acl_scope_ids is not None else None,
+            external_id=external_id,
         )
         self._session.add(row)
         await self._session.flush()
         return _to_document(row)
+
+    async def get_by_external_id(self, source_id: UUID, external_id: str) -> Document | None:
+        """The source's document for a provider id, or ``None`` (ADR-0019 §3).
+
+        The identity-reconcile lookup: incremental upserts key on
+        ``(source_id, external_id)`` (unique when set) instead of wholesale
+        delete-and-recreate. Tenant-scoped (INV-1).
+        """
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.source_id == source_id,
+            models.Document.external_id == external_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_document(row) if row is not None else None
+
+    async def update_from_sync(
+        self,
+        document_id: UUID,
+        *,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+        storage_key: str,
+        status: DocumentStatus,
+        acl_principals: Sequence[str] | None,
+        acl_synced_at: datetime | None,
+        acl_scope_ids: Sequence[str] | None,
+    ) -> Document | None:
+        """Refresh an existing connector document in place (incremental upsert).
+
+        Keeps the row id stable (the index replaces chunk docs by document id,
+        so no orphans) while replacing content metadata + the mirrored ACL.
+        ``acl_enforced`` is intentionally NOT a parameter: the mode is set once
+        at create from the connector's declared capability and never flips.
+        Tenant-scoped; returns ``None`` when no row matches (INV-1).
+        """
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.filename = filename
+        row.mime_type = mime_type
+        row.size_bytes = size_bytes
+        row.storage_key = storage_key
+        row.status = status.value
+        row.error = None
+        row.acl_principals = list(acl_principals) if acl_principals is not None else None
+        row.acl_synced_at = acl_synced_at
+        row.acl_scope_ids = list(acl_scope_ids) if acl_scope_ids is not None else None
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_document(row)
+
+    async def stamp_acl_stale_by_scope(
+        self, source_id: UUID, scope_ids: Iterable[str]
+    ) -> list[UUID]:
+        """Stale-stamp every known descendant of the given containers (ADR-0019 §3).
+
+        Sets ``acl_synced_at → NULL`` on this source's ``acl_enforced``
+        documents whose persisted scope chain intersects ``scope_ids`` — the
+        freshness predicate then denies them **immediately**, not at window
+        expiry. Runs inside the caller's page transaction. Returns the affected
+        document ids so the caller can propagate the stamp to the search index
+        (update-by-query). Portable across Postgres and the offline SQLite: the
+        scope-chain intersection is evaluated in Python over the source's rows
+        (a bounded set — one source's corpus), not via a dialect-specific JSON
+        operator.
+        """
+        wanted = set(scope_ids)
+        if not wanted:
+            return []
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.source_id == source_id,
+            models.Document.acl_enforced.is_(True),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        stamped: list[UUID] = []
+        for row in rows:
+            chain = set(row.acl_scope_ids or [])
+            if chain & wanted:
+                row.acl_synced_at = None
+                stamped.append(row.id)
+        if stamped:
+            await self._session.flush()
+        return stamped
+
+    async def stamp_acl_stale_for_source(self, source_id: UUID) -> list[UUID]:
+        """Stale-stamp EVERY ``acl_enforced`` document of a source (fail closed).
+
+        The ADR-0019 §3 source-wide stamp for a page whose cascade effects are
+        unprovable (``integrity=incomplete``): every mirrored document is denied
+        immediately until a later sync re-examines it. Returns the affected ids
+        for the index propagation.
+        """
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.source_id == source_id,
+            models.Document.acl_enforced.is_(True),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        stamped: list[UUID] = []
+        for row in rows:
+            row.acl_synced_at = None
+            stamped.append(row.id)
+        if stamped:
+            await self._session.flush()
+        return stamped
 
     async def list_for_source(self, source_id: UUID) -> list[Document]:
         """List the documents a source ingested (tenant-scoped, INV-1).
@@ -4738,6 +4937,41 @@ class SandboxSessionRepository(_TenantScopedRepository):
             models.SandboxSession.id == sandbox_session_id,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+
+class SourceReconcileRepository:
+    """Cross-tenant read of connected managed sources — the sync-poll beat ONLY.
+
+    **Not** tenant-scoped (the one source read that spans tenants), mirroring
+    :class:`ScheduleReconcileRepository` / :class:`RunDeliveryReconcileRepository`:
+    the periodic connector poll (ADR-0019 §3 cadence) must find every tenant's
+    connected managed sources so it can enqueue each sync through the existing
+    per-tenant rate-limited seam. Runs under a **bypass**-scoped session
+    (``bind_bypass``) — a deliberate, system-only path, never a request path
+    (requests stay tenant-scoped, INV-1). Read-only.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_connected_pollable(self) -> list[tuple[UUID, UUID]]:
+        """``(tenant_id, source_id)`` for every pollable connected managed source.
+
+        Pollable = carries a vault credential (``auth_secret_ref`` set — the
+        managed marker) and sits in a resting status (``ready``/``error``) — a
+        mid-``syncing``/``pending`` source already has a sync in flight, and a
+        ``pending_auth`` source has no credential yet. Ordered for determinism.
+        """
+        stmt = (
+            select(models.Source.tenant_id, models.Source.id)
+            .where(
+                models.Source.auth_secret_ref.is_not(None),
+                models.Source.status.in_((SourceStatus.READY.value, SourceStatus.ERROR.value)),
+            )
+            .order_by(models.Source.created_at.asc(), models.Source.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(row[0], row[1]) for row in rows]
 
 
 class CodeRunRepository(_TenantScopedRepository):

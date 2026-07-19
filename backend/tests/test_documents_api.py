@@ -270,6 +270,7 @@ async def _seed_document(
             mime_type=_TXT,
             size_bytes=len(data),
             storage_key=stored.key,
+            acl_enforced=False,
         )
         await session.commit()
         return doc.id
@@ -689,12 +690,22 @@ async def test_delete_keeps_object_shared_by_another_document(
     )
     # Same data+filename ⇒ same storage key ⇒ one object referenced by both docs.
     doc_a = await _seed_document(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        collection_id=coll, filename="same.txt", data=b"identical bytes",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        filename="same.txt",
+        data=b"identical bytes",
     )
     doc_b = await _seed_document(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        collection_id=coll, filename="same.txt", data=b"identical bytes",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        filename="same.txt",
+        data=b"identical bytes",
     )
     assert len(store.objects) == 1  # deduped by content address
     shared_key = next(iter(store.objects))
@@ -1071,10 +1082,7 @@ async def _make_ready_with_chunks(
     async with sessionmaker() as session:
         await ChunkRepository(session, tenant_id).replace_for_document(
             document_id,
-            [
-                ChunkInput(text=p.text, char_start=p.char_start, char_end=p.char_end)
-                for p in pieces
-            ],
+            [ChunkInput(text=p.text, char_start=p.char_start, char_end=p.char_end) for p in pieces],
         )
         updated = await DocumentRepository(session, tenant_id).set_status(
             document_id, DocumentStatus.READY

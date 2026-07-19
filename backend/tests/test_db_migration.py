@@ -122,7 +122,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0039_connector_oauth"]
+    assert list(script.get_heads()) == ["0040_gdrive_acl"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -219,6 +219,12 @@ def test_migration_chain_is_linear_single_head() -> None:
     sandbox_sessions = script.get_revision("0038_sandbox_sessions")
     assert sandbox_sessions is not None
     assert sandbox_sessions.down_revision == "0037_session_summaries"
+    connector_oauth = script.get_revision("0039_connector_oauth")
+    assert connector_oauth is not None
+    assert connector_oauth.down_revision == "0038_sandbox_sessions"
+    gdrive_acl = script.get_revision("0040_gdrive_acl")
+    assert gdrive_acl is not None
+    assert gdrive_acl.down_revision == "0039_connector_oauth"
 
 
 def test_offline_reusable_sandbox_session_migration_round_trips(
@@ -565,7 +571,6 @@ def test_offline_tool_invocations_migration_round_trips(
     assert "drop table tool_invocations" in down
 
 
-
 def test_offline_artifacts_migration_round_trips(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -823,8 +828,7 @@ def test_offline_schedules_migration_round_trips(
     # The three tenant-leading indexes (owner list, by assistant, enabled sweep).
     assert "create index ix_schedules_tenant_owner on schedules (tenant_id, owner_id)" in up
     assert (
-        "create index ix_schedules_tenant_assistant on schedules "
-        "(tenant_id, assistant_id)" in up
+        "create index ix_schedules_tenant_assistant on schedules " "(tenant_id, assistant_id)" in up
     )
     assert "create index ix_schedules_tenant_enabled on schedules (tenant_id, enabled)" in up
     # The #235 residual FK: runs.schedule_id → schedules.id, SET NULL.
@@ -981,9 +985,7 @@ def test_offline_tenant_tool_policy_migration_round_trips(
     # The per-tenant-per-tool upsert UNIQUE.
     assert "uq_tenant_tool_policy_tenant_tool" in up
     # Tenant-leading index (the INV-1 predicate column).
-    assert (
-        "create index ix_tenant_tool_policy_tenant_id on tenant_tool_policy (tenant_id)" in up
-    )
+    assert "create index ix_tenant_tool_policy_tenant_id on tenant_tool_policy (tenant_id)" in up
     # The RLS backstop — same fail-closed GUC policy as 0007.
     assert "alter table tenant_tool_policy enable row level security" in up
     assert "alter table tenant_tool_policy force row level security" in up
@@ -1031,8 +1033,7 @@ def test_offline_tenant_sandbox_policy_migration_round_trips(
     assert "ck_tenant_sandbox_policy_runtime_pos" in up
     # Tenant-leading index (the INV-1 predicate column).
     assert (
-        "create index ix_tenant_sandbox_policy_tenant_id on tenant_sandbox_policy (tenant_id)"
-        in up
+        "create index ix_tenant_sandbox_policy_tenant_id on tenant_sandbox_policy (tenant_id)" in up
     )
     # The RLS backstop — same fail-closed GUC policy as 0007.
     assert "alter table tenant_sandbox_policy enable row level security" in up

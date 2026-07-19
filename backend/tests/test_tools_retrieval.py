@@ -136,6 +136,7 @@ async def _doc(
         mime_type="text/plain",
         size_bytes=len(text),
         storage_key=f"{tenant_id}/{filename}",
+        acl_enforced=False,
         status=DocumentStatus.READY,
     )
     await ChunkRepository(session, tenant_id).replace_for_document(
@@ -158,9 +159,7 @@ async def _call(session: AsyncSession, principal: Principal, name: str, args: di
 # --- Registry discovery + governance metadata (AC-1) ------------------------
 
 
-_RETRIEVAL_TOOLS = frozenset(
-    {"search_text", "search_documents", "list_documents", "get_document"}
-)
+_RETRIEVAL_TOOLS = frozenset({"search_text", "search_documents", "list_documents", "get_document"})
 
 
 def test_registry_discovers_the_retrieval_tools() -> None:
@@ -343,9 +342,7 @@ class _RecordingRetrieval:
         self.text_k = k
         return []
 
-    async def search_documents(
-        self, *, principal: object, name_or_query: str, k: int = 10
-    ) -> list:
+    async def search_documents(self, *, principal: object, name_or_query: str, k: int = 10) -> list:
         self.docs_k = k
         return []
 
@@ -416,9 +413,17 @@ def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> No
     short = rendered_snippet("short text", budget)
     assert short == "short text"
     assert short in _render_passages(
-        [RetrievedPassage(
-            chunk_id=uuid.uuid4(), document_id=uuid.uuid4(), document_name="d",
-            ord=0, text="short text", char_start=0, char_end=10, score=None,
-        )],
+        [
+            RetrievedPassage(
+                chunk_id=uuid.uuid4(),
+                document_id=uuid.uuid4(),
+                document_name="d",
+                ord=0,
+                text="short text",
+                char_start=0,
+                char_end=10,
+                score=None,
+            )
+        ],
         budget,
     )

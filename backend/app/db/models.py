@@ -252,6 +252,12 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     connect_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     connected_account: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     sync_cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ACL-mirror health surface (ADR-0019 §2, F-CB-2): when the source's mirrored
+    # ACLs were last refreshed by a sync, and how many documents mapped to no
+    # Lumen principal (ingested but invisible — attestation lights them up).
+    # NULL for non-ACL connectors and before the first sync.
+    acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unmapped_acl_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="source")
 
@@ -263,6 +269,17 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_documents_collection_id", "collection_id"),
         Index("ix_documents_source_id", "source_id"),
+        # Identity-based reconcile (ADR-0019 §3): a provider document maps to at
+        # most ONE row per source. Partial — direct uploads (external_id NULL)
+        # are unconstrained.
+        Index(
+            "uq_documents_source_external_id",
+            "source_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+            sqlite_where=text("external_id IS NOT NULL"),
+        ),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
     )
 
@@ -294,6 +311,29 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
+    # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
+    # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
+    # mirrored-principal intersection and NOTHING else — owner/grants never
+    # apply. The mode is a mandatory no-default argument at the write seam
+    # (``DocumentRepository.create``); the column default exists solely for the
+    # 0039 backfill of pre-existing upload/web rows, never as a code path.
+    acl_enforced: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # The mirrored principal-set (JSON array of `user:<uuid>` / `tenant`); NULL
+    # for non-connector documents. An empty array admits no one (fail closed).
+    acl_principals: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
+    # When the ACL was last examined/attested by a sync. NULL ⇒ stale ⇒ deny;
+    # the cascade stale-stamp (§3) sets it NULL for an immediate deny.
+    acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The container scope chain (drive id + ancestor folder ids) the cascade
+    # stale-stamp matches on (§3). JSON array of opaque scope ids; NULL for
+    # non-connector documents.
+    acl_scope_ids: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
+    # The provider's stable document id — identity-based reconcile (§3); NULL
+    # for direct uploads and full-replace connectors.
+    external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     collection: Mapped[Collection] = relationship(back_populates="documents")
     source: Mapped[Source | None] = relationship(back_populates="documents")

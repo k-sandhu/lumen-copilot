@@ -67,6 +67,7 @@ async def _seed_doc(
             mime_type="application/pdf",
             size_bytes=10,
             storage_key=f"{tenant_id}/{name}",
+            acl_enforced=False,
         )
         await s.commit()
 

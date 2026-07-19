@@ -327,7 +327,9 @@ class DocumentService:
             filename=filename,
         )
 
-        # 4. Register the row, owned by the caller, pending ingestion.
+        # 4. Register the row, owned by the caller, pending ingestion. An
+        # upload is owner-or-grant governed — never a mirrored source ACL
+        # (ADR-0019 §2: the mode is explicit at every write, no default).
         document = await self._documents.create(
             owner_id=self._owner_id,
             collection_id=collection_id,
@@ -335,6 +337,7 @@ class DocumentService:
             mime_type=content_type,
             size_bytes=stored.size_bytes,
             storage_key=stored.key,
+            acl_enforced=False,
             status=DocumentStatus.PENDING,
         )
 

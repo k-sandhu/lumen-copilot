@@ -371,6 +371,7 @@ async def test_delete_removes_ingested_document_objects(
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key=key,
+                acl_enforced=False,
                 status=DocumentStatus.READY,
                 source_id=src.id,
             )

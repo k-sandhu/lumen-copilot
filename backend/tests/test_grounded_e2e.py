@@ -165,7 +165,7 @@ class _GroundedAnswerGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         tool_texts = [
             getattr(m, "content", "")
@@ -285,6 +285,7 @@ async def _upload_and_ingest(ctx: _Ctx, *, owner: Principal, filename: str, text
             mime_type="text/plain",
             size_bytes=len(text.encode("utf-8")),
             storage_key=storage_key,
+            acl_enforced=False,
             status=DocumentStatus.PENDING,
         )
         await session.commit()

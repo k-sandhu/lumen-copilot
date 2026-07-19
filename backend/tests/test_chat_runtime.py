@@ -261,6 +261,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{tenant.id}/taxes.pdf",
+                acl_enforced=False,
             )
             chunks = await ChunkRepository(seed, tenant.id).replace_for_document(
                 doc.id,
@@ -829,7 +830,10 @@ async def test_run_python_seam_wired_when_allowed_but_gated_by_approval(ctx: _Ct
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
     runtime = _sandbox_runtime(
-        ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane,
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
         sandbox_factory=_factory,
     )
     # An assistant config whose allow-list grants run_python (admin/assistant-gated).
@@ -856,9 +860,7 @@ async def test_run_python_seam_wired_when_allowed_but_gated_by_approval(ctx: _Ct
     # (INV-7: no unapproved consequential action executes).
     assert seam_holder["seam"].submissions == []
     # The tool_result event reports the governance denial the model reads.
-    tool_results = [
-        e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"
-    ]
+    tool_results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
     assert any(
         e["data"]["tool"] == "run_python" and e["data"]["ok"] is False  # type: ignore[index]
         for e in tool_results
@@ -885,7 +887,10 @@ async def test_ad_hoc_session_never_wires_run_python_seam(ctx: _Ctx) -> None:
     )
     backplane = InMemoryBackplane()
     runtime = _sandbox_runtime(
-        ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane,
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
         sandbox_factory=factory,
     )
     await runtime.run(
@@ -1064,9 +1069,7 @@ class _RecordingSearchGateway:
         assert isinstance(tools, list)
         if any("truncated to fit the context window" in m.content for m in messages):
             self.saw_compaction = True
-        est = estimate_message_tokens(
-            messages, tools, counter=lambda t: len(t.encode("utf-8"))
-        )
+        est = estimate_message_tokens(messages, tools, counter=lambda t: len(t.encode("utf-8")))
         self.estimates.append(est)
         if tool_choice == "none":
             self.synthesis_estimates.append(est)
@@ -1470,8 +1473,6 @@ async def test_usage_row_zeroed_when_provider_omits_usage_and_is_tenant_scoped(
         assert foreign == []
 
 
-
-
 # --- Spec 0006 (#429): steps, ask_user, suggestions --------------------------
 
 
@@ -1547,13 +1548,11 @@ async def test_step_events_bracket_the_run(ctx: _Ctx) -> None:
     names = [e.get("name") for e in envs if e["type"] == "event"]
     assert "suggestions" not in names
     # The tool turn's think step reports what it requested; turns are ordinal.
-    step_data = [
-        e["data"]
-        for e in envs
-        if e["type"] == "event" and e.get("name") == "step"
-    ]
+    step_data = [e["data"] for e in envs if e["type"] == "event" and e.get("name") == "step"]
     think_started = [
-        d for d in step_data if d["key"] == "think" and d["state"] == "started"  # type: ignore[index]
+        d
+        for d in step_data
+        if d["key"] == "think" and d["state"] == "started"  # type: ignore[index]
     ]
     assert [d["turn"] for d in think_started] == [1, 2]  # type: ignore[index]
     completed_details = [
@@ -1611,9 +1610,7 @@ async def test_ask_user_ends_turn_as_question(ctx: _Ctx) -> None:
     # Persisted: the question text IS the message; the structured payload
     # round-trips through the repository for the reload path (Message.question).
     async with ctx.sessionmaker() as session:
-        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert len(assistant) == 1
         stored = assistant[0]
@@ -1715,9 +1712,7 @@ async def test_ask_user_malformed_recovers_to_normal_answer(ctx: _Ctx) -> None:
     text = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
     assert text == "Recovered answer."
     async with ctx.sessionmaker() as session:
-        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert len(assistant) == 1
         assert assistant[0].content == "Recovered answer."
@@ -1759,9 +1754,7 @@ async def test_ask_user_not_intercepted_when_non_interactive(ctx: _Ctx) -> None:
     assert results[0]["data"]["ok"] is False  # type: ignore[index]
     assert envs[-1]["data"]["finishReason"] == "stop"  # type: ignore[index]
     async with ctx.sessionmaker() as session:
-        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert assistant[0].content == "Best-guess answer."
         assert assistant[0].question is None
@@ -2027,9 +2020,7 @@ async def test_session_usage_totals_and_last(ctx: _Ctx) -> None:
         assert last is not None and last.prompt_tokens == 300
         assert last.model == "m" and last.message_id is not None
         # INV-1: a foreign-tenant repository sees nothing.
-        foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(
-            ctx.session_id
-        )
+        foreign = await LlmUsageRepository(session, uuid.uuid4()).totals_for_session(ctx.session_id)
         assert foreign.answers == 0
 
 
@@ -2083,7 +2074,7 @@ async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
             api_key: object = None,
             api_base: object = None,
             cache_key: object = None,
-                ):
+        ):
             if self.first_prompt is None:
                 self.first_prompt = list(messages)  # type: ignore[call-overload]
             async for ev in super().stream_tools(
@@ -2674,9 +2665,7 @@ async def test_mid_batch_failure_keeps_dispatch_ordinals_and_full_trace(ctx: _Ct
     from app.services.tools.runner import hash_args
 
     async with ctx.sessionmaker() as session:
-        stmt = select(models.ToolInvocation).where(
-            models.ToolInvocation.tenant_id == ctx.tenant_id
-        )
+        stmt = select(models.ToolInvocation).where(models.ToolInvocation.tenant_id == ctx.tenant_id)
         rows = list((await session.execute(stmt)).scalars().all())
     assert len(rows) == 3
     by_hash = {r.args_hash: r for r in rows}
@@ -3054,9 +3043,7 @@ async def test_denial_only_batch_opens_no_call_scopes(ctx: _Ctx) -> None:
     from app.services.tools.runner import hash_args
 
     async with ctx.sessionmaker() as session:
-        stmt = select(models.ToolInvocation).where(
-            models.ToolInvocation.tenant_id == ctx.tenant_id
-        )
+        stmt = select(models.ToolInvocation).where(models.ToolInvocation.tenant_id == ctx.tenant_id)
         rows = list((await session.execute(stmt)).scalars().all())
     assert len(rows) == 2
     by_hash = {r.args_hash: r for r in rows}
@@ -3383,14 +3370,10 @@ async def test_exhausted_primary_fails_over_and_records_actual_model(ctx: _Ctx) 
         assert answered and answered[0].metadata["model"] == fallback
         # The ledger READ contract survives multi-row answers (#440 NEW-1):
         # one produced answer, sums across both scopes, "last" = the winner.
-        totals = await LlmUsageRepository(session, ctx.tenant_id).totals_for_session(
-            ctx.session_id
-        )
+        totals = await LlmUsageRepository(session, ctx.tenant_id).totals_for_session(ctx.session_id)
         assert totals.answers == 1
         assert totals.total_tokens == 12 + 35
-        last = await LlmUsageRepository(session, ctx.tenant_id).last_for_session(
-            ctx.session_id
-        )
+        last = await LlmUsageRepository(session, ctx.tenant_id).last_for_session(ctx.session_id)
         assert last is not None and last.model == fallback
         # Every scope row carries the durable answer correlation.
         assert all(r.answer_id == assistant[-1].id for r in rows)
@@ -3591,11 +3574,15 @@ async def test_midstream_fault_discards_partial_and_retries_cleanly(ctx: _Ctx) -
     the partial attempt's spend stays counted in the (single-route) usage row."""
     retrieval = _FakeRetrieval([])
     gateway = _MidStreamFaultGateway(
-        [[
-            StreamEvent(text="Clean answer."),
-            StreamEvent(usage=TokenUsage(prompt_tokens=20, completion_tokens=5, total_tokens=25)),
-            StreamEvent(finish_reason="stop"),
-        ]]
+        [
+            [
+                StreamEvent(text="Clean answer."),
+                StreamEvent(
+                    usage=TokenUsage(prompt_tokens=20, completion_tokens=5, total_tokens=25)
+                ),
+                StreamEvent(finish_reason="stop"),
+            ]
+        ]
     )
     sleeps, recorder = _sleep_recorder()
     envs = await _run_answer(ctx, gateway, retrieval, retry_sleep=recorder)
@@ -3616,9 +3603,7 @@ async def test_midstream_fault_discards_partial_and_retries_cleanly(ctx: _Ctx) -
         for e in envs
         if e["type"] == "event" and e.get("name") == "step"
     ]
-    think_started = [
-        s for s in steps if s.get("key") == "think" and s.get("state") == "started"
-    ]
+    think_started = [s for s in steps if s.get("key") == "think" and s.get("state") == "started"]
     assert len(think_started) == 1
     # Billing-honest: the failed attempt's 14 tokens + the retry's 25 all landed
     # in the ONE (single-route) usage row.
@@ -4211,9 +4196,7 @@ async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
     from app.db.repositories import SessionSummaryRepository
 
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
     assert row is not None
     assert row.evidence == ((ctx.document_id, ctx.chunk_id),)
     assert row.summary is None  # the TEXT summary is the async task's job
@@ -4502,9 +4485,7 @@ async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
     assert sleeps == []  # no retry: the window closed at the first narration
     assert gateway.calls_made == 1  # one attempt, no failover either
     # The narration that DID stream is on the wire (transient status).
-    assert any(
-        e["type"] == "event" and e.get("name") == "narration" for e in envs
-    )
+    assert any(e["type"] == "event" and e.get("name") == "narration" for e in envs)
 
 
 async def test_narration_payload_validates_against_the_contract(ctx: _Ctx) -> None:
@@ -4540,9 +4521,7 @@ async def test_narration_payload_validates_against_the_contract(ctx: _Ctx) -> No
         collection_ids=None,
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
-    narrations = [
-        e for e in envs if e["type"] == "event" and e.get("name") == "narration"
-    ]
+    narrations = [e for e in envs if e["type"] == "event" and e.get("name") == "narration"]
     assert narrations
     schema = _ws_schema()
     for e in narrations:
@@ -4634,9 +4613,7 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
     assert sleeps == []  # zero backoffs
     assert gateway.calls_made == 1  # one attempt: no retry, no failover
     # And no empty narration envelope was emitted for the textless flush.
-    assert not any(
-        e["type"] == "event" and e.get("name") == "narration" for e in envs
-    )
+    assert not any(e["type"] == "event" and e.get("name") == "narration" for e in envs)
 
 
 # --- The cache-hit KPI (#411 / ADR-0016 §2.6) --------------------------------
@@ -4733,9 +4710,7 @@ async def test_cache_kpi_emitted_without_usage_as_unreported(
     """A route that reports no usage still emits — zeros, a null ratio, and
     ``usage_reported=false`` — never a silent gap in the series."""
     log_rec = _patch_runtime_log(monkeypatch)
-    gateway = _ScriptedGateway(
-        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
-    )
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
     _sleeps, recorder = _sleep_recorder()
     envs = await _run_answer(ctx, gateway, _FakeRetrieval([]), retry_sleep=recorder)
     assert envs[-1]["type"] == "done"
@@ -4794,9 +4769,7 @@ async def test_cache_kpi_not_emitted_when_commit_fails(
         session.commit = _boom  # type: ignore[method-assign]
         return session
 
-    gateway = _ScriptedGateway(
-        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
-    )
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
     consumer = asyncio.create_task(_drain(backplane, stream_id))
@@ -4856,9 +4829,7 @@ async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
                 yield StreamEvent(finish_reason="stop")
             else:
                 yield StreamEvent(
-                    tool_calls=(
-                        ToolCall(id="c1", name="search_text", arguments={"query": "q"}),
-                    ),
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
                     finish_reason="tool_calls",
                 )
 

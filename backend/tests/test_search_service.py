@@ -188,6 +188,7 @@ async def _seed_document(
         mime_type="text/plain",
         size_bytes=10,
         storage_key="k",
+        acl_enforced=False,
         status=DocumentStatus.READY,
     )
     offset = 0
@@ -866,6 +867,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
                     mime_type="text/plain",
                     size_bytes=1,
                     storage_key="k",
+                    acl_enforced=False,
                     status=DocumentStatus.READY,
                 )
                 await ChunkRepository(sess, tenant).replace_for_document(
@@ -984,6 +986,7 @@ async def test_live_search_returns_granted_document_passages() -> None:
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key="k",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             await ChunkRepository(sess, tenant).replace_for_document(
@@ -999,8 +1002,12 @@ async def test_live_search_returns_granted_document_passages() -> None:
             )
             await sess.commit()
             await _index_document_chunks(
-                store, sess, tenant_id=tenant, document_id=doc.id,
-                owner_id=owner.id, collection_id=coll.id,
+                store,
+                sess,
+                tenant_id=tenant,
+                document_id=doc.id,
+                owner_id=owner.id,
+                collection_id=coll.id,
             )
 
             gateway = _LiveGateway(_unit_vector(_EMBED_DIM, hot))

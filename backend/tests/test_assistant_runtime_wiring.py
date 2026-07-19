@@ -196,7 +196,7 @@ class _OneSearchThenAnswer:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if not has_tool_result and tool_choice != "none":
@@ -246,12 +246,8 @@ async def ctx() -> AsyncIterator[_Ctx]:
             user = await UserRepository(seed, tenant.id).create(
                 email="alice@acme.test", password_hash="x", roles=[Role.MEMBER]
             )
-            coll_a = await CollectionRepository(seed, tenant.id).create(
-                owner_id=user.id, name="A"
-            )
-            coll_b = await CollectionRepository(seed, tenant.id).create(
-                owner_id=user.id, name="B"
-            )
+            coll_a = await CollectionRepository(seed, tenant.id).create(owner_id=user.id, name="A")
+            coll_b = await CollectionRepository(seed, tenant.id).create(owner_id=user.id, name="B")
             doc = await DocumentRepository(seed, tenant.id).create(
                 owner_id=user.id,
                 collection_id=coll_a.id,
@@ -259,6 +255,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{tenant.id}/a.pdf",
+                acl_enforced=False,
             )
             chunks = await ChunkRepository(seed, tenant.id).replace_for_document(
                 doc.id, [ChunkInput(text="A content.", char_start=0, char_end=10)]
@@ -269,9 +266,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
             await seed.commit()
             yield _Ctx(
                 sessionmaker=factory,
-                principal=Principal(
-                    user_id=user.id, tenant_id=tenant.id, roles=(Role.MEMBER,)
-                ),
+                principal=Principal(user_id=user.id, tenant_id=tenant.id, roles=(Role.MEMBER,)),
                 session_id=session.id,
                 collection_a=coll_a.id,
                 collection_b=coll_b.id,

@@ -143,9 +143,7 @@ class _RunPythonGateway:
             yield StreamEvent(finish_reason="stop")
         else:
             yield StreamEvent(
-                tool_calls=(
-                    ToolCall(id="p1", name="run_python", arguments={"code": "print(1)"}),
-                ),
+                tool_calls=(ToolCall(id="p1", name="run_python", arguments={"code": "print(1)"}),),
                 finish_reason="tool_calls",
             )
 
@@ -233,6 +231,7 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{ta.id}/taxes.pdf",
+                acl_enforced=False,
             )
             chunks = await ChunkRepository(seed, ta.id).replace_for_document(
                 doc.id,
@@ -357,9 +356,7 @@ async def test_write_file_is_simulated_no_artifact_or_transcript(
         assert sessions == []
 
 
-async def test_run_python_is_denied_no_code_run(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_python_is_denied_no_code_run(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC-1/AC-N: the T2 code tool is DENIED in a preview (no sandbox seam) — no code run."""
     _patch_runtime(monkeypatch, gateway=_RunPythonGateway(), retrieval=_Retrieval(_passage(ctx)))
 
@@ -416,9 +413,7 @@ async def test_debug_trace_has_prompt_retrieval_tools_outputs_timing(
 # --- INV-1/INV-2 (negative): cross-tenant / non-owned assistant → 404 --------
 
 
-async def test_cross_tenant_assistant_is_404(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_cross_tenant_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-1: an assistant in tenant A is invisible to a caller in tenant B (404)."""
     _patch_runtime(
         monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
@@ -430,9 +425,7 @@ async def test_cross_tenant_assistant_is_404(
             await service.run_test(ctx.assistant_id, input_text="hi")
 
 
-async def test_non_owner_assistant_is_404(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_non_owner_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-2: a non-owner (same tenant, not admin) cannot test another user's draft (404)."""
     _patch_runtime(
         monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))

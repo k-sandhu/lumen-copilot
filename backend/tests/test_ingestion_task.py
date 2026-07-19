@@ -210,6 +210,7 @@ async def _seed_document(*, mime_type: str, key: str) -> tuple[uuid.UUID, uuid.U
             mime_type=mime_type,
             size_bytes=1,
             storage_key=key,
+            acl_enforced=False,
         )
     return tenant.id, doc.id
 
