@@ -52,11 +52,14 @@ class DocumentStatus(str, enum.Enum):
 class SourceStatus(str, enum.Enum):
     """Connector sync lifecycle (contracts/openapi.yaml SourceStatus, ADR-0009 §4).
 
-    ``pending`` = added, first sync not yet run; ``syncing`` = a sync is in
+    ``pending_auth`` = a managed source was created but its OAuth consent has
+    not completed (ADR-0019 §1 — run the connect flow); ``pending`` = authorized
+    (or a ``web`` source), first sync not yet run; ``syncing`` = a sync is in
     flight; ``ready`` = the last sync succeeded and content is indexed;
     ``error`` = the last sync failed (see ``last_error``).
     """
 
+    PENDING_AUTH = "pending_auth"
     PENDING = "pending"
     SYNCING = "syncing"
     READY = "ready"
@@ -140,13 +143,17 @@ class SecretKind(str, enum.Enum):
     """What a stored secret is *for* (issue #209).
 
     The consumer seam: ``MCP_AUTH`` is an MCP server's auth token/header (E3),
-    ``SEARCH_API`` a hosted web-search provider key (SPIKE-4), ``OTHER`` a
-    forward-compatible catch-all for future connector/action credentials. The
-    column admits more kinds without a schema change.
+    ``SEARCH_API`` a hosted web-search provider key (SPIKE-4),
+    ``CONNECTOR_OAUTH`` a managed connector's OAuth refresh token (ADR-0019 §1 —
+    referenced by ``sources.auth_secret_ref``, read only in-process by the sync
+    path), ``OTHER`` a forward-compatible catch-all for future connector/action
+    credentials. The DB CHECK (``ck_secrets_kind``) mirrors this set — widening
+    it is a migration, not just an enum edit.
     """
 
     MCP_AUTH = "mcp_auth"
     SEARCH_API = "search_api"
+    CONNECTOR_OAUTH = "connector_oauth"
     OTHER = "other"
 
 
@@ -602,6 +609,12 @@ class User:
     # initials fallback. The user manages their own; the shell reads a presigned GET
     # URL delivered on ``GET /auth/me`` (mirrors the tenant ``logo_key``, but per-user).
     avatar_key: str | None = None
+    # Identity attestation for connector-ACL mapping (ADR-0019 §2): set by a
+    # tenant admin's audited attest action (or the provider-verified
+    # auto-attestation at OAuth callback). ``None`` = unattested — the ACL
+    # mapper never emits a principal for this user.
+    email_attested_at: datetime | None = None
+    email_attested_by: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,6 +693,16 @@ class Source:
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    # Managed-connector OAuth surface (ADR-0019 §1; null/0 for `web` sources).
+    # ``auth_secret_ref`` points at the CC-C vault row holding the refresh token
+    # (never the token itself); ``connect_generation`` is the monotonic per-source
+    # flow counter the callback compares against; ``connected_account`` is
+    # provider-account metadata ({"email": ...}) — never token material;
+    # ``sync_cursor`` is the incremental-sync resume point (ADR-0019 §3).
+    auth_secret_ref: UUID | None = None
+    connect_generation: int = 0
+    connected_account: dict[str, object] | None = None
+    sync_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1241,9 +1264,7 @@ class RunDeliveryStatus(str, enum.Enum):
 
 
 # The terminal-for-reading statuses — a delivery the owner has already seen.
-_READ_RUN_DELIVERY_STATUSES: frozenset[RunDeliveryStatus] = frozenset(
-    {RunDeliveryStatus.READ}
-)
+_READ_RUN_DELIVERY_STATUSES: frozenset[RunDeliveryStatus] = frozenset({RunDeliveryStatus.READ})
 
 
 @dataclass(frozen=True, slots=True)

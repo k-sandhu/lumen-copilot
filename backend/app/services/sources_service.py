@@ -49,17 +49,18 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.connectors.base import ConnectorConfigError
+from app.connectors.base import ConnectorConfigError, get_oauth_spec
 from app.connectors.registry import UnknownConnectorError, get_connector
-from app.core.errors import ValidationError
+from app.core.errors import ConflictError, ForbiddenError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
+    SecretRepository,
     SourceRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Source, SourceStatus
+from app.domain.entities import AuditOutcome, Role, Source, SourceStatus
 from app.services.audit import AuditSink
 from app.storage import ObjectStore
 
@@ -165,6 +166,7 @@ class SourcesService:
         *,
         tenant_id: UUID,
         owner_id: UUID,
+        roles: tuple[Role, ...] = (),
         object_store: ObjectStore,
         audit: AuditSink,
         request_id: str,
@@ -176,6 +178,7 @@ class SourcesService:
         self._documents = DocumentRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._roles = roles
         self._object_store = object_store
         self._audit = audit
         self._request_id = request_id
@@ -187,15 +190,59 @@ class SourcesService:
         """Deny-by-default ownership check (spec 0004 §2.2, INV-2)."""
         return source.owner_id == self._owner_id
 
+    @staticmethod
+    def _is_managed(source_type: str) -> bool:
+        """Whether ``source_type`` is a managed OAuth connector (ADR-0019 §1).
+
+        Managed = the registered connector exposes the ``oauth_spec`` capability.
+        An unknown type is not managed (its create/lookup paths reject it
+        elsewhere).
+        """
+        try:
+            return get_oauth_spec(get_connector(source_type)) is not None
+        except UnknownConnectorError:
+            return False
+
+    async def _require_admin(self, source_id: UUID | None, reason: str) -> None:
+        """Action-time admin gate for managed-source mutations (ADR-0019 §1).
+
+        Checked against the roles resolved for THIS request — a demoted owner
+        loses every managed mutation. The denial is audited
+        (``permission.denied``, INV-6) before the typed 403 (INV-5).
+        """
+        if Role.ADMIN in self._roles:
+            return
+        await self._audit.emit(
+            action=AuditAction.PERMISSION_DENIED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="source",
+            resource_id=str(source_id) if source_id is not None else "new",
+            outcome=AuditOutcome.DENIED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={"reason": reason},
+        )
+        # The typed 403 aborts the request before the route's commit, which
+        # would roll the deny-audit back with it — commit it now (INV-6; the
+        # gate runs before any other write in every mutation path, so nothing
+        # else rides this commit).
+        await self._session.commit()
+        raise ForbiddenError("Managed-source mutations require the admin role.")
+
     async def _visible(self, source_id: UUID) -> Source | None:
         """Fetch a source the caller may see, or ``None`` (→ 404).
 
         ``None`` for a missing id, a foreign-tenant id (the repository sees no
-        row), *or* a same-tenant source owned by another user (ownership check) —
-        INV-1/INV-2 collapse all three to 404 at the router.
+        row), *or* a same-tenant **web** source owned by another user — INV-1/
+        INV-2 collapse all three to 404 at the router. **Managed** sources are
+        tenant-level admin resources (ADR-0019 §1): they are visible to any
+        tenant member here (the mutation paths then apply the audited admin
+        gate — wrong role is a 403 per INV-5, not existence non-disclosure).
         """
         source = await self._sources.get(source_id)
-        if source is None or not self._owns(source):
+        if source is None:
+            return None
+        if not self._is_managed(source.type) and not self._owns(source):
             return None
         return source
 
@@ -219,29 +266,37 @@ class SourcesService:
 
     # --- use-cases ----------------------------------------------------------
 
-    async def add(self, *, source_type: str, url: str) -> Source:
-        """Add a source: validate + SSRF-check, create the row, enqueue first sync.
+    async def add(
+        self,
+        *,
+        source_type: str,
+        url: str | None = None,
+        config: dict[str, object] | None = None,
+    ) -> Source:
+        """Add a source: validate, create the row, enqueue first sync (web).
 
         Order (fail-closed):
 
         1. **Connector** — resolve the connector for ``source_type`` (unknown type
            → 422 ``unsupported_source_type``).
-        2. **Validate + SSRF** — ``connector.validate_config`` runs the scheme/host
-           SSRF pre-check; a blocked URL raises ``ConnectorConfigError``
+        2. **Admin gate** — a *managed* type (the connector exposes ``oauth_spec``,
+           ADR-0019 §1) requires the admin role at action time (403, audited).
+        3. **Validate + SSRF** — ``connector.validate_config`` validates the
+           config; for the web connector that runs the scheme/host SSRF pre-check
            (``url_blocked`` → 422) *before* anything is written (ADR-0009 §3).
-        3. **Backing collection** — create a collection owned by the caller to home
-           the source's ingested documents (``documents.collection_id`` is
-           non-null); its id is stored on the source config so the sync task can
-           find it.
-        4. **Source row** — ``status=pending``, owned by the caller.
-        5. **Audit** ``source.added`` (INV-6).
-        6. **Enqueue** the first sync after commit (never in the request path).
+        4. **Backing collection** — create a collection owned by the caller to home
+           the source's ingested documents; its id is stored on the source config
+           so the sync task can find it.
+        5. **Source row** — ``status=pending`` (web) or ``pending_auth`` (managed).
+        6. **Audit** ``source.added`` (INV-6).
+        7. **Enqueue** the first sync after commit (web only — a managed source
+           syncs after its connect flow completes).
 
         Raises:
+            ForbiddenError: a non-admin creating a managed source (INV-5).
             ValidationError: unknown ``source_type``, or an invalid / SSRF-blocked
-                URL — all mapped to **422** (INV-8). The connector's stable ``code``
-                (``url_blocked`` for SSRF) is carried onto the Problem so the wire
-                distinguishes the cases (ADR-0009 §3).
+                config — all mapped to **422** (INV-8) with the connector's stable
+                ``code`` (``url_blocked``, ``invalid_config``, …).
         """
         try:
             connector = get_connector(source_type)
@@ -251,30 +306,44 @@ class SourcesService:
                 code="unsupported_source_type",
             ) from exc
 
+        managed = get_oauth_spec(connector) is not None
+        if managed:
+            # Every managed-source mutation is admin-gated at action time
+            # (ADR-0019 §1) — creation included, audited on denial.
+            await self._require_admin(None, "managed_source_create")
+
         # SSRF + config validation. The connector raises a vendor-free
         # ConnectorConfigError (e.g. url_blocked); map it to the HTTP-aware
         # ValidationError (422) here so the router stays I/O- and error-mapping-free
         # and the connector boundary keeps emitting domain errors (ADR-0004).
+        raw_config: dict[str, object] = dict(config or {})
+        if url is not None:
+            raw_config["url"] = url
         try:
-            validated = connector.validate_config({"url": url})
+            validated = connector.validate_config(raw_config)
         except ConnectorConfigError as exc:
             raise ValidationError(exc.detail, code=exc.code) from exc
 
         # A backing collection homes the source's ingested documents. Named after
-        # the connector + URL so it is recognisable in the documents surface.
+        # the connector + its salient config so it is recognisable in the
+        # documents surface.
+        label = str(validated.get("url") or validated.get("mode") or source_type)
         collection = await self._collections.create(
             owner_id=self._owner_id,
-            name=f"{source_type}: {validated.get('url', url)}",
+            name=f"{source_type}: {label}",
             description="Documents ingested from a connected source (ADR-0009).",
         )
-        config: dict[str, object] = dict(validated)
-        config["collection_id"] = str(collection.id)
+        stored: dict[str, object] = dict(validated)
+        stored["collection_id"] = str(collection.id)
 
+        # A managed source starts in ``pending_auth`` (no credential yet; the
+        # connect flow moves it to ``pending`` and enqueues the first sync) —
+        # nothing to enqueue here. A web source syncs immediately.
         source = await self._sources.create(
             owner_id=self._owner_id,
             type=source_type,
-            config=config,
-            status=SourceStatus.PENDING,
+            config=stored,
+            status=SourceStatus.PENDING_AUTH if managed else SourceStatus.PENDING,
         )
 
         await self._audit.emit(
@@ -285,10 +354,13 @@ class SourcesService:
             outcome=AuditOutcome.ALLOWED,
             request_id=self._request_id,
             source_ip=self._source_ip,
-            metadata={"type": source_type, "url": str(config.get("url"))},
+            metadata={"type": source_type, "url": str(stored.get("url"))}
+            if not managed
+            else {"type": source_type, "mode": str(stored.get("mode"))},
         )
 
-        self._enqueue_sync_after_commit(source.id)
+        if not managed:
+            self._enqueue_sync_after_commit(source.id)
         return source
 
     async def list_page(self, *, cursor: str | None, limit: int | None) -> SourcePage:
@@ -324,6 +396,15 @@ class SourcesService:
         source = await self._visible(source_id)
         if source is None:
             return None
+        if self._is_managed(source.type):
+            # Action-time admin gate (ADR-0019 §1): a demoted owner loses
+            # on-demand sync too. 403, audited — after the 404 visibility check.
+            await self._require_admin(source_id, "managed_source_sync")
+            if source.status == SourceStatus.PENDING_AUTH:
+                raise ConflictError(
+                    "source is awaiting OAuth consent and cannot sync",
+                    code="source_pending_auth",
+                )
         if source.status == SourceStatus.SYNCING:
             # Already in flight — no new sync, no new audit (idempotent no-op).
             return source, False
@@ -382,6 +463,9 @@ class SourcesService:
         source = await self._visible(source_id)
         if source is None:
             return False
+        if self._is_managed(source.type):
+            # Action-time admin gate (ADR-0019 §1) — 403, audited.
+            await self._require_admin(source_id, "managed_source_delete")
 
         # Snapshot — taken before any delete so the backing-collection emptiness
         # check below reads a stable pre-delete view regardless of autoflush.
@@ -428,6 +512,26 @@ class SourcesService:
             )
             if not has_unrelated_documents:
                 await self._collections.delete(collection_id)
+
+        # A managed source's vault credential dies with it (ADR-0019 §1 — no
+        # orphaned refresh tokens). Deleted via the repository (deletion needs no
+        # cipher) and audited exactly like the vault's own delete; the
+        # ``sources.auth_secret_ref`` FK is SET NULL so ordering is safe.
+        if source.auth_secret_ref is not None:
+            secret_deleted = await SecretRepository(self._session, self._tenant_id).delete(
+                source.auth_secret_ref
+            )
+            if secret_deleted:
+                await self._audit.emit(
+                    action=AuditAction.SECRET_DELETED,
+                    actor=AuditActor.user(self._owner_id),
+                    resource_type="secret",
+                    resource_id=str(source.auth_secret_ref),
+                    outcome=AuditOutcome.ALLOWED,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata={"reason": "source_deleted", "source_id": str(source_id)},
+                )
 
         deleted = await self._sources.delete(source_id)
         if not deleted:  # pragma: no cover — visibility already established

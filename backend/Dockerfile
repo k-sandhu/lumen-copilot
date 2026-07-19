@@ -34,4 +34,8 @@ EXPOSE 8000
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# --no-access-log: uvicorn's access logger writes the FULL request path incl.
+# query strings — the OAuth callback carries `state`/`code` there (ADR-0019 §1),
+# so the default logger would leak authorization codes into stdout. Request
+# telemetry stays on the app's structlog middleware, which never logs queries.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--no-access-log"]

@@ -150,6 +150,8 @@ def _to_user(row: models.User) -> User:
         created_at=row.created_at,
         updated_at=row.updated_at,
         avatar_key=row.avatar_key,
+        email_attested_at=row.email_attested_at,
+        email_attested_by=row.email_attested_by,
     )
 
 
@@ -190,6 +192,12 @@ def _to_source(row: models.Source) -> Source:
         last_error=row.last_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        auth_secret_ref=row.auth_secret_ref,
+        connect_generation=row.connect_generation,
+        connected_account=dict(row.connected_account)
+        if row.connected_account is not None
+        else None,
+        sync_cursor=row.sync_cursor,
     )
 
 
@@ -877,11 +885,17 @@ class UserRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_user(row)
 
-    async def get(self, user_id: UUID) -> User | None:
+    async def get(self, user_id: UUID, *, refresh: bool = False) -> User | None:
+        """Fetch a user (tenant-scoped). ``refresh=True`` bypasses the identity
+        map (``populate_existing``) so the row reflects the DATABASE's current
+        state — the OAuth callback's final role re-check uses it, where a
+        session-cached row could mask a demotion committed elsewhere."""
         stmt = select(models.User).where(
             models.User.tenant_id == self._tenant_id,
             models.User.id == user_id,
         )
+        if refresh:
+            stmt = stmt.execution_options(populate_existing=True)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
@@ -892,6 +906,27 @@ class UserRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
+
+    async def attest_email(self, user_id: UUID, *, attested_by: UUID) -> User | None:
+        """Record a tenant admin's identity attestation for this user (ADR-0019 §2).
+
+        Idempotent from the caller's view: re-attesting refreshes
+        ``email_attested_at``. Tenant-scoped (INV-1): a foreign-tenant user is
+        invisible → ``None`` (the service maps that to 404). The audited event
+        (``user.identity_attested``) is emitted by the calling service, not here.
+        """
+        stmt = select(models.User).where(
+            models.User.tenant_id == self._tenant_id,
+            models.User.id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.email_attested_at = datetime.now(UTC)
+        row.email_attested_by = attested_by
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_user(row)
 
     async def set_avatar_key(self, user_id: UUID, *, avatar_key: str | None) -> User | None:
         """Set (or clear) the user's per-user profile-avatar key.
@@ -1236,6 +1271,83 @@ class SourceRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_source(row) if row is not None else None
+
+    async def begin_connect(self, source_id: UUID) -> Source | None:
+        """Atomically advance the source's connect generation (ADR-0019 §1).
+
+        Starting flow N+1 invalidates flow N: the incremented value is stamped
+        into the new state record, and the callback finalize is a CAS on this
+        exact value. The increment is a single ``UPDATE … SET
+        connect_generation = connect_generation + 1 RETURNING`` — never a
+        read-then-add, so two concurrent initiations can never mint the same
+        generation. Returns the updated entity, or ``None`` when the source is
+        not in this tenant.
+        """
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+            )
+            .values(connect_generation=models.Source.connect_generation + 1)
+            .returning(models.Source)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        return _to_source(row)
+
+    # Statuses a callback may finalize from (ADR-0019 §1): awaiting consent, a
+    # reauthorize after a failure, a reconnect of a connected-but-idle source.
+    # A mid-``syncing`` source loses the CAS — the flow completes nothing.
+    _CONNECTABLE_STATUSES = (
+        SourceStatus.PENDING_AUTH.value,
+        SourceStatus.PENDING.value,
+        SourceStatus.READY.value,
+        SourceStatus.ERROR.value,
+    )
+
+    async def complete_connect(
+        self,
+        source_id: UUID,
+        *,
+        expected_generation: int,
+        auth_secret_ref: UUID,
+        connected_account: dict[str, object],
+    ) -> Source | None:
+        """CAS-finalize a completed OAuth consent (ADR-0019 §1).
+
+        One atomic ``UPDATE`` guarded on tenant, id, **the exact connect
+        generation the flow was minted with**, and a connectable status: a flow
+        superseded after the callback's earlier checks — or a source that
+        started syncing / was deleted meanwhile — loses the CAS and this
+        returns ``None`` (the caller then writes no credential binding and
+        reports the flow denied). On success binds the vault reference +
+        provider-account metadata (never token material), clears any prior
+        failure, and moves the source to ``pending``.
+        """
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+                models.Source.connect_generation == expected_generation,
+                models.Source.status.in_(self._CONNECTABLE_STATUSES),
+            )
+            .values(
+                auth_secret_ref=auth_secret_ref,
+                connected_account=connected_account,
+                status=SourceStatus.PENDING.value,
+                last_error=None,
+            )
+            .returning(models.Source)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        return _to_source(row)
 
     async def list_for_owner_page(
         self,
@@ -2789,6 +2901,45 @@ class SecretRepository(_TenantScopedRepository):
             row.hint = hint
         await self._session.flush()
         await self._session.refresh(row)
+        return _to_secret(row)
+
+    async def rotate_value(
+        self,
+        secret_id: UUID,
+        *,
+        ciphertext: bytes,
+        nonce: bytes,
+        key_version: int,
+        hint: str,
+    ) -> Secret | None:
+        """Rotate a secret's value **in place by id** (tenant-scoped, INV-1).
+
+        The by-reference rotation ADR-0019 §1 needs: a bound consumer (a source
+        row holding ``auth_secret_ref``) replaces the credential under the SAME
+        row regardless of which admin originally stored it — the handle stays
+        stable, no per-owner duplicate is minted. One atomic
+        ``UPDATE … RETURNING`` (no read-then-write): a row deleted by a racing
+        transaction after the caller's authorization read simply matches
+        nothing here, and the ``None`` return is the caller's race signal.
+        """
+        stmt = (
+            update(models.Secret)
+            .where(
+                models.Secret.tenant_id == self._tenant_id,
+                models.Secret.id == secret_id,
+            )
+            .values(
+                ciphertext=ciphertext,
+                nonce=nonce,
+                key_version=key_version,
+                hint=hint,
+            )
+            .returning(models.Secret)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
         return _to_secret(row)
 
     async def list_for_owner(self, owner_id: UUID) -> list[Secret]:

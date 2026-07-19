@@ -45,6 +45,17 @@ class AuditAction(str, enum.Enum):
     SOURCE_ADDED = "source.added"
     SOURCE_SYNCED = "source.synced"
     SOURCE_DELETED = "source.deleted"
+    # Managed-connector OAuth (ADR-0019 §1, additive per spec 0004 §2.4):
+    # emitted on callback success AND, with outcome=denied|error, on
+    # callback-stage failures that resolve to a trusted tenant. A denied
+    # *initiation* (JWT-bound, pre-state) emits PERMISSION_DENIED instead;
+    # a sync-stage refresh failure rides SOURCE_SYNCED outcome=error. Metadata
+    # carries the account email + scopes — never tokens/codes/verifiers.
+    SOURCE_CONNECTED = "source.connected"
+    # Identity attestation for connector-ACL mapping (ADR-0019 §2): a tenant
+    # admin attested a member's email identity (incl. the provider-verified
+    # auto-attestation of the connecting admin at OAuth callback).
+    USER_IDENTITY_ATTESTED = "user.identity_attested"
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
     # #416 (ADR-0016 §3.2): the rolling-summary write and the next-answer

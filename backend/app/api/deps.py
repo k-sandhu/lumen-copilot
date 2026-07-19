@@ -16,11 +16,13 @@ from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InvalidTokenError, Principal, verify_access_token
+from app.connectors.oauth import OAuthStateStore, RedisOAuthStateStore
 from app.core.config import Settings, get_settings
 from app.db.repositories import AuditEventRepository
 from app.db.session import get_sessionmaker
@@ -117,6 +119,39 @@ def get_backplane_dep() -> Backplane:
 
 
 BackplaneDep = Annotated[Backplane, Depends(get_backplane_dep)]
+
+
+@lru_cache(maxsize=1)
+def get_oauth_state_store() -> OAuthStateStore:
+    """Process-wide connector-OAuth state store (ADR-0019 §1).
+
+    The Redis-backed single-use flow-record store behind the opaque ``state``
+    handles. Returned as the :class:`OAuthStateStore` Protocol so the offline
+    tests override it with the in-memory implementation.
+    """
+    return RedisOAuthStateStore(get_settings().redis_url)
+
+
+def get_oauth_state_store_dep() -> OAuthStateStore:
+    """State-store dependency (delegates to the cached singleton)."""
+    return get_oauth_state_store()
+
+
+OAuthStateStoreDep = Annotated[OAuthStateStore, Depends(get_oauth_state_store_dep)]
+
+
+async def get_oauth_token_http() -> AsyncIterator[httpx.AsyncClient]:
+    """A request-scoped bounded HTTP client for the OAuth token exchange.
+
+    Fresh per request and closed with it (the exchange happens inside the
+    interactive callback). Tests override this with a MockTransport client so
+    the flow tests run fully offline.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        yield client
+
+
+OAuthTokenHttpDep = Annotated[httpx.AsyncClient, Depends(get_oauth_token_http)]
 
 
 @lru_cache(maxsize=1)

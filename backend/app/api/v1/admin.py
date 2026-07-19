@@ -56,6 +56,7 @@ from app.domain.entities import (
     CertificationState,
     LlmProvider,
     Role,
+    User,
 )
 from app.services.admin_service import (
     AdminService,
@@ -91,16 +92,20 @@ router = APIRouter(
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
 
 
-
-
 class MemberResponse(BaseModel):
-    """``#/components/schemas/Member`` — one roster entry."""
+    """``#/components/schemas/Member`` — one roster entry.
+
+    ``email_attested_at`` is contract-**required** (nullable): the roster always
+    states each member's identity-attestation state (ADR-0019 §2), so the
+    members route must NOT serialize with ``exclude_none``.
+    """
 
     model_config = {"extra": "forbid"}
 
     id: UUID
     email: str
     role: list[str]
+    email_attested_at: datetime | None = None
 
 
 class MemberListResponse(BaseModel):
@@ -359,12 +364,18 @@ class BulkOrphanResponse(BaseModel):
 # --- Serialisation helpers --------------------------------------------------
 
 
+def _to_member(user: User) -> MemberResponse:
+    return MemberResponse(
+        id=user.id,
+        email=user.email,
+        role=[r.value for r in user.roles],
+        email_attested_at=user.email_attested_at,
+    )
+
+
 def _to_member_list(page: MemberPage) -> MemberListResponse:
     return MemberListResponse(
-        items=[
-            MemberResponse(id=user.id, email=user.email, role=[r.value for r in user.roles])
-            for user in page.items
-        ],
+        items=[_to_member(user) for user in page.items],
         next_cursor=page.next_cursor,
     )
 
@@ -466,7 +477,7 @@ def _to_bulk_orphan(result: BulkOrphanResult) -> BulkOrphanResponse:
 # --- Routes -----------------------------------------------------------------
 
 
-@router.get("/members", response_model=MemberListResponse, response_model_exclude_none=True)
+@router.get("/members", response_model=MemberListResponse)
 async def list_members(
     session: DbSession,
     tenant_id: CurrentTenant,
@@ -478,11 +489,41 @@ async def list_members(
 
     Cursor-paginated, stable order. Admin-only via the router gate (INV-5);
     tenant-scoped via ``current_tenant`` (INV-1). A malformed cursor → 422
-    (INV-8), raised in the service.
+    (INV-8), raised in the service. NOT serialized with ``exclude_none``: the
+    contract requires (nullable) ``email_attested_at`` on every member and
+    admits a null ``next_cursor``.
     """
     service = AdminService(session, tenant_id=tenant_id, settings=settings)
     page = await service.list_members(cursor=cursor, limit=limit)
     return _to_member_list(page)
+
+
+@router.post("/members/{member_id}/attest-identity", response_model=MemberResponse)
+async def attest_member_identity(
+    member_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+) -> MemberResponse:
+    """Attest a member's email identity for connector-ACL mapping (ADR-0019 §2).
+
+    Admin-only via the router gate (INV-5); tenant-scoped (INV-1 — a foreign or
+    unknown member id is **404**). Idempotent; audited ``user.identity_attested``
+    (INV-6) by the service. A **T1** admin write.
+    """
+    service = AdminService(session, tenant_id=tenant_id, settings=settings)
+    attested = await service.attest_member_identity(
+        member_id,
+        actor_id=principal.user_id,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    if attested is None:
+        raise NotFoundError("Member not found.")
+    await session.commit()
+    return _to_member(attested)
 
 
 @router.get("/model-governance", response_model=ModelGovernanceResponse)

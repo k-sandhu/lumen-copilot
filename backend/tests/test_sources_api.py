@@ -271,6 +271,12 @@ async def test_add_empty_url_is_422(client: AsyncClient, seeded: _Seeded) -> Non
 
 
 async def test_add_unknown_type_is_422(client: AsyncClient, seeded: _Seeded) -> None:
+    # #451/#452: ``SourceCreate`` is a CLOSED discriminated union (web | gdrive),
+    # so a type outside it is malformed-body 422 at the wire model
+    # (``validation_error``, INV-8) — it never reaches the registry. A type the
+    # union admits but no connector serves (gdrive before F-CB-2) is the
+    # service-level ``unsupported_source_type`` (covered in
+    # test_connector_oauth.py).
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
         "/api/v1/sources",
@@ -278,7 +284,7 @@ async def test_add_unknown_type_is_422(client: AsyncClient, seeded: _Seeded) -> 
         headers=_auth(token),
     )
     assert resp.status_code == 422
-    assert resp.json()["code"] == "unsupported_source_type"
+    assert resp.json()["code"] == "validation_error"
 
 
 async def test_add_malformed_body_is_422(client: AsyncClient, seeded: _Seeded) -> None:

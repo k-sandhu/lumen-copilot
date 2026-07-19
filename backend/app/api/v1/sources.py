@@ -27,22 +27,28 @@ router does not special-case it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field, model_serializer
 
 from app.api.deps import (
     AuditSinkFactory,
     CurrentTenant,
     CurrentUser,
     DbSession,
+    OAuthStateStoreDep,
+    OAuthTokenHttpDep,
     ObjectStoreDep,
+    SettingsDep,
     extract_request_id,
 )
+from app.connectors.oauth import REAUTHORIZE_REQUIRED
 from app.core.errors import NotFoundError
 from app.domain.entities import Source, SourceStatus, WebSourceMode
+from app.services.connector_oauth_service import ConnectorOAuthService
 from app.services.sources_service import SourcePage, SourcesService
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -52,7 +58,7 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 
 
 class SourceConfigResponse(BaseModel):
-    """``#/components/schemas/SourceConfig`` — the web connector's ``{url, mode}``.
+    """``#/components/schemas/WebSourceConfig`` — the web connector's ``{url, mode}``.
 
     ``additionalProperties: false`` in the contract: the internal ``collection_id``
     the service stores on the source config is **not** exposed — only ``url`` and
@@ -67,13 +73,58 @@ class SourceConfigResponse(BaseModel):
     mode: WebSourceMode
 
 
+class GdriveMyDriveConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveMyDriveConfig`` — closed: no id keys exist."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["my_drive"]
+
+
+class GdriveFolderConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveFolderConfig`` — ``folder_id`` required."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["folder"]
+    folder_id: str = Field(min_length=1)
+    drive_id: str | None = Field(default=None, min_length=1)
+
+    @model_serializer
+    def _contract_shape(self) -> dict[str, str]:
+        out = {"mode": self.mode, "folder_id": self.folder_id}
+        if self.drive_id is not None:
+            out["drive_id"] = self.drive_id
+        return out
+
+
+class GdriveSharedDriveConfigResponse(BaseModel):
+    """``#/components/schemas/GdriveSharedDriveConfig`` — ``drive_id`` only."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["shared_drive"]
+    drive_id: str = Field(min_length=1)
+
+
+GdriveSourceConfigResponse = Annotated[
+    GdriveMyDriveConfigResponse | GdriveFolderConfigResponse | GdriveSharedDriveConfigResponse,
+    Field(discriminator="mode"),
+]
+
+
 class SourceResponse(BaseModel):
-    """``#/components/schemas/Source`` — the wire projection of a source."""
+    """``#/components/schemas/WebSource`` — the (pre-0.7.0) web wire projection.
+
+    The serializer is contract-exact: ``last_synced_at`` is required-nullable
+    (always emitted), ``last_error`` is optional non-nullable (emitted only when
+    set) — so this model must NOT rely on route-level ``exclude_none``.
+    """
 
     model_config = {"extra": "forbid"}
 
     id: UUID
-    type: str
+    type: Literal["web"] = "web"
     config: SourceConfigResponse
     status: SourceStatus
     indexed_count: int
@@ -83,23 +134,147 @@ class SourceResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @model_serializer
+    def _contract_shape(self) -> dict[str, object]:
+        out: dict[str, object] = {
+            "id": self.id,
+            "type": self.type,
+            "config": self.config,
+            "status": self.status,
+            "indexed_count": self.indexed_count,
+            "last_synced_at": self.last_synced_at,
+            "owner_id": self.owner_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if self.last_error is not None:
+            out["last_error"] = self.last_error
+        return out
+
+
+class GdriveSourceResponse(BaseModel):
+    """``#/components/schemas/GdriveSource`` — the managed-source wire projection.
+
+    The four health fields are contract-**required** (nullable where absence is
+    a value), so the serializer always emits them; ``last_error`` stays optional
+    non-nullable like the web branch.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    type: Literal["gdrive"] = "gdrive"
+    config: GdriveSourceConfigResponse
+    status: SourceStatus
+    indexed_count: int
+    last_synced_at: datetime | None = None
+    last_error: str | None = None
+    connected_account: dict[str, str] | None = None
+    acl_synced_at: datetime | None = None
+    unmapped_acl_count: int | None = None
+    reauthorize_required: bool = False
+    owner_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    @model_serializer
+    def _contract_shape(self) -> dict[str, object]:
+        out: dict[str, object] = {
+            "id": self.id,
+            "type": self.type,
+            "config": self.config,
+            "status": self.status,
+            "indexed_count": self.indexed_count,
+            "last_synced_at": self.last_synced_at,
+            "connected_account": self.connected_account,
+            "acl_synced_at": self.acl_synced_at,
+            "unmapped_acl_count": self.unmapped_acl_count,
+            "reauthorize_required": self.reauthorize_required,
+            "owner_id": self.owner_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if self.last_error is not None:
+            out["last_error"] = self.last_error
+        return out
+
+
+SourceWireResponse = Annotated[
+    SourceResponse | GdriveSourceResponse,
+    Field(discriminator="type"),
+]
+
 
 class SourceListResponse(BaseModel):
     """``#/components/schemas/SourceList`` — a cursor-paginated page."""
 
     model_config = {"extra": "forbid"}
 
-    items: list[SourceResponse]
+    items: list[SourceWireResponse]
     next_cursor: str | None = None
 
 
-class SourceCreateRequest(BaseModel):
-    """``#/components/schemas/SourceCreate`` — ``{type, url}`` for the web connector."""
+class SourceConnectResponse(BaseModel):
+    """``#/components/schemas/SourceConnectResponse`` — the consent URL."""
 
     model_config = {"extra": "forbid"}
 
-    type: str
+    authorization_url: str
+
+
+class WebSourceCreateRequest(BaseModel):
+    """``#/components/schemas/WebSourceCreate`` — ``{type: web, url}``."""
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["web"]
     url: str
+
+
+class GdriveMyDriveConfigRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["my_drive"]
+
+
+class GdriveFolderConfigRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["folder"]
+    folder_id: str = Field(min_length=1)
+    drive_id: str | None = Field(default=None, min_length=1)
+
+
+class GdriveSharedDriveConfigRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["shared_drive"]
+    drive_id: str = Field(min_length=1)
+
+
+GdriveConfigRequest = Annotated[
+    GdriveMyDriveConfigRequest | GdriveFolderConfigRequest | GdriveSharedDriveConfigRequest,
+    Field(discriminator="mode"),
+]
+
+
+class GdriveSourceCreateRequest(BaseModel):
+    """``#/components/schemas/GdriveSourceCreate`` — ``{type: gdrive, config}``.
+
+    The mode-discriminated config variants are **closed** (INV-8): a missing
+    conditional id — or an id the mode does not take — fails validation.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["gdrive"]
+    config: GdriveConfigRequest
+
+
+SourceCreateRequest = Annotated[
+    WebSourceCreateRequest | GdriveSourceCreateRequest,
+    Field(discriminator="type"),
+]
 
 
 # --- Serialisation helpers --------------------------------------------------
@@ -122,15 +297,79 @@ def _config_response(config: dict[str, object]) -> SourceConfigResponse:
     return SourceConfigResponse(url=str(url) if url is not None else "", mode=mode)
 
 
-def _to_response(source: Source) -> SourceResponse:
-    return SourceResponse(
+def _gdrive_config_response(
+    config: dict[str, object],
+) -> GdriveMyDriveConfigResponse | GdriveFolderConfigResponse | GdriveSharedDriveConfigResponse:
+    """Project a stored gdrive config onto its closed wire variant — fail closed.
+
+    A stored config that fits no variant (unknown mode, a missing conditional
+    id, an id the mode does not take) raises rather than emitting a
+    contract-invalid shape: a malformed row is a defect surfaced as a 500, never
+    a silently-wrong wire object (INV-8 on the way OUT).
+    """
+    mode = config.get("mode")
+    folder_id = config.get("folder_id")
+    drive_id = config.get("drive_id")
+    if mode == "my_drive" and folder_id is None and drive_id is None:
+        return GdriveMyDriveConfigResponse(mode="my_drive")
+    if mode == "folder" and isinstance(folder_id, str) and folder_id:
+        # An empty stored drive_id is malformed, not "absent" — fall through
+        # to the fail-closed raise rather than emitting a contract-invalid id.
+        if drive_id is None or (isinstance(drive_id, str) and drive_id):
+            return GdriveFolderConfigResponse(
+                mode="folder",
+                folder_id=folder_id,
+                drive_id=drive_id,
+            )
+    if mode == "shared_drive" and isinstance(drive_id, str) and drive_id and folder_id is None:
+        return GdriveSharedDriveConfigResponse(mode="shared_drive", drive_id=drive_id)
+    raise ValueError(f"stored gdrive config fits no contract variant (mode={mode!r})")
+
+
+def _connected_account_response(source: Source) -> dict[str, str] | None:
+    """The ``ConnectedAccount`` wire shape ({email}) — or null (never tokens)."""
+    account = source.connected_account
+    if not account:
+        return None
+    email = account.get("email")
+    return {"email": str(email)} if isinstance(email, str) and email else None
+
+
+def _reauthorize_required(source: Source) -> bool:
+    """Whether the grant is dead (ADR-0019 §1): the sync task's sentinel, or a
+    vanished credential (``auth_secret_ref`` SET NULL) on a connected source."""
+    if source.last_error == REAUTHORIZE_REQUIRED:
+        return True
+    return source.auth_secret_ref is None and source.status != SourceStatus.PENDING_AUTH
+
+
+def _to_response(source: Source) -> SourceResponse | GdriveSourceResponse:
+    """Project a source onto its contract branch (discriminated by ``type``)."""
+    if source.type == "web":
+        return SourceResponse(
+            id=source.id,
+            type=source.type,
+            config=_config_response(source.config),
+            status=source.status,
+            indexed_count=source.indexed_count,
+            last_synced_at=source.last_synced_at,
+            last_error=source.last_error,
+            owner_id=source.owner_id,
+            created_at=source.created_at,
+            updated_at=source.updated_at,
+        )
+    return GdriveSourceResponse(
         id=source.id,
         type=source.type,
-        config=_config_response(source.config),
+        config=_gdrive_config_response(source.config),
         status=source.status,
         indexed_count=source.indexed_count,
         last_synced_at=source.last_synced_at,
         last_error=source.last_error,
+        connected_account=_connected_account_response(source),
+        acl_synced_at=None,  # populated by the ACL mirror (F-CB-2)
+        unmapped_acl_count=None,  # populated by the ACL mirror (F-CB-2)
+        reauthorize_required=_reauthorize_required(source),
         owner_id=source.owner_id,
         created_at=source.created_at,
         updated_at=source.updated_at,
@@ -162,6 +401,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
         request_id=extract_request_id(request) or "unknown",
@@ -172,7 +412,7 @@ def _build_service(
 # --- Routes -----------------------------------------------------------------
 
 
-@router.get("", response_model=SourceListResponse, response_model_exclude_none=True)
+@router.get("", response_model=SourceListResponse)
 async def list_sources(
     request: Request,
     session: DbSession,
@@ -198,9 +438,8 @@ async def list_sources(
 
 @router.post(
     "",
-    response_model=SourceResponse,
+    response_model=SourceWireResponse,
     status_code=status.HTTP_201_CREATED,
-    response_model_exclude_none=True,
 )
 async def create_source(
     body: SourceCreateRequest,
@@ -210,14 +449,15 @@ async def create_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
-) -> SourceResponse:
-    """Add a source (first connector — a Web URL); enqueue its first sync.
+) -> SourceResponse | GdriveSourceResponse:
+    """Add a source — a web URL (any member) or a managed connector (admin only).
 
-    Validates + SSRF-checks the URL (ADR-0009 §3): a blocked or invalid URL is a
-    **422** (``url_blocked`` for SSRF; ``unsupported_source_type`` for an unknown
-    ``type``) raised by the service as a typed ``AppError`` and mapped by the
-    global handler. On accept, a ``Source`` ``status=pending`` is returned and the
-    sync runs async (never in the request path).
+    Web: validates + SSRF-checks the URL (ADR-0009 §3) — a blocked or invalid
+    URL is **422** (``url_blocked``); the source returns ``pending`` with the
+    first sync enqueued. Managed (``gdrive``): admin-gated at action time
+    (ADR-0019 §1 — non-admin is **403**, audited); the source is created
+    ``pending_auth`` and syncs only after the connect flow completes. Errors are
+    typed ``AppError``\\ s mapped by the global handler.
     """
     service = _build_service(
         session=session,
@@ -227,12 +467,18 @@ async def create_source(
         object_store=object_store,
         request=request,
     )
-    source = await service.add(source_type=body.type, url=body.url)
+    if isinstance(body, WebSourceCreateRequest):
+        source = await service.add(source_type=body.type, url=body.url)
+    else:
+        source = await service.add(
+            source_type=body.type,
+            config=body.config.model_dump(exclude_none=True),
+        )
     await session.commit()
     return _to_response(source)
 
 
-@router.post("/{source_id}/sync", response_model=SourceResponse, response_model_exclude_none=True)
+@router.post("/{source_id}/sync", response_model=SourceWireResponse)
 async def sync_source(
     source_id: UUID,
     request: Request,
@@ -242,12 +488,15 @@ async def sync_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
-) -> SourceResponse:
+) -> SourceResponse | GdriveSourceResponse:
     """Re-sync one of the caller's sources (re-fetch + re-index); else 404.
 
     Returns **202** with status ``syncing`` when a fresh sync was enqueued, or
     **200** (no-op) when the source was already ``syncing`` (the contract's two
-    success codes). A non-owner or cross-tenant source is **404** (INV-1/INV-2).
+    success codes). A non-owner or cross-tenant **web** source is **404**
+    (INV-1/INV-2). Managed sources are admin-gated at action time (**403**,
+    ADR-0019 §1) and cannot sync while awaiting consent (**409**
+    ``source_pending_auth``, INV-8).
     """
     service = _build_service(
         session=session,
@@ -292,3 +541,113 @@ async def delete_source(
     await session.commit()
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
+
+
+# --- Managed-connector OAuth (ADR-0019 §1; F-CB-1 #452) ---------------------
+
+
+def _callback_redirect(url: str) -> RedirectResponse:
+    """The callback 302 with its cache/referrer hardening (ADR-0019 §1).
+
+    The request URL carried `state`/`code`: `no-store` keeps any intermediary
+    or browser cache from retaining the exchange, and `no-referrer` keeps the
+    callback URL (query included) out of the Referer header on the follow-up
+    navigation to the SPA.
+    """
+    response = RedirectResponse(url, status_code=status.HTTP_302_FOUND)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _build_oauth_service(
+    *,
+    session: DbSession,
+    settings: SettingsDep,
+    state_store: OAuthStateStoreDep,
+    token_http: OAuthTokenHttpDep,
+    request: Request,
+) -> ConnectorOAuthService:
+    return ConnectorOAuthService(
+        session,
+        settings=settings,
+        state_store=state_store,
+        token_http=token_http,
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+
+
+@router.post("/{source_id}/connect", response_model=SourceConnectResponse)
+async def connect_source(
+    source_id: UUID,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    state_store: OAuthStateStoreDep,
+    token_http: OAuthTokenHttpDep,
+) -> SourceConnectResponse:
+    """Start (or restart) a managed source's OAuth consent flow (admin only).
+
+    Admin-gated **at action time** in the service (a denial is audited
+    ``permission.denied`` before the 403 — INV-5/INV-6). A non-OAuth type is
+    **409** ``oauth_not_supported``; a mid-sync source is **409**
+    ``not_connectable``; unknown/foreign is **404** (INV-1). The returned URL
+    carries only the opaque single-use state handle (ADR-0019 §1).
+
+    ``tenant_id`` is depended on for its side effect (RLS GUC binding); the
+    service reads the tenant from the principal.
+    """
+    del tenant_id  # dependency retained for the RLS bind side effect
+    service = _build_oauth_service(
+        session=session,
+        settings=settings,
+        state_store=state_store,
+        token_http=token_http,
+        request=request,
+    )
+    authorization_url = await service.start_connect(source_id, principal=principal)
+    await session.commit()
+    return SourceConnectResponse(authorization_url=authorization_url)
+
+
+@router.get("/oauth/callback", include_in_schema=True)
+async def oauth_callback(
+    request: Request,
+    session: DbSession,
+    settings: SettingsDep,
+    state_store: OAuthStateStoreDep,
+    token_http: OAuthTokenHttpDep,
+    state: Annotated[str | None, Query()] = None,
+    code: Annotated[str | None, Query()] = None,
+    error: Annotated[str | None, Query()] = None,
+) -> RedirectResponse:
+    """The provider redirect target — state-authenticated, **always 302**.
+
+    No bearer token (a browser redirect): authentication is the opaque
+    single-use ``state`` handle, consumed atomically; the service re-authorizes
+    from current state and completes (or fail-closes) the flow. Every query
+    parameter is syntactically optional — a missing/garbled ``state`` reaches
+    the fail-closed handler and yields the generic ``expired`` error redirect,
+    never a validation error (the contract's always-302 guarantee). The
+    Location target is the frozen ``{return_url}?connect=...`` shape; no token,
+    code, or verifier material ever appears in it.
+    """
+    service = _build_oauth_service(
+        session=session,
+        settings=settings,
+        state_store=state_store,
+        token_http=token_http,
+        request=request,
+    )
+    redirect_url = await service.complete_callback(state=state, code=code, error=error)
+    try:
+        await session.commit()
+    except Exception:  # noqa: BLE001 — the 302 guarantee outranks a commit fault
+        await session.rollback()
+        # The rolled-back flow still gets its tenant-attributed failure audit
+        # (INV-6) from the now-clean transaction, inside the service.
+        return _callback_redirect(await service.record_route_commit_failure())
+    return _callback_redirect(redirect_url)

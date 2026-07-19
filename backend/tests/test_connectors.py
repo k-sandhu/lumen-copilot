@@ -16,7 +16,13 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from app.connectors.base import Connector, ConnectorConfigError, ConnectorError, FetchedDoc
+from app.connectors.base import (
+    Connector,
+    ConnectorConfigError,
+    ConnectorError,
+    ConnectorRun,
+    FetchedDoc,
+)
 from app.connectors.registry import (
     UnknownConnectorError,
     get_connector,
@@ -31,6 +37,13 @@ from app.connectors.web.extract import (
 from app.domain.entities import Source, SourceStatus, WebSourceMode
 
 _PUBLIC = "93.184.216.34"
+
+# The framework-supplied per-run context (ADR-0019 §4). The web connector uses
+# its own SSRF-guarded fetch client, so this anonymous context is never dialled —
+# a MockTransport that would fail loudly if it ever were.
+_RUN = ConnectorRun(
+    http=httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(500)))
+)
 
 
 def _source(url: str) -> Source:
@@ -246,7 +259,7 @@ async def test_sync_single_page(patched_client: dict[str, object]) -> None:
         )
 
     patched_client["handler"] = handler
-    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/page")))
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/page"), _RUN))
     assert len(docs) == 1
     assert isinstance(docs[0], FetchedDoc)
     assert docs[0].title == "Page"
@@ -269,7 +282,7 @@ async def test_sync_feed_fans_out(patched_client: dict[str, object]) -> None:
         return httpx.Response(200, headers={"content-type": "application/rss+xml"}, text=feed)
 
     patched_client["handler"] = handler
-    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml")))
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml"), _RUN))
     assert {d.title for d in docs} == {"A", "B"}
 
 
@@ -288,7 +301,7 @@ async def test_sync_feed_skips_ssrf_child(patched_client: dict[str, object]) -> 
         return httpx.Response(200, headers={"content-type": "application/rss+xml"}, text=feed)
 
     patched_client["handler"] = handler
-    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml")))
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml"), _RUN))
     assert [d.title for d in docs] == ["Good"]
 
 
@@ -308,14 +321,14 @@ async def test_sync_sitemap_fans_out(patched_client: dict[str, object]) -> None:
         return httpx.Response(200, headers={"content-type": "application/xml"}, text=sitemap)
 
     patched_client["handler"] = handler
-    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/sitemap.xml")))
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/sitemap.xml"), _RUN))
     assert len(docs) == 2
 
 
 async def test_health_reports_unhealthy_on_block(patched_client: dict[str, object]) -> None:
     patched_client["handler"] = lambda r: httpx.Response(200, headers={"content-type": "text/html"})
     # A blocked URL never reaches the transport — validate-time block at fetch.
-    health = await WebConnector().health(_source("http://127.0.0.1/x"))
+    health = await WebConnector().health(_source("http://127.0.0.1/x"), _RUN)
     assert health.healthy is False
 
 
@@ -335,7 +348,7 @@ async def test_sync_root_http_error_fails_the_sync(patched_client: dict[str, obj
 
     patched_client["handler"] = handler
     with pytest.raises(ConnectorError) as exc:
-        await WebConnector().sync(_source(f"http://{_PUBLIC}/page"))
+        await WebConnector().sync(_source(f"http://{_PUBLIC}/page"), _RUN)
     assert exc.value.code == "fetch_failed"
 
 
@@ -356,7 +369,7 @@ async def test_sync_feed_skips_child_http_error(patched_client: dict[str, object
         return httpx.Response(200, headers={"content-type": "application/rss+xml"}, text=feed)
 
     patched_client["handler"] = handler
-    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml")))
+    docs = list(await WebConnector().sync(_source(f"http://{_PUBLIC}/feed.xml"), _RUN))
     assert [d.title for d in docs] == ["Good"]
 
 
@@ -369,7 +382,7 @@ async def test_sync_sends_configured_user_agent(patched_client: dict[str, object
         return httpx.Response(200, headers={"content-type": "text/html"}, text="<p>ok</p>")
 
     patched_client["handler"] = handler
-    await WebConnector().sync(_source(f"http://{_PUBLIC}/page"))
+    await WebConnector().sync(_source(f"http://{_PUBLIC}/page"), _RUN)
     assert "LumenCopilot" in seen["ua"]
     assert "python-httpx" not in seen["ua"].lower()
 

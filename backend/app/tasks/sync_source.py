@@ -33,19 +33,37 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+import httpx
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.connectors.base import ConnectorError, FetchedDoc
+from app.connectors.base import Connector, ConnectorError, ConnectorRun, FetchedDoc, get_oauth_spec
+from app.connectors.oauth import (
+    REAUTHORIZE_REQUIRED,
+    OAuthExchangeError,
+    OAuthGrantDeadError,
+    build_authenticated_client,
+    refresh_access_token,
+)
 from app.connectors.registry import UnknownConnectorError, get_connector
 from app.core.config import Settings, get_settings
-from app.core.errors import DependencyError
+from app.core.errors import DependencyError, NotFoundError
 from app.db import models
-from app.db.repositories import DocumentRepository, SourceRepository
-from app.db.session import session_scope
-from app.domain.entities import DocumentStatus, SourceStatus, WebSourceMode
+from app.db.repositories import AuditEventRepository, DocumentRepository, SourceRepository
+from app.db.session import tenant_session_scope
+from app.domain.audit import AuditAction, AuditActor
+from app.domain.entities import (
+    AuditOutcome,
+    DocumentStatus,
+    Role,
+    Source,
+    SourceStatus,
+    WebSourceMode,
+)
 from app.llm import LLMGateway
+from app.services.audit import AuditSink
+from app.services.secrets_service import SecretsService, build_secrets_service
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
@@ -97,7 +115,7 @@ async def sync_source_async(
     log = structlog.get_logger(__name__)
 
     # --- Phase 1: resolve the source + connector, claim it as `syncing`. -----
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         sources = SourceRepository(session, tenant_id)
         source = await sources.get(source_id)
         if source is None:
@@ -119,18 +137,31 @@ async def sync_source_async(
 
     # --- Phase 2: fetch via the connector (re-runs the full SSRF guard). ------
     # ``source`` is a frozen, detached domain entity — safe to hand the connector
-    # after the session that read it has closed.
+    # after the session that read it has closed. The framework builds the per-run
+    # execution context (ADR-0019 §4): for an OAuth connector that means
+    # resolving the vault-held refresh token and running the refresh grant HERE —
+    # connector code never sees a raw token, only an authenticated client. A dead
+    # grant fails the sync closed as *reauthorize required* (ADR-0019 §1),
+    # audited as the sync-stage ``source.synced`` outcome=error.
     try:
-        fetched = list(await connector.sync(source))
+        run = await _build_run(connector, source, tenant_id=tenant_id, settings=settings)
+    except OAuthGrantDeadError:
+        return await _fail_reauthorize(tenant_id, source_id, source_type=source_type)
+    except OAuthExchangeError as exc:
+        return await _fail(tenant_id, source_id, f"token refresh failed: {exc.code}")
+    try:
+        fetched = list(await connector.sync(source, run))
     except ConnectorError as exc:
         # Includes UrlBlockedError (SSRF) — a permanent rejection of this source.
         return await _fail(tenant_id, source_id, f"fetch failed: {exc.detail}")
+    finally:
+        await run.http.aclose()
 
     # --- Phase 3: reconcile (replace prior docs) then ingest each fetched doc. -
     detected_mode = _detect_mode(source_type, fetched, config)
     indexed = 0
     orphaned_keys: list[str] = []
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
         prior = await documents.list_for_source(source_id)
         for stale in prior:
@@ -213,7 +244,7 @@ async def sync_source_async(
         )
 
     # --- Phase 4: advance the source to ready. -------------------------------
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         await SourceRepository(session, tenant_id).update_status(
             source_id,
             status=SourceStatus.READY,
@@ -255,7 +286,7 @@ async def _ingest_one(
         content_type=_TEXT_MIME,
         filename=_safe_filename(fetched.title, index),
     )
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         document = await DocumentRepository(session, tenant_id).create(
             owner_id=owner_id,
             collection_id=collection_id,
@@ -278,6 +309,122 @@ async def _ingest_one(
     )
 
 
+# Bounded default timeout for an authenticated connector run's client.
+_RUN_TIMEOUT_SECONDS = 30.0
+
+
+async def _build_run(
+    connector: Connector,
+    source: Source,
+    *,
+    tenant_id: UUID,
+    settings: Settings,
+) -> ConnectorRun:
+    """Construct the per-run execution context (ADR-0019 §4) — framework-only.
+
+    Credential-less connectors get an anonymous bounded client. For an OAuth
+    connector the framework resolves the vault-held refresh token
+    (``get_secret_plaintext`` with the **system** accessor, so ``secret.accessed``
+    names the sync worker) and runs the refresh grant; the resulting access
+    token exists only inside the returned client's default headers — connector
+    code never sees it, and it is never persisted or logged.
+
+    Raises:
+        OAuthGrantDeadError: no usable credential (missing ``auth_secret_ref``
+            or ``invalid_grant``) — the caller fails the sync closed as
+            *reauthorize required*.
+        OAuthExchangeError: a transient token-endpoint fault (retryable error).
+    """
+    spec = get_oauth_spec(connector)
+    if spec is None:
+        return ConnectorRun(http=httpx.AsyncClient(timeout=_RUN_TIMEOUT_SECONDS))
+    if source.auth_secret_ref is None:
+        raise OAuthGrantDeadError()
+
+    def _vault(session: AsyncSession) -> SecretsService:
+        # The worker acts as the SYSTEM under the tenant's authority: ADMIN role
+        # so a source reconnected by a *different* admin (the credential row's
+        # owner) still authorizes — `secret.accessed` names the true reader
+        # (the system accessor), and RLS is armed by the tenant-bound scope.
+        return build_secrets_service(
+            session,
+            settings=settings,
+            tenant_id=tenant_id,
+            owner_id=source.owner_id,
+            roles=(Role.ADMIN,),
+            audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            request_id="source-sync-task",
+            source_ip="system",
+        )
+
+    async with tenant_session_scope(tenant_id) as session:
+        try:
+            refresh_token = await _vault(session).get_secret_plaintext(
+                source.auth_secret_ref, accessor=AuditActor.system()
+            )
+        except NotFoundError as exc:
+            # The credential row vanished (deleted secret; SET NULL raced) —
+            # indistinguishable from a dead grant: reauthorize is the repair.
+            raise OAuthGrantDeadError() from exc
+    async with httpx.AsyncClient(timeout=_RUN_TIMEOUT_SECONDS) as token_http:
+        token = await refresh_access_token(token_http, spec, refresh_token=refresh_token)
+    if token.refresh_token is not None:
+        # The provider rotated the refresh token on use — re-store it in place
+        # (by reference, owner unchanged) or the NEXT sync would refresh with a
+        # revoked credential (#452 AC).
+        async with tenant_session_scope(tenant_id) as session:
+            try:
+                await _vault(session).rotate_secret_value(
+                    source.auth_secret_ref,
+                    plaintext=token.refresh_token,
+                    accessor=AuditActor.system(),
+                )
+            except NotFoundError as exc:
+                # The credential row was deleted between the read and this
+                # rotation (source/secret deletion racing the sync) — the same
+                # repair as any dead grant: reauthorize (terminal, audited).
+                raise OAuthGrantDeadError() from exc
+    # The authenticated client is framework-built and HOST-PINNED to the
+    # connector's fixed allowlist (ADR-0019 §4/§5): an off-allowlist request
+    # raises inside the guard before the Authorization header could leave.
+    return ConnectorRun(
+        http=build_authenticated_client(
+            spec, access_token=token.access_token, timeout=_RUN_TIMEOUT_SECONDS
+        )
+    )
+
+
+async def _fail_reauthorize(tenant_id: UUID, source_id: UUID, *, source_type: str) -> SyncResult:
+    """Fail a sync closed on a dead OAuth grant (ADR-0019 §1).
+
+    Marks the source ``error`` with the ``reauthorize_required`` sentinel and
+    emits the **sync-stage** audit — ``source.synced`` with ``outcome=error``
+    from the system actor (never ``source.connected``, which is callback-stage
+    only). The repair is the connect flow, surfaced by the health field. The
+    tenant-bound scope arms the RLS backstop (a plain ``session_scope`` would
+    see no rows under the FORCE-RLS deployment role).
+    """
+    async with tenant_session_scope(tenant_id) as session:
+        await SourceRepository(session, tenant_id).update_status(
+            source_id,
+            status=SourceStatus.ERROR,
+            indexed_count=0,
+            last_error=REAUTHORIZE_REQUIRED,
+            set_last_error=True,
+        )
+        await AuditSink(AuditEventRepository(session, tenant_id)).emit(
+            action=AuditAction.SOURCE_SYNCED,
+            actor=AuditActor.system(),
+            resource_type="source",
+            resource_id=str(source_id),
+            outcome=AuditOutcome.ERROR,
+            request_id="source-sync-task",
+            source_ip="system",
+            metadata={"type": source_type, "reason": REAUTHORIZE_REQUIRED},
+        )
+    return SyncResult(source_id, SourceStatus.ERROR, 0, REAUTHORIZE_REQUIRED)
+
+
 async def _fail(tenant_id: UUID, source_id: UUID, reason: str) -> SyncResult:
     """Mark a source ``error`` with ``reason`` (own transaction). ADR-0009 §4.
 
@@ -286,7 +433,7 @@ async def _fail(tenant_id: UUID, source_id: UUID, reason: str) -> SyncResult:
     successful sync must not survive (e.g. "error / 2 indexed" with an empty doc
     list). ``update_status`` leaves ``indexed_count`` untouched unless supplied (#157).
     """
-    async with session_scope() as session:
+    async with tenant_session_scope(tenant_id) as session:
         await SourceRepository(session, tenant_id).update_status(
             source_id,
             status=SourceStatus.ERROR,

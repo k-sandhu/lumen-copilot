@@ -74,7 +74,7 @@ from app.core.errors import (
     ValidationError,
 )
 from app.db import models
-from app.db.repositories import AuditEventRepository, TenantRepository
+from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role, User
 from app.domain.models import ModelTier
@@ -290,6 +290,8 @@ class _TenantMemberQuery:
             roles=tuple(Role(r) for r in row.roles),
             created_at=row.created_at,
             updated_at=row.updated_at,
+            email_attested_at=row.email_attested_at,
+            email_attested_by=row.email_attested_by,
         )
 
     async def list_for_tenant_page(self, *, limit: int, after_id: UUID | None = None) -> list[User]:
@@ -367,6 +369,40 @@ class AdminService:
         page = rows[:page_size]
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
         return MemberPage(items=page, next_cursor=next_cursor)
+
+    async def attest_member_identity(
+        self,
+        member_id: UUID,
+        *,
+        actor_id: UUID,
+        request_id: str,
+        source_ip: str,
+    ) -> User | None:
+        """Attest a member's email identity for connector-ACL mapping (ADR-0019 §2).
+
+        The tenant admin's explicit statement that this email is the person it
+        names — the prerequisite for the ACL mapper to ever emit this user's
+        principal. Idempotent (re-attesting refreshes the timestamp), audited
+        ``user.identity_attested`` (INV-6). Returns the updated member, or
+        ``None`` for a missing / foreign-tenant id (→ 404, INV-1). Role gating
+        is the router's ``require_roles`` dependency, like every /admin route.
+        """
+        attested = await UserRepository(self._session, self._tenant_id).attest_email(
+            member_id, attested_by=actor_id
+        )
+        if attested is None:
+            return None
+        await AuditSink(AuditEventRepository(self._session, self._tenant_id)).emit(
+            action=AuditAction.USER_IDENTITY_ATTESTED,
+            actor=AuditActor.user(actor_id),
+            resource_type="user",
+            resource_id=str(member_id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=request_id,
+            source_ip=source_ip,
+            metadata={"basis": "admin_attestation"},
+        )
+        return attested
 
     def model_governance(self) -> ModelGovernanceView:
         """Which models are permitted and the governance tiers they map to.
@@ -449,9 +485,10 @@ class AdminService:
             stored_fallbacks = tenant.fallback_models if tenant is not None else None
         else:
             stored_fallbacks = await self._validated_fallbacks(fallback_models)
-            if await repo.set_fallback_models(
-                self._tenant_id, fallback_models=stored_fallbacks
-            ) is None:
+            if (
+                await repo.set_fallback_models(self._tenant_id, fallback_models=stored_fallbacks)
+                is None
+            ):
                 raise NotFoundError("Tenant not found.")
         updated = await repo.update(self._tenant_id, max_tool_turns=max_tool_turns)
         if updated is None:
@@ -510,9 +547,7 @@ class AdminService:
         )
         for model_id in deduped:
             if not await models_service.is_allowed_model_async(model_id):
-                raise ValidationError(
-                    f"Unknown or unavailable fallback model: {model_id!r}."
-                )
+                raise ValidationError(f"Unknown or unavailable fallback model: {model_id!r}.")
         return deduped or None
 
     # --- Per-tenant application logo (admin branding) -----------------------
@@ -578,9 +613,7 @@ class AdminService:
         logo is a no-op mutation that still records the audited action. The stored
         object is left in place (content-addressed, unreferenced); no bytes are read.
         """
-        updated = await TenantRepository(self._session).set_logo_key(
-            self._tenant_id, logo_key=None
-        )
+        updated = await TenantRepository(self._session).set_logo_key(self._tenant_id, logo_key=None)
         if updated is None:
             raise NotFoundError("Tenant not found.")
         await self._emit_branding_audit(

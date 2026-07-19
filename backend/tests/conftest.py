@@ -64,6 +64,34 @@ def _seed_test_environment() -> None:
 _seed_test_environment()
 
 
+def _disable_dotenv_discovery() -> None:
+    """Enforce the suite's hermeticity contract against transitive dotenv loads.
+
+    This module's contract (docstring above) is that the suite constructs
+    ``Settings`` "without a real ``.env``" — but **litellm** (imported lazily by
+    ``app/llm/gateway.py`` on first use) calls python-dotenv's ``load_dotenv()``
+    at import, whose default discovery walks UP the directory tree and loads the
+    first ``.env`` it finds into ``os.environ`` MID-RUN. From any checkout with
+    an ancestor ``.env`` (every ``.claude/worktrees/*`` tree sits under the repo
+    root's live-stack ``.env``) that injects real deployment values —
+    ``WEB_SEARCH_ENABLED``, ``CHAT_MODEL_REGISTRY``, ``LLM_MODEL``, … — and
+    every later ``Settings()`` construction reads them: order-dependent
+    failures across unrelated modules (issue #469; the #94 flake class).
+
+    Stubbing the loader BEFORE litellm's ``from dotenv import load_dotenv``
+    binds it makes the contract structural: inside the test process, no code
+    path may bulk-load an env file. (Production is untouched — this is test
+    scaffolding; the app-side posture is #469's follow-up.)
+    """
+    import dotenv
+
+    dotenv.load_dotenv = lambda *args, **kwargs: False  # type: ignore[assignment]
+    dotenv.main.load_dotenv = dotenv.load_dotenv
+
+
+_disable_dotenv_discovery()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _test_environment() -> None:
     """Re-assert the env and reset the cached settings singleton once."""

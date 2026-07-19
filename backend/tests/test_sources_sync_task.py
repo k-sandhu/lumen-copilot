@@ -218,7 +218,7 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
 def _patch_sync(monkeypatch: pytest.MonkeyPatch, docs: list[FetchedDoc] | Exception) -> None:
     """Replace the web connector's ``sync`` so no network is touched."""
 
-    async def _fake_sync(self: object, source: Source) -> Iterable[FetchedDoc]:
+    async def _fake_sync(self: object, source: Source, run: object) -> Iterable[FetchedDoc]:
         if isinstance(docs, Exception):
             raise docs
         return list(docs)
