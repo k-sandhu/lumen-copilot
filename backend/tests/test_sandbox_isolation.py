@@ -79,6 +79,10 @@ def test_non_local_enabled_sandbox_requires_gvisor() -> None:
         "JWT_SECRET": "production-secret-that-is-not-the-dev-default",
         "SECRETS_ENCRYPTION_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         "SANDBOX_ENABLED": True,
+        # ADR-0019 §1 (#452): a non-local environment refuses http OAuth
+        # callback/return URLs — part of the minimal production boot env.
+        "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "https://api.example.com",
+        "CONNECTOR_OAUTH_FRONTEND_RETURN_URL": "https://app.example.com/sources",
     }
     with pytest.raises(ValidationError, match="runsc"):
         Settings(**common, SANDBOX_RUNTIME="runc")  # type: ignore[arg-type]
