@@ -43,7 +43,7 @@ from app.search.filters import SearchAllowFilter
 from app.search.store import OpenSearchStore
 
 from .engine import FakeEngine
-from .subject import AclSubject
+from .subject import UNPROVABLE_CAUSE_IDS, AclSubject
 from .subjects import SUBJECT_IDS, SUBJECTS
 from .sync_harness import (
     DIM,
@@ -378,21 +378,61 @@ async def test_container_change_denies_known_descendants_immediately(
     assert "inside" not in await _engine_visible(seeded, engine)
 
 
-@pytest.mark.parametrize("reason", ["enumeration_failure", "budget_exhausted"])
-async def test_unprovable_affected_set_fails_closed_source_wide(
+# --- §3 cause → signal → contract, in that order -----------------------------
+#
+# The framework's reaction to `integrity=incomplete` is ONE contract, so handing
+# it a pre-formed incomplete page proves nothing about whether a given cause ever
+# produces one. The two halves are therefore proven separately: the probes drive
+# each connector's REAL change-replay capability under a real failure condition
+# (cause → signal), and the framework test below consumes the signal (signal →
+# contract).
+
+
+@pytest.mark.parametrize("cause", UNPROVABLE_CAUSE_IDS)
+async def test_the_connector_emits_incomplete_for_each_unprovable_cause(
+    subject: AclSubject, cause: str
+) -> None:
+    """CAUSE → SIGNAL: the connector itself raises ``integrity=incomplete``.
+
+    ``enumeration_failure`` and ``budget_exhausted`` are distinct ADR-0019 §3
+    bullets with distinct code paths; neither is observable downstream unless the
+    connector actually emits the signal. Budget exhaustion in particular had no
+    producer-side coverage anywhere before this test.
+    """
+    probe = subject.probe(cause)
+    pages = await probe.induce()
+    assert pages, f"{subject.name}:{cause} induced no pages ({probe.why})"
+    assert any(page.integrity is PageIntegrity.INCOMPLETE for page in pages), (
+        f"{subject.name}: {probe.why} did NOT produce integrity=incomplete — "
+        "the framework's source-wide denial can never fire for this cause"
+    )
+
+
+async def test_a_provable_cascade_stays_complete(subject: AclSubject) -> None:
+    """The control that stops the probes above from being vacuous.
+
+    A connector hard-coding ``INCOMPLETE`` would pass every cause probe while
+    being useless (permanently source-wide denied). An in-budget, fully
+    enumerable cascade must therefore report COMPLETE.
+    """
+    pages = await subject.probe("healthy_cascade").induce()
+    assert pages
+    assert all(
+        page.integrity is PageIntegrity.COMPLETE for page in pages
+    ), f"{subject.name} reports incomplete even for a provable cascade"
+
+
+async def test_an_incomplete_page_fails_the_source_closed(
     sqlite_db: None,
     subject: AclSubject,
     connector: KitConnector,
     engine: FakeEngine,
-    reason: str,
 ) -> None:
-    """Enumeration failure OR budget exhaustion ⇒ every mirrored document stale.
+    """SIGNAL → CONTRACT: an unprovable page stale-stamps every mirrored document.
 
-    The connector cannot prove the affected set complete, so it flags the page
-    ``integrity=incomplete`` and the framework denies the whole source rather
-    than guessing which descendants were touched. The two reasons are distinct
-    ADR bullets and are both exercised; the framework's contract is the signal,
-    not the cause.
+    The framework does not guess which descendants a cascade touched — it denies
+    the whole source, holds the cursor, and records the durable full-resync
+    requirement.
     """
     seeded = await _seed(subject)
     public = subject.case("public").raw
@@ -401,21 +441,13 @@ async def test_unprovable_affected_set_fails_closed_source_wide(
     assert await _engine_visible(seeded, engine) == {"a", "b"}
 
     connector.pending_pages = {
-        "cursor-1": [
-            PageSpec(
-                next_cursor="cursor-2",
-                # `reason` is the connector's own diagnosis; the framework sees
-                # only the fail-closed signal.
-                stale_scope_ids=frozenset({reason}),
-                integrity=PageIntegrity.INCOMPLETE,
-            )
-        ]
+        "cursor-1": [PageSpec(next_cursor="cursor-2", integrity=PageIntegrity.INCOMPLETE)]
     }
     await run_sync(seeded.tenant_id, seeded.source_id, object_store=FakeObjectStore())
 
     rows = await _rows(seeded)
-    assert rows["a"].acl_synced_at is None, reason
-    assert rows["b"].acl_synced_at is None, reason
+    assert rows["a"].acl_synced_at is None
+    assert rows["b"].acl_synced_at is None
     assert await _engine_visible(seeded, engine) == set()
     source = await _source_row(seeded)
     assert source.acl_resync_required is True
@@ -472,6 +504,13 @@ async def test_a_healthy_terminal_page_cannot_publish_over_a_stale_stamped_row(
     assert row.acl_synced_at is None  # no fresh source-level health
     assert row.status == "error"
     assert result.status is SourceStatus.ERROR
+    assert result.error == "acl_mirror_incomplete"  # the reason is recorded, not generic
+
+    # ...and the caller refuses the incremental path entirely while the
+    # requirement stands: the next run is a FULL replay, not another page.
+    calls_before = connector.sync_calls
+    await run_sync(seeded.tenant_id, seeded.source_id, object_store=FakeObjectStore())
+    assert connector.sync_calls == calls_before + 1
 
 
 # --- source-side revocation ---------------------------------------------------
