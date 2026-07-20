@@ -11,7 +11,7 @@ Two kinds of proof, because either alone is weak:
   and the token strings are then searched for across every persisted surface and
   every structlog event the run emitted;
 * **static (the "grep" half)** — an AST scan of ``app/`` asserting no log call
-  and no audit ``metadata`` literal names token material, and that the PKCE
+  and no audit ``metadata`` expression names token material, and that the PKCE
   verifier stays inside its two owning modules. Static checks catch the write
   that *would* leak on a code path this suite never happens to execute.
 
@@ -20,6 +20,49 @@ failed callback → ``source.connected`` ``outcome=denied|error``; connect and
 delete audits) are proven end-to-end against the real API in
 ``tests/test_connector_oauth.py`` (#452) and are deliberately not duplicated
 here — this module owns the sync/credential half.
+
+What the static scan is, and is not
+-----------------------------------
+
+It is a **conservative hygiene lint, not sound dataflow analysis.**
+
+Earlier revisions tried to *resolve* ``metadata=<name>`` back to a dict literal
+and report only when the result looked tainted. That is a losing design: doing
+it correctly means reimplementing Python name resolution **and reachability** in
+an AST walker. Binding forms alone (augmented assignment, walrus, tuple/star
+unpacking, ``global``/``nonlocal``, comprehension targets, parameters,
+``except ... as``) are merely tedious; branch and loop control flow is not
+solvable at this size at all — a tainted ``if`` arm followed textually by a
+benign ``else``, an ``if False`` rebind, or a rebind in a never-entered loop all
+read as "the later assignment wins" to any line-ordered walker. Each patch left
+that hole open while making the check *look* more trustworthy, which is worse
+than a check that is obviously partial.
+
+So the rule is inverted: **resolve only when provably unambiguous, otherwise
+report.** A name resolves only when its scope chain yields exactly one binding,
+that binding is a plain ``Assign``/``AnnAssign`` with a literal ``ast.Dict``
+right-hand side, and it does not sit inside a branch or loop. Anything else —
+several bindings, an unmodelled binding form, a parameter, a name touched by a
+``global``/``nonlocal`` declaration anywhere in the file — is emitted as an
+``unresolvable`` finding rather than silently assumed clean. Silence now means
+*proven clean*; it used to mean *failed to resolve*.
+
+Residual limits, stated plainly:
+
+* **It can over-report.** That is the intended direction: a false positive costs
+  one allowlist line with a written reason, a false negative ships a credential
+  into an audit record. :data:`UNRESOLVABLE_ALLOWLIST` is that escape hatch and
+  is empty on the current tree.
+* **It does not track values across calls.** ``_emit(metadata=build(token))``
+  is invisible to it; only the expression at the audit/log site is examined.
+* **Unresolvable sites in functions that never mention credential material are
+  silent**, to keep the noise bounded — see :func:`scan_source`. A credential
+  reaching such a function purely through a parameter would not be reported.
+* It reasons about **identifiers, not values**: a token renamed to an innocuous
+  local before the sink is not detected.
+
+The runtime half above is what covers the paths this suite actually executes;
+the two are complementary and neither is claimed to be complete.
 """
 
 from __future__ import annotations
@@ -28,6 +71,8 @@ import ast
 import json
 import pathlib
 import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -306,6 +351,15 @@ FORBIDDEN_FIELDS = frozenset(
 _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical"})
 _METADATA_KEYWORDS = frozenset({"metadata", "event_data", "event_metadata"})
 
+# Audit-metadata sites the scan cannot prove clean but a human has. Keyed
+# ``file::function::name``; the value is the reason, and an empty one fails
+# ``test_every_allowlist_entry_carries_a_reason``. Empty on the current tree —
+# every indirect site in ``app/`` today sits in a thin audit-forwarding helper
+# that never touches credential material, so the scan stays silent without an
+# exemption. Kept (with its tests) so the escape hatch is a reviewed, written
+# decision rather than a quiet code change when the first one appears.
+UNRESOLVABLE_ALLOWLIST: dict[str, str] = {}
+
 
 def _python_sources() -> list[pathlib.Path]:
     return sorted(p for p in _APP.rglob("*.py") if "__pycache__" not in p.parts)
@@ -341,65 +395,170 @@ def _tainted_identifiers(node: ast.AST) -> set[str]:
 
 
 _SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_BRANCHING = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith)
+# Only this form is resolvable; every other way a name can be bound is recorded
+# so it can make the name *unresolvable*, never so it can be trusted.
+_RESOLVABLE = "dict_literal"
+
+
+@dataclass(frozen=True)
+class _Binding:
+    """One place a name is bound, and whether it is a form we can trust."""
+
+    kind: str
+    dict_value: ast.Dict | None
+    in_control_flow: bool
 
 
 class _ScopeIndex:
-    """Lexical scoping for the scan: which binding does a name see *here*?
+    """Which binding does a name see here — and is that answer *provable*?
 
-    Built because keying dict assignments by bare **name** across the whole
-    module is wrong in both directions. A later benign ``payload = {...}`` in an
-    unrelated function silently overwrote an earlier tainted one (the leak then
-    scanned clean), and a tainted binding equally bled into unrelated functions
-    that happened to reuse the name (a false positive). Resolution is per
-    ``(scope, name)``, nearest preceding assignment first, walking outwards
-    through enclosing scopes exactly as Python does — so a closure over a
-    tainted payload is still caught while a shadowing local is not.
+    Deliberately not a name resolver. It records **every** way a name can be
+    bound in a scope so that anything short of a single, unconditional,
+    literal-dict assignment is reported as unresolvable rather than guessed at.
+    See the module docstring for why guessing is the wrong design here.
     """
 
     def __init__(self, tree: ast.AST) -> None:
         self.owner: dict[int, ast.AST] = {id(tree): tree}
         self.parent: dict[int, ast.AST | None] = {id(tree): None}
-        self.dicts: dict[tuple[int, str], list[tuple[int, ast.Dict]]] = {}
-        self._index(tree, tree)
-        for bindings in self.dicts.values():
-            bindings.sort(key=lambda pair: pair[0])
+        self.bindings: dict[tuple[int, str], list[_Binding]] = {}
+        # Any name touched by a `global`/`nonlocal` statement ANYWHERE in the
+        # file can be rebound from a scope this walk is not looking at, so it is
+        # never resolvable — cheap and blunt on purpose.
+        self.rebindable: set[str] = set()
+        self._index(tree, tree, ())
 
-    def _index(self, node: ast.AST, scope: ast.AST) -> None:
+    # --- construction ---------------------------------------------------------
+
+    def _index(self, node: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, _SCOPE_NODES):
-                self.owner[id(child)] = scope
-                self.parent[id(child)] = scope
-                self._index(child, child)
-                continue
             self.owner[id(child)] = scope
-            self._record_binding(child, scope)
-            self._index(child, scope)
+            if isinstance(child, _SCOPE_NODES):
+                self.parent[id(child)] = scope
+                self._enter_scope(child, scope, stack)
+                self._index(child, child, ())
+                continue
+            self._record(child, scope, stack)
+            self._index(child, scope, (*stack, child))
 
-    def _record_binding(self, node: ast.AST, scope: ast.AST) -> None:
-        targets: list[ast.expr] = []
-        value: ast.expr | None = None
+    def _enter_scope(self, child: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+            self._bind(scope, child.name, "def", stack)
+            self._bind_params(child.args, child)
+        elif isinstance(child, ast.ClassDef):
+            self._bind(scope, child.name, "class", stack)
+        elif isinstance(child, ast.Lambda):
+            self._bind_params(child.args, child)
+
+    def _bind_params(self, args: ast.arguments, scope: ast.AST) -> None:
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+            self._bind(scope, arg.arg, "parameter", ())
+        for optional in (args.vararg, args.kwarg):
+            if optional is not None:
+                self._bind(scope, optional.arg, "parameter", ())
+
+    def _bind(
+        self,
+        scope: ast.AST,
+        name: str,
+        kind: str,
+        stack: tuple[ast.AST, ...],
+        dict_value: ast.Dict | None = None,
+    ) -> None:
+        binding = _Binding(
+            kind=kind,
+            dict_value=dict_value,
+            in_control_flow=any(isinstance(a, _BRANCHING) for a in stack),
+        )
+        self.bindings.setdefault((id(scope), name), []).append(binding)
+
+    def _names(self, target: ast.expr) -> Iterator[ast.Name]:
+        """Every ``Name`` a target binds, through tuple/list/star unpacking."""
+        if isinstance(target, ast.Name):
+            yield target
+        elif isinstance(target, ast.Tuple | ast.List):
+            for element in target.elts:
+                yield from self._names(element)
+        elif isinstance(target, ast.Starred):
+            yield from self._names(target.value)
+
+    def _record(self, node: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
         if isinstance(node, ast.Assign):
-            targets, value = list(node.targets), node.value
+            simple = len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            literal = isinstance(node.value, ast.Dict)
+            kind = _RESOLVABLE if (simple and literal) else "assignment"
+            value = node.value if (simple and literal) else None
+            for target in node.targets:
+                for name in self._names(target):
+                    self._bind(scope, name.id, kind, stack, value)  # type: ignore[arg-type]
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        if not isinstance(value, ast.Dict):
-            return
-        for target in targets:
-            if isinstance(target, ast.Name):
-                self.dicts.setdefault((id(scope), target.id), []).append((node.lineno, value))
+            literal = isinstance(node.value, ast.Dict) and isinstance(node.target, ast.Name)
+            kind = _RESOLVABLE if literal else "annotated assignment"
+            for name in self._names(node.target):
+                self._bind(
+                    scope,
+                    name.id,
+                    kind,
+                    stack,
+                    node.value if literal else None,  # type: ignore[arg-type]
+                )
+        elif isinstance(node, ast.AugAssign):
+            for name in self._names(node.target):
+                self._bind(scope, name.id, "augmented assignment", stack)
+        elif isinstance(node, ast.NamedExpr):
+            self._bind(scope, node.target.id, "walrus", stack)
+        elif isinstance(node, ast.For | ast.AsyncFor):
+            for name in self._names(node.target):
+                self._bind(scope, name.id, "loop target", stack)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            for name in self._names(node.optional_vars):
+                self._bind(scope, name.id, "with target", stack)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            self._bind(scope, node.name, "except binder", stack)
+        elif isinstance(node, ast.comprehension):
+            for name in self._names(node.target):
+                self._bind(scope, name.id, "comprehension target", stack)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            for name in node.names:
+                self.rebindable.add(name)
+                self._bind(scope, name, "global/nonlocal declaration", stack)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                self._bind(scope, alias.asname or alias.name.split(".")[0], "import", stack)
 
-    def resolve_dict(self, name: str, call: ast.Call) -> ast.Dict | None:
-        """The dict literal ``name`` refers to at ``call``, or ``None``."""
+    # --- the one query --------------------------------------------------------
+
+    def resolve_dict(self, name: str, call: ast.Call) -> tuple[ast.Dict | None, str | None]:
+        """``(dict, None)`` when provably unambiguous, else ``(None, reason)``.
+
+        Walks the scope chain as Python does, with one correction the previous
+        revision got wrong: a ``ClassDef`` body is **not** part of the closure
+        chain, so a method resolves past its class to the module. Only the
+        innermost scope may be a class (code written directly in a class body
+        does see class-level names).
+        """
+        if name in self.rebindable:
+            return None, f"{name!r} is rebindable via a global/nonlocal declaration"
         scope: ast.AST | None = self.owner.get(id(call))
+        innermost = True
         while scope is not None:
-            bindings = self.dicts.get((id(scope), name))
-            if bindings:
-                preceding = [value for lineno, value in bindings if lineno <= call.lineno]
-                # Bound in this scope but only *after* the call: the name is
-                # local here, so nothing earlier is visible — unresolvable.
-                return preceding[-1] if preceding else None
+            if isinstance(scope, ast.ClassDef) and not innermost:
+                scope = self.parent.get(id(scope))
+                continue
+            innermost = False
+            found = self.bindings.get((id(scope), name))
+            if found:
+                if len(found) > 1:
+                    return None, f"{len(found)} bindings for {name!r} in one scope"
+                binding = found[0]
+                if binding.kind != _RESOLVABLE or binding.dict_value is None:
+                    return None, f"bound by {binding.kind}, not a literal dict"
+                if binding.in_control_flow:
+                    return None, f"the binding of {name!r} sits inside a branch or loop"
+                return binding.dict_value, None
             scope = self.parent.get(id(scope))
-        return None
+        return None, f"no binding for {name!r} in any enclosing scope"
 
     def enclosing_function(self, node: ast.AST) -> ast.AST | None:
         """The innermost ``def``/``async def`` around ``node``, if any."""
@@ -433,26 +592,39 @@ def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
             if keyword.arg not in _METADATA_KEYWORDS:
                 continue
             value: ast.AST | None = keyword.value
+            reason: str | None = None
             if isinstance(value, ast.Name):
-                # Follow `metadata=payload` to the binding visible AT THIS CALL,
-                # in this lexical scope — never to whichever assignment to that
-                # name happened to come last in the file.
-                value = index.resolve_dict(value.id, node)
+                value, reason = index.resolve_dict(value.id, node)
+            elif not isinstance(value, ast.Dict):
+                # A call, comprehension, conditional expression, ... — the value
+                # is only knowable at runtime.
+                value, reason = None, f"built by {type(keyword.value).__name__}"
             if value is None:
-                # Built somewhere this scan cannot follow. Fall back to the
-                # enclosing function: no credential material in scope means
-                # nothing for the payload to carry, but an unprovable payload
-                # inside a function that DOES handle one is the leak shape.
-                scope = index.enclosing_function(node) or tree
-                if _tainted_identifiers(scope):
-                    offenders.append(
-                        f"{where} audit metadata is built indirectly inside a "
-                        "function that handles credential material"
-                    )
+                function = index.enclosing_function(node)
+                # Bounded noise: an unresolvable payload in a function that never
+                # mentions credential material has nothing to carry. This is a
+                # documented limit, not a proof (module docstring).
+                if not _tainted_identifiers(function or tree):
+                    continue
+                site = f"{filename}::{getattr(function, 'name', '<module>')}::{_name_of(keyword)}"
+                if site in UNRESOLVABLE_ALLOWLIST:
+                    continue
+                offenders.append(
+                    f"{where} audit metadata is unresolvable ({reason}) in a function "
+                    f"that handles credential material — prove it clean or allowlist "
+                    f"{site!r} with a reason"
+                )
                 continue
             for name in sorted(_tainted_identifiers(value)):
                 offenders.append(f"{where} audit metadata names {name}")
     return offenders
+
+
+def _name_of(keyword: ast.keyword) -> str:
+    """The identifier a metadata keyword was given, for the allowlist key."""
+    if isinstance(keyword.value, ast.Name):
+        return keyword.value.id
+    return f"<{type(keyword.value).__name__}>"
 
 
 def test_no_log_call_or_audit_metadata_carries_token_material(subject: AclSubject) -> None:
@@ -516,6 +688,134 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
         "    audit.record(metadata=payload)\n"
         "    payload = {'detail': 'scrubbed'}\n",
     ),
+    (
+        # The ClassDef body is NOT part of the closure chain, so `m` sees the
+        # MODULE binding. Walking the class as a parent found the benign class
+        # attribute instead — a false negative.
+        "method resolving past a benign class attribute to a tainted module dict",
+        "payload = {'detail': refresh_token}\n"
+        "\n"
+        "class C:\n"
+        "    payload = {'detail': 'safe'}\n"
+        "\n"
+        "    def m(self):\n"
+        "        audit.record(metadata=payload)\n",
+    ),
+)
+
+
+# Shapes where the value is not knowable statically. Under the previous
+# "resolve, then judge" design each of these silently resolved to whichever
+# assignment a line-ordered walk happened to reach last, and scanned CLEAN.
+# They must now be REPORTED as unresolvable — that is the whole point of the
+# inversion, so the assertion checks the reason, not merely that something fired.
+_UNRESOLVABLE_SHAPES: tuple[tuple[str, str], ...] = (
+    (
+        "tainted if-arm followed textually by a benign else",
+        "def leak(refresh_token, flag):\n"
+        "    if flag:\n"
+        "        payload = {'detail': refresh_token}\n"
+        "    else:\n"
+        "        payload = {'detail': 'safe'}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "unreachable `if False` benign rebind",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    if False:\n"
+        "        payload = {'detail': 'safe'}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "benign rebind in a never-entered loop",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    for _ in []:\n"
+        "        payload = {'detail': 'safe'}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "same-line benign rebind after the leaking call",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}; audit.record(metadata=payload); "
+        "payload = {'detail': 'safe'}\n",
+    ),
+    (
+        "augmented assignment merging in the credential",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    payload |= {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "walrus rebind inside a condition",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    if (payload := {'detail': refresh_token}):\n"
+        "        pass\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "tuple unpacking",
+        "def leak(refresh_token):\n"
+        "    payload, other = {'detail': refresh_token}, 1\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "star unpacking",
+        "def leak(refresh_token):\n"
+        "    payload, *rest = [{'detail': refresh_token}]\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "global rebind",
+        "payload = {'detail': 'safe'}\n"
+        "\n"
+        "def leak(refresh_token):\n"
+        "    global payload\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "nonlocal rebind",
+        "def outer(refresh_token):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "\n"
+        "    def inner():\n"
+        "        nonlocal payload\n"
+        "        payload = {'detail': refresh_token}\n"
+        "        audit.record(metadata=payload)\n"
+        "\n"
+        "    return inner\n",
+    ),
+    (
+        # Comprehension targets get their own scope in Python 3, so this does not
+        # really rebind the local. Reporting it is a deliberate over-report — the
+        # cheap direction — rather than a modelled scope.
+        "comprehension target reusing the name",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    seen = [payload for payload in [{'detail': refresh_token}]]\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "lambda parameter shadowing the name",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    emit = lambda payload: audit.record(metadata=payload)\n"
+        "    return emit\n",
+    ),
+    (
+        "except binder reusing the name",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ValueError as payload:\n"
+        "        pass\n"
+        "    audit.record(metadata=payload)\n",
+    ),
 )
 
 
@@ -525,11 +825,81 @@ def test_the_static_scan_detects_each_planted_leak_shape(
 ) -> None:
     """Meta-proof: the scanner catches indirect and positional leaks too.
 
-    The earlier version of this check inspected only keyword *labels* and inline
+    The earliest version of this check inspected only keyword *labels* and inline
     metadata keys, so most of these shapes passed. Planting each one keeps the
     scanner honest about what it actually proves.
     """
     assert scan_source(leak), f"the scan misses a {shape} leak: {leak!r}"
+
+
+@pytest.mark.parametrize(
+    "shape,source", _UNRESOLVABLE_SHAPES, ids=[s for s, _ in _UNRESOLVABLE_SHAPES]
+)
+def test_statically_unknowable_metadata_is_reported_not_assumed_clean(
+    subject: AclSubject, shape: str, source: str
+) -> None:
+    """Every shape a line-ordered resolver got wrong is now a loud report.
+
+    Asserting on the *reason* matters: "something fired" could be satisfied by an
+    unrelated log finding, whereas this pins that the scan declined to guess.
+    """
+    offenders = scan_source(source)
+    assert offenders, f"{shape} scanned clean — it must be reported as unresolvable"
+    assert any(
+        "unresolvable" in offender for offender in offenders
+    ), f"{shape} fired, but not as an unresolvable finding: {offenders}"
+
+
+def test_the_allowlist_silences_exactly_its_own_site(
+    subject: AclSubject, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch works, and does not silence the site next door.
+
+    The allowlist is empty on the current tree, so without this the machinery
+    would be untested until the first real exemption — exactly when a mistake
+    would be expensive.
+    """
+    source = (
+        "def leak(refresh_token):\n"
+        "    payload = build(refresh_token)\n"
+        "    audit.record(metadata=payload)\n"
+        "\n"
+        "def other(access_token):\n"
+        "    payload = build(access_token)\n"
+        "    audit.record(metadata=payload)\n"
+    )
+    assert len(scan_source(source, filename="m.py")) == 2
+
+    monkeypatch.setitem(UNRESOLVABLE_ALLOWLIST, "m.py::leak::payload", "reviewed: build() redacts")
+    remaining = scan_source(source, filename="m.py")
+    assert len(remaining) == 1, remaining
+    assert "m.py::other::payload" in remaining[0]
+
+
+def test_every_allowlist_entry_carries_a_reason(subject: AclSubject) -> None:
+    """An exemption without a written reason is not a decision, it is a hole."""
+    unexplained = [site for site, reason in UNRESOLVABLE_ALLOWLIST.items() if not reason.strip()]
+    assert not unexplained, f"allowlisted with no reason: {unexplained}"
+    for site in UNRESOLVABLE_ALLOWLIST:
+        assert site.count("::") == 2, f"allowlist key must be file::function::name, got {site!r}"
+
+
+def test_allowlist_entries_are_still_needed(subject: AclSubject) -> None:
+    """A stale exemption silently widens the check — fail when one is unused.
+
+    Recomputed by scanning ``app/`` with the allowlist disabled and collecting
+    the sites that actually report; anything allowlisted but absent from that set
+    is dead and must be deleted.
+    """
+    if not UNRESOLVABLE_ALLOWLIST:
+        return
+    reported: set[str] = set()
+    for path in _python_sources():
+        for offender in scan_source(path.read_text(encoding="utf-8"), filename=path.name):
+            if "unresolvable" in offender:
+                reported.add(offender.split("allowlist ")[-1].split("'")[1])
+    stale = set(UNRESOLVABLE_ALLOWLIST) - reported
+    assert not stale, f"allowlist entries no longer needed: {sorted(stale)}"
 
 
 def test_metadata_resolution_is_per_scope_not_per_name(subject: AclSubject) -> None:
