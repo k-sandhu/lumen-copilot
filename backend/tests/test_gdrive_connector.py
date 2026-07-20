@@ -88,6 +88,26 @@ class FakeDrive:
         self.fail_children_of: set[str] = set()
         self.rate_limit_next: int = 0  # serve N 429s before succeeding
         self.calls: list[str] = []  # ordered request paths (with intent tags)
+        # Chunked (streamed) media bodies + how many chunks were actually
+        # produced — the proof that an over-cap read stops early.
+        self.stream_media: dict[str, list[bytes]] = {}
+        self.stream_content_length: dict[str, str] = {}
+        self.served_chunks: list[str] = []
+
+    def _streamed(self, file_id: str) -> httpx.Response:
+        chunks = self.stream_media[file_id]
+        served = self.served_chunks
+
+        async def _body() -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                served.append(file_id)
+                yield chunk
+
+        headers = {}
+        declared = self.stream_content_length.get(file_id)
+        if declared is not None:
+            headers["Content-Length"] = declared
+        return httpx.Response(200, content=_body(), headers=headers)
 
     def add_file(
         self,
@@ -167,11 +187,15 @@ class FakeDrive:
         if path.endswith("/export"):
             file_id = path.split("/")[-2]
             self.calls.append(f"export {file_id} mime={params.get('mimeType')}")
+            if file_id in self.stream_media:
+                return self._streamed(file_id)
             return httpx.Response(200, content=self.exports.get(file_id, b""))
         if path.startswith("/drive/v3/files/"):
             file_id = path.split("/")[-1]
             if params.get("alt") == "media":
                 self.calls.append(f"download {file_id}")
+                if file_id in self.stream_media:
+                    return self._streamed(file_id)
                 return httpx.Response(200, content=self.media.get(file_id, b""))
             self.calls.append(f"files.get {file_id}")
             meta = self.files.get(file_id)
@@ -536,6 +560,82 @@ async def test_fetch_changes_410_raises_typed_cursor_expired(
                     _Run(http),  # type: ignore[arg-type]
                 )
             )
+
+
+# --- content transfer is streamed and hard-capped ----------------------------
+
+
+async def test_chunked_oversize_download_stops_reading_at_the_cap(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Regression (ADR-0019 §5): a chunked body with no declared size must not
+    be buffered whole.
+
+    ``download_file`` used to materialize ``response.content`` and only then
+    compare against ``GDRIVE_FETCH_MAX_BYTES`` — a missing or inaccurate Drive
+    ``size`` therefore consumed unbounded worker memory and egress. The read
+    now stops as soon as ``cap + 1`` bytes have arrived.
+    """
+    fake_drive.stream_media["big1"] = [b"x" * 16] * 100  # 1600 bytes, chunked
+    async with _client(fake_drive) as http:
+        payload = await gdrive_api.download_file(http, "big1", max_bytes=32)
+    assert payload is None  # over the cap ⇒ skip-and-count, never truncated
+    # 3 chunks (48 bytes) is enough to exceed a 32-byte cap; the other 97 are
+    # never pulled off the wire.
+    assert len(fake_drive.served_chunks) == 3
+
+
+async def test_declared_oversize_download_is_refused_before_the_body(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """An oversized ``Content-Length`` is rejected without reading one byte."""
+    fake_drive.stream_media["big2"] = [b"y" * 16] * 10
+    fake_drive.stream_content_length["big2"] = "160"
+    async with _client(fake_drive) as http:
+        payload = await gdrive_api.download_file(http, "big2", max_bytes=32)
+    assert payload is None
+    assert fake_drive.served_chunks == []
+
+
+async def test_chunked_oversize_export_stops_reading_at_the_cap(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Exports have no size upfront at all — same streamed cap applies."""
+    fake_drive.stream_media["exp1"] = [b"z" * 16] * 100
+    async with _client(fake_drive) as http:
+        payload = await gdrive_api.export_file(http, "exp1", mime_type="text/plain", max_bytes=32)
+    assert payload is None
+    assert len(fake_drive.served_chunks) == 3
+
+
+async def test_under_cap_download_returns_the_whole_body(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """The cap is a ceiling, not a truncation: an in-budget body arrives whole."""
+    fake_drive.stream_media["ok1"] = [b"a" * 8, b"b" * 8]
+    async with _client(fake_drive) as http:
+        payload = await gdrive_api.download_file(http, "ok1", max_bytes=1024)
+    assert payload == b"a" * 8 + b"b" * 8
+
+
+async def test_oversize_export_skips_the_document(
+    guard_stub: None, fake_drive: FakeDrive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: an over-cap export is skipped and counted, not ingested."""
+    from app.core.config import Settings, get_settings
+
+    base = get_settings()
+    tuned = Settings(**{**base.model_dump(by_alias=True), "GDRIVE_FETCH_MAX_BYTES": 32})
+    monkeypatch.setattr("app.core.config.get_settings", lambda: tuned)
+
+    fake_drive.add_file("doc1", name="Small", mime=_GDOC, export=b"tiny")
+    fake_drive.add_file("doc2", name="Huge", mime=_GDOC)
+    fake_drive.stream_media["doc2"] = [b"q" * 16] * 100
+    async with _client(fake_drive) as http:
+        result = await CONNECTOR.sync(_source({"mode": "my_drive"}), _Run(http))  # type: ignore[arg-type]
+    assert isinstance(result, FullSyncResult)
+    assert [d.external_id for d in result.docs] == ["doc1"]
+    assert result.skipped_count == 1
 
 
 # --- 429 backoff --------------------------------------------------------------

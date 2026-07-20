@@ -13,6 +13,10 @@ Fault posture:
 
 * **429 / Retry-After** — bounded backoff (Drive's documented throttle), never
   in the request path (connectors run only inside the Celery sync task);
+* **content is streamed under a hard byte cap** — export/download never
+  materialize a response before checking it (an oversized ``Content-Length`` is
+  refused up front and the body read stops at ``cap + 1`` bytes), so a missing
+  or inaccurate Drive ``size`` cannot consume unbounded worker memory/egress;
 * **HTTP 410** — the incremental cursor is expired: raised as the typed
   :class:`~app.connectors.base.CursorExpiredError` the framework maps to a
   cursor-clear + full resync (ADR-0019 §3);
@@ -185,22 +189,95 @@ async def list_permissions(http: httpx.AsyncClient, file_id: str) -> list[dict[s
         page_token = token
 
 
-async def export_file(http: httpx.AsyncClient, file_id: str, *, mime_type: str) -> bytes:
-    """Export a Google-native file's content (Docs→text, Sheets→CSV, Slides→text)."""
-    response = await _request(
-        http, f"{API_BASE}/files/{file_id}/export", params={"mimeType": mime_type}
+def _declared_over_cap(response: httpx.Response, max_bytes: int) -> bool:
+    """True iff the response *declares* a body larger than the cap."""
+    raw = response.headers.get("Content-Length")
+    if raw is None:
+        return False
+    try:
+        return int(raw) > max_bytes
+    except ValueError:
+        return False
+
+
+async def _stream_capped(
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, str],
+    max_bytes: int,
+) -> bytes | None:
+    """Stream one guarded GET, bounded to ``max_bytes``; ``None`` = over the cap.
+
+    The content path is the only place a Drive response can be arbitrarily
+    large, so it is **streamed** rather than buffered by ``response.content``:
+
+    * an oversized declared ``Content-Length`` is rejected **before** the body
+      is read at all (no egress, no memory);
+    * otherwise the body is consumed chunk-by-chunk and reading **stops** as
+      soon as ``max_bytes`` is exceeded — a missing or lying ``size`` on the
+      file metadata can therefore never make a worker buffer an unbounded
+      response (the connection is dropped by exiting the stream context).
+
+    Returns ``None`` for both over-cap outcomes so the caller can skip-and-count
+    the file (ADR-0019 §5), and the same bounded 429/410/error posture as
+    :func:`_request` otherwise.
+    """
+    last_status = 0
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            async with http.stream("GET", url, params=params) as response:
+                if response.status_code == 429:
+                    last_status = 429
+                    if attempt < _MAX_ATTEMPTS - 1:
+                        await asyncio.sleep(_retry_after_seconds(response))
+                    continue
+                if response.status_code == 410:
+                    raise CursorExpiredError("drive changes cursor expired (HTTP 410)")
+                if response.status_code >= 400:
+                    raise ConnectorError(
+                        f"drive api returned {response.status_code}", code="drive_api_error"
+                    )
+                if _declared_over_cap(response, max_bytes):
+                    return None
+                buffer = bytearray()
+                async for chunk in response.aiter_bytes():
+                    buffer.extend(chunk)
+                    if len(buffer) > max_bytes:
+                        # cap + 1 bytes is all the proof an over-cap body needs.
+                        return None
+                return bytes(buffer)
+        except httpx.HTTPError as exc:
+            raise ConnectorError(
+                f"drive api unreachable: {type(exc).__name__}", code="drive_unreachable"
+            ) from exc
+    raise ConnectorError(f"drive api returned {last_status}", code="drive_rate_limited")
+
+
+async def export_file(
+    http: httpx.AsyncClient, file_id: str, *, mime_type: str, max_bytes: int
+) -> bytes | None:
+    """Export a Google-native file (Docs→text, Sheets→CSV, Slides→text).
+
+    Streamed under ``max_bytes``; ``None`` = the export exceeds the cap (an
+    export has no declared size upfront, which is exactly why it is streamed).
+    """
+    return await _stream_capped(
+        http,
+        f"{API_BASE}/files/{file_id}/export",
+        params={"mimeType": mime_type},
+        max_bytes=max_bytes,
     )
-    return response.content
 
 
-async def download_file(http: httpx.AsyncClient, file_id: str) -> bytes:
-    """Download a binary file's bytes (``alt=media``)."""
-    response = await _request(
+async def download_file(http: httpx.AsyncClient, file_id: str, *, max_bytes: int) -> bytes | None:
+    """Download a binary file's bytes (``alt=media``), capped; ``None`` = over cap."""
+    return await _stream_capped(
         http,
         f"{API_BASE}/files/{file_id}",
         params={"alt": "media", "supportsAllDrives": "true"},
+        max_bytes=max_bytes,
     )
-    return response.content
 
 
 async def list_changes_page(

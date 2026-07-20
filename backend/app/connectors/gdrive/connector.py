@@ -396,9 +396,11 @@ class GdriveConnector:
         data: bytes | None = None
         stored_mime = "text/plain"
         if export_mime is not None:
-            payload = await api.export_file(http, file_id, mime_type=export_mime)
-            if len(payload) > cap:
-                log.info("gdrive.skip_oversize", file_id=file_id, size=len(payload))
+            # Streamed under the cap inside the api helper — an over-cap export
+            # answers ``None`` without ever being buffered whole.
+            payload = await api.export_file(http, file_id, mime_type=export_mime, max_bytes=cap)
+            if payload is None:
+                log.info("gdrive.skip_oversize", file_id=file_id)
                 return None
             text = payload.decode("utf-8", errors="replace")
         elif mime in _PASSTHROUGH_MIMES:
@@ -407,11 +409,13 @@ class GdriveConnector:
                 int(declared) if isinstance(declared, str) and declared.isdigit() else None
             )
             if declared_bytes is not None and declared_bytes > cap:
+                # Cheap pre-check off the metadata: skip without any transfer.
                 log.info("gdrive.skip_oversize", file_id=file_id, size=declared_bytes)
                 return None
-            payload = await api.download_file(http, file_id)
-            if len(payload) > cap:
-                log.info("gdrive.skip_oversize", file_id=file_id, size=len(payload))
+            payload = await api.download_file(http, file_id, max_bytes=cap)
+            if payload is None:
+                # A missing/lying ``size`` is caught by the streamed cap.
+                log.info("gdrive.skip_oversize", file_id=file_id)
                 return None
             data = payload
             stored_mime = mime
