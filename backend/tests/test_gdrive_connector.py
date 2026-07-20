@@ -824,6 +824,30 @@ async def test_over_deep_container_ancestry_fails_the_page_closed(
     assert page.upserts == ()
 
 
+async def test_unreadable_ancestor_above_the_root_stays_complete(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Availability regression for the fail-closed walk.
+
+    Making unprovable ancestry fail closed must not condemn the *normal* case:
+    a configured folder's own parent chain runs up into the My Drive root,
+    which Drive routinely refuses to serve. If a strict proof keeps climbing
+    after membership is already settled, every ordinary nested change raises
+    unknown and the page fails closed forever — trading a fail-open for a total
+    outage. The proofs are target-aware, so an unreadable ancestor ABOVE the
+    configured folder is never read.
+    """
+    _folder_tree(fake_drive)
+    fake_drive.add_file("deep", name="Deep", mime=_GDOC, parents=["sub"], export=b"d")
+    fake_drive.fail_get_ids.add("above")  # the unreadable root over the watched folder
+    _change(fake_drive, "sub", "deep")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.COMPLETE  # membership was provable
+    assert "sub" in page.stale_scope_ids  # the in-scope cascade still fired
+    assert {d.external_id for d in page.upserts} == {"deep"}
+
+
 async def test_provably_outside_container_is_still_ignored(
     guard_stub: None, fake_drive: FakeDrive
 ) -> None:

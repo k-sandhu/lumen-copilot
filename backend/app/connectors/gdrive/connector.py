@@ -404,6 +404,7 @@ class GdriveConnector:
         *,
         memo: _Ancestry | None = None,
         strict: bool = False,
+        stop_at: str | None = None,
     ) -> tuple[str, ...]:
         """The ancestor ids ABOVE a container (``files.get`` walk, bounded).
 
@@ -423,6 +424,13 @@ class GdriveConnector:
           answer, it is a *wrong* one — it would make an unprovable container
           look like a proven outside-scope one. An unreadable link raises
           :class:`_AncestryUnknown` so the page fails closed.
+
+        ``stop_at`` makes a strict proof **target-aware**: the walk ends the
+        moment it reaches that id, because the caller's question is answered
+        there. Without it, a strict proof keeps climbing past a settled result
+        into territory it has no reason to read — and the My Drive root above a
+        configured folder is routinely unreadable, so every valid nested change
+        would raise unknown and fail its page closed.
         """
         ancestry = memo if memo is not None else _Ancestry()
         ancestors: list[str] = []
@@ -431,6 +439,14 @@ class GdriveConnector:
             parent = await self._parent_of(http, current, memo=ancestry, strict=strict)
             if parent is None:
                 # The ONLY provable terminus: the walk reached a root.
+                return tuple(ancestors)
+            if parent == stop_at:
+                # The caller's question is already answered: membership is
+                # PROVEN here, so whatever lies above is irrelevant. Climbing on
+                # would be gratuitous — and routinely fatal in strict mode,
+                # because the My Drive root above a configured folder is
+                # normally unreadable and would raise over a settled proof.
+                ancestors.append(parent)
                 return tuple(ancestors)
             if parent in ancestors:
                 # A cycle — the chain never terminates, so no strict caller can
@@ -510,7 +526,10 @@ class GdriveConnector:
             return False
         if parent == cfg.folder_id:
             return True
-        return cfg.folder_id in await self._walk_up(http, parent, memo=memo, strict=True)
+        chain = await self._walk_up(
+            http, parent, memo=memo, strict=True, stop_at=cfg.folder_id
+        )
+        return cfg.folder_id in chain
 
     async def _container_relation(
         self,
@@ -545,10 +564,33 @@ class GdriveConnector:
             return "inside"  # the whole drive/feed is the configured scope
         if container_id == cfg.folder_id:
             return "inside"
-        if cfg.folder_id in await self._walk_up(http, container_id, memo=memo, strict=True):
-            return "inside"
-        if container_id in await self._walk_up(http, cfg.folder_id, memo=memo, strict=True):
+
+        # Two independent directions can settle this, and an unknown in one does
+        # NOT mean the relation is unprovable — the other may still decide it.
+        # Both walks stop at their target, so neither reads past its own answer.
+        inside_unprovable = False
+        try:
+            chain = await self._walk_up(
+                http, container_id, memo=memo, strict=True, stop_at=cfg.folder_id
+            )
+            if cfg.folder_id in chain:
+                return "inside"
+        except _AncestryUnknown:
+            inside_unprovable = True
+
+        # "Above" walks up from the configured root — a chain we can usually
+        # read even when the container's own is broken. Deciding it here rescues
+        # exactly the case a first-walk failure would otherwise have doomed.
+        above_chain = await self._walk_up(
+            http, cfg.folder_id, memo=memo, strict=True, stop_at=container_id
+        )
+        if container_id in above_chain:
             return "above"
+
+        if inside_unprovable:
+            # Provably not above, but "inside" was never settled — unknown, and
+            # emphatically not "outside" (see the docstring).
+            raise _AncestryUnknown(container_id)
         return "outside"
 
     async def _fetch_doc(
