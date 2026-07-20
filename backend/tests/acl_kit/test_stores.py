@@ -16,6 +16,8 @@ Subsumes the document-visibility matrix of ``tests/test_acl_mode_split.py``
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 import app.db.session as db_session
@@ -252,8 +254,15 @@ async def test_enforced_documents_index_their_mirror_explicitly(
 async def test_freshness_floor_is_shared_by_both_chokepoints(
     world: World, subject: AclSubject
 ) -> None:
-    """One definition of the window — the engine range uses the same floor."""
+    """One definition of the window — the engine range uses the same floor.
+
+    Both sides call ``acl_freshness_floor()``, which is relative to *now*, so
+    the assertion is a tolerance rather than equality: what matters is that the
+    engine's floor is the shared helper's value and not some second definition
+    (a hard-coded window here would be off by hours, not by milliseconds).
+    """
     await world.engine_visible(world.owner_id)
     enforced_branch = world.engine.searches[-1][1]["bool"]["should"][1]
     floor = enforced_branch["bool"]["filter"][2]["range"]["acl_synced_at"]["gte"]
-    assert floor.startswith(acl_freshness_floor().isoformat()[:13])
+    drift = abs(datetime.fromisoformat(floor) - acl_freshness_floor())
+    assert drift < timedelta(minutes=1), f"engine floor {floor} is not the shared window"
