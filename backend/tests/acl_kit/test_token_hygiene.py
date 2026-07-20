@@ -39,27 +39,38 @@ that hole open while making the check *look* more trustworthy, which is worse
 than a check that is obviously partial.
 
 So the rule is inverted: **resolve only when provably unambiguous, otherwise
-report.** A name resolves only when its scope chain yields exactly one binding,
-that binding is a plain ``Assign``/``AnnAssign`` with a literal ``ast.Dict``
-right-hand side, and it does not sit inside a branch or loop. Anything else —
-several bindings, an unmodelled binding form, a parameter, a name touched by a
-``global``/``nonlocal`` declaration anywhere in the file — is emitted as an
-``unresolvable`` finding rather than silently assumed clean. Silence now means
-*proven clean*; it used to mean *failed to resolve*.
+report.** Two layers, both whitelists:
+
+* a name resolves only when its scope chain yields **exactly one** binding, that
+  binding is a plain ``Assign``/``AnnAssign`` with a literal ``ast.Dict``
+  right-hand side, and it does not sit inside a branch or loop;
+* every scope consulted on the way must be built entirely from node types in
+  :data:`_MODELLED_NODES`. Listing the *risky* constructs instead was the same
+  bug one level up — ``ast.Match`` and ``ast.TryStar`` were simply absent, so a
+  ``case {'wrapped': payload}`` capture scanned clean. A whitelist fails closed
+  on every construct nobody has taught it, including ones that do not exist yet.
+
+**What silence means, precisely.** A metadata site produces no finding when, and
+only when, one of these holds: the expression is a literal dict naming no
+credential identifier; or the name resolved under both rules above to a dict
+naming none; or the site is listed in :data:`UNRESOLVABLE_ALLOWLIST` with a
+written reason. Silence is *not* a claim that the value is clean at runtime.
 
 Residual limits, stated plainly:
 
-* **It can over-report.** That is the intended direction: a false positive costs
-  one allowlist line with a written reason, a false negative ships a credential
-  into an audit record. :data:`UNRESOLVABLE_ALLOWLIST` is that escape hatch and
-  is empty on the current tree.
-* **It does not track values across calls.** ``_emit(metadata=build(token))``
-  is invisible to it; only the expression at the audit/log site is examined.
-* **Unresolvable sites in functions that never mention credential material are
-  silent**, to keep the noise bounded — see :func:`scan_source`. A credential
-  reaching such a function purely through a parameter would not be reported.
+* **It can over-report**, by design — an unresolvable site is a finding until a
+  human writes down why it is safe. There are ten such entries today.
+* **It does not track values across calls.** ``_emit(metadata=build(token))`` is
+  invisible; only the expression at the audit/log site is examined. This is why
+  the forwarding helpers in the allowlist are exempted *and* why their callers'
+  own metadata expressions are what the direct scan covers.
 * It reasons about **identifiers, not values**: a token renamed to an innocuous
   local before the sink is not detected.
+* The **direct** argument/value scan needs none of this machinery and has been
+  the effective half in every review round; the indirect-binding resolver is
+  deliberately kept separable (see the excision note above
+  ``_scan_indirect_metadata``) so it can be removed wholesale if it proves
+  unable to converge.
 
 The runtime half above is what covers the paths this suite actually executes;
 the two are complementary and neither is claimed to be complete.
@@ -71,7 +82,8 @@ import ast
 import json
 import pathlib
 import uuid
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 import httpx
@@ -351,14 +363,57 @@ FORBIDDEN_FIELDS = frozenset(
 _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical"})
 _METADATA_KEYWORDS = frozenset({"metadata", "event_data", "event_metadata"})
 
-# Audit-metadata sites the scan cannot prove clean but a human has. Keyed
-# ``file::function::name``; the value is the reason, and an empty one fails
-# ``test_every_allowlist_entry_carries_a_reason``. Empty on the current tree —
-# every indirect site in ``app/`` today sits in a thin audit-forwarding helper
-# that never touches credential material, so the scan stays silent without an
-# exemption. Kept (with its tests) so the escape hatch is a reviewed, written
-# decision rather than a quiet code change when the first one appears.
-UNRESOLVABLE_ALLOWLIST: dict[str, str] = {}
+# Audit-metadata sites the scan cannot prove clean but a human has reviewed.
+# Keyed ``<path relative to app/>::<function>::<name>#<ordinal>``; the value is
+# the reason, and an empty one fails ``test_every_allowlist_entry_carries_a_reason``.
+#
+# These ten were previously invisible: an earlier revision suppressed unresolvable
+# sites whose enclosing function never mentioned credential material, which is an
+# unwritten wildcard exemption for a whole class of code — precisely what having a
+# written allowlist is meant to prevent. ``def emit(detail): audit.record(
+# metadata=detail)`` with a caller passing ``{'detail': access_token}`` scanned
+# clean under that rule. The obligation is real, so it is written down: the
+# forwarding helpers below cannot be checked here, and their *callers* are what
+# the direct-argument scan covers.
+UNRESOLVABLE_ALLOWLIST: dict[str, str] = {
+    "db/repositories.py::_to_audit_event::Call#0": (
+        "reads persisted metadata back OUT of a row into a domain object "
+        "(`dict(row.event_metadata)`); a read path, not a sink — nothing can "
+        "leak here that a write path did not already store"
+    ),
+    "db/repositories.py::record::BoolOp#0": (
+        "`event_metadata=metadata or {}` — the repository writes through whatever "
+        "its caller passed; the obligation belongs to the calling service, whose "
+        "own metadata expression is scanned directly"
+    ),
+    "sandbox/service.py::_audit_run::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/assistant_governance_service.py::_emit::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/assistants_service.py::_emit_audit::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/audit.py::emit::metadata#0": (
+        "the audit sink's own forwarding parameter — every caller's metadata "
+        "expression is scanned at its own site"
+    ),
+    "services/runs_service.py::_audit_run::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/runs_service.py::_emit::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/schedules_service.py::_emit_audit::metadata#0": (
+        "metadata is a parameter — callers are responsible for what they pass"
+    ),
+    "services/sources_service.py::add::IfExp#0": (
+        "a conditional expression over two literal dicts, both carrying only "
+        "`type`/`url`/`mode` from the validated source config — reviewed, no "
+        "credential material in either branch"
+    ),
+}
 
 
 def _python_sources() -> list[pathlib.Path]:
@@ -400,6 +455,81 @@ _BRANCHING = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.A
 # so it can make the name *unresolvable*, never so it can be trusted.
 _RESOLVABLE = "dict_literal"
 
+# The statement/expression node types this resolver actually models. It is a
+# WHITELIST on purpose. The previous revision listed the *risky* constructs
+# instead, which is the same bug one level up: `ast.Match` and `ast.TryStar`
+# were simply absent from that list, so a `case {'wrapped': payload}` capture
+# binding a credential scanned clean. A blacklist leaks one construct per Python
+# release; a whitelist fails closed on every construct nobody has taught it,
+# including ones that do not exist yet.
+#
+# Node categories deliberately not checked: operators (`ast.Add`, ...) and
+# contexts (`ast.Load`, ...) carry no binding or control-flow meaning. Match
+# subpatterns need no entry either — the `ast.Match` statement carrying them is
+# itself unmodelled, so the scope is already rejected.
+_MODELLED_NODES: frozenset[type[ast.AST]] = frozenset(
+    {
+        # statements
+        ast.AnnAssign,
+        ast.Assert,
+        ast.Assign,
+        ast.AsyncFor,
+        ast.AsyncFunctionDef,
+        ast.AsyncWith,
+        ast.AugAssign,
+        ast.Break,
+        ast.ClassDef,
+        ast.Continue,
+        ast.Delete,
+        ast.Expr,
+        ast.For,
+        ast.FunctionDef,
+        ast.Global,
+        ast.If,
+        ast.Import,
+        ast.ImportFrom,
+        ast.Nonlocal,
+        ast.Pass,
+        ast.Raise,
+        ast.Return,
+        ast.Try,
+        ast.While,
+        ast.With,
+        # expressions
+        ast.Attribute,
+        ast.Await,
+        ast.BinOp,
+        ast.BoolOp,
+        ast.Call,
+        ast.Compare,
+        ast.Constant,
+        ast.Dict,
+        ast.DictComp,
+        ast.FormattedValue,
+        ast.GeneratorExp,
+        ast.IfExp,
+        ast.JoinedStr,
+        ast.Lambda,
+        ast.List,
+        ast.ListComp,
+        ast.Name,
+        ast.NamedExpr,
+        ast.Set,
+        ast.SetComp,
+        ast.Slice,
+        ast.Starred,
+        ast.Subscript,
+        ast.Tuple,
+        ast.UnaryOp,
+        ast.Yield,
+        ast.YieldFrom,
+        # walked, but neither stmt nor expr
+        ast.ExceptHandler,
+    }
+)
+# The node categories the whitelist is enforced against.
+_CHECKED_CATEGORIES = (ast.stmt, ast.expr, ast.excepthandler, ast.pattern)
+
 
 @dataclass(frozen=True)
 class _Binding:
@@ -427,29 +557,85 @@ class _ScopeIndex:
         # file can be rebound from a scope this walk is not looking at, so it is
         # never resolvable — cheap and blunt on purpose.
         self.rebindable: set[str] = set()
+        # scope id -> the unmodelled node types found directly in it.
+        self.unmodelled: dict[int, set[str]] = {}
         self._index(tree, tree, ())
 
     # --- construction ---------------------------------------------------------
 
     def _index(self, node: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
         for child in ast.iter_child_nodes(node):
-            self.owner[id(child)] = scope
-            if isinstance(child, _SCOPE_NODES):
-                self.parent[id(child)] = scope
-                self._enter_scope(child, scope, stack)
-                self._index(child, child, ())
-                continue
-            self._record(child, scope, stack)
-            self._index(child, scope, (*stack, child))
+            self._visit(child, scope, stack)
+
+    def _visit(self, child: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
+        """Index ONE node in ``scope`` — the single entry point.
+
+        Every walk (a body, a decorator list, a default expression) routes
+        through here, so a nested scope is always properly *entered*. Walking
+        bodies with a separate loop that never checked for scope nodes silently
+        indexed every method against its class: parameters went unbound and calls
+        were attributed to ``<module>``.
+        """
+        self.owner[id(child)] = scope
+        self._check_modelled(child, scope)
+        if isinstance(child, _SCOPE_NODES):
+            self.parent[id(child)] = scope
+            self._enter_scope(child, scope, stack)
+            return
+        self._record(child, scope, stack)
+        self._index(child, scope, (*stack, child))
+
+    def _check_modelled(self, node: ast.AST, scope: ast.AST) -> None:
+        if isinstance(node, _CHECKED_CATEGORIES) and type(node) not in _MODELLED_NODES:
+            self.unmodelled.setdefault(id(scope), set()).add(type(node).__name__)
 
     def _enter_scope(self, child: ast.AST, scope: ast.AST, stack: tuple[ast.AST, ...]) -> None:
+        """Index a nested scope, evaluating each part where Python evaluates it.
+
+        Decorators, default values and annotations are evaluated in the
+        **enclosing** scope, not inside the function. Indexing them inside meant
+        ``def f(arg=audit.record(metadata=payload))`` — which emits at definition
+        time — resolved ``payload`` against the function-local binding instead of
+        the module-level one actually in effect.
+        """
         if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
             self._bind(scope, child.name, "def", stack)
+            self._index_in_enclosing(child.decorator_list, scope, stack)
+            self._index_signature(child.args, scope, stack)
+            if child.returns is not None:
+                self._index_in_enclosing([child.returns], scope, stack)
             self._bind_params(child.args, child)
+            self._index_body(child.body, child)
         elif isinstance(child, ast.ClassDef):
             self._bind(scope, child.name, "class", stack)
+            self._index_in_enclosing([*child.decorator_list, *child.bases], scope, stack)
+            self._index_body(child.body, child)
         elif isinstance(child, ast.Lambda):
+            self._index_signature(child.args, scope, stack)
             self._bind_params(child.args, child)
+            self._index_body([child.body], child)
+
+    def _index_in_enclosing(
+        self, nodes: list[ast.expr], scope: ast.AST, stack: tuple[ast.AST, ...]
+    ) -> None:
+        """Walk expressions that belong to the ENCLOSING scope."""
+        for node in nodes:
+            self._visit(node, scope, stack)
+
+    def _index_signature(
+        self, args: ast.arguments, scope: ast.AST, stack: tuple[ast.AST, ...]
+    ) -> None:
+        defaults = [d for d in [*args.defaults, *args.kw_defaults] if d is not None]
+        annotations = [
+            arg.annotation
+            for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+            if arg.annotation is not None
+        ]
+        self._index_in_enclosing([*defaults, *annotations], scope, stack)
+
+    def _index_body(self, body: list[ast.stmt] | list[ast.expr], scope: ast.AST) -> None:
+        for statement in body:
+            self._visit(statement, scope, ())
 
     def _bind_params(self, args: ast.arguments, scope: ast.AST) -> None:
         for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
@@ -547,6 +733,11 @@ class _ScopeIndex:
                 scope = self.parent.get(id(scope))
                 continue
             innermost = False
+            # Whitelist gate: every scope consulted on the way to a binding must
+            # be built entirely from constructs this resolver models.
+            unmodelled = self.unmodelled.get(id(scope))
+            if unmodelled:
+                return None, f"scope contains unmodelled construct(s) {sorted(unmodelled)}"
             found = self.bindings.get((id(scope), name))
             if found:
                 if len(found) > 1:
@@ -568,20 +759,27 @@ class _ScopeIndex:
         return scope
 
 
-def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
+def scan_source(
+    source: str, *, filename: str = "<planted>", allowlist: Mapping[str, str] | None = None
+) -> list[str]:
     """Report every credential-material leak into a log call or audit metadata.
 
-    Extracted as a plain function so the meta-test below can run the **same**
-    scanner over deliberately planted leaks — a scanner proven only against the
-    code it already passes on is not a proof.
+    Extracted as a plain function so the meta-tests can run the **same** scanner
+    over deliberately planted leaks — a scanner proven only against the code it
+    already passes on is not a proof. ``allowlist`` is injectable so the
+    stale-entry test can genuinely scan with exemptions disabled (passing ``{}``)
+    rather than merely claiming to.
     """
+    exemptions = UNRESOLVABLE_ALLOWLIST if allowlist is None else allowlist
     tree = ast.parse(source, filename=filename)
     index = _ScopeIndex(tree)
     offenders: list[str] = []
+    seen_sites: Counter[str] = Counter()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         where = f"{filename}:{node.lineno}"
+        # --- direct argument/value scan (needs no name resolution) ------------
         if isinstance(node.func, ast.Attribute) and node.func.attr in _LOG_METHODS:
             # EVERY argument of a log call — positional, keyword, nested, or
             # interpolated — is a sink.
@@ -591,40 +789,89 @@ def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
         for keyword in node.keywords:
             if keyword.arg not in _METADATA_KEYWORDS:
                 continue
-            value: ast.AST | None = keyword.value
-            reason: str | None = None
-            if isinstance(value, ast.Name):
-                value, reason = index.resolve_dict(value.id, node)
-            elif not isinstance(value, ast.Dict):
-                # A call, comprehension, conditional expression, ... — the value
-                # is only knowable at runtime.
-                value, reason = None, f"built by {type(keyword.value).__name__}"
-            if value is None:
-                function = index.enclosing_function(node)
-                # Bounded noise: an unresolvable payload in a function that never
-                # mentions credential material has nothing to carry. This is a
-                # documented limit, not a proof (module docstring).
-                if not _tainted_identifiers(function or tree):
-                    continue
-                site = f"{filename}::{getattr(function, 'name', '<module>')}::{_name_of(keyword)}"
-                if site in UNRESOLVABLE_ALLOWLIST:
-                    continue
-                offenders.append(
-                    f"{where} audit metadata is unresolvable ({reason}) in a function "
-                    f"that handles credential material — prove it clean or allowlist "
-                    f"{site!r} with a reason"
-                )
+            if isinstance(keyword.value, ast.Dict):
+                for name in sorted(_tainted_identifiers(keyword.value)):
+                    offenders.append(f"{where} audit metadata names {name}")
                 continue
-            for name in sorted(_tainted_identifiers(value)):
-                offenders.append(f"{where} audit metadata names {name}")
+            offenders.extend(
+                _scan_indirect_metadata(
+                    index, node, keyword, where, filename, exemptions, seen_sites
+                )
+            )
     return offenders
 
 
-def _name_of(keyword: ast.keyword) -> str:
-    """The identifier a metadata keyword was given, for the allowlist key."""
+# ---------------------------------------------------------------------------
+# INDIRECT-BINDING RESOLUTION — separable on purpose.
+#
+# Everything from here to the end of `_site_key` exists to answer "which dict
+# does `metadata=<name>` refer to". If a future review finds yet another
+# construct this cannot model, the agreed fallback is to delete this block and
+# the `_scan_indirect_metadata` call above, keeping the direct argument/value
+# scan — which needs no name resolution and has been the effective half in every
+# review round. That is a clean deletion, not a rewrite.
+# ---------------------------------------------------------------------------
+
+
+def _scan_indirect_metadata(
+    index: _ScopeIndex,
+    node: ast.Call,
+    keyword: ast.keyword,
+    where: str,
+    filename: str,
+    exemptions: Mapping[str, str],
+    seen_sites: Counter[str],
+) -> list[str]:
+    """Resolve an indirect metadata expression, or report it as unresolvable."""
     if isinstance(keyword.value, ast.Name):
-        return keyword.value.id
-    return f"<{type(keyword.value).__name__}>"
+        value, reason = index.resolve_dict(keyword.value.id, node)
+    else:
+        # A call, comprehension, conditional expression, ... — knowable only at
+        # runtime.
+        value, reason = None, f"built by {type(keyword.value).__name__}"
+    if value is not None:
+        return [
+            f"{where} audit metadata names {name}" for name in sorted(_tainted_identifiers(value))
+        ]
+    site = _site_key(index, node, keyword, filename, seen_sites)
+    if site in exemptions:
+        return []
+    return [
+        f"{where} audit metadata is unresolvable ({reason}) — prove it clean or "
+        f"allowlist {site!r} with a reason"
+    ]
+
+
+def _site_key(
+    index: _ScopeIndex,
+    node: ast.Call,
+    keyword: ast.keyword,
+    filename: str,
+    seen_sites: Counter[str],
+) -> str:
+    """A stable identifier for ONE unresolvable site.
+
+    ``<path>::<function>::<name>#<ordinal>``. Two things this has to get right:
+
+    * the path is relative to ``app/``, because the tree holds three ``audit.py``
+      and three ``service.py`` — bare filenames collide and one exemption would
+      silence its namesakes in unrelated packages;
+    * the ordinal distinguishes *sites*, not functions: a helper that audits
+      twice has two independent obligations and one entry must not silence both.
+      An ordinal rather than a line number, so unrelated edits above the site do
+      not churn the allowlist.
+    """
+    function = index.enclosing_function(node)
+    name = keyword.value.id if isinstance(keyword.value, ast.Name) else type(keyword.value).__name__
+    stem = f"{filename}::{getattr(function, 'name', '<module>')}::{name}"
+    ordinal = seen_sites[stem]
+    seen_sites[stem] += 1
+    return f"{stem}#{ordinal}"
+
+
+def _relative_source_name(path: pathlib.Path) -> str:
+    """``connectors/gdrive/api.py`` — unique within ``app/``, unlike ``api.py``."""
+    return path.relative_to(_APP).as_posix()
 
 
 def test_no_log_call_or_audit_metadata_carries_token_material(subject: AclSubject) -> None:
@@ -636,7 +883,9 @@ def test_no_log_call_or_audit_metadata_carries_token_material(subject: AclSubjec
     """
     offenders: list[str] = []
     for path in _python_sources():
-        offenders += scan_source(path.read_text(encoding="utf-8"), filename=path.name)
+        offenders += scan_source(
+            path.read_text(encoding="utf-8"), filename=_relative_source_name(path)
+        )
     assert not offenders, f"credential material reaches a log/audit sink: {offenders}"
 
 
@@ -653,12 +902,6 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
     (
         "indirect metadata dict",
         "payload = {'detail': refresh_token}\naudit.record(action='x', metadata=payload)",
-    ),
-    (
-        "unresolvable metadata inside a credential-handling function",
-        "def refresh(refresh_token):\n"
-        "    payload = build(refresh_token)\n"
-        "    audit.record(action='x', metadata=payload)\n",
     ),
     (
         # A module-wide `name -> dict` map lets a LATER benign assignment to a
@@ -682,13 +925,6 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
         "    audit.record(metadata=payload)\n",
     ),
     (
-        "rebinding a name to a benign dict AFTER the leaking call",
-        "def leak(refresh_token):\n"
-        "    payload = {'detail': refresh_token}\n"
-        "    audit.record(metadata=payload)\n"
-        "    payload = {'detail': 'scrubbed'}\n",
-    ),
-    (
         # The ClassDef body is NOT part of the closure chain, so `m` sees the
         # MODULE binding. Walking the class as a parent found the benign class
         # attribute instead — a false negative.
@@ -701,6 +937,26 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
         "    def m(self):\n"
         "        audit.record(metadata=payload)\n",
     ),
+    (
+        # Defaults are evaluated in the ENCLOSING scope at definition time, so
+        # this call emits the module-level tainted dict — not the function-local
+        # benign one the previous revision resolved to.
+        "call in a default argument, evaluated at definition time",
+        "payload = {'detail': refresh_token}\n"
+        "\n"
+        "def f(arg=audit.record(metadata=payload)):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    return payload\n",
+    ),
+    (
+        "call in a decorator expression, evaluated in the enclosing scope",
+        "payload = {'detail': refresh_token}\n"
+        "\n"
+        "@register(audit.record(metadata=payload))\n"
+        "def f():\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    return payload\n",
+    ),
 )
 
 
@@ -710,6 +966,41 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
 # They must now be REPORTED as unresolvable — that is the whole point of the
 # inversion, so the assertion checks the reason, not merely that something fired.
 _UNRESOLVABLE_SHAPES: tuple[tuple[str, str], ...] = (
+    (
+        "unresolvable metadata inside a credential-handling function",
+        "def refresh(refresh_token):\n"
+        "    payload = build(refresh_token)\n"
+        "    audit.record(action='x', metadata=payload)\n",
+    ),
+    (
+        "rebinding a name to a benign dict AFTER the leaking call",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n"
+        "    payload = {'detail': 'scrubbed'}\n",
+    ),
+    (
+        # `ast.Match` is not on the modelled list, so the scope is rejected
+        # before any binding is trusted. Under the previous BLACKLIST of risky
+        # constructs it was simply absent and this scanned clean.
+        "match-statement capture pattern binding the credential",
+        "def leak(event, refresh_token):\n"
+        "    payload = {'detail': 'safe'}\n"
+        "    match event:\n"
+        "        case {'wrapped': payload}:\n"
+        "            pass\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "except* group, another construct the blacklist never listed",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    try:\n"
+        "        pass\n"
+        "    except* ValueError:\n"
+        "        pass\n"
+        "    audit.record(metadata=payload)\n",
+    ),
     (
         "tainted if-arm followed textually by a benign else",
         "def leak(refresh_token, flag):\n"
@@ -828,8 +1119,16 @@ def test_the_static_scan_detects_each_planted_leak_shape(
     The earliest version of this check inspected only keyword *labels* and inline
     metadata keys, so most of these shapes passed. Planting each one keeps the
     scanner honest about what it actually proves.
+
+    Asserts the finding **names the credential identifier**, not merely that
+    something fired: a bare non-empty check would be satisfied by an unrelated
+    unresolvable report, which is a weaker claim than the one being made.
     """
-    assert scan_source(leak), f"the scan misses a {shape} leak: {leak!r}"
+    offenders = scan_source(leak)
+    assert offenders, f"the scan misses a {shape} leak: {leak!r}"
+    assert any(
+        " names " in offender for offender in offenders
+    ), f"{shape} fired without naming the credential identifier: {offenders}"
 
 
 @pytest.mark.parametrize(
@@ -850,30 +1149,76 @@ def test_statically_unknowable_metadata_is_reported_not_assumed_clean(
     ), f"{shape} fired, but not as an unresolvable finding: {offenders}"
 
 
-def test_the_allowlist_silences_exactly_its_own_site(
-    subject: AclSubject, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The escape hatch works, and does not silence the site next door.
+def _reported_sites(allowlist: Mapping[str, str]) -> set[str]:
+    """The unresolvable site keys ``app/`` yields under ``allowlist``."""
+    sites: set[str] = set()
+    for path in _python_sources():
+        for offender in scan_source(
+            path.read_text(encoding="utf-8"),
+            filename=_relative_source_name(path),
+            allowlist=allowlist,
+        ):
+            if "unresolvable" in offender:
+                sites.add(offender.split("allowlist ")[-1].split("'")[1])
+    return sites
 
-    The allowlist is empty on the current tree, so without this the machinery
-    would be untested until the first real exemption — exactly when a mistake
-    would be expensive.
+
+def test_the_allowlist_silences_exactly_its_own_site(subject: AclSubject) -> None:
+    """One entry silences ONE site — including two sites in the same function.
+
+    The previous version only proved that different *function names* produce
+    different keys, which the old function-scoped key already did. The real risk
+    is a helper that audits twice: exempting one call must not exempt the other,
+    so both calls here live in the same function and differ only by ordinal.
     """
     source = (
-        "def leak(refresh_token):\n"
+        "def emit(refresh_token):\n"
+        "    first = build(refresh_token)\n"
+        "    audit.record(metadata=first)\n"
+        "    second = build(refresh_token)\n"
+        "    audit.record(metadata=second)\n"
+    )
+    baseline = scan_source(source, filename="m.py", allowlist={})
+    assert len(baseline) == 2, baseline
+    assert "m.py::emit::first#0" in baseline[0]
+    assert "m.py::emit::second#0" in baseline[1]
+
+    remaining = scan_source(source, filename="m.py", allowlist={"m.py::emit::first#0": "reviewed"})
+    assert len(remaining) == 1, remaining
+    assert "m.py::emit::second#0" in remaining[0]
+
+
+def test_two_sites_for_the_same_name_get_distinct_keys(subject: AclSubject) -> None:
+    """A function auditing the SAME name twice has two separate obligations."""
+    source = (
+        "def emit(refresh_token):\n"
         "    payload = build(refresh_token)\n"
         "    audit.record(metadata=payload)\n"
-        "\n"
-        "def other(access_token):\n"
-        "    payload = build(access_token)\n"
         "    audit.record(metadata=payload)\n"
     )
-    assert len(scan_source(source, filename="m.py")) == 2
+    baseline = scan_source(source, filename="m.py", allowlist={})
+    assert len(baseline) == 2, baseline
+    assert "m.py::emit::payload#0" in baseline[0]
+    assert "m.py::emit::payload#1" in baseline[1]
 
-    monkeypatch.setitem(UNRESOLVABLE_ALLOWLIST, "m.py::leak::payload", "reviewed: build() redacts")
-    remaining = scan_source(source, filename="m.py")
-    assert len(remaining) == 1, remaining
-    assert "m.py::other::payload" in remaining[0]
+    remaining = scan_source(source, filename="m.py", allowlist={"m.py::emit::payload#0": "ok"})
+    assert len(remaining) == 1 and "m.py::emit::payload#1" in remaining[0], remaining
+
+
+def test_allowlist_keys_are_paths_relative_to_app(subject: AclSubject) -> None:
+    """Bare filenames collide: the tree holds three ``audit.py``/``service.py``.
+
+    Keying on ``path.name`` meant one exemption silenced its namesakes in
+    unrelated packages.
+    """
+    names = [p.name for p in _python_sources()]
+    duplicates = {name for name in names if names.count(name) > 1}
+    assert {"audit.py", "service.py"} <= duplicates, sorted(duplicates)
+    for site in UNRESOLVABLE_ALLOWLIST:
+        relative = site.split("::")[0]
+        assert (
+            _APP / relative
+        ).exists(), f"allowlist path {relative!r} does not resolve under app/"
 
 
 def test_every_allowlist_entry_carries_a_reason(subject: AclSubject) -> None:
@@ -881,25 +1226,25 @@ def test_every_allowlist_entry_carries_a_reason(subject: AclSubject) -> None:
     unexplained = [site for site, reason in UNRESOLVABLE_ALLOWLIST.items() if not reason.strip()]
     assert not unexplained, f"allowlisted with no reason: {unexplained}"
     for site in UNRESOLVABLE_ALLOWLIST:
-        assert site.count("::") == 2, f"allowlist key must be file::function::name, got {site!r}"
+        assert site.count("::") == 2, f"key must be path::function::name#n, got {site!r}"
+        assert "#" in site.rsplit("::", 1)[-1], f"key must carry a site ordinal, got {site!r}"
 
 
 def test_allowlist_entries_are_still_needed(subject: AclSubject) -> None:
     """A stale exemption silently widens the check — fail when one is unused.
 
-    Recomputed by scanning ``app/`` with the allowlist disabled and collecting
-    the sites that actually report; anything allowlisted but absent from that set
-    is dead and must be deleted.
+    Genuinely scans with exemptions disabled (``allowlist={}``). The previous
+    version passed the LIVE allowlist, so every *active* entry was suppressed
+    from the recomputed set and therefore read as stale — the escape hatch could
+    not be used at all without turning this red.
     """
-    if not UNRESOLVABLE_ALLOWLIST:
-        return
-    reported: set[str] = set()
-    for path in _python_sources():
-        for offender in scan_source(path.read_text(encoding="utf-8"), filename=path.name):
-            if "unresolvable" in offender:
-                reported.add(offender.split("allowlist ")[-1].split("'")[1])
-    stale = set(UNRESOLVABLE_ALLOWLIST) - reported
+    stale = set(UNRESOLVABLE_ALLOWLIST) - _reported_sites({})
     assert not stale, f"allowlist entries no longer needed: {sorted(stale)}"
+
+
+def test_the_allowlist_covers_every_unresolvable_site(subject: AclSubject) -> None:
+    """...and the converse: nothing in ``app/`` reports without a written reason."""
+    assert _reported_sites({}) == set(UNRESOLVABLE_ALLOWLIST)
 
 
 def test_metadata_resolution_is_per_scope_not_per_name(subject: AclSubject) -> None:
@@ -962,14 +1307,30 @@ def test_the_static_scan_does_not_flag_benign_logging(subject: AclSubject) -> No
         "log.info('source_sync.started', source_id=str(source_id))\n"
         "log.warning('oauth.exchange_failed', error=exc.code, status=resp.status_code)\n"
         "audit.record(action='source.connected', metadata={'email': account_email})\n"
-        # An indirectly-built payload in a function with no credential material
-        # in sight is not evidence of a leak — flagging it would be noise the
-        # next maintainer silences by deleting the check.
         "def rename(name):\n"
-        "    payload = build(name)\n"
+        "    payload = {'detail': name}\n"
         "    audit.record(action='x', metadata=payload)\n"
     )
     assert scan_source(benign) == []
+
+
+def test_an_unprovable_payload_reports_even_in_an_innocent_function(
+    subject: AclSubject,
+) -> None:
+    """The noise-bounding gate is gone, deliberately.
+
+    An earlier revision suppressed unresolvable sites whose enclosing function
+    never mentioned credential material. That is an *unwritten wildcard
+    exemption* for a whole class of code, which defeats the purpose of keeping a
+    written allowlist: ``def emit(detail): audit.record(metadata=detail)`` scans
+    clean while a caller passes ``{'detail': access_token}``. Such sites now
+    report, and the ten real ones in ``app/`` carry written reasons instead.
+    """
+    forwarding_helper = "def emit(detail):\n    audit.record(action='x', metadata=detail)\n"
+    offenders = scan_source(forwarding_helper, filename="m.py", allowlist={})
+    assert offenders, "a forwarding helper must be a written obligation, not a silent one"
+    assert "unresolvable" in offenders[0]
+    assert "m.py::emit::detail#0" in offenders[0]
 
 
 def test_the_pkce_verifier_is_confined_to_its_owning_modules(subject: AclSubject) -> None:
