@@ -34,19 +34,33 @@ prohibits touching *Lumen's* database, not the existence of SQL — a future
 connector whose external source is a SQL warehouse legitimately imports a SQL
 client, and the SDK has no business prohibiting a vendor boundary.
 
-**P2 — no reads of Lumen's infrastructure settings**
-(:data:`FORBIDDEN_SETTINGS`). P1 alone does not survive contact: ::
+**P2 — the settings seam is sealed to one shape** (:func:`_settings_seam`). P1
+alone does not survive contact: ::
 
     from sqlalchemy.ext.asyncio import create_async_engine
     create_async_engine(get_settings().database_url)      # never imports app.db
 
 opens a connection straight into Lumen's database while importing nothing
-forbidden. The *setting* is what distinguishes "Lumen's datastore" from "the
-connector's own source", so it is the setting that is pinned. ``app.core.config``
-stays importable — reading ``gdrive_oauth_client_id`` is what ``oauth_spec()``
-is *for* — but the infrastructure and credential fields are off limits. Together
-P1 and P2 state the rule the ADR actually makes: never Lumen's DB, whatever
-route you take to it.
+forbidden. The obvious repair — work out whether a given read resolves to a
+settings object — is a dataflow analysis, and hand-rolling one in a test kit
+does not converge: conditionals, walrus, tuple unpacking, ``d = dict(d)`` and
+cross-function laundering each need another case, and every added case risks a
+*false positive* on a connector's own config, which is the more expensive
+failure of the two.
+
+So the shape is pinned instead, which AST can actually prove. A connector may
+touch settings in exactly one form — ``get_settings().<field>`` — with the
+accessor never aliased, stored, passed, or transformed, and the read
+terminating at the field. A connector therefore never holds a settings object,
+so there is nothing to launder: every bypass class dies at once rather than one
+per round. And because the rule only inspects expressions rooted at
+``get_settings``, a connector's own ``connector_config.database_url`` is
+invisible to it — the external-SQL allowance survives by construction.
+
+Deployment config stays readable, because ADR-0019 §4/§5 explicitly sanctions
+it (``oauth_spec()`` reads the platform's OAuth client registration; ``web``
+reads its User-Agent). Lumen's *infrastructure* fields
+(:data:`FORBIDDEN_SETTINGS`) are refused even through the one legal shape.
 
 **P3 — no mutable module-level state**, detected as *mutation*, not as
 container type: a module-level lookup table (``_EXPORT_MIME = {...}``) that is
@@ -58,11 +72,13 @@ a method's unqualified name resolves past its class straight to the module
 global, so `class C: CACHE = set()` does not excuse `CACHE.add(...)` in a method.
 
 Blind spots, recorded honestly (see the guide's *What this does not catch*):
-dynamic imports (``importlib.import_module("app.db…")``, ``__import__``),
-dynamic attribute access (``getattr(settings, "database_url")``), state held on
-a connector *instance* attribute, and mutation reached through an alias rather
-than the module-level name. Those stay review-caught; the scan closes the
-accident-shaped holes, not a determined author.
+**dynamic imports** — ``importlib.import_module("app.core.config")``,
+``sys.modules[...]``, ``__import__`` — reach both the config module and the DB
+regardless of P1/P2, and are the single residue of the settings seam; plus
+state held on a connector *instance* attribute, and mutation reached through an
+alias rather than the module-level name. Those stay review-caught, which is
+adequate under ADR-0019 §4's first-party, code-reviewed trust model. The scan
+closes what syntax can close; it is not a sandbox.
 """
 
 from __future__ import annotations
@@ -110,18 +126,38 @@ FORBIDDEN_IMPORTS: dict[str, str] = {
     ),
 }
 
-# Settings attributes that ARE Lumen's own infrastructure and credentials
-# (`app/core/config.py`). Banning the import of ``app.db`` is not enough on its
-# own: ``create_async_engine(get_settings().database_url)`` never imports
-# ``app.db`` and still opens a connection straight into Lumen's database. The
-# *setting* is what identifies "Lumen's datastore" as opposed to the connector's
-# own source, so that is where the pin belongs.
+# --- the settings seam -------------------------------------------------------
 #
-# This is deliberately the complement of the SQL-client allowance: a connector
-# whose external source is a warehouse may absolutely
-# ``from sqlalchemy.ext.asyncio import create_async_engine`` and point it at a
-# URL from **its own** ``sources.config``. What it may not do is aim any client
-# at Lumen's infrastructure.
+# Banning ``import app.db`` is not enough on its own:
+# ``create_async_engine(get_settings().database_url)`` imports nothing forbidden
+# and still opens a connection into Lumen's database. But *analysing the read*
+# does not converge — receiver provenance has to cope with conditionals, walrus,
+# tuple unpacking, ``d = dict(d)`` and cross-function laundering, and each round
+# of that is wrong one construct deeper, in both directions at once.
+#
+# So the seam is sealed by SHAPE instead, which is the kind of property an AST
+# can actually prove. A connector may touch settings in exactly one form::
+#
+#     get_settings().<field>
+#
+# The accessor may not be aliased, stored, passed, or transformed, and the read
+# must terminate at the field. That single restriction kills every bypass class
+# at once — you cannot launder an object you were never allowed to hold — and it
+# has no false positives on a connector's own config, because the rule only ever
+# looks at expressions rooted at ``get_settings``. ``connector_config.database_url``
+# is invisible to it, which is exactly what the external-SQL allowance needs.
+#
+# Why not ban the accessor outright: ADR-0019 §4/§5 explicitly sanctions a
+# connector reading its own deployment config — ``oauth_spec()`` reads the
+# platform's OAuth client registration, and the ``web`` connector reads its
+# User-Agent. Deployment config is the one non-secret surface a connector may
+# read; Lumen's *infrastructure* fields below are not part of it.
+SETTINGS_ACCESSOR = "get_settings"
+SETTINGS_TYPE = "Settings"
+CONFIG_MODULE = "app.core.config"
+
+# Settings attributes that ARE Lumen's own infrastructure and credentials
+# (`app/core/config.py`) — refused even through the one legal read shape.
 FORBIDDEN_SETTINGS: dict[str, str] = {
     "database_url": "Lumen's own database URL — connectors never open a connection to it",
     "redis_url": "Lumen's Redis (cache / broker / WS backplane)",
@@ -164,13 +200,6 @@ _MUTABLE_LITERALS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, as
 
 # Callables whose result is a fresh mutable container.
 _MUTABLE_FACTORIES = frozenset({"list", "dict", "set", "defaultdict", "OrderedDict", "Counter"})
-
-# How a settings object enters a scope. Provenance starts here and is carried
-# through attributes, calls, and subscripts (see _SettingsProvenance): the
-# receiver's ORIGIN is what makes a subscript a Lumen read, not the name of the
-# method that flattened it.
-_SETTINGS_FACTORIES = frozenset({"get_settings"})
-_SETTINGS_TYPES = frozenset({"Settings"})
 
 # Every node that opens a new lexical scope in Python 3.
 _SCOPE_NODES = (
@@ -402,168 +431,107 @@ def _forbidden_import(module: str) -> tuple[str, str] | None:
     return None
 
 
-def _is_settings_annotation(annotation: ast.expr | None) -> bool:
-    """Does this annotation say "this is Lumen's Settings object"?"""
-    if isinstance(annotation, ast.Name):
-        return annotation.id in _SETTINGS_TYPES
-    if isinstance(annotation, ast.Attribute):
-        return annotation.attr in _SETTINGS_TYPES
-    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-        return annotation.value.strip("'\" ") in _SETTINGS_TYPES
-    return False
-
-
-class _SettingsProvenance(ast.NodeVisitor):
-    """Forbidden-key subscripts on a value **provably traced to Settings**.
-
-    The earlier version matched on *spelling* — "is the receiver a call to
-    something named ``model_dump``" — which was wrong in both directions:
-
-    * **too narrow**: ``dump = get_settings().model_dump()`` on one line and
-      ``dump["database_url"]`` on the next slipped through, though it is the
-      most ordinary way anyone would write it — accident-shaped, not
-      evasion-shaped;
-    * **too broad**: ``connector_config.model_dump()["database_url"]`` was
-      rejected even when ``connector_config`` is the connector's *own* typed
-      warehouse config, contradicting the external-SQL allowance this rule is
-      supposed to preserve.
-
-    So provenance is tracked instead: a name becomes settings-derived when it is
-    assigned from ``get_settings()`` / ``Settings(...)`` (or annotated
-    ``Settings``), and any attribute, call, or subscript **on** such a value
-    stays settings-derived. Rebinding a name to anything else drops it again.
-
-    The failure direction matters and drives that design: over-reporting here
-    breaks a legitimate connector, so provenance must be **positively
-    established** — when it cannot be, the scan stays silent. Cross-scope
-    laundering (handing a dump to a helper) is therefore a disclosed limit, not
-    a guess; under ADR-0019 §4's first-party, code-reviewed model that is the
-    right trade.
-    """
-
-    def __init__(self) -> None:
-        self.findings: list[tuple[str, int, str]] = []
-        self._scopes: list[set[str]] = [set()]
-
-    def _derived(self, node: ast.expr) -> bool:
-        if isinstance(node, ast.Name):
-            return node.id in self._scopes[-1]
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id in _SETTINGS_TYPES | _SETTINGS_FACTORIES:
-                return True
-            if isinstance(func, ast.Attribute):
-                return self._derived(func.value)
-            return False
-        if isinstance(node, ast.Attribute | ast.Subscript):
-            return self._derived(node.value)
-        return False
-
-    def _bind(self, name: str, derived: bool) -> None:
-        if derived:
-            self._scopes[-1].add(name)
-        else:
-            # Rebinding to anything else clears the provenance — silence beats
-            # a false positive on a name that has been reused.
-            self._scopes[-1].discard(name)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._visit_function(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._visit_function(node)
-
-    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        inherited = set(self._scopes[-1])  # a closure can see the outer binding
-        args = node.args
-        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-            if _is_settings_annotation(arg.annotation):
-                inherited.add(arg.arg)
-            else:
-                inherited.discard(arg.arg)  # a parameter shadows the outer name
-        self._scopes.append(inherited)
-        for statement in node.body:
-            self.visit(statement)
-        self._scopes.pop()
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        self.generic_visit(node)
-        derived = self._derived(node.value)
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                self._bind(target.id, derived)
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        self.generic_visit(node)
-        if isinstance(node.target, ast.Name):
-            derived = _is_settings_annotation(node.annotation) or (
-                node.value is not None and self._derived(node.value)
-            )
-            self._bind(node.target.id, derived)
-
-    def visit_Subscript(self, node: ast.Subscript) -> None:
-        key = node.slice
-        if (
-            isinstance(key, ast.Constant)
-            and isinstance(key.value, str)
-            and key.value in FORBIDDEN_SETTINGS
-            and self._derived(node.value)
-        ):
-            self.findings.append(
-                (
-                    key.value,
-                    node.lineno,
-                    f'`...["{key.value}"]` on a value traced back to Settings',
-                )
-            )
-        self.generic_visit(node)
-
-
-def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int, str]]:
-    """Reads of a Lumen infrastructure/credential setting, anywhere in the module.
-
-    Yields ``(field, line, shape)``. Three access shapes are pinned, because
-    catching only the first leaves the seam open:
-
-    1. **attribute** — ``settings.database_url`` (aliased or not);
-    2. **dynamic attribute with a constant name** — ``getattr(settings,
-       "database_url")``;
-    3. **subscript with a constant key on a settings-derived value** — handled
-       by :class:`_SettingsProvenance`, which traces the receiver rather than
-       pattern-matching its spelling.
-
-    (1) and (2) match on the **field name** rather than on the object, because
-    the object is written a dozen ways (``settings``, ``get_settings()``,
-    ``self._cfg``) while the field name is the stable part. The cost is a false
-    positive if a connector invents its own attribute called ``database_url`` —
-    cheap to rename, and the message says so. (3) cannot use that shortcut: a
-    dict subscript with such a key is entirely ordinary on a connector's own
-    config, so it demands positive provenance instead.
-
-    What remains out of reach of a static scan, stated rather than implied: a
-    **non-constant** key or attribute name (``getattr(settings, chosen)``,
-    ``dump[key]``), and a settings mapping handed across a function boundary
-    where the receiver's provenance is no longer visible. Those stay
-    review-caught.
-    """
+def _parent_map(tree: ast.AST) -> dict[int, ast.AST]:
+    """Child-id → parent. One pass, no flow analysis — just structure."""
+    parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_SETTINGS:
-            yield node.attr, node.lineno, f"`.{node.attr}`"
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-            and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
-            and node.args[1].value in FORBIDDEN_SETTINGS
-        ):
-            field = node.args[1].value
-            yield field, node.lineno, f'`getattr(..., "{field}")`'
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    return parents
 
-    provenance = _SettingsProvenance()
-    provenance.visit(tree)
-    yield from provenance.findings
+
+def _accessor_misuse(name: ast.Name, parents: dict[int, ast.AST]) -> str | None:
+    """Why this ``get_settings`` reference is not the one legal read shape.
+
+    The whole seam in one function. ``get_settings().<field>`` is allowed and
+    everything else is refused, so there is never a settings object in scope to
+    launder — which is why no conditional, walrus, unpacking, ``dict(d)``, or
+    cross-function trick needs its own rule. They are all the same violation:
+    holding the object at all.
+    """
+    call = parents.get(id(name))
+    if not (isinstance(call, ast.Call) and call.func is name):
+        return (
+            "references `get_settings` without calling it — the accessor may not be "
+            "aliased, stored, or passed; read the field you need as `get_settings().<field>`"
+        )
+    attr = parents.get(id(call))
+    if not (isinstance(attr, ast.Attribute) and attr.value is call):
+        return (
+            "binds, passes, or transforms the settings object — a connector reads ONE "
+            "field directly (`get_settings().<field>`) and never holds the object, so "
+            "there is nothing to launder into a Lumen infrastructure read"
+        )
+    after = parents.get(id(attr))
+    if isinstance(after, ast.Call) and after.func is attr:
+        return (
+            f"calls `.{attr.attr}()` on the settings object — the read must terminate at "
+            "a field, so a flattening call like `.model_dump()` is refused"
+        )
+    if isinstance(after, ast.Subscript | ast.Attribute):
+        return (
+            f"keeps reading past `.{attr.attr}` — the read must terminate at a single "
+            "deployment-config field"
+        )
+    if attr.attr.startswith("__"):
+        return f"reads the dunder `{attr.attr}` off the settings object"
+    if attr.attr in FORBIDDEN_SETTINGS:
+        return (
+            f"reads Lumen's `{attr.attr}` ({FORBIDDEN_SETTINGS[attr.attr]}) — deployment "
+            "config for your own connector is fair game; Lumen's infrastructure is not"
+        )
+    return None
+
+
+def _settings_seam(tree: ast.AST) -> Iterator[tuple[int, str]]:
+    """Every breach of the sealed settings seam, as ``(line, detail)``.
+
+    Three name-level rules and one shape rule, all decidable from the syntax
+    tree with no dataflow:
+
+    1. ``from app.core.config import …`` may import **only** ``get_settings``,
+       unaliased (an alias would defeat rule 4 by renaming the accessor);
+    2. the config module may not be imported wholesale;
+    3. the ``Settings`` *type* may not be referenced at all — a connector never
+       constructs or annotates settings;
+    4. every ``get_settings`` reference must be the one legal read shape
+       (:func:`_accessor_misuse`).
+    """
+    parents = _parent_map(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == CONFIG_MODULE:
+            for alias in node.names:
+                if alias.name != SETTINGS_ACCESSOR or alias.asname:
+                    spelled = alias.name + (f" as {alias.asname}" if alias.asname else "")
+                    yield (
+                        node.lineno,
+                        f"imports `{spelled}` from {CONFIG_MODULE} — a connector may import "
+                        f"only `{SETTINGS_ACCESSOR}`, unaliased",
+                    )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == CONFIG_MODULE or alias.name.startswith(CONFIG_MODULE + "."):
+                    yield (
+                        node.lineno,
+                        f"imports `{alias.name}` wholesale — use "
+                        f"`from {CONFIG_MODULE} import {SETTINGS_ACCESSOR}`",
+                    )
+        elif isinstance(node, ast.Name) and node.id == SETTINGS_TYPE:
+            yield (
+                node.lineno,
+                f"references the `{SETTINGS_TYPE}` type — a connector never constructs or "
+                "annotates a settings object",
+            )
+        elif isinstance(node, ast.Attribute) and node.attr == SETTINGS_TYPE:
+            yield (
+                node.lineno,
+                f"references the `{SETTINGS_TYPE}` type — a connector never constructs or "
+                "annotates a settings object",
+            )
+        elif isinstance(node, ast.Name) and node.id == SETTINGS_ACCESSOR:
+            misuse = _accessor_misuse(node, parents)
+            if misuse is not None:
+                yield node.lineno, misuse
 
 
 # --- module-level state ------------------------------------------------------
@@ -836,22 +804,9 @@ def scan_package(package: Path) -> list[Violation]:
                         detail=f"imports `{imported}` ({prefix}): {reason}",
                     )
                 )
-        for attr, line, shape in _lumen_infra_settings(tree):
+        for line, detail in _settings_seam(tree):
             violations.append(
-                Violation(
-                    rule="no-lumen-infra",
-                    module=module,
-                    line=line,
-                    detail=(
-                        f"reads the `{attr}` setting via {shape} "
-                        f"({FORBIDDEN_SETTINGS[attr]}) — banning `import app.db` alone "
-                        "does not stop `create_async_engine(get_settings()."
-                        "database_url)`; the SETTING is what identifies Lumen's own "
-                        "infrastructure, however you spell the read. A connector may "
-                        "bring its own SQL/HTTP client for its own source, pointed at a "
-                        "URL from its own sources.config"
-                    ),
-                )
+                Violation(rule="settings-seam", module=module, line=line, detail=detail)
             )
         for name, line in _mutable_literal_state(tree):
             violations.append(

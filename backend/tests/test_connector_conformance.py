@@ -1400,20 +1400,26 @@ def my_own_config_key_is_not_lumens(config: dict) -> str:
     return config["database_url"]
 
 def my_own_typed_config_dump(connector_config: object) -> str:
-    # Nor is the connector's OWN typed config, even flattened the same way. The
-    # rule traces where the receiver came from; `connector_config` is not
-    # Settings, so this must stay legal or the external-SQL allowance is fiction.
+    # Nor is the connector's OWN typed config, even flattened the same way, nor
+    # its own field of that name. The seam rule only ever inspects expressions
+    # rooted at `get_settings`, so none of this is visible to it — which is what
+    # keeps the external-SQL allowance real rather than nominal.
+    _ = connector_config.database_url
     return connector_config.model_dump()["database_url"]
 
-def rebound_name_loses_provenance(config: dict) -> str:
-    # Provenance is dropped when the name is reused: over-reporting here would
-    # break a legitimate connector, so the scan stays silent unless it can prove
-    # the receiver is Settings.
+def deployment_config_is_readable() -> int:
+    # The one legal shape: read a single non-infrastructure field directly off
+    # the accessor, never binding the settings object (ADR-0019 §4/§5 sanctions
+    # a connector reading its own deployment config).
     from app.core.config import get_settings
 
-    dump = get_settings()
-    dump = config
-    return dump["database_url"]
+    return get_settings().gdrive_fetch_max_bytes
+
+def a_field_named_like_a_setting_on_my_own_object(client: object) -> object:
+    # A bare attribute read on something that is NOT get_settings-rooted is
+    # invisible to the seam, even when the field name collides with a Lumen one.
+    # The old field-name rule false-positived here; the seam does not look at it.
+    return client.database_url, client.secrets_encryption_key
 
 def reads_allowed_config() -> str:
     return get_settings().gdrive_oauth_client_id
@@ -1507,62 +1513,110 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
     ),
     # Round-2 finding 7: the exact bypass the reviewer reproduced — no forbidden
     # import anywhere, yet it opens a connection into Lumen's own database.
+    # The exact create_async_engine bypass, now caught at the accessor rather
+    # than by inspecting the read.
     "opens an engine on Lumen's database_url": (
         "from sqlalchemy.ext.asyncio import create_async_engine\n"
         "from app.core.config import get_settings\n\n"
         "def go() -> object:\n"
         "    return create_async_engine(get_settings().database_url)\n",
-        "reads the `database_url` setting",
+        "reads Lumen's `database_url`",
     ),
     "reads Lumen's object-store credentials": (
         "from app.core.config import get_settings\n\n"
         "def go() -> str:\n"
         "    return get_settings().s3_secret_key\n",
-        "reads the `s3_secret_key` setting",
+        "reads Lumen's `s3_secret_key`",
     ),
-    "reads the vault master key": (
-        "def go(settings: object) -> str:\n    return settings.secrets_encryption_key\n",
-        "reads the `secrets_encryption_key` setting",
-    ),
-    # Round-3 finding 7: the same read spelled so it is not an ast.Attribute.
-    "reaches database_url via getattr": (
+    # --- the sealed settings seam (round 5) ---------------------------------
+    # The infrastructure field, read through the one shape that IS allowed.
+    "reads database_url through the legal shape": (
         "from app.core.config import get_settings\n\n"
-        'def go() -> str:\n    return getattr(get_settings(), "database_url")\n',
-        '`getattr(..., "database_url")`',
+        "def go() -> str:\n    return get_settings().database_url\n",
+        "reads Lumen's `database_url`",
     ),
-    "reaches database_url via an inline model_dump()": (
+    # Everything below is refused for *holding the object*, which is why none of
+    # them needs a rule of its own — the constructs that defeated provenance
+    # tracking all collapse into this one violation.
+    "binds the settings object": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    settings = get_settings()\n"
+        "    return settings.database_url\n",
+        "binds, passes, or transforms the settings object",
+    ),
+    "binds the settings object conditionally": (
+        "from app.core.config import get_settings\n\n"
+        "def go(flag: bool) -> object:\n"
+        "    settings = get_settings() if flag else None\n"
+        "    return settings\n",
+        "binds, passes, or transforms the settings object",
+    ),
+    "binds the settings object with a walrus": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    return (s := get_settings()).database_url\n",
+        "binds, passes, or transforms the settings object",
+    ),
+    "unpacks the settings object into a tuple": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> object:\n"
+        "    a, b = get_settings(), 1\n"
+        "    return a\n",
+        "binds, passes, or transforms the settings object",
+    ),
+    "launders the settings object through a helper": (
+        "from app.core.config import get_settings\n\n"
+        "def read(obj: object) -> str:\n"
+        '    return obj.model_dump()["database_url"]\n\n'
+        "def go() -> str:\n"
+        "    return read(get_settings())\n",
+        "binds, passes, or transforms the settings object",
+    ),
+    "flattens the settings object": (
         "from app.core.config import get_settings\n\n"
         'def go() -> str:\n    return get_settings().model_dump()["database_url"]\n',
-        '`...["database_url"]` on a value traced back to Settings',
+        "calls `.model_dump()` on the settings object",
     ),
-    # Round-4: the accident-shaped one. A single local assignment defeated a
-    # spelling-based rule; provenance follows the value instead.
-    "reaches database_url via a local dump variable": (
+    "reads a dunder off the settings object": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> object:\n    return get_settings().__dict__\n",
+        "reads the dunder `__dict__`",
+    ),
+    "subscripts a dunder off the settings object": (
+        "from app.core.config import get_settings\n\n"
+        'def go() -> str:\n    return get_settings().__dict__["s3_secret_key"]\n',
+        "keeps reading past `.__dict__`",
+    ),
+    "reaches a setting via getattr": (
+        "from app.core.config import get_settings\n\n"
+        'def go() -> str:\n    return getattr(get_settings(), "database_url")\n',
+        "binds, passes, or transforms the settings object",
+    ),
+    "aliases the accessor": (
+        "from app.core.config import get_settings as cfg\n\n"
+        "def go() -> str:\n    return cfg().database_url\n",
+        "may import only `get_settings`, unaliased",
+    ),
+    "stores the accessor itself": (
         "from app.core.config import get_settings\n\n"
         "def go() -> str:\n"
-        "    dump = get_settings().model_dump()\n"
-        '    return dump["database_url"]\n',
-        '`...["database_url"]` on a value traced back to Settings',
+        "    accessor = get_settings\n"
+        "    return accessor().database_url\n",
+        "references `get_settings` without calling it",
     ),
-    "reaches an s3 credential via __dict__ on an annotated Settings": (
-        "from app.core.config import Settings\n\n"
-        'def go(settings: Settings) -> str:\n    return settings.__dict__["s3_secret_key"]\n',
-        '`...["s3_secret_key"]` on a value traced back to Settings',
+    "imports the Settings type": (
+        "from app.core.config import Settings\n\n" "def go() -> object:\n    return Settings()\n",
+        "may import only `get_settings`, unaliased",
     ),
-    "reaches database_url via .dict() on a traced settings object": (
-        "from app.core.config import get_settings\n\n"
-        "def go() -> str:\n"
-        "    settings = get_settings()\n"
-        '    return settings.dict()["database_url"]\n',
-        '`...["database_url"]` on a value traced back to Settings',
+    "annotates a parameter as Settings": (
+        "def go(settings: Settings) -> str:\n    return settings.database_url\n",
+        "references the `Settings` type",
     ),
-    "reaches a celery url through two hops": (
-        "from app.core.config import get_settings\n\n"
-        "def go() -> str:\n"
-        "    settings = get_settings()\n"
-        "    dump = settings.model_dump()\n"
-        '    return dump["celery_broker_url"]\n',
-        '`...["celery_broker_url"]` on a value traced back to Settings',
+    "imports the config module wholesale": (
+        "import app.core.config\n\n"
+        "def go() -> str:\n    return app.core.config.get_settings().database_url\n",
+        "imports `app.core.config` wholesale",
     ),
 }
 

@@ -122,57 +122,62 @@ allowed to know is already in that snapshot.
 | Forbidden | Because |
 |---|---|
 | the secrets vault (`app.services.secrets_service`) | the framework resolves credentials and hands you an authenticated client; a raw token never enters connector code |
-| **Lumen's** database — `app.db` (session, models, repositories) **and its `database_url` setting** | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
-| **Lumen's** object store — `app.storage` and the `s3_*` settings | same reason: return bytes on `FetchedDoc.data` |
+| **Lumen's** database — `app.db` (session, models, repositories), and its `database_url` **via the settings object** | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
+| **Lumen's** object store — `app.storage`, and the `s3_*` settings | same reason: return bytes on `FetchedDoc.data` |
 | **Lumen's** other infrastructure + keys — `redis_url`, `celery_broker_url`, `celery_result_backend`, `jwt_secret`, `secrets_encryption_key` | none of it is yours to reach; the vault master key in particular is the secrets prohibition through another door |
 | **mutable module-level state** | a connector must be re-entrant and hold nothing between runs; a module-level cache silently outlives the run and the tenant that filled it |
 
-Note that the rule is stated in **two** halves, because banning the import alone
-does not hold:
+Banning the import alone does not hold, because this reaches Lumen's database
+without touching `app.db`:
 
 ```python
 from sqlalchemy.ext.asyncio import create_async_engine
 create_async_engine(get_settings().database_url)   # imports nothing forbidden
 ```
 
-That opens a connection straight into Lumen's database without touching
-`app.db`. The *setting* is what distinguishes "Lumen's datastore" from "your
-source", so the setting is pinned too — in **all three** spellings of the read,
-not just the obvious one:
+The seam that leaks here is the **settings object**, so that is what is sealed —
+by *shape*, not by analysing the read. A connector may touch settings in exactly
+one form:
 
 ```python
-settings.database_url                          # attribute
-getattr(settings, "database_url")              # dynamic, constant name
-get_settings().model_dump()["database_url"]    # inline
-dump = get_settings().model_dump()             # …or one assignment along
-return dump["database_url"]
+get_settings().<field>          # read ONE deployment-config field, directly
 ```
 
-The subscript rule tracks **provenance, not spelling**: it fires when the
-receiver can be traced back to `get_settings()` / a `Settings`-annotated
-binding, through assignments in the same scope. That cuts both ways, and both
-directions matter:
+The accessor may not be aliased, stored, passed, or transformed, and the read
+must stop at the field. So a connector never *holds* a settings object — and
+with nothing to hold, there is nothing to launder: `create_async_engine(...)`,
+`getattr(...)`, `.model_dump()[...]`, a conditional, a walrus, a hand-off to a
+helper all fail the same way, for *binding the object at all*. Reading a Lumen
+**infrastructure** field (`database_url`, `s3_secret_key`, `redis_url`,
+`jwt_secret`, `secrets_encryption_key`, …) is refused even through the one legal
+shape.
+
+This makes the external-SQL allowance hold **by construction**, not by a
+second rule that has to keep pace:
 
 ```python
-source.config["database_url"]                     # legal — YOUR warehouse URL
-connector_config.model_dump()["database_url"]     # legal — YOUR typed config
+connector_config.database_url                  # legal — not get_settings-rooted
+connector_config.model_dump()["database_url"]  # legal — your own typed config
+source.config["database_url"]                  # legal — your own sources.config
 ```
 
-Neither of those is Lumen's database, so neither is flagged. Requiring
-provenance to be *positively established* is deliberate: the failure direction
-here is the opposite of a credential lint — over-reporting would break a
-legitimate connector — so when the scan cannot prove the receiver is `Settings`,
-it stays quiet.
+The scan only ever inspects expressions rooted at `get_settings`, so a
+connector's own config — whatever it is named, however it is read — is invisible
+to it. That is deliberate and it is the load-bearing half: the failure direction
+here is the opposite of a credential lint, because over-reporting breaks a
+legitimate connector.
 
-Which is exactly what makes the following **allowed**:
+Which is why the following stay **allowed**:
 
-- **`app.core.config` itself** — reading deployment-level, non-secret settings
-  is what `oauth_spec()` does for the platform's client registration
-  (`gdrive_oauth_client_id` and friends are fine).
+- **Deployment config via `get_settings().<field>`** — reading a non-secret
+  field is what `oauth_spec()` does for the platform's OAuth client registration
+  (`get_settings().gdrive_oauth_client_id`), and what `web` does for its
+  User-Agent (ADR-0019 §4/§5). Read it directly; don't bind the object.
 - **A SQL client, `sqlalchemy` included, when your *external source* is a
   database.** Talking to a warehouse over SQL is a vendor boundary like any
-  other (ADR-0004). Point it at a URL from **your own** `sources.config`; the
-  prohibition is Lumen's database, not the existence of SQL.
+  other (ADR-0004). With the settings seam sealed, such a client can only ever
+  reach the warehouse *you* configured; the prohibition is Lumen's database, not
+  the existence of SQL.
 
 These are pinned structurally by an AST scan of your whole package
 (`tests/conformance/prohibitions.py`), covering imports that are deferred inside
@@ -190,21 +195,19 @@ set()` to the module global, and is a real violation).
 not the same as "we pinned it" — everything below is review-caught, not
 test-caught:
 
-- **a dynamic import** — `importlib.import_module("app.db.session")`,
-  `__import__(...)`;
-- **a settings read whose name is not a literal** — `getattr(settings, chosen)`
-  or `dump[key]`, where the field name comes from a variable. Constant names
-  are caught in all the spellings above; computed ones are not;
-- **a settings object laundered across a function boundary** — pass
-  `settings.model_dump()` into a helper and subscript it there, and the
-  receiver's provenance is no longer visible at the point of the read.
-  Same-scope tracing (including through intermediate assignments) does work;
+- **a dynamic import** — `importlib.import_module("app.core.config")`,
+  `sys.modules["app.core.config"]`, `__import__(...)`. This is the *only*
+  residue of the settings seam: sealing the accessor's shape closes every
+  static route to a settings object (binding, aliasing, laundering to a helper,
+  `getattr`, flattening), but a connector that reaches the config module
+  dynamically sidesteps the name check entirely. The same escape reaches
+  `app.db` directly, so it is one hole, not a settings-specific one;
 - **state on a connector *instance* attribute** rather than a module global,
   and **mutation reached through an alias** (`ref = CACHE; ref.add(...)`).
 
-The scan closes the accident-shaped holes and the obvious deliberate ones. It is
-a lint, not a sandbox — which is exactly why the trust model above says
-first-party, code-reviewed connectors only.
+The scan closes what syntax can close. It is a lint, not a sandbox — which is
+exactly why the trust model above says first-party, code-reviewed connectors
+only, and why the dynamic-import residue is acceptable under it.
 
 **Trust model.** v1 connectors are first-party, in-repo, code-reviewed Python
 running **in-process** — the same trust boundary as the rest of the backend, so

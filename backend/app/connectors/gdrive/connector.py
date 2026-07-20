@@ -227,13 +227,16 @@ class GdriveConnector:
         """
         from app.core.config import get_settings
 
-        settings = get_settings()
+        # Read each field directly off the accessor rather than binding the
+        # settings object: connector code never *holds* settings (ADR-0019 §4,
+        # pinned by the conformance kit's sealed settings seam). `get_settings`
+        # is lru_cached, so this is the same object either way.
         return OAuthSpec(
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
             scopes=("https://www.googleapis.com/auth/drive.readonly",),
-            client_id=settings.gdrive_oauth_client_id,
-            client_secret=settings.gdrive_oauth_client_secret,
+            client_id=get_settings().gdrive_oauth_client_id,
+            client_secret=get_settings().gdrive_oauth_client_secret,
             allowed_hosts=(
                 "accounts.google.com",
                 "oauth2.googleapis.com",
@@ -526,9 +529,7 @@ class GdriveConnector:
             return False
         if parent == cfg.folder_id:
             return True
-        chain = await self._walk_up(
-            http, parent, memo=memo, strict=True, stop_at=cfg.folder_id
-        )
+        chain = await self._walk_up(http, parent, memo=memo, strict=True, stop_at=cfg.folder_id)
         return cfg.folder_id in chain
 
     async def _container_relation(
