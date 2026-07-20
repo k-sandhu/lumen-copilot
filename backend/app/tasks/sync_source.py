@@ -328,10 +328,11 @@ async def sync_source_async(
         )
         # Persist the detected mode so the grid shows page/feed/sitemap.
         await _record_mode(session, tenant_id, source_id, detected_mode)
-        # A full sync re-examined every document, so whatever an earlier
-        # incomplete replay could not prove is now proven: clear the bounded
-        # retry counter (ADR-0019 §3 — this IS the escalation's recovery).
-        await sources.record_acl_incomplete_attempts(source_id, 0)
+        if source.acl_incomplete_attempts:
+            # A full sync re-examined every document, so whatever an earlier
+            # incomplete replay could not prove is now proven: clear the bounded
+            # retry counter (ADR-0019 §3 — this IS the escalation's recovery).
+            await sources.record_acl_incomplete_attempts(source_id, 0)
         if baseline_cursor is not None:
             # The pre-enumeration change-log baseline (ADR-0019 §3): the next
             # sync replays incrementally from here, covering the enumeration
@@ -712,10 +713,18 @@ async def _sync_incremental(
             # The transaction rolled back but the objects were already stored —
             # nothing references them, so reclaim them rather than leak
             # (post-rollback, best-effort, reference-checked like every other
-            # object cleanup).
-            await _reclaim_objects(
-                tenant_id, written_keys, object_store=object_store, source_id=source_id
-            )
+            # object cleanup). Cleanup must never mask the real failure: if the
+            # database is the thing that died, the reference check dies too.
+            try:
+                await _reclaim_objects(
+                    tenant_id, written_keys, object_store=object_store, source_id=source_id
+                )
+            except Exception as cleanup_exc:  # noqa: BLE001 — cleanup is best-effort
+                log.warning(
+                    "source_sync.rollback_cleanup_failed",
+                    source_id=str(source_id),
+                    error=type(cleanup_exc).__name__,
+                )
             raise
 
         # --- Post-commit, idempotent derived-state maintenance. --------------
