@@ -165,10 +165,12 @@ _MUTABLE_LITERALS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, as
 # Callables whose result is a fresh mutable container.
 _MUTABLE_FACTORIES = frozenset({"list", "dict", "set", "defaultdict", "OrderedDict", "Counter"})
 
-# Methods that flatten a pydantic-settings object into a mapping. A subscript on
-# one of these with a forbidden key is the same read as the attribute, one
-# indirection along.
-_SETTINGS_DUMP_METHODS = frozenset({"model_dump", "model_dump_json", "dict", "json", "_asdict"})
+# How a settings object enters a scope. Provenance starts here and is carried
+# through attributes, calls, and subscripts (see _SettingsProvenance): the
+# receiver's ORIGIN is what makes a subscript a Lumen read, not the name of the
+# method that flattened it.
+_SETTINGS_FACTORIES = frozenset({"get_settings"})
+_SETTINGS_TYPES = frozenset({"Settings"})
 
 # Every node that opens a new lexical scope in Python 3.
 _SCOPE_NODES = (
@@ -400,19 +402,121 @@ def _forbidden_import(module: str) -> tuple[str, str] | None:
     return None
 
 
-def _is_settings_dump(node: ast.expr) -> bool:
-    """Is this expression a settings object flattened into a mapping?
+def _is_settings_annotation(annotation: ast.expr | None) -> bool:
+    """Does this annotation say "this is Lumen's Settings object"?"""
+    if isinstance(annotation, ast.Name):
+        return annotation.id in _SETTINGS_TYPES
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr in _SETTINGS_TYPES
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return annotation.value.strip("'\" ") in _SETTINGS_TYPES
+    return False
 
-    The realistic shapes for reaching a pydantic-settings field without naming
-    it as an attribute: ``settings.model_dump()``, ``.dict()``, ``.json()``, and
-    ``settings.__dict__``. Restricting the subscript rule to *these* is what
-    keeps it from firing on a connector's own config — a SQL-source connector
-    legitimately reads ``source.config["database_url"]``, and that is its own
-    warehouse, not Lumen's.
+
+class _SettingsProvenance(ast.NodeVisitor):
+    """Forbidden-key subscripts on a value **provably traced to Settings**.
+
+    The earlier version matched on *spelling* — "is the receiver a call to
+    something named ``model_dump``" — which was wrong in both directions:
+
+    * **too narrow**: ``dump = get_settings().model_dump()`` on one line and
+      ``dump["database_url"]`` on the next slipped through, though it is the
+      most ordinary way anyone would write it — accident-shaped, not
+      evasion-shaped;
+    * **too broad**: ``connector_config.model_dump()["database_url"]`` was
+      rejected even when ``connector_config`` is the connector's *own* typed
+      warehouse config, contradicting the external-SQL allowance this rule is
+      supposed to preserve.
+
+    So provenance is tracked instead: a name becomes settings-derived when it is
+    assigned from ``get_settings()`` / ``Settings(...)`` (or annotated
+    ``Settings``), and any attribute, call, or subscript **on** such a value
+    stays settings-derived. Rebinding a name to anything else drops it again.
+
+    The failure direction matters and drives that design: over-reporting here
+    breaks a legitimate connector, so provenance must be **positively
+    established** — when it cannot be, the scan stays silent. Cross-scope
+    laundering (handing a dump to a helper) is therefore a disclosed limit, not
+    a guess; under ADR-0019 §4's first-party, code-reviewed model that is the
+    right trade.
     """
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        return node.func.attr in _SETTINGS_DUMP_METHODS
-    return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+    def __init__(self) -> None:
+        self.findings: list[tuple[str, int, str]] = []
+        self._scopes: list[set[str]] = [set()]
+
+    def _derived(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self._scopes[-1]
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _SETTINGS_TYPES | _SETTINGS_FACTORIES:
+                return True
+            if isinstance(func, ast.Attribute):
+                return self._derived(func.value)
+            return False
+        if isinstance(node, ast.Attribute | ast.Subscript):
+            return self._derived(node.value)
+        return False
+
+    def _bind(self, name: str, derived: bool) -> None:
+        if derived:
+            self._scopes[-1].add(name)
+        else:
+            # Rebinding to anything else clears the provenance — silence beats
+            # a false positive on a name that has been reused.
+            self._scopes[-1].discard(name)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        inherited = set(self._scopes[-1])  # a closure can see the outer binding
+        args = node.args
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            if _is_settings_annotation(arg.annotation):
+                inherited.add(arg.arg)
+            else:
+                inherited.discard(arg.arg)  # a parameter shadows the outer name
+        self._scopes.append(inherited)
+        for statement in node.body:
+            self.visit(statement)
+        self._scopes.pop()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.generic_visit(node)
+        derived = self._derived(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._bind(target.id, derived)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.generic_visit(node)
+        if isinstance(node.target, ast.Name):
+            derived = _is_settings_annotation(node.annotation) or (
+                node.value is not None and self._derived(node.value)
+            )
+            self._bind(node.target.id, derived)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        key = node.slice
+        if (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and key.value in FORBIDDEN_SETTINGS
+            and self._derived(node.value)
+        ):
+            self.findings.append(
+                (
+                    key.value,
+                    node.lineno,
+                    f'`...["{key.value}"]` on a value traced back to Settings',
+                )
+            )
+        self.generic_visit(node)
 
 
 def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int, str]]:
@@ -424,20 +528,23 @@ def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int, str]]:
     1. **attribute** — ``settings.database_url`` (aliased or not);
     2. **dynamic attribute with a constant name** — ``getattr(settings,
        "database_url")``;
-    3. **subscript with a constant key on a flattened settings object** —
-       ``get_settings().model_dump()["database_url"]``,
-       ``settings.__dict__["s3_secret_key"]``.
+    3. **subscript with a constant key on a settings-derived value** — handled
+       by :class:`_SettingsProvenance`, which traces the receiver rather than
+       pattern-matching its spelling.
 
-    Matched on the **field name** rather than on the object it hangs off,
-    because the object is written a dozen ways (``settings``,
-    ``get_settings()``, ``self._cfg``) and the field name is the stable part.
-    The cost is a false positive if a connector invents its own *attribute*
-    called ``database_url`` — cheap to rename, and the message says so.
+    (1) and (2) match on the **field name** rather than on the object, because
+    the object is written a dozen ways (``settings``, ``get_settings()``,
+    ``self._cfg``) while the field name is the stable part. The cost is a false
+    positive if a connector invents its own attribute called ``database_url`` —
+    cheap to rename, and the message says so. (3) cannot use that shortcut: a
+    dict subscript with such a key is entirely ordinary on a connector's own
+    config, so it demands positive provenance instead.
 
     What remains out of reach of a static scan, stated rather than implied: a
     **non-constant** key or attribute name (``getattr(settings, chosen)``,
-    ``dump[key]``), and a settings mapping handed to a helper and subscripted
-    somewhere the dump shape is no longer visible. Those stay review-caught.
+    ``dump[key]``), and a settings mapping handed across a function boundary
+    where the receiver's provenance is no longer visible. Those stay
+    review-caught.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_SETTINGS:
@@ -453,15 +560,10 @@ def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int, str]]:
         ):
             field = node.args[1].value
             yield field, node.lineno, f'`getattr(..., "{field}")`'
-        elif (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.slice, ast.Constant)
-            and isinstance(node.slice.value, str)
-            and node.slice.value in FORBIDDEN_SETTINGS
-            and _is_settings_dump(node.value)
-        ):
-            field = node.slice.value
-            yield field, node.lineno, f'`...["{field}"]` on a flattened settings object'
+
+    provenance = _SettingsProvenance()
+    provenance.visit(tree)
+    yield from provenance.findings
 
 
 # --- module-level state ------------------------------------------------------

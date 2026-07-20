@@ -143,14 +143,26 @@ not just the obvious one:
 ```python
 settings.database_url                          # attribute
 getattr(settings, "database_url")              # dynamic, constant name
-get_settings().model_dump()["database_url"]    # flattened settings object
-settings.__dict__["s3_secret_key"]             # ditto
+get_settings().model_dump()["database_url"]    # inline
+dump = get_settings().model_dump()             # …or one assignment along
+return dump["database_url"]
 ```
 
-The subscript rule fires only on a value that is *demonstrably* a flattened
-settings object (`model_dump()`, `dict()`, `json()`, `__dict__`). That
-restriction is deliberate: `source.config["database_url"]` is **your own**
-warehouse URL out of your own `sources.config`, and it stays legal.
+The subscript rule tracks **provenance, not spelling**: it fires when the
+receiver can be traced back to `get_settings()` / a `Settings`-annotated
+binding, through assignments in the same scope. That cuts both ways, and both
+directions matter:
+
+```python
+source.config["database_url"]                     # legal — YOUR warehouse URL
+connector_config.model_dump()["database_url"]     # legal — YOUR typed config
+```
+
+Neither of those is Lumen's database, so neither is flagged. Requiring
+provenance to be *positively established* is deliberate: the failure direction
+here is the opposite of a credential lint — over-reporting would break a
+legitimate connector — so when the scan cannot prove the receiver is `Settings`,
+it stays quiet.
 
 Which is exactly what makes the following **allowed**:
 
@@ -182,10 +194,11 @@ test-caught:
   `__import__(...)`;
 - **a settings read whose name is not a literal** — `getattr(settings, chosen)`
   or `dump[key]`, where the field name comes from a variable. Constant names
-  are caught in all three spellings above; computed ones are not;
-- **a settings mapping laundered through a helper** — pass
-  `settings.model_dump()` into a function and subscript it there, and the dump
-  shape is no longer visible at the point of the read;
+  are caught in all the spellings above; computed ones are not;
+- **a settings object laundered across a function boundary** — pass
+  `settings.model_dump()` into a helper and subscript it there, and the
+  receiver's provenance is no longer visible at the point of the read.
+  Same-scope tracing (including through intermediate assignments) does work;
 - **state on a connector *instance* attribute** rather than a module global,
   and **mutation reached through an alias** (`ref = CACHE; ref.add(...)`).
 
@@ -384,6 +397,12 @@ builtin exception escape a protocol method.**
 `url_blocked`, `cursor_expired`, `drive_api_error`, …) that the API surfaces in
 the Problem body — pick one per failure mode and don't churn it. `detail` is
 safe prose: never a token, never a raw vendor error body.
+
+**Shape:** lowercase `snake_case`, matching `^[a-z][a-z0-9_]*$`. That is not a
+new rule — it is what all 72 `code="…"` literals in `backend/app/` already use,
+and conformance now enforces it (there is no shared validator to defer to). A
+padded or blank code fails: `" "` is a non-empty string and a useless
+discriminator, since nothing can branch on it, search for it, or count it.
 
 **This applies past `validate_config`.** Conformance drives your connector
 against a *failing* provider and requires that `sync()` and `fetch_changes()`

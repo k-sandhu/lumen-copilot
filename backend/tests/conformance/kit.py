@@ -35,6 +35,7 @@ from __future__ import annotations
 import builtins
 import copy
 import inspect
+import re
 import socket
 import typing
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
@@ -62,6 +63,8 @@ from app.domain.entities import Source
 __all__ = [
     "BASE_FIXTURES",
     "CAPABILITY_FIXTURES",
+    "CODE_FIXTURES",
+    "CODE_TOKEN",
     "AclCase",
     "check_cascade_signal",
     "check_harness_completeness",
@@ -83,6 +86,37 @@ __all__ = [
 ]
 
 _GUIDE = "docs/guides/building-a-connector.md"
+
+# The repo's existing error-code shape, not a new one invented here: every one of
+# the 72 `code="…"` literals under `backend/app/` matches this, and there is no
+# shared validator to defer to. Encoding the convention is what makes it a
+# convention rather than a habit.
+#
+# Truthiness was the previous bar and it is not enough: `code=" "` is a
+# non-empty string and a useless discriminator — nothing can branch on it,
+# search for it, or count it, which is the entire job of the field.
+CODE_TOKEN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _assert_code_token(value: object, *, connector_name: str, where: str) -> str:
+    """A stable machine-readable code: lowercase snake_case, no padding."""
+    assert isinstance(value, str) and value.strip(), (
+        f"connector {connector_name!r}: {where} carries no usable `code` ({value!r}) — "
+        "the code is the stable, machine-readable discriminator the framework records "
+        f"and the API surfaces (ADR-0009 §1, {_GUIDE})"
+    )
+    assert value == value.strip(), (
+        f"connector {connector_name!r}: {where} has a padded code ({value!r}) — "
+        "surrounding whitespace makes every caller-side comparison a trap"
+    )
+    assert CODE_TOKEN.match(value), (
+        f"connector {connector_name!r}: {where} has code {value!r}, which is not a "
+        "lowercase snake_case token — every existing code in this repo "
+        "(`invalid_config`, `url_blocked`, `drive_api_error`, …) matches "
+        f"{CODE_TOKEN.pattern}, and clients branch on the exact string ({_GUIDE})"
+    )
+    return value
+
 
 # The base protocol (ADR-0009 §1) — mandatory for every connector.
 _BASE_METHODS: dict[str, tuple[str, ...]] = {
@@ -138,6 +172,9 @@ CAPABILITY_FIXTURES: dict[str, tuple[str, ...]] = {
     "fetch_changes": ("start_cursor", "expired_cursor", "fault_cursor", "changes_fault_code"),
     "map_acl": ("acl_context", "acl_cases"),
 }
+# Fixtures that are themselves error codes, and so must satisfy CODE_TOKEN
+# rather than merely being present.
+CODE_FIXTURES: frozenset[str] = frozenset({"sync_fault_code", "changes_fault_code"})
 
 
 def check_harness_completeness(
@@ -167,6 +204,16 @@ def check_harness_completeness(
         "fixture does not weaken a rule here, it fails it: a rule that quietly checks "
         f"less is indistinguishable from a rule that passes ({_GUIDE})"
     )
+    # Present-but-useless is the same defect one step along: `changes_fault_code
+    # = " "` satisfies every truthiness check and pins nothing, because the
+    # connector can then "match" it with an equally blank code.
+    for name in required:
+        if name in CODE_FIXTURES:
+            _assert_code_token(
+                getattr(harness, name),
+                connector_name=connector_name,
+                where=f"the harness fixture `{name}`",
+            )
 
 
 # --- protocol surface --------------------------------------------------------
@@ -388,12 +435,12 @@ def check_typed_config_error(
     try:
         result = connector.validate_config(dict(bad_config))
     except ConnectorConfigError as exc:
-        assert isinstance(exc.code, str) and exc.code, (
-            f"connector {connector_name!r}: ConnectorConfigError for {dict(bad_config)!r} "
-            "carries no `code` — the code is the stable, machine-readable "
-            f"discriminator the API surfaces (ADR-0009 §1, {_GUIDE})"
+        _assert_code_token(
+            exc.code,
+            connector_name=connector_name,
+            where=f"the ConnectorConfigError for {dict(bad_config)!r}",
         )
-        assert isinstance(exc.detail, str) and exc.detail
+        assert isinstance(exc.detail, str) and exc.detail.strip()
         return
     except ConnectorError as exc:  # typed, but the wrong kind for a bad config
         raise AssertionError(
@@ -437,13 +484,11 @@ def _assert_typed_fault(exc: BaseException, *, connector_name: str, where: str) 
         "as the typed ConnectorError so the framework records a safe `last_error` and the "
         f"API never leaks a vendor exception or stack trace to a client (ADR-0004, {_GUIDE})"
     )
-    assert isinstance(exc.code, str) and exc.code, (
-        f"connector {connector_name!r}: the ConnectorError from {where} carries no `code` — "
-        "the code is the stable, machine-readable discriminator the framework and the API "
-        "key off"
+    _assert_code_token(
+        exc.code, connector_name=connector_name, where=f"the ConnectorError from {where}"
     )
     assert (
-        isinstance(exc.detail, str) and exc.detail
+        isinstance(exc.detail, str) and exc.detail.strip()
     ), f"connector {connector_name!r}: the ConnectorError from {where} carries no `detail`"
 
 

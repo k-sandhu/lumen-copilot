@@ -660,8 +660,78 @@ class _CodelessErrorConnector(_GoodConnector):
 
 
 def test_kit_bites_codeless_config_error() -> None:
-    with pytest.raises(AssertionError, match=r"carries no `code`"):
+    with pytest.raises(AssertionError, match=r"carries no usable `code`"):
         kit.check_typed_config_error(_CodelessErrorConnector(), {}, connector_name="synthetic")
+
+
+class _WhitespaceCodeConnector(_GoodConnector):
+    """A code that is non-empty and still not a discriminator."""
+
+    def validate_config(self, config: dict[str, object]) -> dict[str, object]:
+        raise ConnectorConfigError("nope", code=" ")
+
+
+def test_kit_bites_whitespace_config_error_code() -> None:
+    """Truthiness is not the bar: `" "` branches nothing and searches to nothing."""
+    with pytest.raises(AssertionError, match=r"carries no usable `code`"):
+        kit.check_typed_config_error(_WhitespaceCodeConnector(), {}, connector_name="synthetic")
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        pytest.param(" ", r"carries no usable `code`", id="blank"),
+        pytest.param("  drive_api_error  ", r"padded code", id="padded"),
+        pytest.param("Drive_API_Error", r"not a\s+lowercase snake", id="uppercase"),
+        pytest.param("drive api error", r"not a\s+lowercase snake", id="spaces"),
+        pytest.param("drive-api-error", r"not a\s+lowercase snake", id="hyphens"),
+        pytest.param("2fast", r"not a\s+lowercase snake", id="leading-digit"),
+    ],
+)
+async def test_kit_bites_malformed_fault_codes(code: str, expected: str) -> None:
+    """The repo's own convention, enforced: lowercase snake_case, unpadded."""
+
+    class _Malformed(_GoodConnector):
+        async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+            raise ConnectorError("provider is unwell", code=code)
+
+    with pytest.raises(AssertionError, match=expected):
+        await kit.check_typed_sync_fault(
+            _Malformed(), source=_stub_source(), run=None, connector_name="synthetic"
+        )
+
+
+def test_code_token_matches_every_code_the_repo_already_uses() -> None:
+    """The pattern is the repo's convention, not a new rule invented here.
+
+    If this fails, either a new code broke the convention or the kit invented a
+    stricter one — both are worth stopping for.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    app_root = _Path(__file__).resolve().parent.parent / "app"
+    literals = {
+        match
+        for path in app_root.rglob("*.py")
+        for match in _re.findall(r'code="([^"]*)"', path.read_text(encoding="utf-8"))
+    }
+    assert literals, "found no code= literals — the convention check would be vacuous"
+    offenders = sorted(c for c in literals if not kit.CODE_TOKEN.match(c))
+    assert not offenders, (
+        f"these existing codes do not match {kit.CODE_TOKEN.pattern}: {offenders} — "
+        "the kit's token rule must describe the repo's convention, not impose a new one"
+    )
+
+
+def test_kit_bites_whitespace_harness_fault_code() -> None:
+    """The same defect on the declaring side: a blank code pins nothing."""
+    with pytest.raises(AssertionError, match=r"carries no usable `code`"):
+        kit.check_harness_completeness(
+            _PartialHarness(changes_fault_code=" "),
+            frozenset({"fetch_changes"}),
+            connector_name="synthetic",
+        )
 
 
 class _PermissiveConfigConnector(_GoodConnector):
@@ -832,7 +902,7 @@ class _CodelessFaultConnector(_GoodConnector):
 
 
 async def test_kit_bites_codeless_sync_fault() -> None:
-    with pytest.raises(AssertionError, match=r"carries no `code`"):
+    with pytest.raises(AssertionError, match=r"carries no usable `code`"):
         await kit.check_typed_sync_fault(
             _CodelessFaultConnector(), source=_stub_source(), run=None, connector_name="synthetic"
         )
@@ -1325,9 +1395,25 @@ def connect_to_MY_OWN_source(config: dict) -> object:
 
 def my_own_config_key_is_not_lumens(config: dict) -> str:
     # A SQL-source connector may legitimately store ITS OWN url under a key that
-    # happens to be named like a Lumen setting. Only a *settings-derived* value
-    # subscripted with that key is a violation — a plain config dict is not.
+    # happens to be named like a Lumen setting. Only a value whose provenance is
+    # Settings is a violation — a plain config dict is not.
     return config["database_url"]
+
+def my_own_typed_config_dump(connector_config: object) -> str:
+    # Nor is the connector's OWN typed config, even flattened the same way. The
+    # rule traces where the receiver came from; `connector_config` is not
+    # Settings, so this must stay legal or the external-SQL allowance is fiction.
+    return connector_config.model_dump()["database_url"]
+
+def rebound_name_loses_provenance(config: dict) -> str:
+    # Provenance is dropped when the name is reused: over-reporting here would
+    # break a legitimate connector, so the scan stays silent unless it can prove
+    # the receiver is Settings.
+    from app.core.config import get_settings
+
+    dump = get_settings()
+    dump = config
+    return dump["database_url"]
 
 def reads_allowed_config() -> str:
     return get_settings().gdrive_oauth_client_id
@@ -1444,18 +1530,39 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
         'def go() -> str:\n    return getattr(get_settings(), "database_url")\n',
         '`getattr(..., "database_url")`',
     ),
-    "reaches database_url via model_dump()": (
+    "reaches database_url via an inline model_dump()": (
         "from app.core.config import get_settings\n\n"
         'def go() -> str:\n    return get_settings().model_dump()["database_url"]\n',
-        '`...["database_url"]` on a flattened settings object',
+        '`...["database_url"]` on a value traced back to Settings',
     ),
-    "reaches an s3 credential via __dict__": (
-        'def go(settings: object) -> str:\n    return settings.__dict__["s3_secret_key"]\n',
-        '`...["s3_secret_key"]` on a flattened settings object',
+    # Round-4: the accident-shaped one. A single local assignment defeated a
+    # spelling-based rule; provenance follows the value instead.
+    "reaches database_url via a local dump variable": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    dump = get_settings().model_dump()\n"
+        '    return dump["database_url"]\n',
+        '`...["database_url"]` on a value traced back to Settings',
     ),
-    "reaches database_url via .dict()": (
-        'def go(settings: object) -> str:\n    return settings.dict()["database_url"]\n',
-        '`...["database_url"]` on a flattened settings object',
+    "reaches an s3 credential via __dict__ on an annotated Settings": (
+        "from app.core.config import Settings\n\n"
+        'def go(settings: Settings) -> str:\n    return settings.__dict__["s3_secret_key"]\n',
+        '`...["s3_secret_key"]` on a value traced back to Settings',
+    ),
+    "reaches database_url via .dict() on a traced settings object": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    settings = get_settings()\n"
+        '    return settings.dict()["database_url"]\n',
+        '`...["database_url"]` on a value traced back to Settings',
+    ),
+    "reaches a celery url through two hops": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    settings = get_settings()\n"
+        "    dump = settings.model_dump()\n"
+        '    return dump["celery_broker_url"]\n',
+        '`...["celery_broker_url"]` on a value traced back to Settings',
     ),
 }
 
