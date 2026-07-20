@@ -39,6 +39,7 @@ from app.connectors.base import (
 )
 from app.connectors.gdrive import CONNECTOR, GdriveConnector
 from app.connectors.gdrive import api as gdrive_api
+from app.connectors.gdrive.connector import _MAX_ANCESTOR_DEPTH
 from app.connectors.oauth import EgressNotAllowedError, build_authenticated_client
 from app.connectors.registry import registered_types
 from app.domain.entities import Source, SourceStatus
@@ -774,6 +775,53 @@ async def test_unprovable_file_ancestry_is_neither_imported_nor_deleted(
     assert page.integrity is PageIntegrity.INCOMPLETE
     assert page.upserts == ()
     assert page.deleted_external_ids == frozenset()  # never a guessed deletion
+
+
+async def test_cyclic_container_ancestry_fails_the_page_closed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A parent CYCLE is unprovable, not "outside".
+
+    The walk used to stop on revisiting an id and return the truncated chain,
+    which ``_container_relation`` then read as a proven outside-scope
+    container — the same fail-open as a lookup error, reached without one.
+    A chain that never terminates cannot prove anything, so the page fails
+    closed.
+    """
+    _folder_tree(fake_drive)
+    fake_drive.add_file("loopA", name="Loop A", mime=_FOLDER, parents=["loopB"])
+    fake_drive.add_file("loopB", name="Loop B", mime=_FOLDER, parents=["loopA"])
+    _change(fake_drive, "loopA")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.INCOMPLETE
+    assert page.upserts == ()
+    assert page.deleted_external_ids == frozenset()
+
+
+async def test_over_deep_container_ancestry_fails_the_page_closed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A chain longer than the walk cap is truncated — and a truncated chain is
+    unprovable, not proof of "outside".
+
+    Depth exhaustion previously returned normally, so a container nested deeper
+    than ``_MAX_ANCESTOR_DEPTH`` below the configured root looked outside-scope
+    and its cascade was dropped while the page still claimed COMPLETE.
+    """
+    _folder_tree(fake_drive)
+    # A chain of folders far deeper than the cap, whose far end is genuinely
+    # inside the configured root: only an untruncated walk could prove that.
+    parent = "sub"
+    for level in range(_MAX_ANCESTOR_DEPTH + 2):
+        node = f"deep{level}"
+        fake_drive.add_file(node, name=f"Deep {level}", mime=_FOLDER, parents=[parent])
+        parent = node
+    _change(fake_drive, parent)
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.INCOMPLETE
+    assert page.upserts == ()
 
 
 async def test_provably_outside_container_is_still_ignored(

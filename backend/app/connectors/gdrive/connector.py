@@ -429,10 +429,25 @@ class GdriveConnector:
         current = start_id
         for _ in range(_MAX_ANCESTOR_DEPTH):
             parent = await self._parent_of(http, current, memo=ancestry, strict=strict)
-            if parent is None or parent in ancestors:
+            if parent is None:
+                # The ONLY provable terminus: the walk reached a root.
+                return tuple(ancestors)
+            if parent in ancestors:
+                # A cycle — the chain never terminates, so no strict caller can
+                # prove "outside" from it (truncating here would assert exactly
+                # the wrong answer). Lenient callers keep the ids collected so
+                # far: a smaller watch set is harmless.
+                if strict:
+                    raise _AncestryUnknown(parent)
                 break
             ancestors.append(parent)
             current = parent
+        else:
+            # Depth exhausted without reaching a root: the chain is truncated,
+            # so the relation is unprovable in either direction (a container
+            # deeper than the cap would otherwise look proven-outside).
+            if strict:
+                raise _AncestryUnknown(current)
         return tuple(ancestors)
 
     async def _parent_of(

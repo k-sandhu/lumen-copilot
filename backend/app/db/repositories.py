@@ -1756,6 +1756,29 @@ class DocumentRepository(_TenantScopedRepository):
             await self._session.flush()
         return attested
 
+    async def count_stale_acl(self, source_id: UUID) -> int:
+        """Mirrored documents of ``source_id`` still stamped stale (ADR-0019 §3).
+
+        ``acl_synced_at IS NULL`` on an ``acl_enforced`` row means "denied until
+        a sync re-examines this for real" — the state a cascade or an incomplete
+        run leaves behind. The sync terminal uses this as its **proof
+        obligation**: a run may only publish a ready/fresh source when this is
+        zero, because source-level freshness over a NULL row would advertise
+        health for content the permission predicate is (correctly) denying.
+        Tenant-scoped (INV-1).
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.source_id == source_id,
+                models.Document.acl_enforced.is_(True),
+                models.Document.acl_synced_at.is_(None),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
     async def list_for_source(self, source_id: UUID) -> list[Document]:
         """List the documents a source ingested (tenant-scoped, INV-1).
 

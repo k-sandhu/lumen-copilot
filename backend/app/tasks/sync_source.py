@@ -809,6 +809,34 @@ async def _sync_incremental(
         documents = DocumentRepository(session, tenant_id)
         indexed = len(await documents.list_for_source(source_id))
         sources = SourceRepository(session, tenant_id)
+
+        if not unrecovered and enforce_acl:
+            # Attest FIRST — a complete, gap-free replay proves the documents it
+            # did not report are unchanged, and this can only ever NARROW the
+            # stale set (it never revives a NULL stamp; see
+            # ``attest_acl_unchanged``).
+            attested_ids = await documents.attest_acl_unchanged(
+                source_id, attested_at=now, exclude_ids=examined_ids
+            )
+            # ...then PROVE the mirror is whole before claiming health. A page
+            # can be `complete` and still leave rows stale: a cascade
+            # stale-stamps every descendant of a changed container, and the run
+            # may re-examine only a subset of them. Publishing a fresh
+            # source-level `acl_synced_at` over such a row would advertise
+            # health for content the permission predicate is denying. Any
+            # survivor demotes this run and commits the durable requirement, so
+            # the next run is a full sync.
+            stale_remaining = await documents.count_stale_acl(source_id)
+            if stale_remaining:
+                unrecovered = True
+                attested_ids = []
+                await sources.record_acl_resync_required(source_id, True)
+                log.warning(
+                    "source_sync.acl_mirror_incomplete",
+                    source_id=str(source_id),
+                    stale_documents=stale_remaining,
+                )
+
         if unrecovered:
             # An unrecovered mirror is NOT a healthy source: no ready status, no
             # fresh source-level acl_synced_at. Every acl_enforced document is
@@ -837,16 +865,9 @@ async def _sync_incremental(
                 set_last_synced_at=True,
             )
             if enforce_acl:
-                # §2 refresh cadence: a complete, gap-free replay ATTESTS the
-                # documents it did not report as unchanged. Without this, an
-                # untouched document ages past CONNECTOR_ACL_MAX_AGE_HOURS and
-                # disappears from retrieval even though every hourly replay
-                # succeeded. Rows stamped stale by an incomplete run carry a
-                # NULL acl_synced_at and are structurally excluded — an
-                # attestation can narrow freshness, never fake it.
-                attested_ids = await documents.attest_acl_unchanged(
-                    source_id, attested_at=now, exclude_ids=examined_ids
-                )
+                # Attestation already ran above, and the mirror was PROVEN whole
+                # (no `acl_enforced` row left with a NULL stamp) — only then is a
+                # fresh source-level `acl_synced_at` an honest claim.
                 unmapped = await _count_unmapped(session, tenant_id, source_id)
                 await sources.record_acl_health(
                     source_id, acl_synced_at=now, unmapped_acl_count=unmapped

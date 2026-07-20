@@ -854,13 +854,21 @@ async def test_attestation_never_revives_a_stale_stamped_document(
         ]
     }
     result = await _run(seeded)
-    assert result.status is SourceStatus.READY  # type: ignore[attr-defined]
     after = await _rows(seeded)
     assert after["reexamined"].acl_synced_at is not None  # examined for real
     assert after["unrecovered"].acl_synced_at is None  # NOT revived by attestation
     assert after["elsewhere"].acl_synced_at is not None  # untouched scope, attested
+
+    # The run may NOT call itself healthy while a mirrored row is still stale:
+    # a `complete` page whose cascade stamped more descendants than it
+    # re-examined leaves `unrecovered` denied, so publishing READY + a fresh
+    # source-level acl_synced_at would advertise health for content the
+    # permission predicate is (correctly) denying. The proof obligation demotes
+    # the terminal and commits the durable full-resync requirement instead.
+    assert result.status is SourceStatus.ERROR  # type: ignore[attr-defined]
     source = await _source_row(seeded)
-    assert not source.acl_resync_required  # a cascade is not a source-wide stamp
+    assert source.acl_resync_required
+    assert source.acl_synced_at is None  # no fresh source-level stamp
     assert source.sync_cursor == "baseline-3"
 
 
