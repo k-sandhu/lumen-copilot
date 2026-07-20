@@ -21,6 +21,8 @@ from collections.abc import Mapping
 
 import pytest
 
+from app.connectors.base import AclMappingContext
+
 from .subject import REQUIRED_CASE_IDS, AclSubject
 from .subjects import SUBJECT_IDS, SUBJECTS
 
@@ -92,6 +94,21 @@ def test_domain_share_never_yields_the_tenant_principal(subject: AclSubject) -> 
     assert subject.guest_email.rsplit("@", 1)[-1] != subject.sharing_domain
     assert "tenant" not in subject.mapped("domain_only")
     assert subject.mapped("domain_only") == frozenset()
+
+
+def test_an_empty_identity_snapshot_admits_the_public_share_and_nobody_else(
+    subject: AclSubject,
+) -> None:
+    """A tenant with **no attested users** still resolves the safe wildcard.
+
+    ``anyone`` needs no identity map (every tenant member is a strict subset of
+    "everyone"), while every user-matched entry maps to nothing. Restores the
+    coverage of the deleted ``test_empty_context_still_maps_anyone_but_no_users``
+    (#453) in connector-agnostic form.
+    """
+    empty = AclMappingContext(email_to_user_id={}, evaluated_at=subject.context.evaluated_at)
+    assert subject.map_acl(subject.case("public").raw, empty) == frozenset({"tenant"})
+    assert subject.map_acl(subject.case("direct_user").raw, empty) == frozenset()
 
 
 def test_unattested_email_lights_up_once_attested(subject: AclSubject) -> None:
