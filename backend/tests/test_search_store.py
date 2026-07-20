@@ -275,6 +275,114 @@ async def test_upsert_failing_later_batch_fails_the_call(
     assert seen["count"] == 2  # stopped at the failing batch, no batch 3
 
 
+# --- schema: the ACL fields reach an ALREADY-EXISTING strict index -----------
+
+
+class _StrictEngine:
+    """A minimal ``dynamic: strict`` engine double (mapping-aware).
+
+    Models the one behaviour the regression is about: the index already exists
+    with a **pre-0040 mapping**, and a strict mapping rejects any document
+    carrying a field it does not know. ``PUT /{index}/_mapping`` widens the
+    known-field set (the additive, compatible operation ADR-0019 §2 calls for).
+    """
+
+    def __init__(self, *, exists: bool) -> None:
+        self.exists = exists
+        self.known_fields: set[str] = {
+            "chunk_id",
+            "tenant_id",
+            "document_id",
+            "owner_id",
+            "collection_id",
+            "ord",
+            "text",
+            "embedding",
+            "char_start",
+            "char_end",
+        }
+        self.requests: list[tuple[str, str]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.requests.append((request.method, path))
+        if request.method == "HEAD":
+            return httpx.Response(200 if self.exists else 404)
+        if request.method == "PUT" and path.endswith("/_mapping"):
+            body = json.loads(request.content.decode("utf-8"))
+            self.known_fields |= set(body["properties"])
+            return httpx.Response(200, json={"acknowledged": True})
+        if request.method == "PUT":  # create index / pipeline
+            if path == "/lumen-test":
+                body = json.loads(request.content.decode("utf-8"))
+                self.known_fields |= set(body["mappings"]["properties"])
+                self.exists = True
+            return httpx.Response(200, json={"acknowledged": True})
+        if path == "/_bulk":
+            lines = request.content.decode("utf-8").strip().split("\n")
+            for line in lines[1::2]:
+                unknown = set(json.loads(line)) - self.known_fields
+                if unknown:  # what a strict mapping does to an unmapped field
+                    return httpx.Response(200, json={"errors": True, "items": []})
+            return httpx.Response(200, json={"errors": False, "items": []})
+        return httpx.Response(200, json={})  # pragma: no cover — unused paths
+
+
+async def test_existing_strict_index_gets_the_acl_mapping_added() -> None:
+    """Regression (ADR-0019 §2): an index created BEFORE the mirrored-ACL
+    fields must still accept the new writes.
+
+    ``ensure_index`` only ever *created* the index, so a deployed
+    ``dynamic: strict`` index never learned ``acl_enforced`` /
+    ``acl_principals`` / ``acl_synced_at`` / ``acl_scope_ids`` and rejected
+    every subsequent bulk write. The additive ``PUT /{index}/_mapping`` is the
+    compatible migration; the documented reindex backfills existing rows.
+    """
+    engine = _StrictEngine(exists=True)
+    store = _store(httpx.MockTransport(engine))
+
+    await store.ensure_index()
+
+    assert ("PUT", "/lumen-test/_mapping") in engine.requests
+    assert ("PUT", "/lumen-test") not in engine.requests  # never re-created
+    assert {
+        "acl_enforced",
+        "acl_principals",
+        "acl_synced_at",
+        "acl_scope_ids",
+    } <= engine.known_fields
+    # The upgraded index now accepts a mirrored-ACL chunk write.
+    await store.upsert_chunks([_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())])
+
+
+async def test_fresh_index_creation_still_carries_the_acl_mapping() -> None:
+    """A brand-new index gets the fields from the create body (mapping PUT is a no-op)."""
+    engine = _StrictEngine(exists=False)
+    store = _store(httpx.MockTransport(engine))
+
+    await store.ensure_index()
+
+    assert ("PUT", "/lumen-test") in engine.requests
+    assert ("PUT", "/lumen-test/_mapping") in engine.requests
+    await store.upsert_chunks([_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())])
+
+
+async def test_rejected_mapping_update_fails_closed() -> None:
+    """An engine that refuses the mapping update is a hard dependency failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200)
+        if request.url.path.endswith("/_mapping"):
+            return httpx.Response(400, json={"error": "illegal_argument_exception"})
+        return httpx.Response(200, json={})  # pragma: no cover
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.ensure_index()
+    assert excinfo.value.code == "search_error"
+
+
 # --- Live round-trip against the base-stack engine (skips when offline) ------
 
 _OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")

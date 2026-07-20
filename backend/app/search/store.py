@@ -96,6 +96,29 @@ class SearchHit:
     score: float
 
 
+def _acl_mapping_properties() -> dict[str, Any]:
+    """The ADR-0019 §2 mirrored-ACL properties — declared in ONE place.
+
+    Used both by :func:`_index_body` (a fresh index) and by
+    :meth:`OpenSearchStore.ensure_index`'s **additive mapping update** for an
+    index that already exists. Adding properties to a ``dynamic: strict``
+    mapping is a legal, compatible operation (existing documents are untouched;
+    they simply lack the fields until the reindex backfill re-writes them), and
+    it is what lets a deployment that predates this change accept the new bulk
+    writes at all — a strict index rejects an unmapped field outright.
+
+    ``acl_enforced`` is an explicit boolean because an empty keyword array is
+    indexed like a missing field and cannot discriminate "not a connector
+    document" from "connector document nobody may see".
+    """
+    return {
+        "acl_enforced": {"type": "boolean"},
+        "acl_principals": {"type": "keyword"},
+        "acl_synced_at": {"type": "date"},
+        "acl_scope_ids": {"type": "keyword"},
+    }
+
+
 def _index_body(dimensions: int) -> dict[str, Any]:
     """The chunk-index settings + strict mapping (ADR-0010 §5).
 
@@ -130,14 +153,9 @@ def _index_body(dimensions: int) -> dict[str, Any]:
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
                 # Mirrored source ACL (ADR-0019 §2) — the engine half of the
-                # mode-split predicate. ``acl_enforced`` is an explicit boolean
-                # because an empty keyword array is indexed like a missing
-                # field and cannot discriminate "not a connector document"
-                # from "connector document nobody may see".
-                "acl_enforced": {"type": "boolean"},
-                "acl_principals": {"type": "keyword"},
-                "acl_synced_at": {"type": "date"},
-                "acl_scope_ids": {"type": "keyword"},
+                # mode-split predicate, shared verbatim with the additive
+                # mapping update an already-deployed index receives.
+                **_acl_mapping_properties(),
             },
         },
     }
@@ -321,6 +339,19 @@ class OpenSearchStore:
         ``resource_already_exists`` 400 — treated as success, matching the
         "safe on every boot" contract. Latched per instance after the first
         success so callers on a hot path may invoke it unconditionally.
+
+        **Mapping migration (ADR-0019 §2).** Creating the index only ever
+        covers a *fresh* deployment; an index that already exists keeps the
+        mapping it was created with. Because the mapping is ``dynamic:
+        strict``, a deployed ``lumen-chunks`` that predates the mirrored-ACL
+        fields would reject every new bulk write outright. So the ACL
+        properties are **always** applied as an additive ``PUT
+        /{index}/_mapping`` — legal and idempotent for a strict mapping (new
+        fields only; no existing field is redefined), and a no-op on the index
+        this call just created. Existing chunk documents simply lack the fields
+        until ``python -m app.search.reindex`` backfills them; until then the
+        mode-split filter's ``acl_enforced`` term excludes them from the
+        enforced branch and the Postgres hydration re-check is the backstop.
         """
         if self._ensured:
             return
@@ -341,6 +372,13 @@ class OpenSearchStore:
             )
         elif head.status_code != 200:
             raise DependencyError("The search engine is unreachable.", code="search_unavailable")
+        # Additive, compatible mapping update — also repairs the lost-create
+        # race above (that index was created by the winner, possibly older).
+        await self._request(
+            "PUT",
+            f"/{self._index}/_mapping",
+            json_body={"properties": _acl_mapping_properties()},
+        )
         # PUT of a search pipeline is a full upsert — idempotent by nature.
         await self._request(
             "PUT", f"/_search/pipeline/{self._pipeline}", json_body=_pipeline_body()
