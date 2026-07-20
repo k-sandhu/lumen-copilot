@@ -562,6 +562,187 @@ async def test_fetch_changes_410_raises_typed_cursor_expired(
             )
 
 
+# --- folder mode: the change log is WIDER than the configured subtree --------
+
+
+def _folder_tree(fake: FakeDrive) -> None:
+    """``above`` ⊃ {``watch`` (the sync root) ⊃ ``sub``, ``elsewhere``}."""
+    fake.files["above"] = {"id": "above", "name": "Above", "mimeType": _FOLDER}
+    fake.add_file("watch", name="Watched", mime=_FOLDER, parents=["above"])
+    fake.add_file("sub", name="Sub", mime=_FOLDER, parents=["watch"])
+    fake.add_file("elsewhere", name="Elsewhere", mime=_FOLDER, parents=["above"])
+
+
+def _change(fake: FakeDrive, *file_ids: str, next_token: str = "baseline-x") -> None:
+    fake.changes_pages = {
+        "cur-1": {
+            "changes": [
+                {"changeType": "file", "fileId": fid, "file": fake.files[fid]} for fid in file_ids
+            ],
+            "newStartPageToken": next_token,
+        }
+    }
+
+
+def _folder_source() -> Source:
+    return _source({"mode": "folder", "folder_id": "watch"})
+
+
+async def test_change_inside_the_subtree_is_ingested(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    _folder_tree(fake_drive)
+    fake_drive.add_file("in1", name="Inside", mime=_GDOC, parents=["sub"], export=b"x")
+    _change(fake_drive, "in1")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert [d.external_id for d in page.upserts] == ["in1"]
+    assert page.deleted_external_ids == frozenset()
+
+
+async def test_change_outside_the_subtree_is_never_imported(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Regression (ADR-0019 §5): folder mode consumed the WHOLE user/Shared-Drive
+    change log and upserted any live ingestible file.
+
+    Drive's changes feed is per-account, not per-folder, so a change anywhere
+    in My Drive imported data the source was never configured to ingest. Every
+    live change must now prove its *current* ancestor chain contains the
+    configured ``folder_id``.
+    """
+    _folder_tree(fake_drive)
+    fake_drive.add_file("out1", name="Outside", mime=_GDOC, parents=["elsewhere"], export=b"y")
+    _change(fake_drive, "out1")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.upserts == ()
+    # Reconciled as a deletion — a no-op when no row exists for it, and the
+    # correct repair when the row IS ours (see the move-out test below).
+    assert page.deleted_external_ids == frozenset({"out1"})
+    assert page.integrity is PageIntegrity.COMPLETE
+    # Never even fetched: no content, no permissions leave the pinned host set.
+    assert not any(c.startswith("export out1") for c in fake_drive.calls)
+    assert not any(c.startswith("permissions out1") for c in fake_drive.calls)
+
+
+async def test_file_moved_out_of_the_subtree_is_removed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A file that moves OUT is reconciled as a deletion, not left orphaned."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("moved", name="Moved", mime=_GDOC, parents=["elsewhere"], export=b"z")
+    _change(fake_drive, "moved")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.upserts == ()
+    assert page.deleted_external_ids == frozenset({"moved"})
+
+
+async def test_file_moved_into_the_subtree_is_ingested(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    _folder_tree(fake_drive)
+    fake_drive.add_file("arrived", name="Arrived", mime=_GDOC, parents=["watch"], export=b"w")
+    _change(fake_drive, "arrived")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert [d.external_id for d in page.upserts] == ["arrived"]
+
+
+async def test_ancestor_change_reexamines_the_configured_root_only(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A permission change ABOVE the sync root cascades over everything we
+    sync — but re-examination enumerates the configured root, never the
+    ancestor's own subtree (which holds siblings outside the source)."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("in1", name="Inside", mime=_GDOC, parents=["sub"], export=b"x")
+    fake_drive.add_file("out1", name="Outside", mime=_GDOC, parents=["elsewhere"], export=b"y")
+    _change(fake_drive, "above")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.stale_scope_ids == frozenset({"above"})  # descendants denied now
+    assert [d.external_id for d in page.upserts] == ["in1"]  # only ours refreshed
+    # The ancestor's own children are never enumerated.
+    assert not any("q='above' in parents" in c for c in fake_drive.calls)
+
+
+async def test_unrelated_container_change_is_ignored(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A folder change outside the configured subtree cascades over nothing of
+    ours — no stale scope, no re-enumeration."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("out1", name="Outside", mime=_GDOC, parents=["elsewhere"], export=b"y")
+    _change(fake_drive, "elsewhere")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.stale_scope_ids == frozenset()
+    assert page.upserts == ()
+    assert page.integrity is PageIntegrity.COMPLETE
+    assert not any("q='elsewhere' in parents" in c for c in fake_drive.calls)
+
+
+async def test_inside_container_change_reexamines_that_folder(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A folder change INSIDE the subtree re-examines that folder's descendants
+    (the narrower, cheaper set) — not the whole configured root."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("deep", name="Deep", mime=_GDOC, parents=["sub"], export=b"d")
+    fake_drive.add_file("shallow", name="Shallow", mime=_GDOC, parents=["watch"], export=b"s")
+    _change(fake_drive, "sub")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.stale_scope_ids == frozenset({"sub"})
+    assert [d.external_id for d in page.upserts] == ["deep"]
+
+
+async def test_changed_file_that_stops_being_ingestible_is_removed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """An in-subtree file whose type is no longer one we mirror is reconciled
+    as a deletion — not silently left behind as un-refreshable content."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("pic", name="Pic.png", mime="image/png", parents=["watch"])
+    _change(fake_drive, "pic")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.deleted_external_ids == frozenset({"pic"})
+    assert page.integrity is PageIntegrity.COMPLETE
+
+
+async def test_changed_file_with_unreadable_acl_marks_incomplete(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Unknown rights on an ingestible file is NOT a deletion — it is the
+    unprovable-mirror signal (fail closed source-wide downstream)."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("broken", name="Broken", mime=_GDOC, parents=["watch"], export=b"b")
+    fake_drive.perm_fail_ids.add("broken")
+    _change(fake_drive, "broken")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.upserts == ()
+    assert page.deleted_external_ids == frozenset()  # never a deletion
+    assert page.integrity is PageIntegrity.INCOMPLETE
+
+
+async def test_my_drive_mode_keeps_consuming_the_whole_feed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """The subtree proof is folder-mode only: for ``my_drive`` the account's
+    feed IS the configured scope (parity with its full enumeration)."""
+    fake_drive.add_file("anywhere", name="Anywhere", mime=_GDOC, export=b"a")
+    _change(fake_drive, "anywhere")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(
+            CONNECTOR.fetch_changes(_source({"mode": "my_drive"}), "cur-1", _Run(http))  # type: ignore[arg-type]
+        )
+    assert [d.external_id for d in page.upserts] == ["anywhere"]
+
+
 # --- content transfer is streamed and hard-capped ----------------------------
 
 

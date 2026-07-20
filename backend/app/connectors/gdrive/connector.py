@@ -17,7 +17,9 @@ Capabilities (auto-discovered off this object, ADR-0019 §4):
   stores it — the first incremental replay covers the enumeration window);
 * ``fetch_changes(source, cursor, run)`` — the §3 page-shaped replay
   (drive-scoped log for Shared-Drive modes; removals → deletions; container
-  changes → ``stale_scope_ids`` + in-run descendant re-examination; unprovable
+  changes → ``stale_scope_ids`` + in-run descendant re-examination rooted at
+  the configured scope; **every live change proved to sit inside the configured
+  subtree before import**, a move out reconciled as a deletion; unprovable
   effects → ``integrity=incomplete``; HTTP 410 → typed cursor-expired);
 * ``map_acl(raw, ctx)`` — the pure §2 effective-read mapper
   (:mod:`app.connectors.gdrive.acl`).
@@ -98,6 +100,10 @@ _CASCADE_REFETCH_BUDGET = 200
 # Upper bound on ancestor-chain walks (cycle/defect guard).
 _MAX_ANCESTOR_DEPTH = 64
 
+# Per-run memo of ``file id → parent id`` (``None`` = no/unreadable parent), so
+# the subtree proofs a change page needs cost one lookup per distinct ancestor.
+_ParentCache = dict[str, "str | None"]
+
 
 @dataclass(frozen=True, slots=True)
 class _ModeConfig:
@@ -126,6 +132,18 @@ def _mode_config(config: Mapping[str, object]) -> _ModeConfig:
         folder_id=str(folder_id) if isinstance(folder_id, str) and folder_id else None,
         drive_id=str(drive_id) if isinstance(drive_id, str) and drive_id else None,
     )
+
+
+class _AclUnavailable(Exception):
+    """A file's effective permissions could not be read this run (§2).
+
+    Module-private control flow, never surfaced: it separates "we do not know
+    this file's current rights" (skip without advancing freshness; an
+    incremental page over it is ``integrity=incomplete``) from "this file is
+    not something we mirror at all" (``_fetch_doc`` → ``None``, reconciled as a
+    deletion). Conflating the two is how an unreadable ACL used to look like a
+    type we never ingest.
+    """
 
 
 def _parse_modified(value: object) -> datetime | None:
@@ -253,9 +271,18 @@ class GdriveConnector:
         docs: list[FetchedDoc] = []
         skipped = 0
         for file in files:
-            doc = await self._fetch_doc(
-                run.http, file, scope_chain=chains.get(str(file.get("id")), ()), ctx=ctx, cap=cap
-            )
+            try:
+                doc = await self._fetch_doc(
+                    run.http,
+                    file,
+                    scope_chain=chains.get(str(file.get("id")), ()),
+                    ctx=ctx,
+                    cap=cap,
+                )
+            except _AclUnavailable:
+                # Unknown rights ⇒ skipped this sync (never ingested), counted.
+                skipped += 1
+                continue
             if doc is None:
                 skipped += 1
                 continue
@@ -349,25 +376,103 @@ class GdriveConnector:
                 chains[entry_id] = chain
         return files, chains
 
-    async def _walk_up(self, http: httpx.AsyncClient, start_id: str) -> tuple[str, ...]:
-        """The ancestor ids ABOVE a container (``files.get`` walk, bounded)."""
+    async def _walk_up(
+        self, http: httpx.AsyncClient, start_id: str, *, cache: _ParentCache | None = None
+    ) -> tuple[str, ...]:
+        """The ancestor ids ABOVE a container (``files.get`` walk, bounded).
+
+        Drive files have a single parent (multi-parenting was removed in 2020),
+        so ``parents[0]`` is *the* position — the walk is a chain, not a graph.
+        ``cache`` memoizes ``child → parent`` for one run so a change page full
+        of siblings costs one lookup per distinct ancestor, not per file.
+        """
+        parents = cache if cache is not None else {}
         ancestors: list[str] = []
-        entry = await api.get_file(http, start_id)
-        depth = 0
-        while depth < _MAX_ANCESTOR_DEPTH:
-            parents = entry.get("parents")
-            parent = parents[0] if isinstance(parents, list) and parents else None
-            if not isinstance(parent, str) or parent in ancestors:
-                break
-            ancestors.append(parent)
-            try:
-                entry = await api.get_file(http, parent)
-            except ConnectorError:
+        current = start_id
+        for _ in range(_MAX_ANCESTOR_DEPTH):
+            parent = await self._parent_of(http, current, cache=parents)
+            if parent is None or parent in ancestors:
                 # The top of a chain may be unreadable (e.g. the My Drive
                 # root); the ids collected so far still widen the watch set.
                 break
-            depth += 1
+            ancestors.append(parent)
+            current = parent
         return tuple(ancestors)
+
+    async def _parent_of(
+        self, http: httpx.AsyncClient, file_id: str, *, cache: _ParentCache
+    ) -> str | None:
+        """The file's parent id (memoized); ``None`` = no/unreadable parent."""
+        if file_id in cache:
+            return cache[file_id]
+        try:
+            entry = await api.get_file(http, file_id)
+        except ConnectorError:
+            cache[file_id] = None
+            return None
+        raw = entry.get("parents")
+        parent = raw[0] if isinstance(raw, list) and raw else None
+        resolved = parent if isinstance(parent, str) and parent else None
+        cache[file_id] = resolved
+        return resolved
+
+    async def _is_within_root(
+        self,
+        http: httpx.AsyncClient,
+        file: Mapping[str, Any],
+        cfg: _ModeConfig,
+        *,
+        cache: _ParentCache,
+    ) -> bool:
+        """Is this file **currently** inside the configured subtree? (§5 scope).
+
+        Only ``folder`` mode has a subtree narrower than its change log: the
+        Drive changes feed is per-user (or per-Shared-Drive) and reports every
+        file the account can see, so an incremental replay MUST prove a changed
+        file's current ancestor chain still contains the configured
+        ``folder_id`` before importing it. A file whose position cannot be
+        established (no readable parent) counts as **outside** — the connector
+        never imports content it cannot place inside the configured scope.
+        """
+        if cfg.mode != "folder" or cfg.folder_id is None:
+            return True  # my_drive / shared_drive: the whole log IS the scope
+        raw = file.get("parents")
+        parent = raw[0] if isinstance(raw, list) and raw else None
+        if not isinstance(parent, str) or not parent:
+            return False
+        if parent == cfg.folder_id:
+            return True
+        return cfg.folder_id in await self._walk_up(http, parent, cache=cache)
+
+    async def _container_relation(
+        self,
+        http: httpx.AsyncClient,
+        container_id: str,
+        cfg: _ModeConfig,
+        *,
+        cache: _ParentCache,
+    ) -> str:
+        """How a changed container relates to the configured root (§3 cascade).
+
+        * ``"inside"`` — the root itself or a folder within it: its permission
+          change cascades over a *subset* of the corpus, so re-examination
+          starts at that folder;
+        * ``"above"`` — an ancestor of the configured root (or the enclosing
+          Shared Drive): its change cascades over **everything** we sync, so
+          re-examination starts at the configured root — never at the
+          ancestor's own subtree, which would enumerate siblings the source was
+          never configured to ingest;
+        * ``"outside"`` — unrelated to the configured subtree: ignored.
+        """
+        if cfg.mode != "folder" or cfg.folder_id is None:
+            return "inside"  # the whole drive/feed is the configured scope
+        if container_id == cfg.folder_id:
+            return "inside"
+        if cfg.folder_id in await self._walk_up(http, container_id, cache=cache):
+            return "inside"
+        if container_id in await self._walk_up(http, cfg.folder_id, cache=cache):
+            return "above"
+        return "outside"
 
     async def _fetch_doc(
         self,
@@ -378,10 +483,17 @@ class GdriveConnector:
         ctx: AclMappingContext | None,
         cap: int,
     ) -> FetchedDoc | None:
-        """One file → a :class:`FetchedDoc`, or ``None`` = skipped (counted).
+        """One file → a :class:`FetchedDoc`, or ``None`` = **not ingestible**.
 
-        Skips: unsupported type, over the size cap, or a permissions fetch
-        that keeps failing (ADR-0019 §2 — never ingested with unknown rights).
+        ``None`` means the file is outside what this connector mirrors at all
+        (unsupported type, or over the size cap) — a *stable* property of the
+        file, which an incremental replay reconciles as a deletion.
+
+        A permissions fetch that keeps failing is a different outcome and
+        raises :class:`_AclUnavailable`: the file *is* ingestible, we simply do
+        not know its current rights, so it must be skipped without advancing
+        ``acl_synced_at`` (ADR-0019 §2 — never ingested/kept with unknown
+        rights) and an incremental page must fail closed over it.
         """
         file_id = file.get("id")
         name = file.get("name")
@@ -423,10 +535,10 @@ class GdriveConnector:
             log.info("gdrive.skip_unsupported", file_id=file_id, mime=mime)
             return None
 
-        # --- effective permissions (bounded retry; skip on persistent failure)
+        # --- effective permissions (bounded retry; fail closed on exhaustion)
         permissions = await self._fetch_permissions(http, file_id)
         if permissions is None:
-            return None
+            raise _AclUnavailable(file_id)
         raw_acl: dict[str, object] = {
             "permissions": permissions,
             "inheritedPermissionsDisabled": file.get("inheritedPermissionsDisabled") is True,
@@ -483,6 +595,17 @@ class GdriveConnector:
         source-wide). The terminal page's ``next_cursor`` is Drive's
         ``newStartPageToken`` — the new baseline. HTTP 410 raises the typed
         cursor-expired error before any page is yielded for that token.
+
+        **The change log is wider than the configured scope.** Drive's feed is
+        per-user (or per-Shared-Drive); in ``folder`` mode it therefore reports
+        files the source was never configured to ingest. Every live change is
+        proved to sit inside the configured subtree *at its current position*
+        before it is upserted, and a file that moved **out** (or stopped being
+        ingestible) is reconciled as a **deletion** — the framework's
+        identity-delete is a no-op when no row exists, so this is safe for
+        files that were never ours. Cascade re-examination likewise enumerates
+        the **configured root**, never an arbitrary ancestor scope whose
+        subtree contains siblings outside the source.
         """
         from app.core.config import get_settings
 
@@ -491,6 +614,7 @@ class GdriveConnector:
         ctx = run.acl_context
         token = cursor
         refetch_budget = _CASCADE_REFETCH_BUDGET
+        parents: _ParentCache = {}
         while True:
             payload = await api.list_changes_page(
                 run.http, page_token=token, drive_id=cfg.change_log_drive_id
@@ -498,6 +622,10 @@ class GdriveConnector:
             upserts: list[FetchedDoc] = []
             deleted: set[str] = set()
             stale_scopes: set[str] = set()
+            # Where re-examination must START for this page's cascades — the
+            # changed container itself when it is inside the configured
+            # subtree, the configured root when the change is above it.
+            refetch_roots: set[str] = set()
             incomplete = False
 
             changes = payload.get("changes")
@@ -507,10 +635,14 @@ class GdriveConnector:
                     continue
                 if change.get("changeType") == "drive":
                     drive_id = change.get("driveId")
-                    if isinstance(drive_id, str) and drive_id:
-                        stale_scopes.add(drive_id)
-                    else:
+                    if not (isinstance(drive_id, str) and drive_id):
                         incomplete = True
+                        continue
+                    # A Shared-Drive permission change cascades over everything
+                    # we sync — but re-examination starts at the configured
+                    # root, which in folder mode is narrower than the drive.
+                    stale_scopes.add(drive_id)
+                    refetch_roots.add(cfg.folder_id or drive_id)
                     continue
                 file_id = change.get("fileId")
                 if not isinstance(file_id, str) or not file_id:
@@ -531,26 +663,39 @@ class GdriveConnector:
                     # A container change cascades (Drive emits no per-
                     # descendant events): signal the scope for the framework's
                     # immediate stale-stamp, then re-examine descendants below.
+                    relation = await self._container_relation(run.http, file_id, cfg, cache=parents)
+                    if relation == "outside":
+                        continue  # a container we do not sync — not our cascade
                     stale_scopes.add(file_id)
+                    refetch_roots.add(file_id if relation == "inside" else str(cfg.folder_id))
                     continue
-                chain = await self._change_scope_chain(run.http, file, cfg)
-                doc = await self._fetch_doc(run.http, file, scope_chain=chain, ctx=ctx, cap=cap)
+                if not await self._is_within_root(run.http, file, cfg, cache=parents):
+                    # Outside the configured subtree *now*: never import it, and
+                    # reconcile away a row left behind by a move OUT of scope.
+                    deleted.add(file_id)
+                    continue
+                chain = await self._change_scope_chain(run.http, file, cfg, cache=parents)
+                try:
+                    doc = await self._fetch_doc(run.http, file, scope_chain=chain, ctx=ctx, cap=cap)
+                except _AclUnavailable:
+                    # Ingestible, but its current rights are unknown — the
+                    # page's effect on the mirror is unprovable (fail closed).
+                    incomplete = True
+                    continue
                 if doc is None:
-                    # Skipped with unknown rights (persistent ACL-fetch
-                    # failure) or newly unsupported/oversize: for a *changed*
-                    # document the safe direction is unprovable ⇒ incomplete
-                    # unless it is a type we never ingest.
-                    if self._is_ingestible(file):
-                        incomplete = True
+                    # No longer ingestible (unsupported type / over the cap):
+                    # a stable property, reconciled as a deletion so the mirror
+                    # never keeps content we can no longer refresh.
+                    deleted.add(file_id)
                     continue
                 upserts.append(doc)
 
-            # Re-examine the descendants of every stale scope in-run (§3: the
+            # Re-examine the descendants of every cascade root in-run (§3: the
             # stamp denies them immediately; these upserts restore freshness
             # per document as each is re-examined).
-            for scope_id in sorted(stale_scopes):
+            for root_id in sorted(refetch_roots):
                 refetched, used, complete = await self._refetch_scope(
-                    run.http, scope_id, cfg=cfg, ctx=ctx, cap=cap, budget=refetch_budget
+                    run.http, root_id, cfg=cfg, ctx=ctx, cap=cap, budget=refetch_budget
                 )
                 refetch_budget -= used
                 upserts.extend(refetched)
@@ -586,7 +731,12 @@ class GdriveConnector:
         return isinstance(mime, str) and (mime in _EXPORT_MIME or mime in _PASSTHROUGH_MIMES)
 
     async def _change_scope_chain(
-        self, http: httpx.AsyncClient, file: Mapping[str, Any], cfg: _ModeConfig
+        self,
+        http: httpx.AsyncClient,
+        file: Mapping[str, Any],
+        cfg: _ModeConfig,
+        *,
+        cache: _ParentCache | None = None,
     ) -> tuple[str, ...]:
         """A changed file's scope chain: drive id + upward ancestor walk."""
         chain: list[str] = []
@@ -600,7 +750,7 @@ class GdriveConnector:
         if isinstance(parent, str):
             chain.append(parent)
             try:
-                uppers = await self._walk_up(http, parent)
+                uppers = await self._walk_up(http, parent, cache=cache)
             except ConnectorError:
                 uppers = ()
             chain.extend(a for a in uppers if a not in chain)
@@ -609,24 +759,29 @@ class GdriveConnector:
     async def _refetch_scope(
         self,
         http: httpx.AsyncClient,
-        scope_id: str,
+        root_id: str,
         *,
         cfg: _ModeConfig,
         ctx: AclMappingContext | None,
         cap: int,
         budget: int,
     ) -> tuple[list[FetchedDoc], int, bool]:
-        """Re-examine a stale container's descendants (budget-bounded).
+        """Re-examine a cascade root's descendants (budget-bounded).
+
+        ``root_id`` is always a container **inside the configured scope** (the
+        caller maps an ancestor/drive change onto the configured root first),
+        so this enumeration can never reach siblings outside the source.
 
         Returns ``(docs, files_examined, complete)`` — ``complete=False`` when
-        the walk failed or the budget ran out (the §3 unprovable-set signal).
+        the walk failed, the budget ran out, or a descendant's rights could not
+        be re-read (each of them the §3 unprovable-set signal).
         """
         docs: list[FetchedDoc] = []
         used = 0
         try:
             files, chains = await self._enumerate_folder_tree(
                 http,
-                scope_id,
+                root_id,
                 drive_id=cfg.change_log_drive_id,
                 root_chain=(cfg.drive_id,) if cfg.drive_id is not None else (),
             )
@@ -638,17 +793,18 @@ class GdriveConnector:
             if used >= budget:
                 return docs, used, False
             used += 1
-            doc = await self._fetch_doc(
-                http,
-                file,
-                scope_chain=chains.get(str(file.get("id")), ()),
-                ctx=ctx,
-                cap=cap,
-            )
+            try:
+                doc = await self._fetch_doc(
+                    http,
+                    file,
+                    scope_chain=chains.get(str(file.get("id")), ()),
+                    ctx=ctx,
+                    cap=cap,
+                )
+            except _AclUnavailable:
+                return docs, used, False
             if doc is None:
-                if self._is_ingestible(file):
-                    return docs, used, False
-                continue
+                continue  # not ingestible at all — nothing to re-attest
             docs.append(doc)
         return docs, used, True
 
