@@ -79,9 +79,33 @@ def test_past_expiration_denies() -> None:
     assert map_acl(_raw(entry), _CTX) == frozenset()
 
 
+def test_null_expiration_denies() -> None:
+    """Regression: an explicit ``expirationTime: null`` is an unknown state.
+
+    The rule is **key presence**, not truthiness — a value-based check
+    (``.get(...) is not None``) admitted an entry whose expiration field is
+    present but null/empty, which is exactly the "unknown field state" the
+    never-escalate rule denies (ADR-0019 §2).
+    """
+    assert map_acl(_raw(_user("alice@acme.test", expirationTime=None)), _CTX) == frozenset()
+
+
+def test_empty_expiration_denies() -> None:
+    assert map_acl(_raw(_user("alice@acme.test", expirationTime="")), _CTX) == frozenset()
+
+
 def test_metadata_view_denies() -> None:
     """A ``view`` entry (e.g. metadata) never grants content access."""
     assert map_acl(_raw(_user("alice@acme.test", view="metadata")), _CTX) == frozenset()
+
+
+def test_null_view_denies() -> None:
+    """Regression: ``view: null`` is present-but-unknown ⇒ deny (not "unset")."""
+    assert map_acl(_raw(_user("alice@acme.test", view=None)), _CTX) == frozenset()
+
+
+def test_empty_view_denies() -> None:
+    assert map_acl(_raw(_user("alice@acme.test", view="")), _CTX) == frozenset()
 
 
 def test_unknown_role_denies() -> None:

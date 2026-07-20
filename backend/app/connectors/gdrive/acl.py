@@ -10,9 +10,9 @@ An entry is admitted only when **all** of these hold:
 
 * not ``deleted``;
 * **no ``expirationTime`` at all** — v1 does not model time-boxed shares, so an
-  entry carrying *any* expiration (future or past) is denied and a mirror can
-  never outlive a temporal grant;
-* ``view`` unset (a ``view=metadata`` entry never grants content access);
+  entry carrying *any* expiration (future, past, or an explicit null) is denied
+  and a mirror can never outlive a temporal grant;
+* ``view`` **absent** (a ``view=metadata`` entry never grants content access);
 * ``role`` ∈ the content-read set (owner/organizer/fileOrganizer/writer/
   commenter/reader);
 * the ``type`` maps: ``user`` → ``user:<uuid>`` **iff** the email matches an
@@ -29,7 +29,10 @@ effective list (direct + inherited) is consumed as-is; a parent's list is never
 consulted directly.
 
 **Any unknown type, role, or field state ⇒ deny that entry** — the mapped set
-is provably ⊆ the source allow-list (never-escalate).
+is provably ⊆ the source allow-list (never-escalate). The expiration/view rules
+above test **key presence** rather than value truthiness precisely for that
+reason: ``{"expirationTime": null}`` and ``{"view": ""}`` are states this
+version does not model, and an unmodelled state denies.
 """
 
 from __future__ import annotations
@@ -65,11 +68,15 @@ def _map_entry(entry: Mapping[str, object], ctx: AclMappingContext) -> str | Non
     """Map ONE permission entry to a Lumen principal, or ``None`` (deny)."""
     if entry.get("deleted"):
         return None
-    # ANY expiration present — future or past — denies (v1 has no acl_expires_at).
-    if entry.get("expirationTime") is not None:
+    # ANY expiration present — future, past, or an explicit null/empty value —
+    # denies (v1 has no acl_expires_at). **Key presence**, not truthiness: an
+    # entry that carries the field at all is a time-boxed share whose exact
+    # state we refuse to interpret, and an unknown state must fail closed.
+    if "expirationTime" in entry:
         return None
-    # A set `view` (e.g. "metadata") never grants content access.
-    if entry.get("view"):
+    # A `view` entry (e.g. "metadata") never grants content access. Again by
+    # key presence: `view: null` / `view: ""` are unknown states, not "unset".
+    if "view" in entry:
         return None
     role = entry.get("role")
     if not isinstance(role, str) or role not in CONTENT_READ_ROLES:
