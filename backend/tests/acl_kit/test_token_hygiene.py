@@ -340,46 +340,73 @@ def _tainted_identifiers(node: ast.AST) -> set[str]:
     return found
 
 
-def _local_dict_assignments(tree: ast.AST) -> dict[str, ast.Dict]:
-    """``name -> dict literal`` for every module/function-local dict assignment.
+_SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
-    Lets the scan follow the indirect ``metadata=payload`` shape one hop, which
-    is how a real leak would most plausibly be written.
+
+class _ScopeIndex:
+    """Lexical scoping for the scan: which binding does a name see *here*?
+
+    Built because keying dict assignments by bare **name** across the whole
+    module is wrong in both directions. A later benign ``payload = {...}`` in an
+    unrelated function silently overwrote an earlier tainted one (the leak then
+    scanned clean), and a tainted binding equally bled into unrelated functions
+    that happened to reuse the name (a false positive). Resolution is per
+    ``(scope, name)``, nearest preceding assignment first, walking outwards
+    through enclosing scopes exactly as Python does — so a closure over a
+    tainted payload is still caught while a shadowing local is not.
     """
-    resolved: dict[str, ast.Dict] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    resolved[target.id] = node.value
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and isinstance(node.value, ast.Dict)
-        ):
-            resolved[node.target.id] = node.value
-    return resolved
 
+    def __init__(self, tree: ast.AST) -> None:
+        self.owner: dict[int, ast.AST] = {id(tree): tree}
+        self.parent: dict[int, ast.AST | None] = {id(tree): None}
+        self.dicts: dict[tuple[int, str], list[tuple[int, ast.Dict]]] = {}
+        self._index(tree, tree)
+        for bindings in self.dicts.values():
+            bindings.sort(key=lambda pair: pair[0])
 
-def _enclosing_scopes(tree: ast.AST) -> dict[int, ast.AST]:
-    """Map each call node to the innermost function containing it.
+    def _index(self, node: ast.AST, scope: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _SCOPE_NODES):
+                self.owner[id(child)] = scope
+                self.parent[id(child)] = scope
+                self._index(child, child)
+                continue
+            self.owner[id(child)] = scope
+            self._record_binding(child, scope)
+            self._index(child, scope)
 
-    Used to judge an *unresolvable* metadata expression: a function that never
-    mentions credential material has nothing for its payload to carry, while one
-    that handles a token and then builds its audit payload indirectly is exactly
-    the shape worth flagging.
-    """
-    owner: dict[int, ast.AST] = {}
-    functions = [
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    ]
-    # Outermost first, so an inner function overwrites and wins.
-    functions.sort(key=lambda fn: (fn.end_lineno or 0) - fn.lineno, reverse=True)
-    for function in functions:
-        for child in ast.walk(function):
-            if isinstance(child, ast.Call):
-                owner[id(child)] = function
-    return owner
+    def _record_binding(self, node: ast.AST, scope: ast.AST) -> None:
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not isinstance(value, ast.Dict):
+            return
+        for target in targets:
+            if isinstance(target, ast.Name):
+                self.dicts.setdefault((id(scope), target.id), []).append((node.lineno, value))
+
+    def resolve_dict(self, name: str, call: ast.Call) -> ast.Dict | None:
+        """The dict literal ``name`` refers to at ``call``, or ``None``."""
+        scope: ast.AST | None = self.owner.get(id(call))
+        while scope is not None:
+            bindings = self.dicts.get((id(scope), name))
+            if bindings:
+                preceding = [value for lineno, value in bindings if lineno <= call.lineno]
+                # Bound in this scope but only *after* the call: the name is
+                # local here, so nothing earlier is visible — unresolvable.
+                return preceding[-1] if preceding else None
+            scope = self.parent.get(id(scope))
+        return None
+
+    def enclosing_function(self, node: ast.AST) -> ast.AST | None:
+        """The innermost ``def``/``async def`` around ``node``, if any."""
+        scope: ast.AST | None = self.owner.get(id(node))
+        while scope is not None and not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+            scope = self.parent.get(id(scope))
+        return scope
 
 
 def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
@@ -390,8 +417,7 @@ def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
     code it already passes on is not a proof.
     """
     tree = ast.parse(source, filename=filename)
-    dict_locals = _local_dict_assignments(tree)
-    scopes = _enclosing_scopes(tree)
+    index = _ScopeIndex(tree)
     offenders: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -408,13 +434,16 @@ def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
                 continue
             value: ast.AST | None = keyword.value
             if isinstance(value, ast.Name):
-                value = dict_locals.get(value.id)  # follow `metadata=payload`
+                # Follow `metadata=payload` to the binding visible AT THIS CALL,
+                # in this lexical scope — never to whichever assignment to that
+                # name happened to come last in the file.
+                value = index.resolve_dict(value.id, node)
             if value is None:
                 # Built somewhere this scan cannot follow. Fall back to the
                 # enclosing function: no credential material in scope means
                 # nothing for the payload to carry, but an unprovable payload
                 # inside a function that DOES handle one is the leak shape.
-                scope = scopes.get(id(node), tree)
+                scope = index.enclosing_function(node) or tree
                 if _tainted_identifiers(scope):
                     offenders.append(
                         f"{where} audit metadata is built indirectly inside a "
@@ -459,6 +488,34 @@ _PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
         "    payload = build(refresh_token)\n"
         "    audit.record(action='x', metadata=payload)\n",
     ),
+    (
+        # A module-wide `name -> dict` map lets a LATER benign assignment to a
+        # common local name overwrite an earlier tainted one, and the leak scans
+        # clean. Resolution must be per lexical scope.
+        "same local name in two scopes, benign assigned last",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n"
+        "\n"
+        "def benign(name):\n"
+        "    payload = {'detail': name}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "same local name shadowed by a benign module-level assignment",
+        "payload = {'detail': 'nothing'}\n"
+        "\n"
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n",
+    ),
+    (
+        "rebinding a name to a benign dict AFTER the leaking call",
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n"
+        "    payload = {'detail': 'scrubbed'}\n",
+    ),
 )
 
 
@@ -473,6 +530,56 @@ def test_the_static_scan_detects_each_planted_leak_shape(
     scanner honest about what it actually proves.
     """
     assert scan_source(leak), f"the scan misses a {shape} leak: {leak!r}"
+
+
+def test_metadata_resolution_is_per_scope_not_per_name(subject: AclSubject) -> None:
+    """Name resolution is lexical, so a collision must not blur two functions.
+
+    The precision half of the collision proof: with a module-wide map the
+    tainted ``payload`` also bled *into* the benign function and flagged it.
+    Exactly one call is a leak here, and it is the one in ``leak``.
+    """
+    collision = (
+        "def benign(name):\n"
+        "    payload = {'detail': name}\n"
+        "    audit.record(metadata=payload)\n"
+        "\n"
+        "def leak(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "    audit.record(metadata=payload)\n"
+    )
+    offenders = scan_source(collision, filename="c.py")
+    assert len(offenders) == 1, offenders
+    assert offenders[0].startswith("c.py:7"), offenders  # the call inside `leak`
+
+
+def test_a_nested_function_resolves_its_own_binding(subject: AclSubject) -> None:
+    """An inner function's own assignment wins over the enclosing one..."""
+    nested = (
+        "def outer(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "\n"
+        "    def inner(name):\n"
+        "        payload = {'detail': name}\n"
+        "        audit.record(metadata=payload)\n"
+        "\n"
+        "    return inner\n"
+    )
+    assert scan_source(nested) == []
+
+
+def test_a_nested_function_inherits_an_enclosing_binding(subject: AclSubject) -> None:
+    """...and a closure over a tainted enclosing binding is still caught."""
+    nested = (
+        "def outer(refresh_token):\n"
+        "    payload = {'detail': refresh_token}\n"
+        "\n"
+        "    def inner():\n"
+        "        audit.record(metadata=payload)\n"
+        "\n"
+        "    return inner\n"
+    )
+    assert scan_source(nested), "a closed-over tainted payload must still be reported"
 
 
 def test_the_static_scan_does_not_flag_benign_logging(subject: AclSubject) -> None:
