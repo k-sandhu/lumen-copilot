@@ -200,6 +200,7 @@ def _to_source(row: models.Source) -> Source:
         sync_cursor=row.sync_cursor,
         acl_synced_at=row.acl_synced_at,
         unmapped_acl_count=row.unmapped_acl_count,
+        acl_incomplete_attempts=row.acl_incomplete_attempts or 0,
     )
 
 
@@ -1504,6 +1505,26 @@ class SourceRepository(_TenantScopedRepository):
         await self._session.execute(stmt)
         await self._session.flush()
 
+    async def record_acl_incomplete_attempts(self, source_id: UUID, attempts: int) -> None:
+        """Persist the consecutive incomplete-replay count (ADR-0019 §3).
+
+        Durable because the bounded retry → full-resync escalation must survive
+        a crash: an unrecovered mirror may never be quietly published as fresh.
+        Written inside the same page transaction that committed the incomplete
+        page's mutations, and reset to ``0`` by any run that leaves the mirror
+        provably complete.
+        """
+        stmt = (
+            update(models.Source)
+            .where(
+                models.Source.tenant_id == self._tenant_id,
+                models.Source.id == source_id,
+            )
+            .values(acl_incomplete_attempts=attempts)
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
     async def delete(self, source_id: UUID) -> bool:
         """Delete the source **row** (tenant-scoped); ADR-0009 §5.
 
@@ -1689,6 +1710,43 @@ class DocumentRepository(_TenantScopedRepository):
         if stamped:
             await self._session.flush()
         return stamped
+
+    async def attest_acl_unchanged(
+        self, source_id: UUID, *, attested_at: datetime, exclude_ids: Iterable[UUID] = ()
+    ) -> list[UUID]:
+        """Attest untouched mirrors after a gap-free replay (ADR-0019 §2/§3).
+
+        A complete, gap-free change-log replay **proves** the documents it did
+        not report are unchanged, so their mirrors are re-attested — otherwise
+        an hourly successful replay would let every untouched document age past
+        ``CONNECTOR_ACL_MAX_AGE_HOURS`` and silently vanish from retrieval.
+
+        The one row a replay may **never** revive is one an *incomplete* run
+        stamped stale: that stamp is recorded as ``acl_synced_at IS NULL``, and
+        this update only ever advances a **non-NULL** timestamp. The
+        distinction is therefore structural, not bookkeeping — a stale-stamped
+        document stays denied until a sync re-examines it for real.
+        ``exclude_ids`` skips the documents this run already re-examined (they
+        carry their own fresh stamp). Returns the ids actually advanced so the
+        caller can propagate the freshness to the search index.
+        """
+        skip = set(exclude_ids)
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.source_id == source_id,
+            models.Document.acl_enforced.is_(True),
+            models.Document.acl_synced_at.is_not(None),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        attested: list[UUID] = []
+        for row in rows:
+            if row.id in skip:
+                continue
+            row.acl_synced_at = attested_at
+            attested.append(row.id)
+        if attested:
+            await self._session.flush()
+        return attested
 
     async def list_for_source(self, source_id: UUID) -> list[Document]:
         """List the documents a source ingested (tenant-scoped, INV-1).
@@ -4969,6 +5027,40 @@ class SourceReconcileRepository:
                 models.Source.status.in_((SourceStatus.READY.value, SourceStatus.ERROR.value)),
             )
             .order_by(models.Source.created_at.asc(), models.Source.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(row[0], row[1]) for row in rows]
+
+    async def list_stranded_connector_documents(
+        self, *, older_than: datetime, limit: int
+    ) -> list[tuple[UUID, UUID]]:
+        """``(tenant_id, document_id)`` for connector docs stuck pre-ingestion.
+
+        The recovery half of the incremental sync's commit discipline
+        (ADR-0019 §3): a page's row + cursor commit **first**, then ingestion is
+        driven post-commit. A worker that dies in between leaves a ``pending``
+        document with no chunks that the advanced cursor will never revisit —
+        invisible to retrieval forever, and not repairable by the reindex
+        backfill (which cannot create chunks that were never parsed).
+
+        This finds those rows — a **connector-owned** document (``source_id``
+        set) still ``pending``/``processing`` and untouched since
+        ``older_than`` — so the poll beat can re-drive the idempotent ingestion
+        task for each. The age threshold is what keeps a legitimately in-flight
+        ingestion out of the result. Cross-tenant (bypass-scoped, system-only)
+        and bounded by ``limit`` so one sweep can never fan out unbounded.
+        """
+        stmt = (
+            select(models.Document.tenant_id, models.Document.id)
+            .where(
+                models.Document.source_id.is_not(None),
+                models.Document.status.in_(
+                    (DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value)
+                ),
+                models.Document.updated_at < older_than,
+            )
+            .order_by(models.Document.updated_at.asc(), models.Document.id.asc())
+            .limit(limit)
         )
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]

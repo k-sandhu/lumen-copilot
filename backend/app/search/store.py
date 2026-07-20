@@ -546,6 +546,52 @@ class OpenSearchStore:
             params=params,
         )
 
+    async def attest_acl_fresh(
+        self,
+        *,
+        tenant_id: UUID,
+        document_ids: Sequence[UUID],
+        synced_at: datetime,
+        refresh: bool = False,
+    ) -> None:
+        """Advance ``acl_synced_at`` on matching chunk docs (ADR-0019 §2/§3).
+
+        The engine-side twin of :meth:`stamp_acl_stale`: when a complete,
+        gap-free change-log replay attests documents unchanged, the engine's
+        freshness range must learn the new stamp too, or the mode-split filter
+        would keep excluding perfectly fresh mirrors until the next reindex
+        (Postgres would still admit them via the hydration re-check, so this is
+        a recall fix, not a permission one — it can never widen access).
+
+        Tenant-scoped + routed like every other write here; ``document_ids`` is
+        required, so a tenant-wide attestation is unrepresentable.
+        """
+        if not document_ids:
+            return
+        params: dict[str, str] = {"routing": str(tenant_id)}
+        if refresh:
+            params["refresh"] = "true"
+        await self._request(
+            "POST",
+            f"/{self._index}/_update_by_query",
+            json_body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"tenant_id": str(tenant_id)}},
+                            {"terms": {"document_id": sorted(str(d) for d in document_ids)}},
+                        ]
+                    }
+                },
+                "script": {
+                    "source": "ctx._source.acl_synced_at = params.stamp",
+                    "lang": "painless",
+                    "params": {"stamp": synced_at.isoformat()},
+                },
+            },
+            params=params,
+        )
+
     # --- the one read ----------------------------------------------------------
 
     async def hybrid_search(

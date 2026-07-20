@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any, ClassVar
@@ -52,8 +53,9 @@ from app.db.repositories import (
 )
 from app.db.session import session_scope
 from app.db.tenant_context import bind_bypass
-from app.domain.entities import Role, Source, SourceStatus
+from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
+from app.search.filters import acl_freshness_floor
 from app.tasks.sync_source import sync_source_async
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -64,7 +66,7 @@ sync_source_module = import_module("app.tasks.sync_source")
 _SPEC = Path(__file__).resolve().parent.parent.parent / "contracts" / "openapi.yaml"
 
 
-def _settings() -> Settings:
+def _settings(**overrides: object) -> Settings:
     base: dict[str, object] = {
         "DATABASE_URL": "sqlite+aiosqlite://",
         "REDIS_URL": "redis://localhost:6379/0",
@@ -80,6 +82,7 @@ def _settings() -> Settings:
         "INGESTION_EMBED_BATCH_SIZE": "3",
         "LLM_EMBEDDING_DIMENSIONS": str(_DIM),
     }
+    base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
 
 
@@ -145,6 +148,16 @@ class _FakeIndexStore:
         refresh: bool = False,
     ) -> None:
         type(self).events.append(("stamp", frozenset(document_ids or ())))
+
+    async def attest_acl_fresh(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_ids: Sequence[uuid.UUID],
+        synced_at: object,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("attest", frozenset(document_ids)))
 
     async def aclose(self) -> None:
         return None
@@ -275,11 +288,16 @@ async def _seed(*, cursor: str | None = None, attest_owner: bool = True) -> _See
     return s
 
 
-async def _run(seeded: _Seeded, store: _FakeObjectStore | None = None) -> object:
+async def _run(
+    seeded: _Seeded,
+    store: _FakeObjectStore | None = None,
+    *,
+    settings: Settings | None = None,
+) -> object:
     return await sync_source_async(
         seeded.tenant_id,
         seeded.source_id,
-        settings=_settings(),
+        settings=settings or _settings(),
         object_store=store or _FakeObjectStore(),  # type: ignore[arg-type]
         gateway=_FakeGateway(),  # type: ignore[arg-type]
     )
@@ -571,6 +589,409 @@ async def test_integrity_incomplete_stamps_source_wide(
     assert after["b"].acl_synced_at is None
     stamped = [e[1] for e in _FakeIndexStore.events if e[0] == "stamp"]
     assert any({rows["a"].id, rows["b"].id} <= set(ids) for ids in stamped)  # type: ignore[arg-type]
+
+
+# --- integrity=incomplete: never consumed behind the cursor ------------------
+
+
+def _utc(value: datetime) -> datetime:
+    """Offline SQLite drops tzinfo; every stamp we write is UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _backdate_acl(seeded: _Seeded, external_id: str, *, hours: int) -> None:
+    """Age one document's mirror stamp (crossing the freshness window)."""
+    from sqlalchemy import update as sa_update
+
+    stale = datetime.now(UTC) - timedelta(hours=hours)
+    async with db_session.session_scope() as session:
+        await session.execute(
+            sa_update(models.Document)
+            .where(
+                models.Document.source_id == seeded.source_id,
+                models.Document.external_id == external_id,
+            )
+            .values(acl_synced_at=stale)
+        )
+        await session.commit()
+
+
+def _incomplete_page(next_cursor: str = "baseline-x") -> SyncPage:
+    return SyncPage(
+        upserts=(),
+        deleted_external_ids=frozenset(),
+        next_cursor=next_cursor,
+        integrity=PageIntegrity.INCOMPLETE,
+    )
+
+
+async def test_incomplete_page_does_not_advance_the_cursor_or_publish_health(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """Regression (ADR-0019 §3): an ``integrity=incomplete`` page was stamped
+    stale but its cursor still committed, and the terminal path then marked the
+    source ``ready`` with a FRESH source-level ACL timestamp.
+
+    A persistent permission-fetch failure was therefore consumed behind the
+    cursor — no replay would ever revisit it — while health reported success.
+    The page must instead stay the resume point, the source must not be
+    published ready/fresh, and the retry must be recorded durably.
+    """
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(_doc("a", principals=["tenant"]),), baseline_cursor="cur-1"
+    )
+    await _run(seeded)
+
+    connector.script = {"cur-1": [_incomplete_page()]}
+    result = await _run(seeded)
+
+    assert result.status is SourceStatus.ERROR  # type: ignore[attr-defined]
+    assert result.error == "acl_mirror_incomplete"  # type: ignore[attr-defined]
+    source = await _source_row(seeded)
+    assert source.sync_cursor == "cur-1"  # NOT consumed — the page is retried
+    assert source.status == "error"
+    assert source.acl_synced_at is None  # health never lies about the mirror
+    assert source.acl_incomplete_attempts == 1  # durable, survives a crash
+    assert (await _rows(seeded))["a"].acl_synced_at is None  # denied immediately
+
+
+async def test_incomplete_replay_retries_then_escalates_to_a_full_resync(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """The bounded retry ADR-0019 §3 requires: the SAME page is replayed, and
+    once the attempts are spent the cursor is cleared so the next sync is a
+    full resync — the only run that re-examines every document and can restore
+    freshness. Then it recovers."""
+    tuned = _settings(CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS=2)
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(_doc("a", principals=["tenant"]),), baseline_cursor="cur-1"
+    )
+    await _run(seeded, settings=tuned)
+    connector.script = {"cur-1": [_incomplete_page()]}
+
+    first = await _run(seeded, settings=tuned)
+    assert first.status is SourceStatus.ERROR  # type: ignore[attr-defined]
+    assert (await _source_row(seeded)).sync_cursor == "cur-1"
+
+    second = await _run(seeded, settings=tuned)
+    assert second.status is SourceStatus.ERROR  # type: ignore[attr-defined]
+    escalated = await _source_row(seeded)
+    assert escalated.sync_cursor is None  # ⇒ the next sync is FULL
+    assert escalated.acl_incomplete_attempts == 0  # counter armed for the retry
+    # The same change page was retried, never skipped past.
+    assert connector.fetch_calls == ["cur-1", "cur-1"]
+
+    # The escalated full resync re-examines everything and recovers.
+    calls_before = connector.sync_calls
+    connector.full_result = FullSyncResult(
+        docs=(_doc("a", principals=["tenant"]),), baseline_cursor="cur-9"
+    )
+    recovered = await _run(seeded, settings=tuned)
+    assert recovered.status is SourceStatus.READY  # type: ignore[attr-defined]
+    assert connector.sync_calls == calls_before + 1
+    healthy = await _source_row(seeded)
+    assert healthy.acl_synced_at is not None  # health may report success again
+    assert healthy.sync_cursor == "cur-9"
+    assert (await _rows(seeded))["a"].acl_synced_at is not None
+
+
+# --- complete replays attest unchanged mirrors -------------------------------
+
+
+async def test_complete_replay_attests_unchanged_documents(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """Regression (ADR-0019 §2/§3): a complete, gap-free replay only advanced
+    ``acl_synced_at`` on the documents it *changed*.
+
+    With hourly successful replays and no changes, every untouched document
+    aged past ``CONNECTOR_ACL_MAX_AGE_HOURS`` and silently disappeared from
+    retrieval. A gap-free replay proves the untouched documents unchanged, so
+    it must attest them — and propagate the freshness to the index.
+    """
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(_doc("quiet", principals=["tenant"]),), baseline_cursor="cur-1"
+    )
+    await _run(seeded)
+    await _backdate_acl(seeded, "quiet", hours=48)  # beyond the 24h window
+    stale_row = (await _rows(seeded))["quiet"]
+    assert stale_row.acl_synced_at is not None
+    assert _utc(stale_row.acl_synced_at) < acl_freshness_floor()  # would be DENIED now
+
+    connector.script = {
+        "cur-1": [
+            SyncPage(  # a wholly complete, no-change replay
+                upserts=(),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-2",
+            )
+        ]
+    }
+    await _run(seeded)
+
+    after = (await _rows(seeded))["quiet"]
+    assert after.acl_synced_at is not None
+    assert _utc(after.acl_synced_at) >= acl_freshness_floor()  # still retrievable
+    # ...and the engine learns the same freshness (recall, never access).
+    attested = [e[1] for e in _FakeIndexStore.events if e[0] == "attest"]
+    assert any(after.id in ids for ids in attested)  # type: ignore[operator]
+
+
+async def test_attestation_never_revives_a_stale_stamped_document(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """The one row a replay may never re-attest: one an INCOMPLETE run stamped
+    stale. That stamp is ``acl_synced_at = NULL``, and attestation only ever
+    advances a non-NULL timestamp — so the distinction is structural."""
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(
+            _doc("unrecovered", principals=["tenant"]),
+            _doc("reexamined", principals=["tenant"]),
+        ),
+        baseline_cursor="cur-1",
+    )
+    await _run(seeded)
+
+    # Run 1: incomplete ⇒ both stamped stale, cursor held at cur-1.
+    connector.script = {"cur-1": [_incomplete_page()]}
+    await _run(seeded)
+    stamped = await _rows(seeded)
+    assert stamped["unrecovered"].acl_synced_at is None
+    assert stamped["reexamined"].acl_synced_at is None
+
+    # Run 2: the retry now succeeds, but only re-examines ONE document.
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("reexamined", principals=["tenant"]),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-3",
+            )
+        ]
+    }
+    result = await _run(seeded)
+    assert result.status is SourceStatus.READY  # type: ignore[attr-defined]
+    after = await _rows(seeded)
+    assert after["reexamined"].acl_synced_at is not None  # examined for real
+    assert after["unrecovered"].acl_synced_at is None  # NOT revived by attestation
+    source = await _source_row(seeded)
+    assert source.acl_incomplete_attempts == 0  # a provably complete run clears it
+    assert source.sync_cursor == "baseline-3"
+
+
+# --- object lifecycle: replaced revisions + rollback orphans ------------------
+
+
+async def test_replaced_object_is_reclaimed_on_an_incremental_update(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """Regression: an incremental update stored a new object and overwrote
+    ``storage_key``, but only *deleted* rows contributed to the orphan sweep —
+    so the prior object leaked on every single file revision."""
+    store = _FakeObjectStore()
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(_doc("d1", principals=["tenant"], text="first revision " * 20),),
+        baseline_cursor="cur-1",
+    )
+    await _run(seeded, store)
+    [original_key] = list(store.objects)
+
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("d1", principals=["tenant"], text="second revision " * 20),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-4",
+            )
+        ]
+    }
+    await _run(seeded, store)
+
+    rows = await _rows(seeded)
+    assert rows["d1"].storage_key in store.objects  # the live revision survives
+    assert rows["d1"].storage_key != original_key
+    assert original_key not in store.objects  # ...and the prior one is reclaimed
+
+
+async def test_unchanged_content_keeps_its_object(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """Content-addressed keys are shared: an upsert that re-stores identical
+    bytes must not delete the object the row still points at."""
+    store = _FakeObjectStore()
+    seeded = await _seed()
+    same = _doc("d1", principals=["tenant"], text="stable body " * 20)
+    connector.full_result = FullSyncResult(docs=(same,), baseline_cursor="cur-1")
+    await _run(seeded, store)
+
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(same,),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-5",
+            )
+        ]
+    }
+    await _run(seeded, store)
+
+    rows = await _rows(seeded)
+    assert rows["d1"].storage_key in store.objects
+
+
+async def test_failed_page_transaction_reclaims_the_object_it_wrote(
+    sqlite_engine: None, connector: FakeAclConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database failure AFTER ``put()`` used to leak the new object too: the
+    row never referenced it, so no later sweep could ever find it."""
+
+    class _BrokenDocuments(DocumentRepository):
+        async def create(self, **kwargs: object) -> None:  # type: ignore[override]
+            raise RuntimeError("database went away")
+
+    store = _FakeObjectStore()
+    seeded = await _seed(cursor="cur-1")
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("d1", principals=["tenant"]),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-6",
+            )
+        ]
+    }
+    monkeypatch.setattr(sync_source_module, "DocumentRepository", _BrokenDocuments)
+
+    with pytest.raises(RuntimeError):
+        await _run(seeded, store)
+
+    assert store.objects == {}  # the orphan was reclaimed, not leaked
+    assert (await _source_row(seeded)).sync_cursor == "cur-1"  # nothing committed
+
+
+# --- stranded-ingestion recovery (the crash window) --------------------------
+
+
+async def test_crash_between_page_commit_and_ingestion_is_recovered_by_the_sweep(
+    sqlite_engine: None, connector: FakeAclConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (ADR-0019 §3): the page's row + cursor commit, then ingestion
+    runs post-commit. A worker killed in that window left a ``pending``
+    document with no chunks that the advanced cursor would never revisit — and
+    the reindex backfill cannot create chunks that were never parsed.
+
+    The poll beat's sweep re-drives the idempotent ingestion task for connector
+    documents stranded past ``CONNECTOR_INGEST_RECOVERY_MINUTES``.
+    """
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed(cursor="cur-1")
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("stranded", principals=["tenant"]),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-7",
+            )
+        ]
+    }
+
+    def _kill(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt("worker killed between commit and ingestion")
+
+    monkeypatch.setattr(sync_source_module, "ingest_document_async", _kill)
+    with pytest.raises(KeyboardInterrupt):
+        await _run(seeded)
+
+    # The crash window, exactly: committed row + advanced cursor, no chunks.
+    rows = await _rows(seeded)
+    stranded_id = rows["stranded"].id
+    assert rows["stranded"].status == "pending"
+    assert (await _source_row(seeded)).sync_cursor == "baseline-7"
+    async with db_session.session_scope() as session:
+        chunks = (
+            (
+                await session.execute(
+                    select(models.Chunk).where(models.Chunk.document_id == stranded_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert chunks == []
+
+    # A document still inside the recovery window is left alone...
+    poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
+    monkeypatch.setattr(
+        poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
+    )
+    assert await poll_module._sweep_stranded(_settings()) == 0
+    assert enqueued == []
+
+    # ...and re-driven once it is provably stuck.
+    async with db_session.session_scope() as session:
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == stranded_id)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await session.commit()
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, stranded_id)]
+
+
+async def test_sweep_ignores_non_connector_and_ready_documents(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep is connector-scoped and status-scoped: a plain upload pending
+    ingestion (its own task owns it) and a ready connector document are both
+    left alone."""
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed()
+    async with db_session.session_scope() as session:
+        documents = DocumentRepository(session, seeded.tenant_id)
+        upload = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="upload.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/upload",
+            acl_enforced=False,
+        )
+        done = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="done.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/done",
+            acl_enforced=True,
+            source_id=seeded.source_id,
+            external_id="done",
+            status=DocumentStatus.READY,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id.in_([upload.id, done.id]))
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await session.commit()
+
+    poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
+    monkeypatch.setattr(
+        poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
+    )
+    assert await poll_module._sweep_stranded(_settings()) == 0
+    assert enqueued == []
 
 
 async def test_cursor_expired_falls_back_to_full_resync(

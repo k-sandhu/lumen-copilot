@@ -720,6 +720,10 @@ class Source:
     # unmapped-document count the wire's GdriveSource surface reports.
     acl_synced_at: datetime | None = None
     unmapped_acl_count: int | None = None
+    # Consecutive incremental replays that ended on an ``integrity=incomplete``
+    # page (ADR-0019 §3) — the bounded retry counter behind the
+    # escalate-to-full-resync rule. Internal sync state, not a wire field.
+    acl_incomplete_attempts: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -84,7 +84,11 @@ from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
-from app.tasks.index_sync import stamp_index_acl_stale_async, sync_document_index_async
+from app.tasks.index_sync import (
+    attest_index_acl_fresh_async,
+    stamp_index_acl_stale_async,
+    sync_document_index_async,
+)
 from app.tasks.ingest import ingest_document_async
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 from app.tasks.runner import run_task
@@ -92,6 +96,14 @@ from app.tasks.runner import run_task
 # A fetched web document is stored as plain text for the ingestion pipeline (its
 # parser handles text/plain natively, no library needed).
 _TEXT_MIME = "text/plain"
+
+# Recorded in ``sources.last_error`` when an incremental replay ended on an
+# unprovable (``integrity=incomplete``) page: every mirrored document of the
+# source is stale-stamped (denied), the cursor was NOT advanced past that page,
+# and the next run retries it — escalating to a full resync once the bounded
+# attempts are spent (ADR-0019 §3). The source is deliberately not ``ready``
+# while this stands: health must not report success over an unrecovered mirror.
+ACL_MIRROR_INCOMPLETE = "acl_mirror_incomplete"
 
 log = structlog.get_logger(__name__)
 
@@ -316,6 +328,10 @@ async def sync_source_async(
         )
         # Persist the detected mode so the grid shows page/feed/sitemap.
         await _record_mode(session, tenant_id, source_id, detected_mode)
+        # A full sync re-examined every document, so whatever an earlier
+        # incomplete replay could not prove is now proven: clear the bounded
+        # retry counter (ADR-0019 §3 — this IS the escalation's recovery).
+        await sources.record_acl_incomplete_attempts(source_id, 0)
         if baseline_cursor is not None:
             # The pre-enumeration change-log baseline (ADR-0019 §3): the next
             # sync replays incrementally from here, covering the enumeration
@@ -531,12 +547,30 @@ async def _sync_incremental(
     pages therefore resumes from the last committed token — never skipping a
     page, never re-serving half-applied state.
 
+    **An ``integrity=incomplete`` page is never consumed behind the cursor.**
+    Its mutations and the source-wide stale stamp commit (the work is not
+    lost), but the cursor is deliberately **left where it was** — the exact
+    change page is replayed next run — the durable
+    ``acl_incomplete_attempts`` counter advances in that same transaction, and
+    the replay stops there (a later page's commit would move the cursor past
+    unrecovered work). After ``CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS``
+    consecutive short runs the cursor is cleared, which escalates the next sync
+    to a full resync — the only thing that re-examines every document. The run
+    then terminates as ``error`` and **does not** publish fresh source-level
+    ACL health: an unrecovered mirror is never reported as healthy.
+
+    A **wholly complete** replay does the opposite: it attests the mirrors it
+    did not touch (§2's "a complete gap-free replay attests it unchanged"),
+    without reviving anything an incomplete run stamped stale — otherwise every
+    untouched document would age out of the freshness window and vanish from
+    retrieval while hourly replays kept succeeding.
+
     Chunk/embedding/index writes happen **after** each page commit (the reused
-    ingestion pipeline owns its own transactions and is idempotent; an
-    un-ingested upsert is a ``pending`` document with no retrievable chunks —
-    fail closed, converged by the next run or the reindex backfill). The index
-    stale-stamp propagates by update-by-query in the same run; the Postgres
-    hydration re-check remains the enforcing backstop (ADR-0010 §4).
+    ingestion pipeline owns its own transactions and is idempotent; a document
+    stranded ``pending`` by a crash in that window is recovered by the poll
+    beat's sweep — see :mod:`app.tasks.connector_poll`). The index stale-stamp
+    propagates by update-by-query in the same run; the Postgres hydration
+    re-check remains the enforcing backstop (ADR-0010 §4).
 
     Raises:
         CursorExpiredError: the provider rejected the cursor (HTTP 410) — the
@@ -549,109 +583,151 @@ async def _sync_incremental(
     owner_id = source.owner_id
     upserted = 0
     deleted_count = 0
+    incomplete_run = False
+    escalated = False
+    # Every document this run re-examined — excluded from the unchanged
+    # attestation below because they already carry their own fresh stamp.
+    examined_ids: set[UUID] = set()
 
     async for page in fetch_changes(source, str(source.sync_cursor), run):
         deleted_docs: list[Document] = []
         page_doc_ids: list[UUID] = []
         stale_ids: list[UUID] = []
         orphaned_keys: list[str] = []
-        async with tenant_session_scope(tenant_id) as session:
-            documents = DocumentRepository(session, tenant_id)
-            sources = SourceRepository(session, tenant_id)
+        # Objects written by this page: `replaced` are prior revisions this
+        # page superseded (deletable once the row no longer points at them),
+        # `written` are the new ones (deletable only if the transaction dies).
+        replaced_keys: set[str] = set()
+        written_keys: set[str] = set()
+        incomplete_page = page.integrity is PageIntegrity.INCOMPLETE
+        try:
+            async with tenant_session_scope(tenant_id) as session:
+                documents = DocumentRepository(session, tenant_id)
+                sources = SourceRepository(session, tenant_id)
 
-            # 1. Identity deletions (reconcile by external id, not wholesale).
-            for external_id in sorted(page.deleted_external_ids):
-                existing = await documents.get_by_external_id(source_id, external_id)
-                if existing is None:
-                    continue
-                await documents.delete(existing.id)
-                deleted_docs.append(existing)
-            if deleted_docs:
-                await session.flush()
-                for storage_key in {d.storage_key for d in deleted_docs}:
-                    if await documents.count_by_storage_key(storage_key) == 0:
-                        orphaned_keys.append(storage_key)
+                # 1. Identity deletions (reconcile by external id, not wholesale).
+                for external_id in sorted(page.deleted_external_ids):
+                    existing = await documents.get_by_external_id(source_id, external_id)
+                    if existing is None:
+                        continue
+                    await documents.delete(existing.id)
+                    deleted_docs.append(existing)
+                if deleted_docs:
+                    await session.flush()
+                    for storage_key in {d.storage_key for d in deleted_docs}:
+                        if await documents.count_by_storage_key(storage_key) == 0:
+                            orphaned_keys.append(storage_key)
 
-            # 2. The cascade stale-stamp (§3): immediate deny for every known
-            #    descendant of a replayed container change — BEFORE the page's
-            #    upserts, so a re-examined document ends the page fresh.
-            if page.stale_scope_ids:
-                stale_ids = await documents.stamp_acl_stale_by_scope(
-                    source_id, page.stale_scope_ids
-                )
-            if page.integrity is PageIntegrity.INCOMPLETE:
-                # Unprovable affected set ⇒ fail closed source-wide.
-                stale_ids = await documents.stamp_acl_stale_for_source(source_id)
-
-            # 3. Identity upserts — by (source_id, external_id), keeping row
-            #    ids stable so the index converges without orphans.
-            for index, fetched_doc in enumerate(page.upserts):
-                payload = (
-                    fetched_doc.data
-                    if fetched_doc.data is not None
-                    else fetched_doc.text.encode("utf-8")
-                )
-                mime_type = fetched_doc.mime_type if fetched_doc.data is not None else _TEXT_MIME
-                stored = await object_store.put(
-                    tenant_id=str(tenant_id),
-                    data=payload,
-                    content_type=mime_type,
-                    filename=_safe_filename(fetched_doc.title, index),
-                )
-                acl = fetched_doc.acl
-                acl_stamp = datetime.now(UTC) if acl is not None else None
-                existing = (
-                    await documents.get_by_external_id(source_id, fetched_doc.external_id)
-                    if fetched_doc.external_id is not None
-                    else None
-                )
-                if existing is not None:
-                    updated = await documents.update_from_sync(
-                        existing.id,
-                        filename=_safe_filename(fetched_doc.title, index),
-                        mime_type=mime_type,
-                        size_bytes=stored.size_bytes,
-                        storage_key=stored.key,
-                        status=DocumentStatus.PENDING,
-                        acl_principals=sorted(acl.principals) if acl is not None else None,
-                        acl_synced_at=acl_stamp,
-                        acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                # 2. The cascade stale-stamp (§3): immediate deny for every known
+                #    descendant of a replayed container change — BEFORE the page's
+                #    upserts, so a re-examined document ends the page fresh.
+                if page.stale_scope_ids:
+                    stale_ids = await documents.stamp_acl_stale_by_scope(
+                        source_id, page.stale_scope_ids
                     )
-                    assert updated is not None  # row read in this txn  # noqa: S101
-                    page_doc_ids.append(existing.id)
+                if incomplete_page:
+                    # Unprovable affected set ⇒ fail closed source-wide.
+                    stale_ids = await documents.stamp_acl_stale_for_source(source_id)
+
+                # 3. Identity upserts — by (source_id, external_id), keeping row
+                #    ids stable so the index converges without orphans.
+                for index, fetched_doc in enumerate(page.upserts):
+                    payload = (
+                        fetched_doc.data
+                        if fetched_doc.data is not None
+                        else fetched_doc.text.encode("utf-8")
+                    )
+                    mime_type = (
+                        fetched_doc.mime_type if fetched_doc.data is not None else _TEXT_MIME
+                    )
+                    stored = await object_store.put(
+                        tenant_id=str(tenant_id),
+                        data=payload,
+                        content_type=mime_type,
+                        filename=_safe_filename(fetched_doc.title, index),
+                    )
+                    written_keys.add(stored.key)
+                    acl = fetched_doc.acl
+                    acl_stamp = datetime.now(UTC) if acl is not None else None
+                    existing = (
+                        await documents.get_by_external_id(source_id, fetched_doc.external_id)
+                        if fetched_doc.external_id is not None
+                        else None
+                    )
+                    if existing is not None:
+                        if existing.storage_key != stored.key:
+                            # This revision supersedes the prior object; the row
+                            # will stop referencing it once this commits.
+                            replaced_keys.add(existing.storage_key)
+                        updated = await documents.update_from_sync(
+                            existing.id,
+                            filename=_safe_filename(fetched_doc.title, index),
+                            mime_type=mime_type,
+                            size_bytes=stored.size_bytes,
+                            storage_key=stored.key,
+                            status=DocumentStatus.PENDING,
+                            acl_principals=sorted(acl.principals) if acl is not None else None,
+                            acl_synced_at=acl_stamp,
+                            acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                        )
+                        assert updated is not None  # row read in this txn  # noqa: S101
+                        page_doc_ids.append(existing.id)
+                    else:
+                        created = await documents.create(
+                            owner_id=owner_id,
+                            collection_id=collection_id,
+                            filename=_safe_filename(fetched_doc.title, index),
+                            mime_type=mime_type,
+                            size_bytes=stored.size_bytes,
+                            storage_key=stored.key,
+                            acl_enforced=enforce_acl,
+                            status=DocumentStatus.PENDING,
+                            source_id=source_id,
+                            external_id=fetched_doc.external_id,
+                            acl_principals=sorted(acl.principals) if acl is not None else None,
+                            acl_synced_at=acl_stamp,
+                            acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                        )
+                        page_doc_ids.append(created.id)
+
+                # 4. The cursor — SAME transaction as the mutations. A complete
+                #    page advances it (the stored token is the exact resume
+                #    point); an INCOMPLETE page must not be consumed, so the
+                #    cursor stays put and the durable retry counter advances
+                #    instead, escalating to a full resync once exhausted.
+                if not incomplete_page:
+                    await sources.set_sync_cursor(source_id, page.next_cursor)
                 else:
-                    created = await documents.create(
-                        owner_id=owner_id,
-                        collection_id=collection_id,
-                        filename=_safe_filename(fetched_doc.title, index),
-                        mime_type=mime_type,
-                        size_bytes=stored.size_bytes,
-                        storage_key=stored.key,
-                        acl_enforced=enforce_acl,
-                        status=DocumentStatus.PENDING,
-                        source_id=source_id,
-                        external_id=fetched_doc.external_id,
-                        acl_principals=sorted(acl.principals) if acl is not None else None,
-                        acl_synced_at=acl_stamp,
-                        acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
-                    )
-                    page_doc_ids.append(created.id)
-
-            # 4. The advancing cursor — SAME transaction as the mutations, so
-            #    the stored token is always the exact resume point.
-            await sources.set_sync_cursor(source_id, page.next_cursor)
+                    attempts = source.acl_incomplete_attempts + 1
+                    if attempts >= settings.connector_acl_incomplete_max_attempts:
+                        # Bounded retry exhausted: clear the cursor so the NEXT
+                        # sync is a full resync — the only run that re-examines
+                        # every document and can restore freshness.
+                        await sources.set_sync_cursor(source_id, None)
+                        await sources.record_acl_incomplete_attempts(source_id, 0)
+                        escalated = True
+                    else:
+                        await sources.record_acl_incomplete_attempts(source_id, attempts)
+        except Exception:
+            # The transaction rolled back but the objects were already stored —
+            # nothing references them, so reclaim them rather than leak
+            # (post-rollback, best-effort, reference-checked like every other
+            # object cleanup).
+            await _reclaim_objects(
+                tenant_id, written_keys, object_store=object_store, source_id=source_id
+            )
+            raise
 
         # --- Post-commit, idempotent derived-state maintenance. --------------
-        for storage_key in orphaned_keys:
-            try:
-                await object_store.delete(str(tenant_id), storage_key)
-            except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
-                log.warning(
-                    "source_sync.object_cleanup_failed",
-                    source_id=str(source_id),
-                    storage_key=storage_key,
-                    error=type(exc).__name__,
-                )
+        # Prior revisions are reclaimed only AFTER the commit, and only when no
+        # surviving document still references the content-addressed key
+        # (identical bytes+filename dedupe to one object).
+        await _reclaim_objects(
+            tenant_id,
+            set(orphaned_keys) | (replaced_keys - written_keys),
+            object_store=object_store,
+            source_id=source_id,
+        )
         for doc in deleted_docs:
             try:
                 await sync_document_index_async(tenant_id, doc.id, settings=settings)
@@ -691,34 +767,131 @@ async def _sync_incremental(
                 )
         upserted += len(page_doc_ids)
         deleted_count += len(deleted_docs)
+        examined_ids.update(page_doc_ids)
+        if incomplete_page:
+            # Stop draining: the cursor still points at THIS page, and any
+            # later page's commit would advance it past unrecovered work.
+            incomplete_run = True
+            break
 
-    # --- Terminal: the drained replay left the new baseline as the cursor. ----
+    # --- Terminal ------------------------------------------------------------
     now = datetime.now(UTC)
+    attested_ids: list[UUID] = []
     async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
         indexed = len(await documents.list_for_source(source_id))
         sources = SourceRepository(session, tenant_id)
-        await sources.update_status(
-            source_id,
-            status=SourceStatus.READY,
-            indexed_count=indexed,
-            last_error=None,
-            set_last_error=True,
-            last_synced_at=now,
-            set_last_synced_at=True,
-        )
-        if enforce_acl:
-            unmapped = await _count_unmapped(session, tenant_id, source_id)
-            await sources.record_acl_health(
-                source_id, acl_synced_at=now, unmapped_acl_count=unmapped
+        if incomplete_run:
+            # An unrecovered mirror is NOT a healthy source: no ready status, no
+            # fresh source-level acl_synced_at. Every acl_enforced document is
+            # already stamped stale (denied), and the next run retries the same
+            # page — or, once escalated, runs a full resync.
+            await sources.update_status(
+                source_id,
+                status=SourceStatus.ERROR,
+                indexed_count=indexed,
+                last_error=ACL_MIRROR_INCOMPLETE,
+                set_last_error=True,
             )
+            if enforce_acl:
+                unmapped = await _count_unmapped(session, tenant_id, source_id)
+                await sources.record_acl_health(
+                    source_id, acl_synced_at=None, unmapped_acl_count=unmapped
+                )
+        else:
+            await sources.update_status(
+                source_id,
+                status=SourceStatus.READY,
+                indexed_count=indexed,
+                last_error=None,
+                set_last_error=True,
+                last_synced_at=now,
+                set_last_synced_at=True,
+            )
+            if enforce_acl:
+                # §2 refresh cadence: a complete, gap-free replay ATTESTS the
+                # documents it did not report as unchanged. Without this, an
+                # untouched document ages past CONNECTOR_ACL_MAX_AGE_HOURS and
+                # disappears from retrieval even though every hourly replay
+                # succeeded. Rows stamped stale by an incomplete run carry a
+                # NULL acl_synced_at and are structurally excluded — an
+                # attestation can narrow freshness, never fake it.
+                attested_ids = await documents.attest_acl_unchanged(
+                    source_id, attested_at=now, exclude_ids=examined_ids
+                )
+                unmapped = await _count_unmapped(session, tenant_id, source_id)
+                await sources.record_acl_health(
+                    source_id, acl_synced_at=now, unmapped_acl_count=unmapped
+                )
+            # A run that leaves the mirror provably complete clears the
+            # bounded-retry counter.
+            if source.acl_incomplete_attempts:
+                await sources.record_acl_incomplete_attempts(source_id, 0)
+
+    if attested_ids:
+        try:
+            await attest_index_acl_fresh_async(
+                tenant_id, attested_ids, synced_at=now, settings=settings
+            )
+        except DependencyError as exc:
+            # Postgres is authoritative and its hydration re-check re-evaluates
+            # freshness, so a failed propagation only costs engine recall until
+            # the reindex backfill catches up.
+            log.warning(
+                "source_sync.index_attest_failed",
+                source_id=str(source_id),
+                error=exc.code,
+            )
+    if incomplete_run:
+        log.warning(
+            "source_sync.incremental_incomplete",
+            source_id=str(source_id),
+            escalated_to_full_resync=escalated,
+        )
+        return SyncResult(source_id, SourceStatus.ERROR, indexed, ACL_MIRROR_INCOMPLETE)
     log.info(
         "source_sync.incremental_done",
         source_id=str(source_id),
         upserted=upserted,
         deleted=deleted_count,
+        attested=len(attested_ids),
     )
     return SyncResult(source_id, SourceStatus.READY, indexed)
+
+
+async def _reclaim_objects(
+    tenant_id: UUID,
+    storage_keys: set[str],
+    *,
+    object_store: ObjectStore,
+    source_id: UUID,
+) -> None:
+    """Delete stored objects no surviving document references (#269, ADR-0019 §3).
+
+    Content-addressed keys are shared by identical bytes+filename, so every
+    candidate is reference-checked against the **committed** state before it is
+    removed — never a row pointing at missing bytes. Best-effort: a storage
+    blip must not fail an otherwise-good sync, and a stray object is a benign
+    leak.
+    """
+    if not storage_keys:
+        return
+    unreferenced: list[str] = []
+    async with tenant_session_scope(tenant_id) as session:
+        documents = DocumentRepository(session, tenant_id)
+        for storage_key in sorted(storage_keys):
+            if await documents.count_by_storage_key(storage_key) == 0:
+                unreferenced.append(storage_key)
+    for storage_key in unreferenced:
+        try:
+            await object_store.delete(str(tenant_id), storage_key)
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+            log.warning(
+                "source_sync.object_cleanup_failed",
+                source_id=str(source_id),
+                storage_key=storage_key,
+                error=type(exc).__name__,
+            )
 
 
 async def _fail_reauthorize(tenant_id: UUID, source_id: UUID, *, source_type: str) -> SyncResult:

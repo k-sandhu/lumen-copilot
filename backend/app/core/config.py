@@ -195,6 +195,28 @@ class Settings(BaseSettings):
     connector_sync_interval_minutes: int = Field(
         default=60, ge=1, alias="CONNECTOR_SYNC_INTERVAL_MINUTES"
     )
+    # How many consecutive incremental replays may end on an
+    # ``integrity=incomplete`` page before the sync escalates to a full resync
+    # (ADR-0019 §3: "schedules a bounded retry, escalating to a full resync if
+    # it keeps failing"). Each attempt re-runs the SAME change page — the cursor
+    # never advances past unrecovered work — and the source is never published
+    # ready/fresh until a run leaves the mirror provably complete.
+    connector_acl_incomplete_max_attempts: int = Field(
+        default=3, ge=1, alias="CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS"
+    )
+    # How long a connector document may sit pending/processing before the sync
+    # poll re-drives its ingestion (ADR-0019 §3 recovery): a worker that dies
+    # between a page's commit and its post-commit ingestion leaves a `pending`
+    # row with no chunks that the advanced cursor will never revisit. Must
+    # comfortably exceed a normal ingestion run so an in-flight document is
+    # never re-driven needlessly (the task is idempotent either way).
+    connector_ingest_recovery_minutes: int = Field(
+        default=30, ge=1, alias="CONNECTOR_INGEST_RECOVERY_MINUTES"
+    )
+    # Upper bound on documents one recovery sweep re-drives (bounded fan-out).
+    connector_ingest_recovery_batch: int = Field(
+        default=200, ge=1, alias="CONNECTOR_INGEST_RECOVERY_BATCH"
+    )
 
     @field_validator("access_token_ttl_seconds")
     @classmethod

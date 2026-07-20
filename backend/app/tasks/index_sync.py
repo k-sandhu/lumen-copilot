@@ -30,6 +30,7 @@ retrieval serves from the engine).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 import structlog
@@ -44,6 +45,10 @@ from app.tasks.celery_app import celery_app
 from app.tasks.runner import run_task
 
 log = structlog.get_logger(__name__)
+
+# Documents per attestation update-by-query — bounds the request body when a
+# whole source's corpus is re-attested by one complete replay.
+_ATTEST_BATCH_SIZE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +157,43 @@ async def stamp_index_acl_stale_async(
     active = store or OpenSearchStore.from_settings(settings)
     try:
         await active.stamp_acl_stale(tenant_id=tenant_id, document_ids=document_ids)
+    finally:
+        if owns_store:
+            await active.aclose()
+
+
+async def attest_index_acl_fresh_async(
+    tenant_id: UUID,
+    document_ids: list[UUID],
+    *,
+    synced_at: datetime,
+    settings: Settings,
+    store: OpenSearchStore | None = None,
+) -> None:
+    """Propagate an unchanged-mirror attestation to the index (ADR-0019 §2/§3).
+
+    The counterpart of :func:`stamp_index_acl_stale_async`: a complete,
+    gap-free replay re-attests the mirrors it did not touch, and the engine's
+    freshness range needs the new stamp or those documents would be missing
+    from engine candidates until the next reindex. Issued in bounded batches so
+    a large corpus can never turn into one unbounded update-by-query.
+
+    Raises:
+        DependencyError: the engine is unreachable/rejected the write. Purely a
+            recall concern — Postgres is authoritative and its hydration
+            re-check re-evaluates freshness — so the caller logs and continues.
+    """
+    if not document_ids:
+        return
+    owns_store = store is None
+    active = store or OpenSearchStore.from_settings(settings)
+    try:
+        for start in range(0, len(document_ids), _ATTEST_BATCH_SIZE):
+            await active.attest_acl_fresh(
+                tenant_id=tenant_id,
+                document_ids=document_ids[start : start + _ATTEST_BATCH_SIZE],
+                synced_at=synced_at,
+            )
     finally:
         if owns_store:
             await active.aclose()
