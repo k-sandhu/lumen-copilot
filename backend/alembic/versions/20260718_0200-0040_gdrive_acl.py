@@ -4,15 +4,18 @@ ADR-0019 §2/§3 (F-CB-2):
 
 * ``documents`` gains the mirrored-ACL surface: ``acl_enforced`` (the exclusive
   enforcement mode — ``server_default false`` exists SOLELY to backfill the
-  pre-existing upload/``web`` rows; application writes always pass the mode
-  explicitly, it is a mandatory no-default argument at the write seam),
+  pre-existing upload/``web`` rows and is **dropped again in this same
+  migration**, so no insert path can ever default the mode; it is a mandatory
+  no-default argument at the write seam),
   ``acl_principals`` (the mirrored principal-set), ``acl_synced_at`` (freshness;
   NULL ⇒ deny), ``acl_scope_ids`` (the container scope chain the cascade
   stale-stamp matches on), and ``external_id`` (the provider's stable id) with a
   **partial unique index** on ``(source_id, external_id)`` — identity-based
   reconcile; direct uploads (NULL ``external_id``) are unconstrained.
 * ``sources`` gains the ACL-mirror health surface the wire's ``GdriveSource``
-  reports: ``acl_synced_at`` + ``unmapped_acl_count``.
+  reports: ``acl_synced_at`` + ``unmapped_acl_count``, plus
+  ``acl_incomplete_attempts`` — the durable bounded-retry counter behind
+  ADR-0019 §3's escalate-to-full-resync rule.
 
 No new tables; the RLS backstop on ``documents``/``sources`` (0007) covers the
 new columns. Reversible (backend/AGENTS.md): ``downgrade`` drops the index and
@@ -51,6 +54,15 @@ def upgrade() -> None:
             server_default=sa.false(),
         ),
     )
+    # ...and DROP it immediately, in this same migration. ADR-0019 §2's
+    # write-time discipline is "the mode is never defaulted": with the default
+    # left in place, any future insert path that forgets the column would
+    # silently create an owner/grant-governed document out of connector
+    # content. Post-drop, omitting the mode is a NOT NULL violation — the
+    # failure direction we want. The ORM carries no ``default`` either; the one
+    # write seam (``DocumentRepository.create``) takes it as a mandatory
+    # argument.
+    op.alter_column("documents", "acl_enforced", server_default=None)
     op.add_column("documents", sa.Column("acl_principals", _JSON, nullable=True))
     op.add_column(
         "documents",
@@ -73,9 +85,16 @@ def upgrade() -> None:
         sa.Column("acl_synced_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column("sources", sa.Column("unmapped_acl_count", sa.Integer(), nullable=True))
+    # The bounded incremental-retry counter behind ADR-0019 §3's "escalate to a
+    # full resync" rule: consecutive replays that ended on an ``integrity=
+    # incomplete`` page. Durable, because the escalation must survive a crash —
+    # an unrecovered mirror may never be published as fresh. NULL = 0 (no run
+    # has ever come up short).
+    op.add_column("sources", sa.Column("acl_incomplete_attempts", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("sources", "acl_incomplete_attempts")
     op.drop_column("sources", "unmapped_acl_count")
     op.drop_column("sources", "acl_synced_at")
 

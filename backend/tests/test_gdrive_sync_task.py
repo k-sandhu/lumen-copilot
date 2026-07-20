@@ -374,6 +374,36 @@ async def test_write_seam_refuses_defaulted_acl_mode(
             )
 
 
+async def test_model_insert_cannot_omit_the_acl_mode(sqlite_engine: None) -> None:
+    """Regression: the ACL mode has NO default at ANY layer (ADR-0019 §2).
+
+    The repository argument being mandatory is only half the discipline — the
+    ORM column carried ``default=False`` and migration 0040 left its backfill
+    ``server_default`` in place, so a direct model insert (or any future write
+    path that forgets the column) silently produced an owner/grant-governed
+    document out of connector content. With both defaults gone, omitting the
+    mode is a NOT NULL violation.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    seeded = await _seed()
+    with pytest.raises(IntegrityError):
+        async with db_session.session_scope() as session:
+            session.add(
+                models.Document(
+                    tenant_id=seeded.tenant_id,
+                    owner_id=seeded.owner_id,
+                    collection_id=seeded.collection_id,
+                    filename="no-mode.txt",
+                    mime_type="text/plain",
+                    size_bytes=1,
+                    storage_key="t/no-mode",
+                    status="pending",
+                )
+            )
+            await session.flush()
+
+
 async def test_acl_context_snapshot_is_attested_only(
     sqlite_engine: None, connector: FakeAclConnector
 ) -> None:

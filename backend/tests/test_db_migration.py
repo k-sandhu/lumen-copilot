@@ -1362,3 +1362,43 @@ def test_offline_session_summaries_migration_round_trips(
     down = capsys.readouterr().out.lower()
     assert "drop table session_summaries" in down
     assert "drop policy if exists rls_session_summaries" in down
+
+
+def test_offline_gdrive_acl_migration_drops_the_mode_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0040 adds the mirrored-ACL surface AND removes the backfill default (#453).
+
+    ADR-0019 §2's write-time discipline — *the mode is never defaulted* — only
+    holds if the ``server_default false`` that backfills the pre-existing
+    upload/``web`` rows is dropped again in the same migration. Left in place,
+    any future insert path that omits ``acl_enforced`` silently produces an
+    owner/grant-governed document out of connector content. Offline DDL render
+    (Postgres dialect), reversible — no DB needed (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0039_connector_oauth:0040_gdrive_acl", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table documents add column acl_enforced" in up
+    assert "not null" in up
+    # The backfill default exists...
+    assert "set default false" in up or "default false" in up
+    # ...and is dropped again, in this same migration (the load-bearing line).
+    assert "alter table documents alter column acl_enforced drop default" in up
+    assert "alter table documents add column acl_principals" in up
+    assert "alter table documents add column acl_synced_at" in up
+    assert "alter table documents add column acl_scope_ids" in up
+    assert "alter table documents add column external_id" in up
+    assert "uq_documents_source_external_id" in up
+    assert "where external_id is not null" in up
+    assert "alter table sources add column acl_synced_at" in up
+    assert "alter table sources add column unmapped_acl_count" in up
+    assert "alter table sources add column acl_incomplete_attempts" in up
+
+    command.downgrade(cfg, "0040_gdrive_acl:0039_connector_oauth", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop index uq_documents_source_external_id" in down
+    assert "alter table documents drop column acl_enforced" in down
+    assert "alter table sources drop column acl_incomplete_attempts" in down

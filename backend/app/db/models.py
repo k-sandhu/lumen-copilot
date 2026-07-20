@@ -258,6 +258,11 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     # NULL for non-ACL connectors and before the first sync.
     acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     unmapped_acl_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Consecutive incremental replays that ended on an ``integrity=incomplete``
+    # page (ADR-0019 §3). Durable so the bounded retry → full-resync escalation
+    # survives a crash; reset to 0 by any run that leaves the mirror provably
+    # complete. NULL = 0.
+    acl_incomplete_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="source")
 
@@ -315,12 +320,16 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
     # mirrored-principal intersection and NOTHING else — owner/grants never
-    # apply. The mode is a mandatory no-default argument at the write seam
-    # (``DocumentRepository.create``); the column default exists solely for the
-    # 0039 backfill of pre-existing upload/web rows, never as a code path.
-    acl_enforced: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=false()
-    )
+    # apply.
+    #
+    # **No default, at any layer** (ADR-0019 §2: the mode is never defaulted at
+    # write time). There is deliberately no ORM ``default`` and no
+    # ``server_default``: migration 0040 backfilled the pre-existing upload/web
+    # rows and then DROPPED the server default in the same migration, so an
+    # insert that omits the mode is a NOT NULL violation rather than a silently
+    # owner/grant-governed document. The one write seam
+    # (``DocumentRepository.create``) takes it as a mandatory argument.
+    acl_enforced: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # The mirrored principal-set (JSON array of `user:<uuid>` / `tenant`); NULL
     # for non-connector documents. An empty array admits no one (fail closed).
     acl_principals: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
