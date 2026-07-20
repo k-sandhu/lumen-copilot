@@ -285,8 +285,11 @@ async def test_the_leak_search_is_not_vacuous(
 
 # --- the no-token-material guarantee (static: the "grep" half) ---------------
 
-# Names that must never be a log keyword or an audit-metadata key. Deliberately
-# excludes bare `code` (a legitimate error discriminator throughout the app).
+# Identifiers that denote credential material. A leak is a *value* reaching a
+# sink, so the scan looks for these names anywhere in the expression a log call
+# or an audit-metadata construction consumes — not only as a keyword label.
+# Bare ``code`` is deliberately excluded: it is a legitimate error discriminator
+# throughout the app, and taint-tracking it would drown the signal.
 FORBIDDEN_FIELDS = frozenset(
     {
         "refresh_token",
@@ -301,68 +304,195 @@ FORBIDDEN_FIELDS = frozenset(
     }
 )
 _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical"})
+_METADATA_KEYWORDS = frozenset({"metadata", "event_data", "event_metadata"})
 
 
 def _python_sources() -> list[pathlib.Path]:
     return sorted(p for p in _APP.rglob("*.py") if "__pycache__" not in p.parts)
 
 
-def test_no_log_call_or_audit_metadata_names_token_material(
-    subject: AclSubject,
-) -> None:
-    """Static scan of ``app/``: nothing logs or audits credential material.
+def _tainted_identifiers(node: ast.AST) -> set[str]:
+    """Every forbidden identifier appearing anywhere inside ``node``.
 
-    Catches the leak on a path this suite never executes — a ``log.warning(...,
-    refresh_token=tok)`` added in a rarely-hit error branch would pass every
-    runtime assertion and fail here.
+    Walks the whole sub-expression, so all of these are caught:
+
+    * ``detail=refresh_token`` — a bare :class:`ast.Name` value;
+    * ``token=creds.access_token`` — an :class:`ast.Attribute` tail;
+    * ``f"failed for {refresh_token}"`` — the name inside an f-string;
+    * ``"...".format(code_verifier)`` / ``redact(access_token)`` — a nested call
+      argument;
+    * ``{"a": refresh_token}`` — a dict *value*, not just a key;
+    * a positional argument in any of the above shapes.
+
+    Constants are matched too, so a literal key such as ``{"access_token": v}``
+    still trips even when the value itself is opaque.
     """
+    found: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in FORBIDDEN_FIELDS:
+            found.add(child.id)
+        elif isinstance(child, ast.Attribute) and child.attr in FORBIDDEN_FIELDS:
+            found.add(child.attr)
+        elif isinstance(child, ast.Constant) and child.value in FORBIDDEN_FIELDS:
+            found.add(str(child.value))
+        elif isinstance(child, ast.keyword) and child.arg in FORBIDDEN_FIELDS:
+            found.add(child.arg)
+    return found
+
+
+def _local_dict_assignments(tree: ast.AST) -> dict[str, ast.Dict]:
+    """``name -> dict literal`` for every module/function-local dict assignment.
+
+    Lets the scan follow the indirect ``metadata=payload`` shape one hop, which
+    is how a real leak would most plausibly be written.
+    """
+    resolved: dict[str, ast.Dict] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    resolved[target.id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Dict)
+        ):
+            resolved[node.target.id] = node.value
+    return resolved
+
+
+def _enclosing_scopes(tree: ast.AST) -> dict[int, ast.AST]:
+    """Map each call node to the innermost function containing it.
+
+    Used to judge an *unresolvable* metadata expression: a function that never
+    mentions credential material has nothing for its payload to carry, while one
+    that handles a token and then builds its audit payload indirectly is exactly
+    the shape worth flagging.
+    """
+    owner: dict[int, ast.AST] = {}
+    functions = [
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+    # Outermost first, so an inner function overwrites and wins.
+    functions.sort(key=lambda fn: (fn.end_lineno or 0) - fn.lineno, reverse=True)
+    for function in functions:
+        for child in ast.walk(function):
+            if isinstance(child, ast.Call):
+                owner[id(child)] = function
+    return owner
+
+
+def scan_source(source: str, *, filename: str = "<planted>") -> list[str]:
+    """Report every credential-material leak into a log call or audit metadata.
+
+    Extracted as a plain function so the meta-test below can run the **same**
+    scanner over deliberately planted leaks — a scanner proven only against the
+    code it already passes on is not a proof.
+    """
+    tree = ast.parse(source, filename=filename)
+    dict_locals = _local_dict_assignments(tree)
+    scopes = _enclosing_scopes(tree)
     offenders: list[str] = []
-    for path in _python_sources():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            is_log = isinstance(node.func, ast.Attribute) and node.func.attr in _LOG_METHODS
-            for keyword in node.keywords:
-                if is_log and keyword.arg in FORBIDDEN_FIELDS:
-                    offenders.append(f"{path.name}:{node.lineno} log kwarg {keyword.arg}")
-                if keyword.arg in {"metadata", "event_data"} and isinstance(
-                    keyword.value, ast.Dict
-                ):
-                    for key in keyword.value.keys:
-                        if isinstance(key, ast.Constant) and key.value in FORBIDDEN_FIELDS:
-                            offenders.append(
-                                f"{path.name}:{node.lineno} audit metadata key {key.value}"
-                            )
-    assert not offenders, f"credential material named in a log/audit site: {offenders}"
-
-
-def test_the_static_scan_detects_a_planted_leak(
-    subject: AclSubject, tmp_path: pathlib.Path
-) -> None:
-    """Meta-proof: the AST scan above is not vacuous."""
-    planted = tmp_path / "leaky.py"
-    planted.write_text(
-        "log.info('oauth.refreshed', refresh_token=token)\n"
-        "audit.record(action='x', metadata={'access_token': token})\n",
-        encoding="utf-8",
-    )
-    found: list[str] = []
-    tree = ast.parse(planted.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        is_log = isinstance(node.func, ast.Attribute) and node.func.attr in _LOG_METHODS
+        where = f"{filename}:{node.lineno}"
+        if isinstance(node.func, ast.Attribute) and node.func.attr in _LOG_METHODS:
+            # EVERY argument of a log call — positional, keyword, nested, or
+            # interpolated — is a sink.
+            for argument in [*node.args, *node.keywords]:
+                for name in sorted(_tainted_identifiers(argument)):
+                    offenders.append(f"{where} log argument names {name}")
         for keyword in node.keywords:
-            if is_log and keyword.arg in FORBIDDEN_FIELDS:
-                found.append(str(keyword.arg))
-            if keyword.arg == "metadata" and isinstance(keyword.value, ast.Dict):
-                found += [
-                    str(k.value)
-                    for k in keyword.value.keys
-                    if isinstance(k, ast.Constant) and k.value in FORBIDDEN_FIELDS
-                ]
-    assert set(found) == {"refresh_token", "access_token"}
+            if keyword.arg not in _METADATA_KEYWORDS:
+                continue
+            value: ast.AST | None = keyword.value
+            if isinstance(value, ast.Name):
+                value = dict_locals.get(value.id)  # follow `metadata=payload`
+            if value is None:
+                # Built somewhere this scan cannot follow. Fall back to the
+                # enclosing function: no credential material in scope means
+                # nothing for the payload to carry, but an unprovable payload
+                # inside a function that DOES handle one is the leak shape.
+                scope = scopes.get(id(node), tree)
+                if _tainted_identifiers(scope):
+                    offenders.append(
+                        f"{where} audit metadata is built indirectly inside a "
+                        "function that handles credential material"
+                    )
+                continue
+            for name in sorted(_tainted_identifiers(value)):
+                offenders.append(f"{where} audit metadata names {name}")
+    return offenders
+
+
+def test_no_log_call_or_audit_metadata_carries_token_material(subject: AclSubject) -> None:
+    """Static scan of ``app/``: no credential material reaches a log or an audit.
+
+    Catches the leak on a path this suite never executes — a ``log.warning(...,
+    detail=refresh_token)`` in a rarely-hit error branch would satisfy every
+    runtime assertion in this module and fail only here.
+    """
+    offenders: list[str] = []
+    for path in _python_sources():
+        offenders += scan_source(path.read_text(encoding="utf-8"), filename=path.name)
+    assert not offenders, f"credential material reaches a log/audit sink: {offenders}"
+
+
+# Each planted line is a shape the FIRST version of this scan let through.
+_PLANTED_LEAKS: tuple[tuple[str, str], ...] = (
+    ("keyword label", "log.info('e', refresh_token=tok)"),
+    ("keyword VALUE", "log.error('refresh failed', detail=refresh_token)"),
+    ("attribute value", "log.warning('e', detail=creds.access_token)"),
+    ("positional value", "log.info(access_token)"),
+    ("f-string interpolation", "log.error(f'failed for {refresh_token}')"),
+    ("nested call argument", "log.info('e', detail=redact(code_verifier))"),
+    ("inline metadata key", "audit.record(action='x', metadata={'access_token': v})"),
+    ("inline metadata VALUE", "audit.record(action='x', metadata={'detail': client_secret})"),
+    (
+        "indirect metadata dict",
+        "payload = {'detail': refresh_token}\naudit.record(action='x', metadata=payload)",
+    ),
+    (
+        "unresolvable metadata inside a credential-handling function",
+        "def refresh(refresh_token):\n"
+        "    payload = build(refresh_token)\n"
+        "    audit.record(action='x', metadata=payload)\n",
+    ),
+)
+
+
+@pytest.mark.parametrize("shape,leak", _PLANTED_LEAKS, ids=[s for s, _ in _PLANTED_LEAKS])
+def test_the_static_scan_detects_each_planted_leak_shape(
+    subject: AclSubject, shape: str, leak: str
+) -> None:
+    """Meta-proof: the scanner catches indirect and positional leaks too.
+
+    The earlier version of this check inspected only keyword *labels* and inline
+    metadata keys, so most of these shapes passed. Planting each one keeps the
+    scanner honest about what it actually proves.
+    """
+    assert scan_source(leak), f"the scan misses a {shape} leak: {leak!r}"
+
+
+def test_the_static_scan_does_not_flag_benign_logging(subject: AclSubject) -> None:
+    """...and it is not simply flagging everything.
+
+    A scanner that reported every log call would make the suite green-by-noise
+    impossible to maintain and would be silently disabled by the next person.
+    """
+    benign = (
+        "log.info('source_sync.started', source_id=str(source_id))\n"
+        "log.warning('oauth.exchange_failed', error=exc.code, status=resp.status_code)\n"
+        "audit.record(action='source.connected', metadata={'email': account_email})\n"
+        # An indirectly-built payload in a function with no credential material
+        # in sight is not evidence of a leak — flagging it would be noise the
+        # next maintainer silences by deleting the check.
+        "def rename(name):\n"
+        "    payload = build(name)\n"
+        "    audit.record(action='x', metadata=payload)\n"
+    )
+    assert scan_source(benign) == []
 
 
 def test_the_pkce_verifier_is_confined_to_its_owning_modules(subject: AclSubject) -> None:
