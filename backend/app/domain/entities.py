@@ -720,10 +720,14 @@ class Source:
     # unmapped-document count the wire's GdriveSource surface reports.
     acl_synced_at: datetime | None = None
     unmapped_acl_count: int | None = None
-    # Consecutive incremental replays that ended on an ``integrity=incomplete``
-    # page (ADR-0019 §3) — the bounded retry counter behind the
-    # escalate-to-full-resync rule. Internal sync state, not a wire field.
-    acl_incomplete_attempts: int = 0
+    # ADR-0019 §3's durable full-resync-required state. An
+    # ``integrity=incomplete`` page stale-stamps EVERY mirrored document of the
+    # source, and only a full re-examination can restore them — so the
+    # requirement is **sticky**: it survives a crash and outlives any number of
+    # incremental retries (a page-level retry can never satisfy a source-wide
+    # stamp), and only a completed full sync clears it. Internal sync state,
+    # not a wire field.
+    acl_resync_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -258,11 +258,13 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     # NULL for non-ACL connectors and before the first sync.
     acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     unmapped_acl_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Consecutive incremental replays that ended on an ``integrity=incomplete``
-    # page (ADR-0019 §3). Durable so the bounded retry → full-resync escalation
-    # survives a crash; reset to 0 by any run that leaves the mirror provably
-    # complete. NULL = 0.
-    acl_incomplete_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ADR-0019 §3 full-resync-required state. Set when a replay page comes back
+    # ``integrity=incomplete`` — which stale-stamps EVERY mirrored document of
+    # the source, a condition only a full re-examination can clear. Durable (it
+    # must survive a crash) and sticky (it outlives any number of incremental
+    # retries: a page-level retry re-examines a subset, never the corpus).
+    # Cleared only by a completed full sync. NULL = false.
+    acl_resync_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="source")
 
@@ -1659,9 +1661,7 @@ class SandboxSession(TenantScopedMixin, Base):
 
     __tablename__ = "sandbox_sessions"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "chat_session_id", name="uq_sandbox_sessions_tenant_chat"
-        ),
+        UniqueConstraint("tenant_id", "chat_session_id", name="uq_sandbox_sessions_tenant_chat"),
         Index("ix_sandbox_sessions_tenant_owner", "tenant_id", "owner_id"),
         CheckConstraint(
             "status in ('active', 'closed', 'error')",
@@ -1754,9 +1754,7 @@ class CodeRun(TenantScopedMixin, Base):
         ForeignKey("chat_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    sandbox_session_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
-    )
+    sandbox_session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     sandbox_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The parent agent run / trace — plain nullable UUIDs until those tables land.
     run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
@@ -1764,9 +1762,7 @@ class CodeRun(TenantScopedMixin, Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
     # The exact Python source executed — inspectable (E15-7/E6-5), reproducible.
     code: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_packages: Mapped[list[str]] = mapped_column(
-        StringArray, nullable=False, default=list
-    )
+    requested_packages: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
     # Captured output. Default empty (never null) so a queued run already has readable
     # output fields.
     stdout: Mapped[str] = mapped_column(Text, nullable=False, default="")

@@ -14,8 +14,7 @@ ADR-0019 §2/§3 (F-CB-2):
   reconcile; direct uploads (NULL ``external_id``) are unconstrained.
 * ``sources`` gains the ACL-mirror health surface the wire's ``GdriveSource``
   reports: ``acl_synced_at`` + ``unmapped_acl_count``, plus
-  ``acl_incomplete_attempts`` — the durable bounded-retry counter behind
-  ADR-0019 §3's escalate-to-full-resync rule.
+  ``acl_resync_required`` — ADR-0019 §3's durable full-resync-required state.
 
 No new tables; the RLS backstop on ``documents``/``sources`` (0007) covers the
 new columns. Reversible (backend/AGENTS.md): ``downgrade`` drops the index and
@@ -85,16 +84,16 @@ def upgrade() -> None:
         sa.Column("acl_synced_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column("sources", sa.Column("unmapped_acl_count", sa.Integer(), nullable=True))
-    # The bounded incremental-retry counter behind ADR-0019 §3's "escalate to a
-    # full resync" rule: consecutive replays that ended on an ``integrity=
-    # incomplete`` page. Durable, because the escalation must survive a crash —
-    # an unrecovered mirror may never be published as fresh. NULL = 0 (no run
-    # has ever come up short).
-    op.add_column("sources", sa.Column("acl_incomplete_attempts", sa.Integer(), nullable=True))
+    # ADR-0019 §3's full-resync-required state. An ``integrity=incomplete`` page
+    # stale-stamps EVERY mirrored document of the source, and only a full
+    # re-examination can restore them — so the requirement is durable (it must
+    # survive a crash) and sticky (it outlives any number of incremental
+    # retries). Cleared only by a completed full sync. NULL = false.
+    op.add_column("sources", sa.Column("acl_resync_required", sa.Boolean(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("sources", "acl_incomplete_attempts")
+    op.drop_column("sources", "acl_resync_required")
     op.drop_column("sources", "unmapped_acl_count")
     op.drop_column("sources", "acl_synced_at")
 

@@ -195,15 +195,6 @@ class Settings(BaseSettings):
     connector_sync_interval_minutes: int = Field(
         default=60, ge=1, alias="CONNECTOR_SYNC_INTERVAL_MINUTES"
     )
-    # How many consecutive incremental replays may end on an
-    # ``integrity=incomplete`` page before the sync escalates to a full resync
-    # (ADR-0019 §3: "schedules a bounded retry, escalating to a full resync if
-    # it keeps failing"). Each attempt re-runs the SAME change page — the cursor
-    # never advances past unrecovered work — and the source is never published
-    # ready/fresh until a run leaves the mirror provably complete.
-    connector_acl_incomplete_max_attempts: int = Field(
-        default=3, ge=1, alias="CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS"
-    )
     # How long a connector document may sit pending/processing before the sync
     # poll re-drives its ingestion (ADR-0019 §3 recovery): a worker that dies
     # between a page's commit and its post-commit ingestion leaves a `pending`

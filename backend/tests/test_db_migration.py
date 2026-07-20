@@ -1395,10 +1395,10 @@ def test_offline_gdrive_acl_migration_drops_the_mode_default(
     assert "where external_id is not null" in up
     assert "alter table sources add column acl_synced_at" in up
     assert "alter table sources add column unmapped_acl_count" in up
-    assert "alter table sources add column acl_incomplete_attempts" in up
+    assert "alter table sources add column acl_resync_required" in up
 
     command.downgrade(cfg, "0040_gdrive_acl:0039_connector_oauth", sql=True)
     down = capsys.readouterr().out.lower()
     assert "drop index uq_documents_source_external_id" in down
     assert "alter table documents drop column acl_enforced" in down
-    assert "alter table sources drop column acl_incomplete_attempts" in down
+    assert "alter table sources drop column acl_resync_required" in down

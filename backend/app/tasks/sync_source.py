@@ -100,9 +100,11 @@ _TEXT_MIME = "text/plain"
 # Recorded in ``sources.last_error`` when an incremental replay ended on an
 # unprovable (``integrity=incomplete``) page: every mirrored document of the
 # source is stale-stamped (denied), the cursor was NOT advanced past that page,
-# and the next run retries it — escalating to a full resync once the bounded
-# attempts are spent (ADR-0019 §3). The source is deliberately not ``ready``
-# while this stands: health must not report success over an unrecovered mirror.
+# and the durable ``acl_resync_required`` state makes the next run a FULL
+# resync — the only run that re-examines every document (ADR-0019 §3). The
+# source is deliberately not ``ready`` while this stands, and stays not-ready
+# until that full resync completes: health must never report success over a
+# mirror that is still partly unrecovered.
 ACL_MIRROR_INCOMPLETE = "acl_mirror_incomplete"
 
 log = structlog.get_logger(__name__)
@@ -190,8 +192,19 @@ async def sync_source_async(
 
     baseline_cursor: str | None = None
     try:
-        # --- Incremental path (ADR-0019 §3): capability + a stored cursor. ---
-        if get_fetch_changes(connector) is not None and source.sync_cursor:
+        # --- Incremental path (ADR-0019 §3): capability + a stored cursor, and
+        # no outstanding full-resync requirement. ``acl_resync_required`` means
+        # a previous replay stale-stamped EVERY mirrored document of this
+        # source; only re-examining the whole corpus can restore them, so an
+        # incremental replay is skipped outright — it would re-examine the
+        # subset its pages happen to report and leave the rest denied while
+        # reporting success. This is the §3 escalation, and it is immediate
+        # because until it completes the source's content is invisible.
+        if (
+            get_fetch_changes(connector) is not None
+            and source.sync_cursor
+            and not source.acl_resync_required
+        ):
             try:
                 return await _sync_incremental(
                     tenant_id,
@@ -328,11 +341,14 @@ async def sync_source_async(
         )
         # Persist the detected mode so the grid shows page/feed/sitemap.
         await _record_mode(session, tenant_id, source_id, detected_mode)
-        if source.acl_incomplete_attempts:
-            # A full sync re-examined every document, so whatever an earlier
-            # incomplete replay could not prove is now proven: clear the bounded
-            # retry counter (ADR-0019 §3 — this IS the escalation's recovery).
-            await sources.record_acl_incomplete_attempts(source_id, 0)
+        if source.acl_resync_required:
+            # THE ONLY place the full-resync requirement is cleared (ADR-0019
+            # §3). A full sync re-enumerated the source and re-examined every
+            # surviving document, so the rows an incomplete replay stamped
+            # stale have all been restored or removed — the requirement is
+            # satisfied by construction, not by assumption. This runs in the
+            # same transaction that publishes READY + fresh health.
+            await sources.record_acl_resync_required(source_id, False)
         if baseline_cursor is not None:
             # The pre-enumeration change-log baseline (ADR-0019 §3): the next
             # sync replays incrementally from here, covering the enumeration
@@ -548,17 +564,21 @@ async def _sync_incremental(
     pages therefore resumes from the last committed token — never skipping a
     page, never re-serving half-applied state.
 
-    **An ``integrity=incomplete`` page is never consumed behind the cursor.**
-    Its mutations and the source-wide stale stamp commit (the work is not
-    lost), but the cursor is deliberately **left where it was** — the exact
-    change page is replayed next run — the durable
-    ``acl_incomplete_attempts`` counter advances in that same transaction, and
-    the replay stops there (a later page's commit would move the cursor past
-    unrecovered work). After ``CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS``
-    consecutive short runs the cursor is cleared, which escalates the next sync
-    to a full resync — the only thing that re-examines every document. The run
-    then terminates as ``error`` and **does not** publish fresh source-level
-    ACL health: an unrecovered mirror is never reported as healthy.
+    **An ``integrity=incomplete`` page is never consumed behind the cursor, and
+    what it breaks is not repairable incrementally.** Its mutations and the
+    source-wide stale stamp commit (the work is not lost), but in that same
+    transaction the durable ``acl_resync_required`` state is set, the cursor is
+    deliberately **left where it was**, and the replay stops there (a later
+    page's commit would move the cursor past unrecovered work). The run
+    terminates as ``error`` and publishes **no** fresh source-level ACL health.
+
+    The requirement is *sticky* on purpose. The stamp nulls every mirrored
+    document of the source; a later replay of that same page re-examines only
+    the documents that page reports, so it can restore a subset and would
+    otherwise publish READY while unrelated rows sit at ``acl_synced_at =
+    NULL`` — invisible, but reported healthy. So only a **completed full sync**
+    clears ``acl_resync_required``, and while it is set
+    :func:`sync_source_async` skips the incremental path entirely.
 
     A **wholly complete** replay does the opposite: it attests the mirrors it
     did not touch (§2's "a complete gap-free replay attests it unchanged"),
@@ -585,7 +605,6 @@ async def _sync_incremental(
     upserted = 0
     deleted_count = 0
     incomplete_run = False
-    escalated = False
     # Every document this run re-examined — excluded from the unchanged
     # attestation below because they already carry their own fresh stamp.
     examined_ids: set[UUID] = set()
@@ -693,22 +712,14 @@ async def _sync_incremental(
 
                 # 4. The cursor — SAME transaction as the mutations. A complete
                 #    page advances it (the stored token is the exact resume
-                #    point); an INCOMPLETE page must not be consumed, so the
-                #    cursor stays put and the durable retry counter advances
-                #    instead, escalating to a full resync once exhausted.
+                #    point). An INCOMPLETE page must not be consumed: the cursor
+                #    stays put AND the durable full-resync requirement is
+                #    recorded here, so neither a crash after this commit nor any
+                #    number of later incremental retries can lose it.
                 if not incomplete_page:
                     await sources.set_sync_cursor(source_id, page.next_cursor)
                 else:
-                    attempts = source.acl_incomplete_attempts + 1
-                    if attempts >= settings.connector_acl_incomplete_max_attempts:
-                        # Bounded retry exhausted: clear the cursor so the NEXT
-                        # sync is a full resync — the only run that re-examines
-                        # every document and can restore freshness.
-                        await sources.set_sync_cursor(source_id, None)
-                        await sources.record_acl_incomplete_attempts(source_id, 0)
-                        escalated = True
-                    else:
-                        await sources.record_acl_incomplete_attempts(source_id, attempts)
+                    await sources.record_acl_resync_required(source_id, True)
         except Exception:
             # The transaction rolled back but the objects were already stored —
             # nothing references them, so reclaim them rather than leak
@@ -786,15 +797,23 @@ async def _sync_incremental(
     # --- Terminal ------------------------------------------------------------
     now = datetime.now(UTC)
     attested_ids: list[UUID] = []
+    # An outstanding full-resync requirement — this run's, or one committed by
+    # an earlier run — blocks the healthy terminal. No incremental replay can
+    # satisfy it: it re-examines the documents its pages report, never the whole
+    # corpus a source-wide stale stamp nulled. (The caller already refuses to
+    # enter the incremental path while the requirement stands; this is the
+    # second lock on the same door, so no future caller can publish READY over
+    # rows that are still denied.)
+    unrecovered = incomplete_run or source.acl_resync_required
     async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
         indexed = len(await documents.list_for_source(source_id))
         sources = SourceRepository(session, tenant_id)
-        if incomplete_run:
+        if unrecovered:
             # An unrecovered mirror is NOT a healthy source: no ready status, no
             # fresh source-level acl_synced_at. Every acl_enforced document is
-            # already stamped stale (denied), and the next run retries the same
-            # page — or, once escalated, runs a full resync.
+            # already stamped stale (denied) and `acl_resync_required` is
+            # committed, so the next run is a full resync.
             await sources.update_status(
                 source_id,
                 status=SourceStatus.ERROR,
@@ -832,10 +851,11 @@ async def _sync_incremental(
                 await sources.record_acl_health(
                     source_id, acl_synced_at=now, unmapped_acl_count=unmapped
                 )
-            # A run that leaves the mirror provably complete clears the
-            # bounded-retry counter.
-            if source.acl_incomplete_attempts:
-                await sources.record_acl_incomplete_attempts(source_id, 0)
+            # NOTE: `acl_resync_required` is deliberately NOT cleared here. A
+            # complete *incremental* replay proves only that the documents its
+            # pages reported are current — never that the corpus a source-wide
+            # stale stamp nulled has been restored. Only the full-sync terminal
+            # clears it (and this branch cannot even run while it is set).
 
     if attested_ids:
         try:
@@ -851,11 +871,11 @@ async def _sync_incremental(
                 source_id=str(source_id),
                 error=exc.code,
             )
-    if incomplete_run:
+    if unrecovered:
         log.warning(
             "source_sync.incremental_incomplete",
             source_id=str(source_id),
-            escalated_to_full_resync=escalated,
+            full_resync_required=True,
         )
         return SyncResult(source_id, SourceStatus.ERROR, indexed, ACL_MIRROR_INCOMPLETE)
     log.info(

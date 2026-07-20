@@ -200,7 +200,7 @@ def _to_source(row: models.Source) -> Source:
         sync_cursor=row.sync_cursor,
         acl_synced_at=row.acl_synced_at,
         unmapped_acl_count=row.unmapped_acl_count,
-        acl_incomplete_attempts=row.acl_incomplete_attempts or 0,
+        acl_resync_required=bool(row.acl_resync_required),
     )
 
 
@@ -1511,14 +1511,16 @@ class SourceRepository(_TenantScopedRepository):
         await self._session.execute(stmt)
         await self._session.flush()
 
-    async def record_acl_incomplete_attempts(self, source_id: UUID, attempts: int) -> None:
-        """Persist the consecutive incomplete-replay count (ADR-0019 §3).
+    async def record_acl_resync_required(self, source_id: UUID, required: bool) -> None:
+        """Persist the full-resync-required state (ADR-0019 §3).
 
-        Durable because the bounded retry → full-resync escalation must survive
-        a crash: an unrecovered mirror may never be quietly published as fresh.
-        Written inside the same page transaction that committed the incomplete
-        page's mutations, and reset to ``0`` by any run that leaves the mirror
-        provably complete.
+        Set inside the **same transaction** as the source-wide stale stamp an
+        ``integrity=incomplete`` page triggers, so the requirement survives a
+        crash; cleared only by a run that has re-examined the whole corpus (a
+        completed full sync). It deliberately outlives incremental retries: a
+        page-level retry re-examines the documents that page reports, never the
+        rows the source-wide stamp nulled, so it can never satisfy the
+        requirement on its own.
         """
         stmt = (
             update(models.Source)
@@ -1526,7 +1528,7 @@ class SourceRepository(_TenantScopedRepository):
                 models.Source.tenant_id == self._tenant_id,
                 models.Source.id == source_id,
             )
-            .values(acl_incomplete_attempts=attempts)
+            .values(acl_resync_required=required)
         )
         await self._session.execute(stmt)
         await self._session.flush()

@@ -616,6 +616,13 @@ async def _backdate_acl(seeded: _Seeded, external_id: str, *, hours: int) -> Non
         await session.commit()
 
 
+def _null_run() -> ConnectorRun:
+    """A run context for driving ``_sync_incremental`` directly (no HTTP)."""
+    import httpx
+
+    return ConnectorRun(http=httpx.AsyncClient(), acl_context=None)
+
+
 def _incomplete_page(next_cursor: str = "baseline-x") -> SyncPage:
     return SyncPage(
         upserts=(),
@@ -635,7 +642,7 @@ async def test_incomplete_page_does_not_advance_the_cursor_or_publish_health(
     A persistent permission-fetch failure was therefore consumed behind the
     cursor — no replay would ever revisit it — while health reported success.
     The page must instead stay the resume point, the source must not be
-    published ready/fresh, and the retry must be recorded durably.
+    published ready/fresh, and the full-resync requirement must be durable.
     """
     seeded = await _seed()
     connector.full_result = FullSyncResult(
@@ -649,52 +656,124 @@ async def test_incomplete_page_does_not_advance_the_cursor_or_publish_health(
     assert result.status is SourceStatus.ERROR  # type: ignore[attr-defined]
     assert result.error == "acl_mirror_incomplete"  # type: ignore[attr-defined]
     source = await _source_row(seeded)
-    assert source.sync_cursor == "cur-1"  # NOT consumed — the page is retried
+    assert source.sync_cursor == "cur-1"  # NOT consumed
     assert source.status == "error"
     assert source.acl_synced_at is None  # health never lies about the mirror
-    assert source.acl_incomplete_attempts == 1  # durable, survives a crash
+    assert source.acl_resync_required is True  # durable, survives a crash
     assert (await _rows(seeded))["a"].acl_synced_at is None  # denied immediately
 
 
-async def test_incomplete_replay_retries_then_escalates_to_a_full_resync(
+async def test_incomplete_replay_escalates_to_a_full_resync_and_recovers(
     sqlite_engine: None, connector: FakeAclConnector
 ) -> None:
-    """The bounded retry ADR-0019 §3 requires: the SAME page is replayed, and
-    once the attempts are spent the cursor is cleared so the next sync is a
-    full resync — the only run that re-examines every document and can restore
-    freshness. Then it recovers."""
-    tuned = _settings(CONNECTOR_ACL_INCOMPLETE_MAX_ATTEMPTS=2)
+    """An incomplete page stale-stamps the WHOLE source, so recovery is a full
+    re-examination — the next run takes the full-sync path even though a cursor
+    (and a perfectly good change page) is still there."""
     seeded = await _seed()
     connector.full_result = FullSyncResult(
         docs=(_doc("a", principals=["tenant"]),), baseline_cursor="cur-1"
     )
-    await _run(seeded, settings=tuned)
+    await _run(seeded)
     connector.script = {"cur-1": [_incomplete_page()]}
 
-    first = await _run(seeded, settings=tuned)
-    assert first.status is SourceStatus.ERROR  # type: ignore[attr-defined]
-    assert (await _source_row(seeded)).sync_cursor == "cur-1"
+    failed = await _run(seeded)
+    assert failed.status is SourceStatus.ERROR  # type: ignore[attr-defined]
+    assert (await _source_row(seeded)).acl_resync_required is True
 
-    second = await _run(seeded, settings=tuned)
-    assert second.status is SourceStatus.ERROR  # type: ignore[attr-defined]
-    escalated = await _source_row(seeded)
-    assert escalated.sync_cursor is None  # ⇒ the next sync is FULL
-    assert escalated.acl_incomplete_attempts == 0  # counter armed for the retry
-    # The same change page was retried, never skipped past.
-    assert connector.fetch_calls == ["cur-1", "cur-1"]
-
-    # The escalated full resync re-examines everything and recovers.
-    calls_before = connector.sync_calls
+    # Next run: a complete page is available at the stored cursor, but the
+    # outstanding requirement sends the run down the FULL path instead.
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("a", principals=["tenant"]),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-2",
+            )
+        ]
+    }
+    calls_before, fetches_before = connector.sync_calls, list(connector.fetch_calls)
     connector.full_result = FullSyncResult(
         docs=(_doc("a", principals=["tenant"]),), baseline_cursor="cur-9"
     )
-    recovered = await _run(seeded, settings=tuned)
+    recovered = await _run(seeded)
+
     assert recovered.status is SourceStatus.READY  # type: ignore[attr-defined]
-    assert connector.sync_calls == calls_before + 1
+    assert connector.sync_calls == calls_before + 1  # the FULL replay ran
+    assert connector.fetch_calls == fetches_before  # the incremental path did not
     healthy = await _source_row(seeded)
+    assert healthy.acl_resync_required is False  # cleared ONLY by the full replay
     assert healthy.acl_synced_at is not None  # health may report success again
     assert healthy.sync_cursor == "cur-9"
     assert (await _rows(seeded))["a"].acl_synced_at is not None
+
+
+async def test_page_complete_retry_cannot_satisfy_a_source_wide_stale_stamp(
+    sqlite_engine: None, connector: FakeAclConnector
+) -> None:
+    """Regression (re-review F3): a complete retry of the ONE failed page used
+    to publish READY + fresh source health and clear the requirement, while
+    every document that page did not report was still sitting at
+    ``acl_synced_at = NULL`` — invisible to retrieval, reported healthy.
+
+    The requirement is sticky: a page-level retry re-examines a subset, never
+    the corpus a source-wide stamp nulled, so it can never clear it. Proven by
+    driving the incremental path directly (the caller would refuse to enter it
+    at all while the requirement stands — belt AND braces).
+    """
+    seeded = await _seed()
+    connector.full_result = FullSyncResult(
+        docs=(
+            _doc("reported", principals=["tenant"]),
+            _doc("unreported", principals=["tenant"]),
+        ),
+        baseline_cursor="cur-1",
+    )
+    await _run(seeded)
+
+    connector.script = {"cur-1": [_incomplete_page()]}
+    await _run(seeded)
+    stamped = await _rows(seeded)
+    assert stamped["reported"].acl_synced_at is None
+    assert stamped["unreported"].acl_synced_at is None
+
+    # The page now replays cleanly, but it only reports ONE of the two rows.
+    connector.script = {
+        "cur-1": [
+            SyncPage(
+                upserts=(_doc("reported", principals=["tenant"]),),
+                deleted_external_ids=frozenset(),
+                next_cursor="baseline-3",
+            )
+        ]
+    }
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, seeded.tenant_id).get(seeded.source_id)
+    assert source is not None
+    result = await sync_source_module._sync_incremental(
+        seeded.tenant_id,
+        source,
+        connector,
+        _null_run(),
+        settings=_settings(),
+        object_store=_FakeObjectStore(),  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+        collection_id=seeded.collection_id,
+        enforce_acl=True,
+    )
+
+    after = await _rows(seeded)
+    assert after["reported"].acl_synced_at is not None  # re-examined for real
+    assert after["unreported"].acl_synced_at is None  # STILL unrecovered
+    source_row = await _source_row(seeded)
+    assert source_row.acl_resync_required is True  # requirement survives the retry
+    assert source_row.acl_synced_at is None  # ...so no fresh source-level health
+    assert source_row.status == "error"  # ...and never READY
+    assert result.status is SourceStatus.ERROR  # type: ignore[attr-defined]
+    assert result.error == "acl_mirror_incomplete"  # type: ignore[attr-defined]
+    # ...and the caller refuses the incremental path entirely while it stands:
+    calls_before = connector.sync_calls
+    await _run(seeded)
+    assert connector.sync_calls == calls_before + 1  # a FULL replay, not a page
 
 
 # --- complete replays attest unchanged mirrors -------------------------------
@@ -743,33 +822,34 @@ async def test_complete_replay_attests_unchanged_documents(
 async def test_attestation_never_revives_a_stale_stamped_document(
     sqlite_engine: None, connector: FakeAclConnector
 ) -> None:
-    """The one row a replay may never re-attest: one an INCOMPLETE run stamped
-    stale. That stamp is ``acl_synced_at = NULL``, and attestation only ever
-    advances a non-NULL timestamp — so the distinction is structural."""
+    """The rows a replay may never re-attest: ones a cascade stamped stale.
+
+    The stamp is ``acl_synced_at = NULL``, and attestation only ever advances a
+    non-NULL timestamp — so the distinction is structural, not bookkeeping.
+    Uses the **scope cascade** (a container permission change), which is the
+    stale-stamp an incremental run can legitimately recover from; the
+    source-wide stamp is covered by the full-resync tests above.
+    """
     seeded = await _seed()
     connector.full_result = FullSyncResult(
         docs=(
-            _doc("unrecovered", principals=["tenant"]),
-            _doc("reexamined", principals=["tenant"]),
+            _doc("unrecovered", principals=["tenant"], scopes=["folderX"]),
+            _doc("reexamined", principals=["tenant"], scopes=["folderX"]),
+            _doc("elsewhere", principals=["tenant"], scopes=["folderY"]),
         ),
         baseline_cursor="cur-1",
     )
     await _run(seeded)
 
-    # Run 1: incomplete ⇒ both stamped stale, cursor held at cur-1.
-    connector.script = {"cur-1": [_incomplete_page()]}
-    await _run(seeded)
-    stamped = await _rows(seeded)
-    assert stamped["unrecovered"].acl_synced_at is None
-    assert stamped["reexamined"].acl_synced_at is None
-
-    # Run 2: the retry now succeeds, but only re-examines ONE document.
+    # A container change stale-stamps folderX's descendants; the page
+    # re-examines only ONE of them.
     connector.script = {
         "cur-1": [
             SyncPage(
-                upserts=(_doc("reexamined", principals=["tenant"]),),
+                upserts=(_doc("reexamined", principals=["tenant"], scopes=["folderX"]),),
                 deleted_external_ids=frozenset(),
                 next_cursor="baseline-3",
+                stale_scope_ids=frozenset({"folderX"}),
             )
         ]
     }
@@ -778,8 +858,9 @@ async def test_attestation_never_revives_a_stale_stamped_document(
     after = await _rows(seeded)
     assert after["reexamined"].acl_synced_at is not None  # examined for real
     assert after["unrecovered"].acl_synced_at is None  # NOT revived by attestation
+    assert after["elsewhere"].acl_synced_at is not None  # untouched scope, attested
     source = await _source_row(seeded)
-    assert source.acl_incomplete_attempts == 0  # a provably complete run clears it
+    assert not source.acl_resync_required  # a cascade is not a source-wide stamp
     assert source.sync_cursor == "baseline-3"
 
 
