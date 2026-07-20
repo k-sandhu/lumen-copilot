@@ -88,11 +88,24 @@ class AllowSet:
         source item is tenant-wide). Group principals are a recorded follow-up;
         they widen this same set without any caller changing.
         """
+        return cls.for_user(tenant_id=principal.tenant_id, user_id=principal.user_id)
+
+    @classmethod
+    def for_user(cls, *, tenant_id: UUID, user_id: UUID) -> AllowSet:
+        """The same allow-set from an already-resolved tenant/user pair.
+
+        :meth:`for_principal` is the request-path entry point; services that
+        were constructed with the token-bound ``tenant_id``/``owner_id`` (the
+        documents use-case) build the identical object here rather than
+        re-deriving the rule. One constructor, one definition of "who this
+        requester is" — the SQL predicate is then the only place the *rule*
+        lives (``retrieval.queries._document_permitted``).
+        """
         return cls(
-            tenant_id=principal.tenant_id,
-            owner_ids=frozenset({principal.user_id}),
-            grant_principal_id=principal.user_id,
-            acl_principals=frozenset({f"user:{principal.user_id}", "tenant"}),
+            tenant_id=tenant_id,
+            owner_ids=frozenset({user_id}),
+            grant_principal_id=user_id,
+            acl_principals=frozenset({f"user:{user_id}", "tenant"}),
         )
 
     def permits_owner(self, owner_id: UUID) -> bool:

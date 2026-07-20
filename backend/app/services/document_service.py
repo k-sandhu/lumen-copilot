@@ -63,6 +63,8 @@ from app.core.errors import (
 from app.db.repositories import ChunkRepository, CollectionRepository, DocumentRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Document, DocumentStatus
+from app.retrieval.permissions import AllowSet
+from app.retrieval.queries import get_permitted_document, permitted_document_ids
 from app.services.audit import AuditSink
 from app.storage import ObjectStore
 from app.storage.validation import validate_upload
@@ -244,6 +246,9 @@ class DocumentService:
         self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        # The requester's read allow-set — the SAME object retrieval keys its
+        # permission predicate off (ADR-0019 §2 mode split, spec 0004 §2.2).
+        self._allow_set = AllowSet.for_user(tenant_id=tenant_id, user_id=owner_id)
         self._store = object_store
         self._audit = audit
         self._request_id = request_id
@@ -262,11 +267,38 @@ class DocumentService:
         return DocumentView(document=document, chunk_count=count)
 
     async def _visible(self, document_id: UUID) -> Document | None:
-        """Fetch a document the caller may see, or ``None`` (→ 404).
+        """Fetch a document the caller may **read**, or ``None`` (→ 404).
 
-        ``None`` for a missing id, a foreign-tenant id (the repository sees no
-        row), *or* a same-tenant document owned by another user (ownership
-        check) — INV-1/INV-2 collapse all three to 404 at the router.
+        Delegates to the permission chokepoint
+        (:func:`app.retrieval.queries.get_permitted_document`) so this surface
+        applies the identical mode-split predicate retrieval does — there is no
+        second, weaker rule for point reads:
+
+        * ``acl_enforced = false`` (uploads, ``web``): owner **or** an explicit
+          grant, exactly as spec 0004 §2.2 defines "permitted to see";
+        * ``acl_enforced = true`` (managed-connector documents): a **fresh
+          mirrored-principal intersection and nothing else**. Connector rows are
+          owned by the *connecting admin*, so an ownership-only check here
+          handed that admin every mirrored file — including ones with an empty,
+          stale, or non-member ACL mirror. It no longer does.
+
+        ``None`` for a missing id, a foreign-tenant id (the query sees no row),
+        or a document the requester is not permitted — INV-1/INV-2 collapse all
+        three to 404 at the router.
+        """
+        return await get_permitted_document(
+            self._session, allow_set=self._allow_set, document_id=document_id
+        )
+
+    async def _owned(self, document_id: UUID) -> Document | None:
+        """Fetch a document the caller **manages**, or ``None`` (→ 404).
+
+        Document *management* (delete) stays an ownership decision and is
+        deliberately NOT routed through the read predicate: a grantee must not
+        be able to delete the owner's document, and the connecting admin must
+        stay able to remove a mirrored document they cannot read (the same
+        owner/admin rule that governs the source itself — ADR-0019 §1). Reads
+        go through :meth:`_visible`.
         """
         document = await self._documents.get(document_id)
         if document is None or not self._owns(document):
@@ -432,6 +464,14 @@ class DocumentService:
         row (if present) determines ``next_cursor`` and is then dropped. The
         optional ``collection_id`` / ``status`` / ``filename_query`` narrow the
         result (the contract's list filters).
+
+        The page is then passed through the **same mode-split predicate** as
+        every other read (:func:`app.retrieval.queries.permitted_document_ids`,
+        one bounded query over at most a page of ids): owning a document is not
+        sufficient for an ``acl_enforced`` connector row, so a listing must not
+        surface mirrored documents the requester's mirror does not currently
+        admit. Filtering happens **after** the cursor is computed, so paging
+        stays complete and monotonic — a page may simply carry fewer items.
         """
         page_size = _clamp_limit(limit)
         after_id = _decode_cursor(cursor) if cursor else None
@@ -446,7 +486,10 @@ class DocumentService:
         has_more = len(rows) > page_size
         page = rows[:page_size]
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
-        items = [await self._view(d) for d in page]
+        permitted = await permitted_document_ids(
+            self._session, allow_set=self._allow_set, document_ids=[d.id for d in page]
+        )
+        items = [await self._view(d) for d in page if d.id in permitted]
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:
@@ -552,12 +595,17 @@ class DocumentService:
     async def delete(self, document_id: UUID) -> bool:
         """Delete one of the caller's documents: the row (+ chunks) and the object.
 
-        Visibility (tenant + ownership) is established *before* any write so a
-        non-owner's document is never touched and is reported as 404 (INV-1/INV-2),
-        not 403. On success the row is deleted (the ORM ``delete-orphan`` cascade
-        removes its chunks) **and** the stored object is removed via the #22
-        adapter, then ``document.deleted`` is audited (INV-6). Returns ``False``
-        when the document is not visible to the caller.
+        **Ownership** (tenant + owner), not the read predicate, is established
+        *before* any write so a non-owner's document is never touched and is
+        reported as 404 (INV-1/INV-2), not 403. Management stays an ownership
+        decision on purpose: a grantee must not be able to delete the owner's
+        document, and the connecting admin keeps the ability to remove a
+        mirrored document their ACL mirror does not let them read.
+
+        On success the row is deleted (the ORM ``delete-orphan`` cascade removes
+        its chunks) **and** the stored object is removed via the #22 adapter,
+        then ``document.deleted`` is audited (INV-6). Returns ``False`` when the
+        document is not the caller's.
 
         Order: delete the row first, ``flush`` it, then remove the object **only
         if no other document (this tenant) still references the content-addressed
@@ -568,7 +616,7 @@ class DocumentService:
         ``count_by_storage_key`` read would still see the just-deleted row. All of
         this commits within this request's transaction at the router.
         """
-        document = await self._visible(document_id)
+        document = await self._owned(document_id)
         if document is None:
             return False
         deleted = await self._documents.delete(document_id)

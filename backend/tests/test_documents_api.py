@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -46,10 +47,11 @@ from app.db.repositories import (
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
+    SourceRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import DocumentStatus, Role
+from app.domain.entities import DocumentStatus, Role, SourceStatus
 from app.ingestion.chunking import chunk_text
 from app.main import create_app
 from app.services.document_service import reassemble_chunk_texts
@@ -1300,3 +1302,305 @@ async def test_text_emits_document_viewed_audit(
 async def test_text_requires_auth(client: AsyncClient) -> None:
     resp = await client.get(f"/api/v1/documents/{uuid.uuid4()}/text")
     assert resp.status_code == 401
+
+
+# --- Mirrored connector ACLs on the /documents surface (ADR-0019 §2) --------
+#
+# Connector documents are OWNED by the connecting admin, so an ownership-only
+# visibility check handed that admin every mirrored file through this surface —
+# metadata, text, streamed content, and the presigned object URL — even when
+# `acl_enforced=true` and the mirror was empty, stale, or did not list them.
+# The exclusive mode split (spec 0004 §2.2) says the opposite: for an enforced
+# document, access requires a FRESH mirrored-principal intersection and nothing
+# else. These are that rule's negatives on the point-read paths.
+
+
+async def _seed_connector_document(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+    *,
+    tenant_id: uuid.UUID,
+    owner_email: str,
+    collection_id: uuid.UUID,
+    principals: list[str],
+    synced_hours_ago: float | None = 0.0,
+    filename: str = "drive.txt",
+    data: bytes = b"mirrored body",
+) -> uuid.UUID:
+    """An ``acl_enforced`` document owned by the connecting admin."""
+    stored = await store.put(str(tenant_id), data, _TXT, filename)
+    synced_at = (
+        None if synced_hours_ago is None else datetime.now(UTC) - timedelta(hours=synced_hours_ago)
+    )
+    async with sessionmaker() as session:
+        owner = await UserRepository(session, tenant_id).get_by_email(owner_email)
+        assert owner is not None
+        source = await SourceRepository(session, tenant_id).create(
+            owner_id=owner.id,
+            type="gdrive",
+            config={"mode": "my_drive"},
+            status=SourceStatus.READY,
+        )
+        doc = await DocumentRepository(session, tenant_id).create(
+            owner_id=owner.id,
+            collection_id=collection_id,
+            filename=filename,
+            mime_type=_TXT,
+            size_bytes=len(data),
+            storage_key=stored.key,
+            acl_enforced=True,
+            source_id=source.id,
+            external_id=filename,
+            acl_principals=principals,
+            acl_synced_at=synced_at,
+        )
+        await session.commit()
+        return doc.id
+
+
+async def _assert_every_read_path_404s(client: AsyncClient, token: str, doc_id: uuid.UUID) -> None:
+    """Metadata, text, streamed content, and presign must all be 404."""
+    meta = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
+    assert meta.status_code == 404, meta.text
+    text = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert text.status_code == 404, text.text
+    content = await client.get(
+        f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
+    )
+    # 404 — never a 302 to a presigned URL (that would leak the bytes outright).
+    assert content.status_code == 404, content.text
+
+
+async def _connector_setup(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+    seeded: _Seeded,
+    *,
+    principals: list[str],
+    synced_hours_ago: float | None = 0.0,
+) -> uuid.UUID:
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    return await _seed_connector_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        principals=principals,
+        synced_hours_ago=synced_hours_ago,
+    )
+
+
+async def test_empty_mirror_denies_the_owning_admin_on_every_read_path(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """An empty mirror admits NO ONE — including the document's own owner."""
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=[])
+    token = await _login(client, seeded.alice_email)
+    await _assert_every_read_path_404s(client, token, doc_id)
+    assert store.presigned == []  # no URL was ever minted
+
+
+async def test_stale_mirror_denies_the_owning_admin_on_every_read_path(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """Past CONNECTOR_ACL_MAX_AGE_HOURS the mirror is stale ⇒ deny, even though
+    it names the requester (a stalled sync hides content, never serves stale
+    rights)."""
+    async with sessionmaker() as session:
+        alice = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.alice_email)
+        assert alice is not None
+    doc_id = await _connector_setup(
+        sessionmaker,
+        store,
+        seeded,
+        principals=[f"user:{alice.id}"],
+        synced_hours_ago=get_settings().connector_acl_max_age_hours + 1,
+    )
+    token = await _login(client, seeded.alice_email)
+    await _assert_every_read_path_404s(client, token, doc_id)
+
+
+async def test_never_synced_mirror_denies_the_owning_admin(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """A NULL ``acl_synced_at`` (never synced, or cascade stale-stamped) denies."""
+    async with sessionmaker() as session:
+        alice = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.alice_email)
+        assert alice is not None
+    doc_id = await _connector_setup(
+        sessionmaker, store, seeded, principals=[f"user:{alice.id}"], synced_hours_ago=None
+    )
+    token = await _login(client, seeded.alice_email)
+    await _assert_every_read_path_404s(client, token, doc_id)
+
+
+async def test_mirror_naming_another_user_denies_the_owning_admin(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """The owner leg does not apply at all: a fresh mirror that names only Bob
+    denies Alice, who owns the row."""
+    async with sessionmaker() as session:
+        bob = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.bob_email)
+        assert bob is not None
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=[f"user:{bob.id}"])
+    token = await _login(client, seeded.alice_email)
+    await _assert_every_read_path_404s(client, token, doc_id)
+
+
+async def test_fresh_mirror_admits_the_named_principal(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """The positive control — the mirror IS the authority for an enforced
+    document, so the user it names reads it even though Alice owns the row."""
+    async with sessionmaker() as session:
+        bob = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.bob_email)
+        assert bob is not None
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=[f"user:{bob.id}"])
+    await _make_ready_with_chunks(
+        sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, source="mirrored text"
+    )
+    token = await _login(client, seeded.bob_email)
+    meta = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
+    assert meta.status_code == 200, meta.text
+    text = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
+    assert text.status_code == 200, text.text
+    content = await client.get(
+        f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
+    )
+    assert content.status_code == 302
+
+
+async def test_empty_mirror_denies_the_INLINE_content_stream(
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other content path: with DOCUMENT_CONTENT_REDIRECT off the API streams
+    the bytes itself — that branch must deny too, not just the presigned 302."""
+    monkeypatch.setenv("DOCUMENT_CONTENT_REDIRECT", "false")
+    get_settings.cache_clear()
+    try:
+        doc_id = await _connector_setup(sessionmaker, store, seeded, principals=[])
+        application = create_app()
+
+        async def _override_session() -> AsyncIterator[AsyncSession]:
+            async with sessionmaker() as session:
+                yield session
+
+        application.dependency_overrides[get_db_session] = _override_session
+        application.dependency_overrides[get_object_store_dep] = lambda: store
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            token = await _login(ac, seeded.alice_email)
+            resp = await ac.get(f"/api/v1/documents/{doc_id}/content", headers=_auth(token))
+        assert resp.status_code == 404, resp.text
+    finally:
+        monkeypatch.delenv("DOCUMENT_CONTENT_REDIRECT", raising=False)
+        get_settings.cache_clear()
+
+
+async def test_tenant_wide_mirror_admits_a_tenant_member(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """An ``anyone``-shared source item maps to the tenant principal."""
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=["tenant"])
+    token = await _login(client, seeded.alice_email)
+    meta = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
+    assert meta.status_code == 200, meta.text
+
+
+async def test_cross_tenant_mirror_principal_never_admits(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """INV-1 sits outside the split: Carol (tenant B) sees nothing of tenant A's
+    even when the mirror is tenant-wide."""
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=["tenant"])
+    token = await _login(client, seeded.carol_email)
+    await _assert_every_read_path_404s(client, token, doc_id)
+
+
+async def test_listing_hides_unadmitted_connector_documents(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """The owner listing applies the same split: Alice's own connector document
+    is listed only while the mirror admits her."""
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    upload_id = await _seed_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        filename="upload.txt",
+    )
+    hidden_id = await _seed_connector_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        principals=[],
+        filename="hidden.txt",
+    )
+    shown_id = await _seed_connector_document(
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        collection_id=coll,
+        principals=["tenant"],
+        filename="shown.txt",
+    )
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get("/api/v1/documents", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    listed = {item["id"] for item in resp.json()["items"]}
+    assert str(upload_id) in listed  # owner-or-grant mode, unchanged
+    assert str(shown_id) in listed
+    assert str(hidden_id) not in listed  # empty mirror ⇒ invisible
+
+
+async def test_owner_can_still_delete_an_unreadable_connector_document(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """Management stays an ownership decision: the connecting admin can remove
+    a mirrored document the mirror does not let them read (the same rule that
+    governs the source itself)."""
+    doc_id = await _connector_setup(sessionmaker, store, seeded, principals=[])
+    token = await _login(client, seeded.alice_email)
+    resp = await client.delete(f"/api/v1/documents/{doc_id}", headers=_auth(token))
+    assert resp.status_code == 204, resp.text

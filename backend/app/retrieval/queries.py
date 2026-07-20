@@ -43,6 +43,8 @@ from sqlalchemy import ColumnElement, Select, String, and_, cast, false, func, o
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
+from app.db.repositories import to_document
+from app.domain.entities import Document
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
 
@@ -187,6 +189,60 @@ def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
             models.Document.acl_synced_at >= acl_freshness_floor(),
         ),
     )
+
+
+async def get_permitted_document(
+    session: AsyncSession, *, allow_set: AllowSet, document_id: UUID
+) -> Document | None:
+    """The permitted-document **point read** — one row, one predicate (INV-2).
+
+    Every non-retrieval read path that resolves a single document by id routes
+    through here (``/documents/{id}``, its ``/content``, ``/text``, and the
+    presigned object URL), so a document point read is governed by **exactly**
+    the mode-split predicate retrieval uses — :func:`_document_permitted` — and
+    not by a second, weaker rule.
+
+    That matters because connector documents are *owned* by the connecting
+    admin: an ownership-only check would let that admin read any mirrored file
+    through the ``/documents`` surface even when ``acl_enforced=true`` and the
+    mirror is empty, stale, or does not list them — the exact escalation the
+    exclusive-mode split exists to prevent. Here, an ``acl_enforced`` document
+    requires the fresh mirrored-principal intersection and nothing else.
+
+    ``None`` for a missing id, a foreign-tenant id, or a document the requester
+    is not permitted — the caller maps all three to **404** (existence
+    non-disclosure, never 403). Document *management* (delete) is deliberately
+    NOT routed through this predicate: it stays an ownership decision.
+    """
+    stmt = select(models.Document).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        models.Document.id == document_id,
+        _document_permitted(allow_set),
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return to_document(row) if row is not None else None
+
+
+async def permitted_document_ids(
+    session: AsyncSession, *, allow_set: AllowSet, document_ids: Sequence[UUID]
+) -> set[UUID]:
+    """Which of ``document_ids`` the requester may see (the same predicate).
+
+    The bounded set-membership form of :func:`get_permitted_document`, for
+    listing paths that have already fetched a page of rows: one extra query
+    over at most a page of ids, so an owner-scoped listing cannot surface a
+    connector document whose mirror does not admit the caller. Ids outside the
+    allow-set are simply absent.
+    """
+    ids = list(document_ids)
+    if not ids:
+        return set()
+    stmt = select(models.Document.id).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        models.Document.id.in_(ids),
+        _document_permitted(allow_set),
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 def permitted_document_names(

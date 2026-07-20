@@ -204,7 +204,13 @@ def _to_source(row: models.Source) -> Source:
     )
 
 
-def _to_document(row: models.Document) -> Document:
+def to_document(row: models.Document) -> Document:
+    """Map a ``documents`` row to the storage-faithful domain entity.
+
+    Public because the permission chokepoint (``retrieval/queries``) issues the
+    one permitted-document point read and must return the same domain type this
+    repository does — a second mapper would be a second source of truth.
+    """
     return Document(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -1597,7 +1603,7 @@ class DocumentRepository(_TenantScopedRepository):
         )
         self._session.add(row)
         await self._session.flush()
-        return _to_document(row)
+        return to_document(row)
 
     async def get_by_external_id(self, source_id: UUID, external_id: str) -> Document | None:
         """The source's document for a provider id, or ``None`` (ADR-0019 §3).
@@ -1612,7 +1618,7 @@ class DocumentRepository(_TenantScopedRepository):
             models.Document.external_id == external_id,
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
-        return _to_document(row) if row is not None else None
+        return to_document(row) if row is not None else None
 
     async def update_from_sync(
         self,
@@ -1653,7 +1659,7 @@ class DocumentRepository(_TenantScopedRepository):
         row.acl_scope_ids = list(acl_scope_ids) if acl_scope_ids is not None else None
         await self._session.flush()
         await self._session.refresh(row)
-        return _to_document(row)
+        return to_document(row)
 
     async def stamp_acl_stale_by_scope(
         self, source_id: UUID, scope_ids: Iterable[str]
@@ -1764,7 +1770,7 @@ class DocumentRepository(_TenantScopedRepository):
             .order_by(models.Document.created_at.asc())
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_document(r) for r in rows]
+        return [to_document(r) for r in rows]
 
     async def get(self, document_id: UUID) -> Document | None:
         stmt = select(models.Document).where(
@@ -1772,7 +1778,7 @@ class DocumentRepository(_TenantScopedRepository):
             models.Document.id == document_id,
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
-        return _to_document(row) if row is not None else None
+        return to_document(row) if row is not None else None
 
     async def list_ids_page(self, *, after_id: UUID | None, limit: int) -> list[UUID]:
         """One keyset page of this tenant's document ids, ascending by id.
@@ -1799,7 +1805,7 @@ class DocumentRepository(_TenantScopedRepository):
             .order_by(models.Document.created_at.desc())
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_document(r) for r in rows]
+        return [to_document(r) for r in rows]
 
     async def list_for_owner_page(
         self,
@@ -1863,7 +1869,7 @@ class DocumentRepository(_TenantScopedRepository):
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_document(r) for r in rows]
+        return [to_document(r) for r in rows]
 
     async def count_chunks(self, document_id: UUID) -> int:
         """Count indexed chunks for a document (the wire ``chunk_count``).
@@ -1940,7 +1946,7 @@ class DocumentRepository(_TenantScopedRepository):
         # The ``onupdate`` server default refreshed ``updated_at`` server-side;
         # reload so the mapper reads the new value without a lazy emit.
         await self._session.refresh(row)
-        return _to_document(row)
+        return to_document(row)
 
 
 class ArtifactRepository(_TenantScopedRepository):
