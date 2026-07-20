@@ -122,24 +122,34 @@ allowed to know is already in that snapshot.
 | Forbidden | Because |
 |---|---|
 | the secrets vault (`app.services.secrets_service`) | the framework resolves credentials and hands you an authenticated client; a raw token never enters connector code |
-| the DB (`app.db`, or `sqlalchemy` directly) | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
-| the object store (`app.storage`) | same reason: return bytes on `FetchedDoc.data` |
+| **Lumen's** database (`app.db` — session, models, repositories) | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
+| **Lumen's** object store (`app.storage`) | same reason: return bytes on `FetchedDoc.data` |
 | **mutable module-level state** | a connector must be re-entrant and hold nothing between runs; a module-level cache silently outlives the run and the tenant that filled it |
 
-`app.core.config` **is** allowed — reading deployment-level, non-secret settings
-is exactly what `oauth_spec()` does for the platform's client registration.
+Two things are explicitly **allowed**, because the rule is about *Lumen's* seams,
+not about categories of technology:
+
+- **`app.core.config`** — reading deployment-level, non-secret settings is
+  exactly what `oauth_spec()` does for the platform's client registration.
+- **A SQL client, including `sqlalchemy`, when your *external source* is a
+  database.** Talking to a data warehouse over SQL is a vendor boundary like any
+  other (ADR-0004); what you may not touch is Lumen's own session, models, or
+  repositories. The prohibition is `app.db`, not the existence of SQL.
 
 These are pinned structurally by an AST scan of your whole package
-(`tests/conformance/prohibitions.py`), including imports deferred inside a
-function body. A module-level constant table (`_EXPORT_MIME = {...}`,
-`__all__ = [...]`) is fine — the scan flags *mutation* (`global`, a mutating
-method call, an item/attribute write) and mutable containers bound to
-non-constant names (`_cache = {}`).
+(`tests/conformance/prohibitions.py`), covering imports that are deferred inside
+a function body **and** relative ones (`from ...db import repositories`) — both
+of the shapes a smuggled import actually takes. A module-level constant table
+(`_EXPORT_MIME = {...}`, `__all__ = [...]`) is fine: the scan flags *mutation*
+(`global`, a mutating method call, an item/attribute write) and mutable
+containers bound to non-constant names (`_cache = {}`), with real lexical
+scoping — a local of the same name inside a nested helper does not excuse a
+mutation in the enclosing function.
 
 **What the scan does not catch** — still on you and your reviewer: a dynamic
-import (`importlib.import_module`), state kept on a connector *instance*
-attribute rather than a module global, and mutation reached through an alias.
-The scan closes the accident-shaped holes; it is not a sandbox.
+import (`importlib.import_module`, `__import__`), state kept on a connector
+*instance* attribute rather than a module global, and mutation reached through
+an alias. The scan closes the accident-shaped holes; it is not a sandbox.
 
 **Trust model.** v1 connectors are first-party, in-repo, code-reviewed Python
 running **in-process** — the same trust boundary as the rest of the backend, so
@@ -233,9 +243,20 @@ The contract, and why each part exists:
   The framework then clears `sources.sync_cursor` and falls back to a full
   resync in the same run. A generic `ConnectorError` fails the sync instead of
   self-healing; a silent replay half-commits a token the provider has disowned.
+- **An *ordinary* fault is a plain `ConnectorError`, never `CursorExpiredError`.**
+  A transient 500 or a dropped connection must leave the committed cursor alone
+  so the next run resumes where this one stopped. Reaching for the expiry signal
+  on any failure throws away a valid resume point and re-enumerates the whole
+  corpus every time the provider hiccups. Conformance checks both directions.
 
 Full `sync()` stays mandatory: it is the bootstrap and the fallback. A null
 `sync_cursor` means the next sync is full.
+
+> **Conformance will ask you to prove the cascade signals actually fire**, not
+> just that the fields type-check: your harness supplies a replay containing a
+> container-permission change (⇒ non-empty `stale_scope_ids`) and one whose
+> effects cannot be proven (⇒ `integrity=INCOMPLETE`). If your source has no
+> containers, declare neither and the rules skip.
 
 ### 4.3 `map_acl()` — ACL mirroring
 
@@ -252,25 +273,41 @@ mirror admits nobody, **including the connecting admin**.
 The mapping is:
 
 - **Pure** — a plain (non-`async`) function, deterministic, no I/O, and it must
-  not mutate the snapshot it is handed. Everything it may know is in `ctx`.
+  mutate **neither** input: not the snapshot, not the raw payload. Everything it
+  may know is in `ctx` — including the evaluation instant, which is why you read
+  `ctx.evaluated_at` rather than the clock.
 - **Fail-closed** — anything unmappable grants nobody. Unknown type, unknown
   role, malformed entry, empty input: `frozenset()`.
 - **Never-escalating** — the mapped set is provably a **subset** of the source's
   own allow-list. Under-sharing is fine and expected; a single principal outside
   it is a privilege escalation through the mirror.
 
+> **What the purity rule actually enforces.** The kit checks determinism across
+> repeated calls, immutability of both `raw` and `ctx`, and blocks sockets and
+> `open()`. It does **not** intercept the clock: a mapper that calls
+> `datetime.now()` will pass and still be wrong (two documents in one sync can
+> then disagree). Use `ctx.evaluated_at`; that one is review-caught, not
+> test-caught.
+
 Principal vocabulary (v1): `user:<lumen_user_uuid>` and `tenant`. Use
 `ctx.principal_for_email(email)` — it only resolves **attested** identities
 (`users.email_attested_at`); an unattested match maps to nothing and is counted
 in `unmapped_acl_count` so an admin can see what attestation would light up.
 
-**If you declare `map_acl` you must also pass the INV-2 negative-test kit**
-(F-CB-3, issue [#454](https://github.com/k-sandhu/lumen-copilot/issues/454)) —
+**Pending prerequisite — the INV-2 negative-test kit (F-CB-3,
+[#454](https://github.com/k-sandhu/lumen-copilot/issues/454)) has not landed
+yet.** When it does, a `map_acl`-declaring connector must pass it as well: it is
 the ACL-proof suite covering cross-tenant exclusion, owner-denied and
 grantee-denied on empty/stale mirrors in **both** stores, stale-window denial,
-revocation-after-sync, and the never-escalate property. The conformance kit
-proves your mapper's *shape*; that kit proves the *semantics* hold end to end.
-Conformance passing is not a substitute.
+revocation-after-sync, and the never-escalate property end to end. Until then
+there is **no runnable INV-2 gate to point you at** — the closest existing
+coverage is `backend/tests/test_acl_mode_split.py` and
+`backend/tests/test_gdrive_acl_mapping.py`, and you should extend those with
+your connector's fixtures. Note what this means today: the conformance kit
+proves your mapper's *shape* (fail-closed, pure, never-escalating over the
+fixtures you supply); nothing yet proves the *semantics* hold through retrieval
+for a new connector. Treat an ACL-declaring connector as not-done until #454
+lands and you are in it.
 
 #### Current, deliberate limits (v1)
 
@@ -306,6 +343,14 @@ builtin exception escape a protocol method.**
 the Problem body — pick one per failure mode and don't churn it. `detail` is
 safe prose: never a token, never a raw vendor error body.
 
+**This applies past `validate_config`.** Conformance drives your connector
+against a *failing* provider and requires that `sync()` and `fetch_changes()`
+surface a `ConnectorError` with a non-empty `code` — a leaked `httpx.HTTPError`
+or `ValueError` becomes a 500 with vendor detail instead of a recorded, safe
+`last_error`. And `health()` **reports** a fault (`ConnectorHealth(healthy=False,
+detail=…)`) rather than raising it: a raising probe turns one unreachable source
+into a failed request for the whole connector grid.
+
 ## 6. Egress — the SSRF obligations
 
 The rule from [ADR-0009 §3](../architecture/0009-connector-framework-and-web-source.md),
@@ -337,19 +382,23 @@ warning.
    registry edit; the scan finds it.
 2. **Add the contract enum value** for the new `SourceType` in `contracts/`.
 3. **Add a conformance harness** — `backend/tests/conformance/harnesses.py`: an
-   offline `Source`, a `ConnectorRun` over an `httpx.MockTransport`, the invalid
-   configs your `validate_config` must reject, and one fixture per declared
-   capability (a replay cursor + an expired cursor; ACL cases carrying the
-   source's own allow-list for the subset proof). **A registered connector
-   without a harness fails the suite** — that is the point.
+   offline `Source`, a `ConnectorRun` over an `httpx.MockTransport`, a
+   **faulting** run (so the typed-error rules have a real fault to classify),
+   the invalid configs your `validate_config` must reject, and one fixture per
+   declared capability — a replay cursor, an expired cursor, a transient-fault
+   cursor, and (if your source has containers) a cascade + an unprovable page;
+   ACL cases carrying the source's own allow-list for the subset proof.
+   **A connector package that does not enroll, or that enrolls without a
+   harness, fails the suite** — that is the point.
 4. **Run the gates** from `backend/`:
    ```bash
    uv run --extra dev pytest tests/test_connector_conformance.py
    uv run --extra dev ruff check app tests
    uv run --extra dev mypy app
    ```
-5. **If you declared `map_acl`**, also run the INV-2 kit (#454) and add your
-   fixtures to it.
+5. **If you declared `map_acl`**, extend today's ACL coverage
+   (`tests/test_acl_mode_split.py`, `tests/test_gdrive_acl_mapping.py`) with your
+   fixtures, and join the INV-2 kit once #454 lands (§4.3).
 6. **Migrations**: `sources` already carries `auth_secret_ref`, `sync_cursor`,
    `connect_generation`, and `connected_account`; documents already carry
    `external_id`, `acl_enforced`, `acl_principals`, `acl_synced_at`, and
@@ -368,10 +417,18 @@ register an OAuth app.
 2. Add the redirect URI: `https://<your-host>/api/v1/sources/oauth/callback` —
    the one shared callback for every OAuth connector.
 3. Supply the credentials as deployment config (`pydantic-settings`, never in
-   code or compose). They are **blank-refused outside `local`**, so a
-   misconfigured production deployment fails fast at startup rather than at
-   first connect.
-4. Per-tenant bring-your-own-client is **not** supported in v1 — the client
+   code or compose).
+4. **Add your own non-local fail-fast validator — there is no generic one.**
+   The only startup blank-refusal that exists today is hard-coded to
+   `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET`
+   (`Settings._require_gdrive_oauth_client_in_prod` in `app/core/config.py`),
+   and conformance does not check registration fields. So a new managed
+   connector that only adds settings will start **blank in production** and fail
+   at first connect instead of at boot. Add the settings *and* a matching
+   validator modelled on the Google one, with a test. (Generalising this into
+   one mechanism — every declared `oauth_spec` connector's config refused blank
+   outside `local` — is a worthwhile follow-up; it is not in place.)
+5. Per-tenant bring-your-own-client is **not** supported in v1 — the client
    registration is platform-level (recorded follow-up).
 
 **Google Drive specifically:**
@@ -406,4 +463,5 @@ interval (`CONNECTOR_SYNC_INTERVAL_MINUTES`, default 60).
 | Worked example — no capabilities | `backend/app/connectors/web/` |
 | Worked example — all three capabilities | `backend/app/connectors/gdrive/` |
 | Conformance rules + harnesses | `backend/tests/conformance/`, `backend/tests/test_connector_conformance.py` |
-| ACL/INV-2 negative-test kit | `backend/tests/` (F-CB-3, [#454](https://github.com/k-sandhu/lumen-copilot/issues/454)) |
+| ACL enforcement coverage that exists **today** | `backend/tests/test_acl_mode_split.py`, `backend/tests/test_gdrive_acl_mapping.py` |
+| ACL/INV-2 negative-test kit | **not yet built** — F-CB-3, [#454](https://github.com/k-sandhu/lumen-copilot/issues/454) |

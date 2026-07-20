@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,6 +86,10 @@ class ConnectorHarness:
     # fetch_changes fixtures (ADR-0019 §3)
     start_cursor: str | None = None
     expired_cursor: str | None = None
+    fault_cursor: str | None = None
+    cascade_cursor: str | None = None
+    cascade_scope_id: str | None = None
+    incomplete_cursor: str | None = None
     # map_acl fixtures (ADR-0019 §2)
     acl_context: AclMappingContext | None = None
     acl_cases: tuple[AclCase, ...] = ()
@@ -96,6 +100,16 @@ class ConnectorHarness:
     @asynccontextmanager
     async def run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConnectorRun]:
         """The framework-shaped per-run context (ADR-0019 §4)."""
+        raise NotImplementedError  # pragma: no cover — overridden per connector
+        yield  # pragma: no cover — makes the base an async generator for typing
+
+    @asynccontextmanager
+    async def faulting_run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConnectorRun]:
+        """A run whose provider **fails** — for the typed-fault rules.
+
+        Every connector must have one: the ADR's "typed ConnectorError mapping"
+        is about the faults a real run hits, not only about a rejected config.
+        """
         raise NotImplementedError  # pragma: no cover — overridden per connector
         yield  # pragma: no cover — makes the base an async generator for typing
 
@@ -124,13 +138,34 @@ class _WebHarness(ConnectorHarness):
                 ),
             )
 
+        async with self._patched(monkeypatch, _page) as run:
+            yield run
+
+    @asynccontextmanager
+    async def faulting_run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConnectorRun]:
+        """The source URL answers 503 — the web connector's `fetch_failed` path."""
+
+        def _boom(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                503, headers={"content-type": "text/html"}, text="<p>upstream is down</p>"
+            )
+
+        async with self._patched(monkeypatch, _boom) as run:
+            yield run
+
+    @asynccontextmanager
+    async def _patched(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> AsyncIterator[ConnectorRun]:
         # Built BEFORE the class patch below, so the anonymous run client is a
         # real client with its own explicit transport.
         anonymous = httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(500)))
         real_client = httpx.AsyncClient
 
         def _factory(*_args: object, **_kwargs: object) -> httpx.AsyncClient:
-            return real_client(transport=httpx.MockTransport(_page), follow_redirects=False)
+            return real_client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
         monkeypatch.setattr("app.connectors.web.connector.httpx.AsyncClient", _factory)
         try:
@@ -159,11 +194,16 @@ _WEB = _WebHarness(
 class _FakeDrive:
     """A minimal scriptable Drive REST v3 double (dict in, JSON out).
 
-    Only the endpoints the SDK contract needs: the start token, an enumeration,
-    per-file permissions + export, one change-log replay, and ``about.get``. An
+    Only the endpoints the SDK contract needs: the start token, an enumeration
+    (parent-aware, so a cascade re-examination really walks a subtree),
+    per-file permissions + export, change-log replays, and ``about.get``. An
     unknown change token answers an empty terminal page whose
     ``newStartPageToken`` derives from it — which is what makes the cursor
     round-trip assertion meaningful rather than scripted.
+
+    ``fail_all`` turns every request into a 500 (the typed-fault scenario);
+    ``fault_tokens`` fails only a specific ``changes.list`` token, so an
+    ordinary replay fault can be told apart from a dead cursor.
     """
 
     def __init__(self) -> None:
@@ -172,24 +212,45 @@ class _FakeDrive:
         self.exports: dict[str, bytes] = {}
         self.changes_pages: dict[str, dict[str, Any]] = {}
         self.expired_tokens: set[str] = set()
+        self.fault_tokens: set[str] = set()
+        self.fail_all = False
         self.start_token = "baseline-0"
 
     def add_doc(
-        self, file_id: str, *, name: str, permissions: list[dict[str, Any]], body: bytes
+        self,
+        file_id: str,
+        *,
+        name: str,
+        permissions: list[dict[str, Any]],
+        body: bytes,
+        parent: str = "root-folder",
     ) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "id": file_id,
             "name": name,
             "mimeType": _GDOC,
             "modifiedTime": "2026-07-18T10:00:00Z",
-            "parents": ["root-folder"],
+            "parents": [parent],
         }
         self.files[file_id] = entry
         self.permissions[file_id] = permissions
         self.exports[file_id] = body
         return entry
 
+    def add_folder(self, folder_id: str, *, parent: str | None = None) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "id": folder_id,
+            "name": folder_id,
+            "mimeType": _FOLDER_MIME,
+            "parents": [parent] if parent else [],
+        }
+        self.files[folder_id] = entry
+        self.permissions[folder_id] = []
+        return entry
+
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if self.fail_all:
+            return httpx.Response(500, json={"error": "drive is unwell"})
         path = request.url.path
         params = request.url.params
         if path.endswith("/changes/startPageToken"):
@@ -198,6 +259,8 @@ class _FakeDrive:
             token = params.get("pageToken", "")
             if token in self.expired_tokens:
                 return httpx.Response(410, json={"error": "expired"})
+            if token in self.fault_tokens:
+                return httpx.Response(500, json={"error": "transient"})
             page = self.changes_pages.get(token)
             if page is None:
                 page = {"changes": [], "newStartPageToken": f"{token}-next"}
@@ -205,7 +268,7 @@ class _FakeDrive:
         if path.endswith("/drive/v3/about"):
             return self._json({"user": {"emailAddress": "admin@acme.test"}})
         if path.endswith("/drive/v3/files"):
-            return self._json({"files": [dict(f) for f in self.files.values()]})
+            return self._json({"files": self._list(params.get("q", ""))})
         if path.endswith("/permissions"):
             file_id = path.split("/files/")[1].split("/")[0]
             return self._json({"permissions": self.permissions.get(file_id, [])})
@@ -220,6 +283,22 @@ class _FakeDrive:
             return self._json(dict(entry))
         return httpx.Response(404, json={"error": "unrouted"})  # pragma: no cover
 
+    def _list(self, query: str) -> list[dict[str, Any]]:
+        """Honour ``'<id>' in parents`` so a subtree walk really is a subtree.
+
+        Without this every enumeration returns the whole corpus, and a cascade
+        re-examination would "succeed" by accident regardless of the scope the
+        connector asked for.
+        """
+        if " in parents" in query:
+            parent = query.split("'")[1]
+            return [
+                dict(entry)
+                for entry in self.files.values()
+                if parent in (entry.get("parents") or [])
+            ]
+        return [dict(entry) for entry in self.files.values()]
+
     @staticmethod
     def _json(payload: dict[str, Any]) -> httpx.Response:
         return httpx.Response(
@@ -229,6 +308,8 @@ class _FakeDrive:
 
 def _build_fake_drive() -> _FakeDrive:
     fake = _FakeDrive()
+    fake.add_folder("root-folder")
+    fake.add_folder("cascade-folder", parent="root-folder")
     fake.add_doc(
         "doc-conformance",
         name="Conformance Doc",
@@ -240,12 +321,17 @@ def _build_fake_drive() -> _FakeDrive:
         ],
         body=b"conformance body",
     )
-    fake.files["root-folder"] = {
-        "id": "root-folder",
-        "name": "Root",
-        "mimeType": _FOLDER_MIME,
-        "parents": [],
-    }
+    # A document INSIDE the cascade folder, so the container change has a real
+    # descendant to re-examine.
+    fake.add_doc(
+        "doc-nested",
+        name="Nested Doc",
+        permissions=[{"type": "user", "role": "reader", "emailAddress": "alice@acme.test"}],
+        body=b"nested body",
+        parent="cascade-folder",
+    )
+
+    # A plain replay: one upsert + one removal, integrity complete.
     fake.changes_pages["cursor-1"] = {
         "changes": [
             {
@@ -257,7 +343,27 @@ def _build_fake_drive() -> _FakeDrive:
         ],
         "newStartPageToken": "baseline-1",
     }
+    # A CONTAINER permission change: Drive emits no per-descendant event, so the
+    # connector must surface the folder id in stale_scope_ids and re-examine
+    # what is under it (ADR-0019 §3 cascade).
+    fake.changes_pages["cursor-cascade"] = {
+        "changes": [
+            {
+                "changeType": "file",
+                "fileId": "cascade-folder",
+                "file": dict(fake.files["cascade-folder"]),
+            }
+        ],
+        "newStartPageToken": "baseline-cascade",
+    }
+    # A live change with NO file metadata: the connector cannot prove what the
+    # change did to the mirror, so the page must fail closed.
+    fake.changes_pages["cursor-incomplete"] = {
+        "changes": [{"changeType": "file", "fileId": "doc-mystery"}],
+        "newStartPageToken": "baseline-incomplete",
+    }
     fake.expired_tokens.add("cursor-expired")
+    fake.fault_tokens.add("cursor-fault")
     return fake
 
 
@@ -280,6 +386,14 @@ class _GdriveHarness(ConnectorHarness):
     @asynccontextmanager
     async def run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConnectorRun]:
         async with self._client(monkeypatch, _build_fake_drive()) as http:
+            yield ConnectorRun(http=http, acl_context=_GDRIVE_CTX)
+
+    @asynccontextmanager
+    async def faulting_run(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConnectorRun]:
+        """Drive answers 500 to everything — the `drive_api_error` path."""
+        fake = _build_fake_drive()
+        fake.fail_all = True
+        async with self._client(monkeypatch, fake) as http:
             yield ConnectorRun(http=http, acl_context=_GDRIVE_CTX)
 
     @asynccontextmanager
@@ -318,6 +432,10 @@ _GDRIVE = _GdriveHarness(
     ),
     start_cursor="cursor-1",
     expired_cursor="cursor-expired",
+    fault_cursor="cursor-fault",
+    cascade_cursor="cursor-cascade",
+    cascade_scope_id="cascade-folder",
+    incomplete_cursor="cursor-incomplete",
     acl_context=_GDRIVE_CTX,
     acl_cases=(
         AclCase(

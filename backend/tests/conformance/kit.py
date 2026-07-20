@@ -14,18 +14,26 @@ The rules:
   values a real offline sync actually produced;
 * :func:`check_typed_config_error` — an invalid config raises the typed
   :class:`ConnectorConfigError` with a stable ``code``, never a vendor
-  exception;
-* :func:`check_oauth_spec` — https endpoints, non-empty scopes, a non-empty
-  pinned ``allowed_hosts`` that actually covers the endpoints it declares;
+  exception; :func:`check_typed_sync_fault` / :func:`check_typed_changes_fault`
+  / :func:`check_health_reports_fault` extend the same rule past config, to the
+  provider faults a real run actually hits;
+* :func:`check_oauth_spec` — the domain ``OAuthSpec`` type, https endpoints,
+  non-empty scopes, and a non-empty pinned ``allowed_hosts`` of bare hostnames
+  that actually covers the endpoints it declares (URL-parsed, so
+  ``https://good.test@evil.test/`` cannot smuggle a host past it);
 * :func:`check_cursor_round_trip` / :func:`check_expired_cursor_fallback` — the
   §3 page/cursor contract, including that an expired cursor raises the typed
   signal *before* any page is yielded (the framework's clear-and-full-resync);
+  :func:`check_cascade_signal` / :func:`check_incomplete_signal` prove the §3
+  cascade signals are actually *produced*, not merely well-typed;
 * :func:`check_map_acl_fail_closed` / :func:`check_map_acl_purity` /
   :func:`check_map_acl_never_escalates` — the §2 mapping contract.
 """
 
 from __future__ import annotations
 
+import builtins
+import copy
 import inspect
 import socket
 import typing
@@ -34,6 +42,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from typing import Any, get_args, get_origin
+from urllib.parse import urlsplit
 
 from app.connectors.base import (
     AclMappingContext,
@@ -47,20 +56,26 @@ from app.connectors.base import (
     SourceAcl,
     SyncPage,
 )
+from app.connectors.oauth import OAuthSpec
 from app.domain.entities import Source
 
 __all__ = [
     "AclCase",
+    "check_cascade_signal",
     "check_cursor_round_trip",
     "check_domain_documents",
     "check_domain_types_only",
     "check_expired_cursor_fallback",
+    "check_health_reports_fault",
+    "check_incomplete_signal",
     "check_map_acl_fail_closed",
     "check_map_acl_never_escalates",
     "check_map_acl_purity",
     "check_oauth_spec",
     "check_protocol_surface",
+    "check_typed_changes_fault",
     "check_typed_config_error",
+    "check_typed_sync_fault",
     "declared_capabilities",
 ]
 
@@ -143,6 +158,15 @@ def check_protocol_surface(connector: object, *, expected_name: str) -> None:
 
 
 def _check_signature(name: str, method: str, attr: Any, params: tuple[str, ...]) -> None:
+    """The framework's exact call must **bind**, not merely name-match.
+
+    Comparing positional parameter names alone accepts
+    ``async def sync(self, source, run, *, required)`` — which then raises
+    ``TypeError`` the first time the sync task calls ``sync(source, run)``. So
+    the check binds a representative call against the real signature: an
+    unsatisfied required parameter (keyword-only or otherwise) fails here rather
+    than in production.
+    """
     try:
         signature = inspect.signature(attr)
     except (TypeError, ValueError) as exc:  # pragma: no cover — exotic callables
@@ -159,6 +183,23 @@ def _check_signature(name: str, method: str, attr: Any, params: tuple[str, ...])
         f"calls it as {method}{tuple(params)} — the execution context is "
         f"framework-supplied, not connector-constructed (ADR-0019 §4, {_GUIDE})"
     )
+    sample = tuple(_CallSentinel(param) for param in params)
+    try:
+        signature.bind(*sample)
+    except TypeError as exc:
+        raise AssertionError(
+            f"connector {name!r}: the framework's call `{method}{tuple(params)}` does not "
+            f"bind against this signature ({exc}) — an extra required parameter (a "
+            "keyword-only one included) means the framework cannot call the method at "
+            f"all; give it a default or drop it ({_GUIDE})"
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _CallSentinel:
+    """A stand-in argument for signature binding — never actually invoked."""
+
+    param: str
 
 
 def _check_asyncness(name: str, method: str, attr: object) -> None:
@@ -343,33 +384,157 @@ def check_valid_config_round_trip(
     )
 
 
+def _assert_typed_fault(exc: BaseException, *, connector_name: str, where: str) -> None:
+    """A raised fault is a typed, vendor-free ``ConnectorError`` with a code."""
+    assert isinstance(exc, ConnectorError), (
+        f"connector {connector_name!r}: {where} raised "
+        f"{type(exc).__module__}.{type(exc).__qualname__} — a provider fault must surface "
+        "as the typed ConnectorError so the framework records a safe `last_error` and the "
+        f"API never leaks a vendor exception or stack trace to a client (ADR-0004, {_GUIDE})"
+    )
+    assert isinstance(exc.code, str) and exc.code, (
+        f"connector {connector_name!r}: the ConnectorError from {where} carries no `code` — "
+        "the code is the stable, machine-readable discriminator the framework and the API "
+        "key off"
+    )
+    assert (
+        isinstance(exc.detail, str) and exc.detail
+    ), f"connector {connector_name!r}: the ConnectorError from {where} carries no `detail`"
+
+
+async def check_typed_sync_fault(
+    connector: Any, *, source: Source, run: Any, connector_name: str
+) -> None:
+    """A provider fault during ``sync`` is a typed ``ConnectorError``.
+
+    The config rule alone is not the ADR's "typed `ConnectorError` mapping": the
+    faults a connector actually meets at 3am are a 500, a dropped connection, a
+    malformed body. Those must arrive at the framework typed and vendor-free, or
+    the sync task's error handling degrades into "something threw".
+    """
+    try:
+        result = await connector.sync(source, run)
+        list(result)
+    except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
+        _assert_typed_fault(exc, connector_name=connector_name, where="sync() on a failing source")
+        return
+    raise AssertionError(
+        f"connector {connector_name!r}: sync() completed against a failing provider — the "
+        "harness's fault scenario must actually fault, or this rule proves nothing"
+    )
+
+
+async def check_typed_changes_fault(
+    fetch_changes: Callable[[Source, str, Any], AsyncIterator[SyncPage]],
+    *,
+    source: Source,
+    cursor: str,
+    run: Any,
+    connector_name: str,
+) -> None:
+    """A provider fault during a replay is a typed ``ConnectorError`` — and is
+    **not** ``CursorExpiredError``.
+
+    The distinction is load-bearing: a cursor-expired signal makes the framework
+    discard the cursor and resync in full, while an ordinary fault must leave
+    the committed cursor alone so the next run resumes where this one stopped.
+    Collapsing the two would throw away a valid resume point on every transient
+    500.
+    """
+    try:
+        async for _page in fetch_changes(source, cursor, run):
+            pass
+    except CursorExpiredError as exc:
+        raise AssertionError(
+            f"connector {connector_name!r}: an ordinary provider fault during a replay "
+            "raised CursorExpiredError — that signal means the cursor is dead and makes "
+            "the framework discard a still-valid resume point; use ConnectorError for a "
+            "transient fault"
+        ) from exc
+    except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
+        _assert_typed_fault(
+            exc, connector_name=connector_name, where="fetch_changes() on a failing provider"
+        )
+        return
+    raise AssertionError(
+        f"connector {connector_name!r}: fetch_changes() drained cleanly against a failing "
+        "provider — the harness's fault scenario must actually fault"
+    )
+
+
+async def check_health_reports_fault(
+    connector: Any, *, source: Source, run: Any, connector_name: str
+) -> None:
+    """``health`` **reports** a fault; it never raises one.
+
+    Health is a probe the connector grid renders. A raising probe turns one
+    unreachable source into a failed request for the whole grid, so the fault is
+    a return value.
+    """
+    try:
+        health = await connector.health(source, run)
+    except BaseException as exc:  # noqa: BLE001 — a raise IS the failure being caught
+        raise AssertionError(
+            f"connector {connector_name!r}: health() raised "
+            f"{type(exc).__module__}.{type(exc).__qualname__} against a failing provider — "
+            "a probe REPORTS a fault as ConnectorHealth(healthy=False, detail=…) rather "
+            f"than raising it ({_GUIDE})"
+        ) from exc
+    check_health_result(health, connector_name=connector_name)
+    assert health.healthy is False, (
+        f"connector {connector_name!r}: health() reported healthy against a failing "
+        "provider — the harness's fault scenario must actually fault, or the probe is "
+        "not really probing"
+    )
+
+
 # --- oauth_spec capability ---------------------------------------------------
+
+
+def _endpoint_host(url: str, *, connector_name: str, label: str) -> str:
+    """The host a *runtime* client would dial — parsed, never string-split.
+
+    String-splitting on ``://`` and ``/`` reads the **userinfo** as the host, so
+    ``https://good.test@evil.test/authorize`` looks like it targets
+    ``good.test`` while httpx dials ``evil.test``. Pairing that with an
+    ``allowed_hosts`` entry of ``"good.test@evil.test"`` would pass a naive
+    check and pin nothing. Userinfo is therefore refused outright — an OAuth
+    endpoint has no business carrying credentials in its URL.
+    """
+    parts = urlsplit(url)
+    assert parts.scheme == "https", (
+        f"connector {connector_name!r}: oauth_spec().{label} is {url!r} — OAuth endpoints "
+        "must be https (state/code/tokens never transit cleartext, ADR-0019 §1)"
+    )
+    assert "@" not in parts.netloc, (
+        f"connector {connector_name!r}: oauth_spec().{label} carries userinfo "
+        f"({parts.netloc!r}) — the runtime host is {parts.hostname!r}, not what the text "
+        "reads like; an endpoint URL must be a plain https://host/path"
+    )
+    hostname = parts.hostname
+    assert hostname, f"connector {connector_name!r}: oauth_spec().{label} has no host ({url!r})"
+    return hostname.casefold()
 
 
 def check_oauth_spec(spec: Any, *, connector_name: str) -> None:
     """The declared OAuth capability is well formed (ADR-0019 §1/§5).
 
-    https endpoints (state and code must never transit cleartext), a non-empty
-    scope set, and a non-empty **pinned host set** — the fixed allowlist the
-    framework's guarded transport enforces before an Authorization header could
-    leave toward anything else.
+    The domain :class:`OAuthSpec` type (a duck-typed vendor object would carry
+    whatever fields it liked past the framework's guard), https endpoints, a
+    non-empty scope set, and a non-empty **pinned host set** — the fixed
+    allowlist the framework's guarded transport enforces before an Authorization
+    header could leave toward anything else. Endpoints and host entries are
+    URL-parsed and compared on normalized hosts.
     """
-    for attr in ("authorize_url", "token_url", "scopes", "allowed_hosts"):
-        assert hasattr(spec, attr), (
-            f"connector {connector_name!r}: oauth_spec() must return an OAuthSpec "
-            f"(missing `{attr}`) — see {_GUIDE}"
-        )
-    authorize_url = spec.authorize_url
-    token_url = spec.token_url
+    assert isinstance(spec, OAuthSpec), (
+        f"connector {connector_name!r}: oauth_spec() returned "
+        f"{type(spec).__module__}.{type(spec).__qualname__}, not the domain OAuthSpec — "
+        "the framework builds the authorize URL, the exchange, and the pinned client off "
+        f"this exact value object (ADR-0004 domain types, {_GUIDE})"
+    )
     scopes = spec.scopes
     allowed_hosts = spec.allowed_hosts
 
-    for label, url in (("authorize_url", authorize_url), ("token_url", token_url)):
-        assert isinstance(url, str) and url.startswith("https://"), (
-            f"connector {connector_name!r}: oauth_spec().{label} is {url!r} — OAuth "
-            "endpoints must be https (state/code/tokens never transit cleartext, "
-            "ADR-0019 §1)"
-        )
     assert isinstance(scopes, tuple) and scopes and all(isinstance(s, str) and s for s in scopes), (
         f"connector {connector_name!r}: oauth_spec().scopes must be a non-empty tuple "
         f"of scope strings (got {scopes!r}) — the consent screen is built from it"
@@ -384,19 +549,38 @@ def check_oauth_spec(spec: Any, *, connector_name: str) -> None:
         f"means every request is refused, and an unpinned one is an SSRF hole "
         f"(ADR-0019 §5 / ADR-0009 §3, {_GUIDE})"
     )
-    for host in allowed_hosts:
-        assert host == host.casefold() and not any(c in host for c in "/:?*"), (
-            f"connector {connector_name!r}: allowed_hosts entry {host!r} must be a bare "
-            "lowercase hostname (no scheme, port, path, or wildcard) — the guard "
-            "compares it against the request's casefolded host"
+
+    # Each entry must be a BARE hostname: the guard compares it verbatim against
+    # the request's casefolded host, so anything carrying a scheme, userinfo,
+    # port, or path silently matches nothing (pinning becomes a no-op) — or
+    # worse, reads as a host it is not.
+    pinned: set[str] = set()
+    for entry in allowed_hosts:
+        parsed = urlsplit(f"//{entry}")
+        bare = (
+            entry == entry.casefold()
+            and parsed.hostname == entry
+            and parsed.port is None
+            and "@" not in entry
+            and not any(char in entry for char in "/:?#*")
         )
-    hosts = frozenset(allowed_hosts)
-    for label, url in (("authorize_url", authorize_url), ("token_url", token_url)):
-        host = url.split("://", 1)[1].split("/", 1)[0].casefold()
-        assert host in hosts, (
-            f"connector {connector_name!r}: oauth_spec().{label} points at {host!r}, "
-            f"which is not in allowed_hosts {sorted(hosts)} — the guarded client "
-            "would refuse the connector's own endpoint"
+        assert bare, (
+            f"connector {connector_name!r}: allowed_hosts entry {entry!r} must be a bare "
+            "lowercase hostname (no scheme, userinfo, port, path, or wildcard) — the "
+            "guard compares it verbatim against the request's casefolded host, so a "
+            "decorated entry pins nothing"
+        )
+        pinned.add(entry)
+
+    for label, url in (("authorize_url", spec.authorize_url), ("token_url", spec.token_url)):
+        assert (
+            isinstance(url, str) and url
+        ), f"connector {connector_name!r}: oauth_spec().{label} must be a non-empty string"
+        host = _endpoint_host(url, connector_name=connector_name, label=label)
+        assert host in pinned, (
+            f"connector {connector_name!r}: oauth_spec().{label} resolves to host {host!r}, "
+            f"which is not in allowed_hosts {sorted(pinned)} — the guarded client would "
+            "refuse the connector's own endpoint"
         )
 
 
@@ -509,6 +693,68 @@ async def check_expired_cursor_fallback(
     )
 
 
+async def check_cascade_signal(
+    fetch_changes: Callable[[Source, str, Any], AsyncIterator[SyncPage]],
+    *,
+    source: Source,
+    cursor: str,
+    run: Any,
+    connector_name: str,
+    expected_scope: str | None = None,
+) -> None:
+    """A container-permission change actually **produces** ``stale_scope_ids``.
+
+    ADR-0019 §4 assigns the connector-side *production* of the cascade signals to
+    this kit (the framework's stale-stamp reaction is proven in the sync-task
+    tests). Type-checking an empty default proves nothing: providers do not emit
+    one change per descendant, so a connector that fails to surface the container
+    id leaves every descendant's mirror **fresh** after a permission change —
+    a silent fail-open, and the exact bug this field exists to prevent.
+    """
+    pages = [page async for page in fetch_changes(source, cursor, run)]
+    assert pages, f"connector {connector_name!r}: the cascade scenario produced no page at all"
+    signalled: set[str] = set()
+    for page in pages:
+        signalled |= set(page.stale_scope_ids)
+    assert signalled, (
+        f"connector {connector_name!r}: a container-permission change replayed without "
+        "any `stale_scope_ids` — the framework has no way to find the affected "
+        "descendants, so their mirrors stay fresh after a permission change (fail-open, "
+        f"ADR-0019 §3, {_GUIDE})"
+    )
+    if expected_scope is not None:
+        assert expected_scope in signalled, (
+            f"connector {connector_name!r}: expected the changed container "
+            f"{expected_scope!r} in stale_scope_ids, got {sorted(signalled)}"
+        )
+
+
+async def check_incomplete_signal(
+    fetch_changes: Callable[[Source, str, Any], AsyncIterator[SyncPage]],
+    *,
+    source: Source,
+    cursor: str,
+    run: Any,
+    connector_name: str,
+) -> None:
+    """An unprovable page actually **produces** ``integrity=INCOMPLETE``.
+
+    The fail-closed escape hatch (ADR-0019 §3): when the connector cannot prove
+    which documents a replayed change affects, it says so and the framework
+    stamps the whole source stale. A connector that reports ``COMPLETE`` for a
+    page it could not fully interpret is claiming a guarantee it does not have,
+    and the framework will believe it.
+    """
+    pages = [page async for page in fetch_changes(source, cursor, run)]
+    assert pages, f"connector {connector_name!r}: the incomplete-page scenario produced no page"
+    assert any(page.integrity is PageIntegrity.INCOMPLETE for page in pages), (
+        f"connector {connector_name!r}: a replay whose effects cannot be proven complete "
+        "reported integrity=COMPLETE — the framework then trusts a guarantee the "
+        "connector does not have; emit PageIntegrity.INCOMPLETE so it fails closed "
+        f"source-wide (ADR-0019 §3, {_GUIDE})"
+    )
+
+
 # --- map_acl capability (ADR-0019 §2) ----------------------------------------
 
 
@@ -580,11 +826,17 @@ def check_map_acl_purity(
 ) -> None:
     """``map_acl`` is pure over the frozen :class:`AclMappingContext`.
 
-    Same input ⇒ same output, no network, and the context is left untouched. The
-    framework freezes an identity snapshot per run precisely so mapping is
-    deterministic and replayable — a mapper that dialled a directory service (or
-    mutated the snapshot mid-run) would make two documents in one sync disagree
-    about who a principal is.
+    Same input ⇒ same output, no network or file I/O, and **neither input is
+    mutated**. The framework freezes an identity snapshot per run precisely so
+    mapping is deterministic and replayable — a mapper that dialled a directory
+    service, or that edited the raw payload it was handed, would make two
+    documents in one sync disagree about who a principal is.
+
+    Enforcement boundary, stated plainly (the guide says the same): this checks
+    determinism across repeated calls, immutability of ``raw`` **and** ``ctx``,
+    and blocks sockets and :func:`open`. It does **not** intercept the clock —
+    a mapper must use ``ctx.evaluated_at`` rather than reading ``datetime.now``,
+    and that one stays review-caught.
     """
     params = AclMappingContext.__dataclass_params__  # type: ignore[attr-defined]
     assert is_dataclass(AclMappingContext) and params.frozen, (
@@ -592,8 +844,9 @@ def check_map_acl_purity(
         "snapshot the framework owns for the whole run"
     )
 
-    before = (dict(ctx.email_to_user_id), ctx.evaluated_at, ctx.tenant_principal)
-    with _no_network(connector_name):
+    ctx_before = (dict(ctx.email_to_user_id), ctx.evaluated_at, ctx.tenant_principal)
+    raw_before = copy.deepcopy(dict(raw))
+    with _no_io(connector_name):
         first = map_acl(raw, ctx)
         second = map_acl(raw, ctx)
     assert first == second, (
@@ -601,36 +854,50 @@ def check_map_acl_purity(
         f"the same input returned {sorted(first)} then {sorted(second)}; the mapping "
         f"must be pure over the frozen AclMappingContext (ADR-0019 §4, {_GUIDE})"
     )
-    after = (dict(ctx.email_to_user_id), ctx.evaluated_at, ctx.tenant_principal)
-    assert before == after, (
+    ctx_after = (dict(ctx.email_to_user_id), ctx.evaluated_at, ctx.tenant_principal)
+    assert ctx_before == ctx_after, (
         f"connector {connector_name!r}: map_acl mutated the AclMappingContext — the "
         "identity snapshot is the framework's, shared across the whole run"
+    )
+    assert raw_before == dict(raw), (
+        f"connector {connector_name!r}: map_acl mutated the raw permission payload it was "
+        "handed — the mapper reads its input, it does not edit it; the framework may "
+        "reuse that payload (health counts, retries) and would then see a different "
+        f"document than the source sent ({_GUIDE})"
     )
 
 
 @contextmanager
-def _no_network(connector_name: str) -> typing.Iterator[None]:
-    """Make any socket use inside the block an actionable failure.
+def _no_io(connector_name: str) -> typing.Iterator[None]:
+    """Make socket *and* file use inside the block an actionable failure.
 
-    Bounds the purity claim at the network edge — the one kind of I/O a mapper
-    would plausibly reach for (resolving a group, looking up a directory).
+    The two kinds of I/O a mapper would plausibly reach for: resolving a group
+    against a directory service, or reading a mapping file off disk. Both would
+    make ACL mapping depend on something outside the frozen snapshot — which is
+    to say, non-replayable and not equal across the documents of one sync.
     """
 
-    def _blocked(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError(
-            f"connector {connector_name!r}: map_acl opened a socket — the mapping is "
-            "PURE over the frozen AclMappingContext; everything it may know is already "
-            f"in that snapshot (ADR-0019 §4, {_GUIDE})"
-        )
+    def _blocked(what: str) -> Callable[..., object]:
+        def _raise(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError(
+                f"connector {connector_name!r}: map_acl performed {what} — the mapping is "
+                "PURE over the frozen AclMappingContext; everything it may know is "
+                f"already in that snapshot (ADR-0019 §4, {_GUIDE})"
+            )
 
-    saved = (socket.socket, socket.getaddrinfo, socket.create_connection)
-    socket.socket = _blocked  # type: ignore[assignment]
-    socket.getaddrinfo = _blocked  # type: ignore[assignment]
-    socket.create_connection = _blocked  # type: ignore[assignment]
+        return _raise
+
+    saved_socket = (socket.socket, socket.getaddrinfo, socket.create_connection)
+    saved_open = builtins.open
+    socket.socket = _blocked("network I/O")  # type: ignore[assignment]
+    socket.getaddrinfo = _blocked("a DNS lookup")  # type: ignore[assignment]
+    socket.create_connection = _blocked("network I/O")  # type: ignore[assignment]
+    builtins.open = _blocked("file I/O")  # type: ignore[assignment]
     try:
         yield
     finally:
-        socket.socket, socket.getaddrinfo, socket.create_connection = saved  # type: ignore[assignment]
+        builtins.open = saved_open
+        socket.socket, socket.getaddrinfo, socket.create_connection = saved_socket  # type: ignore[assignment]
 
 
 def check_map_acl_never_escalates(

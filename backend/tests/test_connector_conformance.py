@@ -52,7 +52,6 @@ from app.connectors.base import (
     FetchedDoc,
     FullSyncResult,
     PageIntegrity,
-    SourceAcl,
     SyncPage,
     get_fetch_changes,
     get_map_acl,
@@ -66,7 +65,10 @@ from tests.conformance.harnesses import ConnectorHarness, harness_for, harness_n
 from tests.conformance.prohibitions import (
     Violation,
     check_execution_context_prohibitions,
+    check_registry_enrollment,
     connector_package_path,
+    connectors_root,
+    discover_connector_packages,
     scan_package,
 )
 
@@ -80,7 +82,7 @@ def harness(request: pytest.FixtureRequest) -> ConnectorHarness:
     return harness_for(str(request.param))
 
 
-# --- the kit covers whatever the registry discovered -------------------------
+# --- enrollment: the kit sees every connector ON DISK, not just enrolled ones -
 
 
 def test_registry_is_non_empty() -> None:
@@ -88,6 +90,43 @@ def test_registry_is_non_empty() -> None:
     parametrized test below disappear rather than fail."""
     assert CONNECTOR_TYPES, "the connector registry discovered nothing — the kit would be vacuous"
     assert {"web", "gdrive"} <= set(CONNECTOR_TYPES)
+
+
+def _diagnose_unenrolled(package: str) -> str | None:
+    """Why did the registry drop this package? (imported, then protocol-checked)"""
+    import importlib
+
+    try:
+        module = importlib.import_module(f"app.connectors.{package}")
+        candidate = getattr(module, "CONNECTOR", None)
+    except Exception as exc:  # pragma: no cover — an import-time defect
+        return f"importing app.connectors.{package} raised {type(exc).__name__}: {exc}"
+    if candidate is None:  # pragma: no cover — guarded by the AST check first
+        return "CONNECTOR is None"
+    try:
+        kit.check_protocol_surface(candidate, expected_name=package)
+    except AssertionError as exc:
+        return str(exc)
+    return None  # pragma: no cover — a conformant connector would have enrolled
+
+
+def test_every_connector_package_enrolls_in_the_registry() -> None:
+    """Every connector package **on disk** must actually enroll (ADR-0008 §3).
+
+    The hole this closes: ``registry._registry()`` *skips* a ``CONNECTOR`` that
+    fails the runtime protocol check instead of raising. A newly dropped
+    connector missing (say) ``health`` is therefore absent from
+    ``registered_types()`` — so a suite parametrized over the registry passes
+    green while the connector the author just added was never tested at all.
+    Enrollment has to be checked from the filesystem, the only side that can see
+    a package the registry dropped.
+    """
+    check_registry_enrollment(connectors_root(), registered_types(), diagnose=_diagnose_unenrolled)
+
+
+def test_enrollment_check_sees_the_real_packages() -> None:
+    """Anti-vacuity: the disk scan must find the connectors we know exist."""
+    assert {"web", "gdrive"} <= set(discover_connector_packages(connectors_root()))
 
 
 def test_every_registered_connector_has_a_harness() -> None:
@@ -169,6 +208,67 @@ async def test_health_returns_domain_probe(
     async with harness.run(monkeypatch) as run:
         health = await connector.health(harness.source(), run)
     kit.check_health_result(health, connector_name=harness.name)
+
+
+# --- typed errors beyond config (ADR-0009 §1 / ADR-0004) ---------------------
+
+
+async def test_sync_fault_is_a_typed_connector_error(
+    harness: ConnectorHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider fault during ``sync`` surfaces as ``ConnectorError`` + code.
+
+    The config rule alone does not satisfy "typed ConnectorError mapping": the
+    faults a connector actually meets are 5xx responses and dropped connections,
+    and a leaked ``httpx.HTTPError`` there becomes a 500 with vendor detail
+    rather than a recorded, safe ``last_error``.
+    """
+    async with harness.faulting_run(monkeypatch) as run:
+        await kit.check_typed_sync_fault(
+            get_connector(harness.name),
+            source=harness.source(),
+            run=run,
+            connector_name=harness.name,
+        )
+
+
+async def test_health_reports_a_fault_instead_of_raising(
+    harness: ConnectorHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable provider is an unhealthy probe, not an exception."""
+    async with harness.faulting_run(monkeypatch) as run:
+        await kit.check_health_reports_fault(
+            get_connector(harness.name),
+            source=harness.source(),
+            run=run,
+            connector_name=harness.name,
+        )
+
+
+async def test_changes_fault_is_typed_and_not_cursor_expiry(
+    harness: ConnectorHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient replay fault is a ``ConnectorError``, never ``CursorExpiredError``.
+
+    Collapsing the two would make the framework discard a still-valid resume
+    point on every transient 500 and re-enumerate the whole corpus.
+    """
+    connector = get_connector(harness.name)
+    fetch_changes = get_fetch_changes(connector)
+    if fetch_changes is None:
+        pytest.skip(f"{harness.name} declares no fetch_changes capability")
+    assert harness.fault_cursor is not None, (
+        f"harness for {harness.name!r} declares fetch_changes but no fault_cursor — "
+        "the typed-fault rule needs a replay that fails for an ordinary reason"
+    )
+    async with harness.run(monkeypatch) as run:
+        await kit.check_typed_changes_fault(
+            fetch_changes,
+            source=harness.source(),
+            cursor=harness.fault_cursor,
+            run=run,
+            connector_name=harness.name,
+        )
 
 
 # --- execution-context prohibitions (ADR-0019 §4) ----------------------------
@@ -253,6 +353,60 @@ async def test_expired_cursor_falls_back(
             run=run,
             connector_name=harness.name,
         )
+
+
+async def test_container_change_produces_a_cascade_scope(
+    harness: ConnectorHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A container permission change really emits ``stale_scope_ids`` (§3).
+
+    Providers do not emit one change per descendant, so this field is the ONLY
+    way the framework learns which documents a folder-level permission change
+    affected. A connector that stays silent leaves every descendant's mirror
+    fresh after a revocation — a fail-open the type checks alone cannot see.
+    """
+    fetch_changes = get_fetch_changes(get_connector(harness.name))
+    if fetch_changes is None or harness.cascade_cursor is None:
+        pytest.skip(f"{harness.name} declares no container-cascade scenario")
+    async with harness.run(monkeypatch) as run:
+        await kit.check_cascade_signal(
+            fetch_changes,
+            source=harness.source(),
+            cursor=harness.cascade_cursor,
+            run=run,
+            connector_name=harness.name,
+            expected_scope=harness.cascade_scope_id,
+        )
+
+
+async def test_unprovable_page_produces_incomplete_integrity(
+    harness: ConnectorHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page whose effects cannot be proven really reports ``INCOMPLETE`` (§3)."""
+    fetch_changes = get_fetch_changes(get_connector(harness.name))
+    if fetch_changes is None or harness.incomplete_cursor is None:
+        pytest.skip(f"{harness.name} declares no unprovable-page scenario")
+    async with harness.run(monkeypatch) as run:
+        await kit.check_incomplete_signal(
+            fetch_changes,
+            source=harness.source(),
+            cursor=harness.incomplete_cursor,
+            run=run,
+            connector_name=harness.name,
+        )
+
+
+def test_the_cascade_signals_are_proven_by_someone() -> None:
+    """Anti-vacuity: both §3 cascade scenarios must be exercised by a connector.
+
+    They are optional per connector (a source with no containers has no cascade
+    to emit), but if *no* registered connector declares them the two rules above
+    would skip into a vacuum and prove nothing.
+    """
+    cascade = [n for n in CONNECTOR_TYPES if harness_for(n).cascade_cursor is not None]
+    incomplete = [n for n in CONNECTOR_TYPES if harness_for(n).incomplete_cursor is not None]
+    assert cascade, "no connector harness exercises stale_scope_ids production (ADR-0019 §3)"
+    assert incomplete, "no connector harness exercises integrity=INCOMPLETE production"
 
 
 # --- capability: map_acl (ADR-0019 §2) ---------------------------------------
@@ -354,6 +508,24 @@ class _SyncSyncConnector(_GoodConnector):
 def test_kit_bites_non_async_sync() -> None:
     with pytest.raises(AssertionError, match=r"`sync` must be `async def`"):
         kit.check_protocol_surface(_SyncSyncConnector(), expected_name="synthetic")
+
+
+class _ExtraRequiredKwargConnector(_GoodConnector):
+    """Names the right positionals, but the framework's call cannot bind.
+
+    ``sync(source, run)`` raises ``TypeError`` at runtime because ``required``
+    has no default — a name-only signature comparison waves this through.
+    """
+
+    async def sync(  # type: ignore[override]
+        self, source: Source, run: ConnectorRun, *, required: str
+    ) -> Iterable[FetchedDoc]:
+        return []
+
+
+def test_kit_bites_unbindable_signature() -> None:
+    with pytest.raises(AssertionError, match=r"does not bind against this signature"):
+        kit.check_protocol_surface(_ExtraRequiredKwargConnector(), expected_name="synthetic")
 
 
 class _WrongSignatureConnector(_GoodConnector):
@@ -481,6 +653,215 @@ def test_kit_bites_malformed_oauth_spec(spec: OAuthSpec, expected: str) -> None:
         kit.check_oauth_spec(spec, connector_name="synthetic")
 
 
+def test_kit_bites_userinfo_smuggled_endpoint() -> None:
+    """The real bypass: the URL *reads* as good.test, the client dials evil.test.
+
+    ``allowed_hosts`` here is deliberately a clean, bare ``evil.test`` — so the
+    host-shape rule is satisfied and the *only* thing that can catch this is the
+    userinfo rejection. (A naive check that finds the host by splitting on
+    ``://`` and ``/`` would read ``good.test@evil.test`` and never notice.)
+    """
+    spec = OAuthSpec(
+        authorize_url="https://good.test@evil.test/authorize",
+        token_url="https://good.test@evil.test/token",
+        scopes=("read",),
+        client_id="c",
+        client_secret="s",
+        allowed_hosts=("evil.test",),
+    )
+    with pytest.raises(AssertionError, match=r"carries userinfo"):
+        kit.check_oauth_spec(spec, connector_name="synthetic")
+
+
+def test_kit_bites_decorated_allowed_host_entry() -> None:
+    """The other half: a host entry that is not a bare hostname pins nothing.
+
+    The guard compares entries verbatim against the request's casefolded host,
+    so ``"good.test@evil.test"`` in the allowlist matches no real request — the
+    pin silently becomes a no-op.
+    """
+    spec = OAuthSpec(
+        authorize_url="https://provider.test/authorize",
+        token_url="https://provider.test/token",
+        scopes=("read",),
+        client_id="c",
+        client_secret="s",
+        allowed_hosts=("good.test@evil.test", "provider.test"),
+    )
+    with pytest.raises(AssertionError, match=r"bare lowercase hostname"):
+        kit.check_oauth_spec(spec, connector_name="synthetic")
+
+
+def test_oauth_spec_accepts_an_explicit_default_port() -> None:
+    """Control for the parsing fix: ``:443`` is the same host, not a mismatch."""
+    spec = OAuthSpec(
+        authorize_url="https://provider.test:443/authorize",
+        token_url="https://provider.test:443/token",
+        scopes=("read",),
+        client_id="c",
+        client_secret="s",
+        allowed_hosts=("provider.test",),
+    )
+    kit.check_oauth_spec(spec, connector_name="synthetic")
+
+
+class _DuckTypedSpec:
+    """A vendor-shaped object with the right attribute names and nothing else."""
+
+    authorize_url = "https://provider.test/authorize"
+    token_url = "https://provider.test/token"
+    scopes = ("read",)
+    allowed_hosts = ("provider.test",)
+
+
+def test_kit_bites_duck_typed_oauth_spec() -> None:
+    with pytest.raises(AssertionError, match=r"not the domain OAuthSpec"):
+        kit.check_oauth_spec(_DuckTypedSpec(), connector_name="synthetic")
+
+
+# --- typed faults past config ------------------------------------------------
+
+
+class _LeakySyncConnector(_GoodConnector):
+    """Lets the vendor's own transport exception escape ``sync``."""
+
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+        raise httpx.ConnectError("connection refused")
+
+
+async def test_kit_bites_vendor_exception_from_sync() -> None:
+    with pytest.raises(AssertionError, match=r"must surface as the typed ConnectorError"):
+        await kit.check_typed_sync_fault(
+            _LeakySyncConnector(), source=_stub_source(), run=None, connector_name="synthetic"
+        )
+
+
+class _CodelessFaultConnector(_GoodConnector):
+    """Typed, but with no stable code for the framework to record."""
+
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+        raise ConnectorError("something went wrong", code="")
+
+
+async def test_kit_bites_codeless_sync_fault() -> None:
+    with pytest.raises(AssertionError, match=r"carries no `code`"):
+        await kit.check_typed_sync_fault(
+            _CodelessFaultConnector(), source=_stub_source(), run=None, connector_name="synthetic"
+        )
+
+
+class _RaisingHealthConnector(_GoodConnector):
+    """A probe that raises — one dead source breaks the whole grid request."""
+
+    async def health(self, source: Source, run: ConnectorRun) -> ConnectorHealth:
+        raise httpx.ConnectError("connection refused")
+
+
+async def test_kit_bites_raising_health_probe() -> None:
+    with pytest.raises(AssertionError, match=r"health\(\) raised"):
+        await kit.check_health_reports_fault(
+            _RaisingHealthConnector(), source=_stub_source(), run=None, connector_name="synthetic"
+        )
+
+
+class _OptimisticHealthConnector(_GoodConnector):
+    """Always healthy — a probe that never probes."""
+
+
+async def test_kit_bites_health_that_never_fails() -> None:
+    with pytest.raises(AssertionError, match=r"reported healthy against a failing"):
+        await kit.check_health_reports_fault(
+            _OptimisticHealthConnector(),
+            source=_stub_source(),
+            run=None,
+            connector_name="synthetic",
+        )
+
+
+async def test_kit_bites_replay_fault_disguised_as_cursor_expiry() -> None:
+    """A transient 500 signalled as cursor-expiry throws away a valid cursor."""
+
+    async def _mislabels(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        raise CursorExpiredError()
+        yield  # pragma: no cover — unreachable, keeps this an async generator
+
+    with pytest.raises(AssertionError, match=r"raised CursorExpiredError"):
+        await kit.check_typed_changes_fault(
+            _mislabels,
+            source=_stub_source(),
+            cursor="fault",
+            run=None,
+            connector_name="synthetic",
+        )
+
+
+async def test_kit_bites_vendor_exception_from_fetch_changes() -> None:
+    async def _leaks(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        raise httpx.ReadTimeout("too slow")
+        yield  # pragma: no cover — unreachable, keeps this an async generator
+
+    with pytest.raises(AssertionError, match=r"must surface as the typed ConnectorError"):
+        await kit.check_typed_changes_fault(
+            _leaks, source=_stub_source(), cursor="fault", run=None, connector_name="synthetic"
+        )
+
+
+# --- cascade signals (ADR-0019 §3) -------------------------------------------
+
+
+async def test_kit_bites_silent_container_cascade() -> None:
+    """A container change replayed with no ``stale_scope_ids`` is a fail-open."""
+
+    async def _silent(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        yield SyncPage(upserts=(), deleted_external_ids=frozenset(), next_cursor="c1")
+
+    with pytest.raises(AssertionError, match=r"without any `stale_scope_ids`"):
+        await kit.check_cascade_signal(
+            _silent, source=_stub_source(), cursor="cascade", run=None, connector_name="synthetic"
+        )
+
+
+async def test_kit_bites_wrong_cascade_scope() -> None:
+    async def _wrong_scope(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        yield SyncPage(
+            upserts=(),
+            deleted_external_ids=frozenset(),
+            next_cursor="c1",
+            stale_scope_ids=frozenset({"some-other-folder"}),
+        )
+
+    with pytest.raises(AssertionError, match=r"expected the changed container"):
+        await kit.check_cascade_signal(
+            _wrong_scope,
+            source=_stub_source(),
+            cursor="cascade",
+            run=None,
+            connector_name="synthetic",
+            expected_scope="cascade-folder",
+        )
+
+
+async def test_kit_bites_overclaimed_page_integrity() -> None:
+    """Reporting COMPLETE for a page the connector could not interpret."""
+
+    async def _overclaims(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        yield SyncPage(
+            upserts=(),
+            deleted_external_ids=frozenset(),
+            next_cursor="c1",
+            integrity=PageIntegrity.COMPLETE,
+        )
+
+    with pytest.raises(AssertionError, match=r"reported integrity=COMPLETE"):
+        await kit.check_incomplete_signal(
+            _overclaims,
+            source=_stub_source(),
+            cursor="incomplete",
+            run=None,
+            connector_name="synthetic",
+        )
+
+
 def _escalating_map_acl(raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]:
     """Maps an unexpanded group to the whole tenant — the classic escalation."""
     return frozenset({"tenant"})
@@ -523,8 +904,20 @@ def test_kit_bites_map_acl_that_dials_out() -> None:
         socket.getaddrinfo("directory.example.test", 443)
         return frozenset()  # pragma: no cover — the lookup raises first
 
-    with pytest.raises(AssertionError, match=r"map_acl opened a socket"):
+    with pytest.raises(AssertionError, match=r"map_acl performed a DNS lookup"):
         kit.check_map_acl_purity(_dialling, _CTX, {}, connector_name="synthetic")
+
+
+def test_kit_bites_map_acl_that_reads_a_file() -> None:
+    """A mapping table read off disk is just as non-replayable as a network call."""
+
+    def _reading(raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]:
+        with open("group-mappings.json", encoding="utf-8") as handle:  # noqa: PTH123
+            handle.read()
+        return frozenset()  # pragma: no cover — the open raises first
+
+    with pytest.raises(AssertionError, match=r"map_acl performed file I/O"):
+        kit.check_map_acl_purity(_reading, _CTX, {}, connector_name="synthetic")
 
 
 def test_kit_bites_map_acl_that_mutates_the_snapshot() -> None:
@@ -537,6 +930,24 @@ def test_kit_bites_map_acl_that_mutates_the_snapshot() -> None:
     ctx = AclMappingContext(email_to_user_id={"alice@acme.test": uuid.uuid4()}, evaluated_at=_NOW)
     with pytest.raises(AssertionError, match=r"mutated the AclMappingContext"):
         kit.check_map_acl_purity(_mutating, ctx, {}, connector_name="synthetic")
+
+
+def test_kit_bites_map_acl_that_mutates_its_raw_payload() -> None:
+    """The mapper reads its input; it does not edit it.
+
+    The framework may look at the same payload again (health counts, a retry),
+    and would then be looking at a document the source never sent.
+    """
+
+    def _edits_input(raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]:
+        permissions = raw.get("permissions")
+        assert isinstance(permissions, list)
+        permissions.append({"type": "anyone", "role": "reader"})
+        return frozenset()
+
+    raw: dict[str, object] = {"permissions": [{"type": "user", "role": "reader"}]}
+    with pytest.raises(AssertionError, match=r"mutated the raw permission payload"):
+        kit.check_map_acl_purity(_edits_input, _CTX, raw, connector_name="synthetic")
 
 
 def _stub_source() -> Source:
@@ -658,8 +1069,10 @@ def test_kit_bites_missing_harness() -> None:
 
 _CONFORMANT_MODULE = '''
 """A conformant connector package body."""
+import sqlalchemy  # an EXTERNAL SQL source is a legitimate vendor boundary
 from app.connectors.base import ConnectorHealth
 from app.core.config import get_settings
+from .helpers import thing
 
 _EXPORT_MIME = {"a": "b"}
 __all__ = ["CONNECTOR"]
@@ -668,8 +1081,19 @@ def helper(items: list[str]) -> list[str]:
     local = []
     local.append(items[0])
     return local
+
+CACHE_LIKE = set()
+
+def own_scope_shadow() -> None:
+    # Binds its OWN local of the same name: not module state, must NOT flag.
+    CACHE_LIKE = set()
+    CACHE_LIKE.add("x")
+
+def comprehension_target() -> list[str]:
+    return [CACHE_LIKE for CACHE_LIKE in ["a", "b"]]
 '''
 
+# Each entry: (module body, a substring the failure message must contain).
 _OFFENDERS: dict[str, tuple[str, str]] = {
     "imports the vault": (
         "from app.services.secrets_service import SecretsService\n",
@@ -677,15 +1101,24 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
     ),
     "imports a repository": (
         "from app.db.repositories import SourceRepository\n",
-        "connectors never read or write the DB",
-    ),
-    "imports the DB toolkit": (
-        "import sqlalchemy\n",
-        "private engine inside a connector",
+        "connectors never read or write it",
     ),
     "imports the vault lazily inside a function": (
         "def go() -> None:\n    from app.services import secrets_service\n",
         "credential vault",
+    ),
+    # Blocker-2 shapes: a relative import scanned as zero imports before the fix.
+    "imports a repository by RELATIVE path": (
+        "from ...db import repositories\n",
+        "connectors never read or write it",
+    ),
+    "imports the vault by relative path INSIDE a function": (
+        "def go() -> None:\n    from ...services.secrets_service import SecretsService\n",
+        "credential vault",
+    ),
+    "imports the object store by relative path": (
+        "from ...storage import objects\n",
+        "object store",
     ),
     "holds a module-level cache": (
         "_token_cache = {}\n",
@@ -702,6 +1135,17 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
     "assigns into a module-level table": (
         "TABLE = dict()\n\ndef go() -> None:\n    TABLE['k'] = 'v'\n",
         "writes to module-level `TABLE`",
+    ),
+    # Blocker-2 scope shape: a binding in a NESTED function must not suppress the
+    # genuine mutation in the enclosing one.
+    "mutates module state despite a nested shadow": (
+        "CACHE = set()\n\n"
+        "def go() -> None:\n"
+        "    CACHE.add('outer')\n"
+        "    def inner() -> None:\n"
+        "        CACHE = set()\n"
+        "        CACHE.add('inner')\n",
+        "`CACHE.add(...)` mutates module state",
     ),
 }
 
@@ -747,6 +1191,95 @@ def test_real_connectors_are_scanned_not_skipped() -> None:
         assert len(modules) >= 2, f"{name}: only {modules} scanned — the connector body is missing"
 
 
+# --- the enrollment check bites too ------------------------------------------
+
+
+def _write_connector_package(root: Path, name: str, *, init_body: str) -> Path:
+    package = root / name
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text(textwrap.dedent(init_body), encoding="utf-8")
+    return package
+
+
+def test_enrollment_bites_a_malformed_newly_dropped_connector(tmp_path: Path) -> None:
+    """The blocker this closes: a new connector the registry silently dropped.
+
+    Simulates the real drop-in: a package on disk exposing ``CONNECTOR`` whose
+    implementation is incomplete, so ``registered_types()`` never contains it.
+    Without this check the whole registry-parametrized suite would pass green
+    while the connector the author just added went completely untested.
+    """
+    _write_connector_package(tmp_path, "web", init_body="CONNECTOR = object()\n")
+    _write_connector_package(tmp_path, "newconnector", init_body="CONNECTOR = object()\n")
+
+    # The registry enrolled only `web` — `newconnector` failed its protocol check.
+    with pytest.raises(AssertionError, match=r"did not enroll it under the name 'newconnector'"):
+        check_registry_enrollment(tmp_path, frozenset({"web"}))
+
+
+def test_enrollment_failure_carries_the_diagnosis(tmp_path: Path) -> None:
+    """The message names the missing method, not just "did not enroll".
+
+    This is the wiring that turns a mystery into a fix: the real suite passes a
+    diagnoser that imports the package and runs the protocol rules over its
+    ``CONNECTOR``, so the author is told *which* method the registry choked on.
+    """
+
+    class _Incomplete:
+        name = "newconnector"
+
+        def validate_config(self, config: dict[str, object]) -> dict[str, object]:
+            return config
+
+        async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+            return []
+
+    def _diagnose(_package: str) -> str | None:
+        try:
+            kit.check_protocol_surface(_Incomplete(), expected_name="newconnector")
+        except AssertionError as exc:
+            return str(exc)
+        raise AssertionError("expected the protocol check to fail")  # pragma: no cover
+
+    _write_connector_package(tmp_path, "newconnector", init_body="CONNECTOR = object()\n")
+    with pytest.raises(AssertionError, match=r"is missing `health`"):
+        check_registry_enrollment(tmp_path, frozenset(), diagnose=_diagnose)
+
+
+def test_enrollment_accepts_a_reexported_connector(tmp_path: Path) -> None:
+    """Regression: ``from .connector import CONNECTOR`` is a real drop-in shape.
+
+    The ``web`` connector re-exports its instance rather than assigning one here.
+    An assignment-only check would flag the repo's own connector as unregistered
+    — a false positive that would make the enrollment rule untrustworthy on day
+    one.
+    """
+    _write_connector_package(
+        tmp_path, "reexport", init_body="from app.connectors.web.connector import CONNECTOR\n"
+    )
+    check_registry_enrollment(tmp_path, frozenset({"reexport"}))
+
+
+def test_enrollment_bites_a_package_without_connector(tmp_path: Path) -> None:
+    """A connector package that forgot the drop-in sentinel entirely."""
+    _write_connector_package(tmp_path, "forgot", init_body='"""No CONNECTOR here."""\n')
+    with pytest.raises(AssertionError, match=r"has no module-level CONNECTOR"):
+        check_registry_enrollment(tmp_path, frozenset())
+
+
+def test_enrollment_passes_a_fully_enrolled_tree(tmp_path: Path) -> None:
+    """Control: every package present and enrolled is clean."""
+    _write_connector_package(tmp_path, "alpha", init_body="CONNECTOR = object()\n")
+    _write_connector_package(tmp_path, "beta", init_body="CONNECTOR = object()\n")
+    check_registry_enrollment(tmp_path, frozenset({"alpha", "beta"}))
+
+
+def test_enrollment_refuses_to_pass_vacuously(tmp_path: Path) -> None:
+    """An empty tree is a broken scan, not a clean bill of health."""
+    with pytest.raises(AssertionError, match=r"no connector packages found"):
+        check_registry_enrollment(tmp_path, frozenset())
+
+
 # --- the framework's own contract the guide documents ------------------------
 
 
@@ -779,18 +1312,8 @@ async def test_full_sync_result_is_iterable_as_the_base_protocol() -> None:
     kit.check_domain_documents(result, connector_name="synthetic", where="FullSyncResult")
 
 
-def test_acl_declaring_connector_marks_documents_enforced() -> None:
-    """A ``map_acl`` connector's documents carry a ``SourceAcl`` — the structural
-    derivation of ``acl_enforced`` at the write seam (ADR-0019 §2)."""
-    doc = FetchedDoc(
-        title="t",
-        text="x",
-        url="https://example.test/x",
-        acl=SourceAcl(principals=frozenset({"tenant"}), scope_ids=frozenset({"drive-1"})),
-    )
-    assert doc.acl is not None
-    assert doc.acl.principals == frozenset({"tenant"})
-    assert (
-        SyncPage(upserts=(doc,), deleted_external_ids=frozenset(), next_cursor="c").integrity
-        is PageIntegrity.COMPLETE
-    )
+# NOTE: the ACL write-mode derivation is asserted against a REAL connector in
+# `test_sync_returns_domain_documents` (a map_acl-declaring connector must attach
+# a SourceAcl to every document it emits). The framework's persistence reaction
+# to that — `acl_enforced=true` at the write seam — is covered in
+# `test_gdrive_sync_task.py`, which is where the write seam actually lives.
