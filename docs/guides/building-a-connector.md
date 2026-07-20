@@ -137,7 +137,20 @@ create_async_engine(get_settings().database_url)   # imports nothing forbidden
 
 That opens a connection straight into Lumen's database without touching
 `app.db`. The *setting* is what distinguishes "Lumen's datastore" from "your
-source", so the setting is pinned too.
+source", so the setting is pinned too — in **all three** spellings of the read,
+not just the obvious one:
+
+```python
+settings.database_url                          # attribute
+getattr(settings, "database_url")              # dynamic, constant name
+get_settings().model_dump()["database_url"]    # flattened settings object
+settings.__dict__["s3_secret_key"]             # ditto
+```
+
+The subscript rule fires only on a value that is *demonstrably* a flattened
+settings object (`model_dump()`, `dict()`, `json()`, `__dict__`). That
+restriction is deliberate: `source.config["database_url"]` is **your own**
+warehouse URL out of your own `sources.config`, and it stays legal.
 
 Which is exactly what makes the following **allowed**:
 
@@ -161,11 +174,24 @@ mutation in the enclosing function, and **a class attribute does not excuse one
 in a method** (`CACHE.add(...)` inside a method resolves past `class C: CACHE =
 set()` to the module global, and is a real violation).
 
-**What the scan does not catch** — still on you and your reviewer: a dynamic
-import (`importlib.import_module`, `__import__`), dynamic attribute access
-(`getattr(settings, "database_url")`), state kept on a connector *instance*
-attribute rather than a module global, and mutation reached through an alias.
-The scan closes the accident-shaped holes; it is not a sandbox.
+**What the scan does not catch.** Stated precisely, because "we disclosed it" is
+not the same as "we pinned it" — everything below is review-caught, not
+test-caught:
+
+- **a dynamic import** — `importlib.import_module("app.db.session")`,
+  `__import__(...)`;
+- **a settings read whose name is not a literal** — `getattr(settings, chosen)`
+  or `dump[key]`, where the field name comes from a variable. Constant names
+  are caught in all three spellings above; computed ones are not;
+- **a settings mapping laundered through a helper** — pass
+  `settings.model_dump()` into a function and subscript it there, and the dump
+  shape is no longer visible at the point of the read;
+- **state on a connector *instance* attribute** rather than a module global,
+  and **mutation reached through an alias** (`ref = CACHE; ref.add(...)`).
+
+The scan closes the accident-shaped holes and the obvious deliberate ones. It is
+a lint, not a sandbox — which is exactly why the trust model above says
+first-party, code-reviewed connectors only.
 
 **Trust model.** v1 connectors are first-party, in-repo, code-reviewed Python
 running **in-process** — the same trust boundary as the rest of the backend, so
@@ -369,10 +395,17 @@ failed request for the whole connector grid.
 
 **"Stable" is checked, not assumed.** Each fault is driven **twice** and the
 code must be identical both times *and* equal to the value your harness declares
-(`sync_fault_code` / `changes_fault_code`). A per-occurrence code
-(`f"drive_error_{uuid4()}"`) is non-empty and still useless — nobody can match
-on it, search for it, or count it. Pin one code per failure mode; changing it
-later is a visible diff in the harness, which is the point.
+(`sync_fault_code`, and `changes_fault_code` if you declare `fetch_changes`).
+A per-occurrence code (`f"drive_error_{uuid4()}"`) is non-empty and still
+useless — nobody can match on it, search for it, or count it. Pin one code per
+failure mode; changing it later is a visible diff in the harness, which is the
+point.
+
+Declaring the expected code is **mandatory**, not a nicety: a harness that omits
+it fails `check_harness_completeness` rather than quietly downgrading the rule
+to "the code did not vary". Every fixture a declared capability needs works this
+way — an absent fixture is a failure, because a rule that silently checks less
+is indistinguishable from a rule that passes.
 
 ## 6. Egress — the SSRF obligations
 

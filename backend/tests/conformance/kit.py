@@ -60,8 +60,11 @@ from app.connectors.oauth import OAuthSpec
 from app.domain.entities import Source
 
 __all__ = [
+    "BASE_FIXTURES",
+    "CAPABILITY_FIXTURES",
     "AclCase",
     "check_cascade_signal",
+    "check_harness_completeness",
     "check_cursor_round_trip",
     "check_domain_documents",
     "check_domain_types_only",
@@ -121,6 +124,48 @@ def declared_capabilities(connector: object) -> frozenset[str]:
     """Which optional capabilities this connector opts into (presence = opt-in)."""
     return frozenset(
         name for name in _CAPABILITY_METHODS if callable(getattr(connector, name, None))
+    )
+
+
+# Fixtures a harness must supply, unconditionally and then per declared
+# capability. A missing one used to make a rule quietly weaken itself — an
+# absent `changes_fault_code` left the stable-code rule checking only that the
+# code did not vary, never that it was the declared value. Silence is the worst
+# failure mode for a conformance kit, so absence is now loud.
+BASE_FIXTURES: tuple[str, ...] = ("invalid_configs", "sync_fault_code")
+CAPABILITY_FIXTURES: dict[str, tuple[str, ...]] = {
+    "oauth_spec": (),
+    "fetch_changes": ("start_cursor", "expired_cursor", "fault_cursor", "changes_fault_code"),
+    "map_acl": ("acl_context", "acl_cases"),
+}
+
+
+def check_harness_completeness(
+    harness: Any, capabilities: frozenset[str], *, connector_name: str
+) -> None:
+    """A harness supplies every fixture its connector's capabilities require.
+
+    Without this, a rule that takes an optional fixture silently degrades to a
+    weaker check when the fixture is absent — which reads as a pass. The
+    capability is declared by the *connector*, so the obligation is derived from
+    the connector and cannot be dodged by leaving a harness field unset.
+
+    Note what is deliberately **not** required: the ``cascade_cursor`` /
+    ``incomplete_cursor`` scenarios, because a source with no containers has no
+    cascade to emit. Those are covered by a separate anti-vacuity rule asserting
+    that *some* connector exercises them.
+    """
+    required = list(BASE_FIXTURES)
+    for capability in sorted(capabilities):
+        required.extend(CAPABILITY_FIXTURES.get(capability, ()))
+
+    missing = [name for name in required if not getattr(harness, name, None)]
+    assert not missing, (
+        f"the conformance harness for {connector_name!r} is missing {missing} — the "
+        f"connector declares {sorted(capabilities) or 'no capabilities'}, and each "
+        "declared capability brings fixtures its rules cannot run without. An absent "
+        "fixture does not weaken a rule here, it fails it: a rule that quietly checks "
+        f"less is indistinguishable from a rule that passes ({_GUIDE})"
     )
 
 
@@ -420,6 +465,12 @@ def _assert_stable_code(
         "discriminator the framework records and the API surfaces; a per-occurrence "
         f"value cannot be matched, searched, or counted ({_GUIDE})"
     )
+    # ``expected`` is optional ONLY so the kit's own synthetic offenders can
+    # exercise the across-runs half in isolation. Every registered connector
+    # reaches this with a harness-declared value: `check_harness_completeness`
+    # makes the declaration mandatory per capability, and the suite asserts it is
+    # present before calling. Without that pairing this branch is where the
+    # promised "equals the declared code" quietly becomes "is not empty".
     if expected is not None:
         assert codes[0] == expected, (
             f"connector {connector_name!r}: {where} reported code {codes[0]!r} but its "

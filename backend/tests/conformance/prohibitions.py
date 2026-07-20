@@ -165,6 +165,11 @@ _MUTABLE_LITERALS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, as
 # Callables whose result is a fresh mutable container.
 _MUTABLE_FACTORIES = frozenset({"list", "dict", "set", "defaultdict", "OrderedDict", "Counter"})
 
+# Methods that flatten a pydantic-settings object into a mapping. A subscript on
+# one of these with a forbidden key is the same read as the attribute, one
+# indirection along.
+_SETTINGS_DUMP_METHODS = frozenset({"model_dump", "model_dump_json", "dict", "json", "_asdict"})
+
 # Every node that opens a new lexical scope in Python 3.
 _SCOPE_NODES = (
     ast.FunctionDef,
@@ -395,19 +400,68 @@ def _forbidden_import(module: str) -> tuple[str, str] | None:
     return None
 
 
-def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int]]:
+def _is_settings_dump(node: ast.expr) -> bool:
+    """Is this expression a settings object flattened into a mapping?
+
+    The realistic shapes for reaching a pydantic-settings field without naming
+    it as an attribute: ``settings.model_dump()``, ``.dict()``, ``.json()``, and
+    ``settings.__dict__``. Restricting the subscript rule to *these* is what
+    keeps it from firing on a connector's own config — a SQL-source connector
+    legitimately reads ``source.config["database_url"]``, and that is its own
+    warehouse, not Lumen's.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return node.func.attr in _SETTINGS_DUMP_METHODS
+    return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+
+def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int, str]]:
     """Reads of a Lumen infrastructure/credential setting, anywhere in the module.
 
-    Matched on the **attribute name** rather than on the object it hangs off,
-    because the object is written a dozen ways (``settings.database_url``,
-    ``get_settings().database_url``, ``self._cfg.database_url``) and the field
-    name is the stable part. The cost is a false positive if a connector invents
-    its own attribute called ``database_url`` — cheap to rename, and the message
-    says so.
+    Yields ``(field, line, shape)``. Three access shapes are pinned, because
+    catching only the first leaves the seam open:
+
+    1. **attribute** — ``settings.database_url`` (aliased or not);
+    2. **dynamic attribute with a constant name** — ``getattr(settings,
+       "database_url")``;
+    3. **subscript with a constant key on a flattened settings object** —
+       ``get_settings().model_dump()["database_url"]``,
+       ``settings.__dict__["s3_secret_key"]``.
+
+    Matched on the **field name** rather than on the object it hangs off,
+    because the object is written a dozen ways (``settings``,
+    ``get_settings()``, ``self._cfg``) and the field name is the stable part.
+    The cost is a false positive if a connector invents its own *attribute*
+    called ``database_url`` — cheap to rename, and the message says so.
+
+    What remains out of reach of a static scan, stated rather than implied: a
+    **non-constant** key or attribute name (``getattr(settings, chosen)``,
+    ``dump[key]``), and a settings mapping handed to a helper and subscripted
+    somewhere the dump shape is no longer visible. Those stay review-caught.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_SETTINGS:
-            yield node.attr, node.lineno
+            yield node.attr, node.lineno, f"`.{node.attr}`"
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in FORBIDDEN_SETTINGS
+        ):
+            field = node.args[1].value
+            yield field, node.lineno, f'`getattr(..., "{field}")`'
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and node.slice.value in FORBIDDEN_SETTINGS
+            and _is_settings_dump(node.value)
+        ):
+            field = node.slice.value
+            yield field, node.lineno, f'`...["{field}"]` on a flattened settings object'
 
 
 # --- module-level state ------------------------------------------------------
@@ -680,17 +734,18 @@ def scan_package(package: Path) -> list[Violation]:
                         detail=f"imports `{imported}` ({prefix}): {reason}",
                     )
                 )
-        for attr, line in _lumen_infra_settings(tree):
+        for attr, line, shape in _lumen_infra_settings(tree):
             violations.append(
                 Violation(
                     rule="no-lumen-infra",
                     module=module,
                     line=line,
                     detail=(
-                        f"reads the `{attr}` setting ({FORBIDDEN_SETTINGS[attr]}) — "
-                        "banning `import app.db` alone does not stop "
-                        "`create_async_engine(get_settings().database_url)`; the SETTING "
-                        "is what identifies Lumen's own infrastructure. A connector may "
+                        f"reads the `{attr}` setting via {shape} "
+                        f"({FORBIDDEN_SETTINGS[attr]}) — banning `import app.db` alone "
+                        "does not stop `create_async_engine(get_settings()."
+                        "database_url)`; the SETTING is what identifies Lumen's own "
+                        "infrastructure, however you spell the read. A connector may "
                         "bring its own SQL/HTTP client for its own source, pointed at a "
                         "URL from its own sources.config"
                     ),

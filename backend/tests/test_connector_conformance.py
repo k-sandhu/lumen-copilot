@@ -35,6 +35,7 @@ from __future__ import annotations
 import textwrap
 import uuid
 from collections.abc import AsyncIterator, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,20 @@ def test_every_registered_connector_has_a_harness() -> None:
     )
 
 
+@pytest.mark.parametrize("name", CONNECTOR_TYPES)
+def test_harness_supplies_every_fixture_its_capabilities_require(name: str) -> None:
+    """Nor by leaving a fixture unset so a rule quietly checks less.
+
+    Optional fixtures are how a conformance kit rots: a rule that takes one and
+    skips its strongest assertion when it is absent reads as a pass. The
+    obligation is derived from the *connector's* declared capabilities, so it
+    cannot be dodged from the harness side.
+    """
+    kit.check_harness_completeness(
+        harness_for(name), kit.declared_capabilities(get_connector(name)), connector_name=name
+    )
+
+
 # --- base protocol -----------------------------------------------------------
 
 
@@ -323,6 +338,11 @@ async def test_changes_fault_is_typed_and_not_cursor_expiry(
     assert harness.fault_cursor is not None, (
         f"harness for {harness.name!r} declares fetch_changes but no fault_cursor — "
         "the typed-fault rule needs a replay that fails for an ordinary reason"
+    )
+    assert harness.changes_fault_code, (
+        f"harness for {harness.name!r} declares fetch_changes but no changes_fault_code "
+        "— without it the stable-code rule degrades to 'the code did not vary', which "
+        "is not the guarantee this kit claims"
     )
     async with harness.run(monkeypatch) as run:
         await kit.check_typed_changes_fault(
@@ -883,6 +903,87 @@ async def test_kit_bites_unstable_changes_fault_code() -> None:
         )
 
 
+async def test_kit_bites_changes_fault_code_that_drifted_from_the_declared_one() -> None:
+    """The changes path enforces equality too, not just non-variance."""
+
+    async def _renamed(source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        raise ConnectorError("provider is unwell", code="anything_goes")
+        yield  # pragma: no cover — unreachable, keeps this an async generator
+
+    with pytest.raises(AssertionError, match=r"but its harness declares"):
+        await kit.check_typed_changes_fault(
+            _renamed,
+            source=_stub_source(),
+            cursor="fault",
+            run=None,
+            connector_name="synthetic",
+            expected_code="drive_api_error",
+        )
+
+
+# --- harness completeness: an unset fixture must fail, not soften a rule ------
+
+
+@dataclass
+class _PartialHarness:
+    """A harness missing exactly the fixture under test."""
+
+    invalid_configs: tuple[dict[str, object], ...] = ({"bad": True},)
+    sync_fault_code: str | None = "fetch_failed"
+    start_cursor: str | None = "c1"
+    expired_cursor: str | None = "c-expired"
+    fault_cursor: str | None = "c-fault"
+    changes_fault_code: str | None = "provider_error"
+    acl_context: object | None = "ctx"
+    acl_cases: tuple[object, ...] = ("case",)
+
+
+def test_harness_completeness_passes_a_complete_harness() -> None:
+    """Control: everything declared, nothing missing."""
+    kit.check_harness_completeness(
+        _PartialHarness(),
+        frozenset({"fetch_changes", "map_acl", "oauth_spec"}),
+        connector_name="synthetic",
+    )
+
+
+def test_kit_bites_fetch_changes_harness_without_a_declared_fault_code() -> None:
+    """The exact gap: `fetch_changes` declared, `changes_fault_code` unset.
+
+    Previously this silently degraded the stable-code rule to "the code did not
+    vary" — a connector emitting a stable but arbitrary `anything_goes` passed.
+    """
+    with pytest.raises(AssertionError, match=r"missing \['changes_fault_code'\]"):
+        kit.check_harness_completeness(
+            _PartialHarness(changes_fault_code=None),
+            frozenset({"fetch_changes"}),
+            connector_name="synthetic",
+        )
+
+
+def test_kit_bites_harness_missing_a_base_fixture() -> None:
+    with pytest.raises(AssertionError, match=r"missing \['sync_fault_code'\]"):
+        kit.check_harness_completeness(
+            _PartialHarness(sync_fault_code=None), frozenset(), connector_name="synthetic"
+        )
+
+
+def test_kit_bites_map_acl_harness_without_acl_cases() -> None:
+    with pytest.raises(AssertionError, match=r"missing \['acl_cases'\]"):
+        kit.check_harness_completeness(
+            _PartialHarness(acl_cases=()), frozenset({"map_acl"}), connector_name="synthetic"
+        )
+
+
+def test_harness_completeness_ignores_undeclared_capabilities() -> None:
+    """A credential-less connector is not asked for cursor or ACL fixtures."""
+    kit.check_harness_completeness(
+        _PartialHarness(changes_fault_code=None, acl_cases=(), acl_context=None),
+        frozenset(),
+        connector_name="synthetic",
+    )
+
+
 class _RaisingHealthConnector(_GoodConnector):
     """A probe that raises — one dead source breaks the whole grid request."""
 
@@ -1222,6 +1323,12 @@ def connect_to_MY_OWN_source(config: dict) -> object:
     # is what the scan forbids.
     return create_async_engine(config["warehouse_url"])
 
+def my_own_config_key_is_not_lumens(config: dict) -> str:
+    # A SQL-source connector may legitimately store ITS OWN url under a key that
+    # happens to be named like a Lumen setting. Only a *settings-derived* value
+    # subscripted with that key is a violation — a plain config dict is not.
+    return config["database_url"]
+
 def reads_allowed_config() -> str:
     return get_settings().gdrive_oauth_client_id
 
@@ -1330,6 +1437,25 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
     "reads the vault master key": (
         "def go(settings: object) -> str:\n    return settings.secrets_encryption_key\n",
         "reads the `secrets_encryption_key` setting",
+    ),
+    # Round-3 finding 7: the same read spelled so it is not an ast.Attribute.
+    "reaches database_url via getattr": (
+        "from app.core.config import get_settings\n\n"
+        'def go() -> str:\n    return getattr(get_settings(), "database_url")\n',
+        '`getattr(..., "database_url")`',
+    ),
+    "reaches database_url via model_dump()": (
+        "from app.core.config import get_settings\n\n"
+        'def go() -> str:\n    return get_settings().model_dump()["database_url"]\n',
+        '`...["database_url"]` on a flattened settings object',
+    ),
+    "reaches an s3 credential via __dict__": (
+        'def go(settings: object) -> str:\n    return settings.__dict__["s3_secret_key"]\n',
+        '`...["s3_secret_key"]` on a flattened settings object',
+    ),
+    "reaches database_url via .dict()": (
+        'def go(settings: object) -> str:\n    return settings.dict()["database_url"]\n',
+        '`...["database_url"]` on a flattened settings object',
     ),
 }
 
