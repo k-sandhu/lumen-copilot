@@ -131,6 +131,7 @@ async def _seed_user_with_document(
         mime_type="text/plain",
         size_bytes=10,
         storage_key="k",
+        acl_enforced=False,
         status=DocumentStatus.READY,
     )
     offset = 0
@@ -449,6 +450,7 @@ async def test_search_hydrates_in_engine_order_and_drops_unknown_hits(
         mime_type="text/plain",
         size_bytes=1,
         storage_key="k",
+        acl_enforced=False,
         status=DocumentStatus.READY,
     )
     chunks = await ChunkRepository(session, tenant_a).replace_for_document(
@@ -623,6 +625,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key="k",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             chunks_a = await ChunkRepository(sess, tenant_a).replace_for_document(
@@ -649,6 +652,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key="k",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             chunks_b = await ChunkRepository(sess, tenant_b).replace_for_document(

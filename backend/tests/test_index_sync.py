@@ -95,9 +95,7 @@ class _FakeIndexStore:
     async def ensure_index(self) -> None:
         self.ensured += 1
 
-    async def upsert_chunks(
-        self, chunks: Sequence[IndexedChunk], *, refresh: bool = False
-    ) -> None:
+    async def upsert_chunks(self, chunks: Sequence[IndexedChunk], *, refresh: bool = False) -> None:
         if self.fail_upsert is not None:
             raise self.fail_upsert
         self.upserts.append(list(chunks))
@@ -187,6 +185,7 @@ async def _seed(
             mime_type="text/plain",
             size_bytes=1,
             storage_key="k",
+            acl_enforced=False,
             status=DocumentStatus.READY,
         )
         offset = 0
@@ -213,9 +212,7 @@ async def test_sync_replaces_live_document_chunks(sqlite_engine: None) -> None:
     tenant_id, user_id, coll_id, doc_id = await _seed(chunk_texts=["alpha", "beta"])
     store = _FakeIndexStore()
 
-    result = await sync_document_index_async(
-        tenant_id, doc_id, settings=_settings(), store=store
-    )
+    result = await sync_document_index_async(tenant_id, doc_id, settings=_settings(), store=store)
 
     assert result.indexed_count == 2 and result.deleted is False
     assert store.ensured == 1
@@ -237,9 +234,7 @@ async def test_sync_missing_document_deletes_only(sqlite_engine: None) -> None:
     ghost = uuid.uuid4()
     store = _FakeIndexStore()
 
-    result = await sync_document_index_async(
-        tenant_id, ghost, settings=_settings(), store=store
-    )
+    result = await sync_document_index_async(tenant_id, ghost, settings=_settings(), store=store)
 
     assert result.deleted is True and result.indexed_count == 0
     assert store.deletes == [(tenant_id, ghost)]
@@ -250,9 +245,7 @@ async def test_sync_chunkless_document_deletes_only(sqlite_engine: None) -> None
     tenant_id, _, _, doc_id = await _seed(chunk_texts=[])
     store = _FakeIndexStore()
 
-    result = await sync_document_index_async(
-        tenant_id, doc_id, settings=_settings(), store=store
-    )
+    result = await sync_document_index_async(tenant_id, doc_id, settings=_settings(), store=store)
 
     assert result.deleted is True
     assert store.deletes == [(tenant_id, doc_id)]
@@ -317,9 +310,7 @@ async def test_document_delete_enqueues_index_sync_after_commit(
 ) -> None:
     tenant_id, user_id, _, doc_id = await _seed(chunk_texts=["x"])
     calls: list[tuple[uuid.UUID, uuid.UUID]] = []
-    monkeypatch.setattr(
-        "app.tasks.enqueue_index_sync", lambda t, d: calls.append((t, d))
-    )
+    monkeypatch.setattr("app.tasks.enqueue_index_sync", lambda t, d: calls.append((t, d)))
 
     async with db_session.session_scope() as session:
         svc = DocumentService(
@@ -344,9 +335,7 @@ async def test_collection_delete_enqueues_index_sync_per_document(
 ) -> None:
     tenant_id, user_id, coll_id, doc_id = await _seed(chunk_texts=["x"])
     calls: list[tuple[uuid.UUID, uuid.UUID]] = []
-    monkeypatch.setattr(
-        "app.tasks.enqueue_index_sync", lambda t, d: calls.append((t, d))
-    )
+    monkeypatch.setattr("app.tasks.enqueue_index_sync", lambda t, d: calls.append((t, d)))
 
     async with db_session.session_scope() as session:
         svc = CollectionsService(
@@ -381,6 +370,7 @@ async def test_reindex_tenant_sweeps_only_that_tenant(sqlite_engine: None) -> No
             mime_type="text/plain",
             size_bytes=1,
             storage_key="k2",
+            acl_enforced=False,
             status=DocumentStatus.READY,
         )
     tenant_b, _, _, doc_b = await _seed(chunk_texts=["b one"])

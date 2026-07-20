@@ -252,6 +252,19 @@ class Source(TenantScopedMixin, TimestampMixin, Base):
     connect_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     connected_account: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     sync_cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ACL-mirror health surface (ADR-0019 §2, F-CB-2): when the source's mirrored
+    # ACLs were last refreshed by a sync, and how many documents mapped to no
+    # Lumen principal (ingested but invisible — attestation lights them up).
+    # NULL for non-ACL connectors and before the first sync.
+    acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unmapped_acl_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ADR-0019 §3 full-resync-required state. Set when a replay page comes back
+    # ``integrity=incomplete`` — which stale-stamps EVERY mirrored document of
+    # the source, a condition only a full re-examination can clear. Durable (it
+    # must survive a crash) and sticky (it outlives any number of incremental
+    # retries: a page-level retry re-examines a subset, never the corpus).
+    # Cleared only by a completed full sync. NULL = false.
+    acl_resync_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="source")
 
@@ -263,6 +276,17 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_documents_collection_id", "collection_id"),
         Index("ix_documents_source_id", "source_id"),
+        # Identity-based reconcile (ADR-0019 §3): a provider document maps to at
+        # most ONE row per source. Partial — direct uploads (external_id NULL)
+        # are unconstrained.
+        Index(
+            "uq_documents_source_external_id",
+            "source_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+            sqlite_where=text("external_id IS NOT NULL"),
+        ),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
     )
 
@@ -294,6 +318,33 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
+    # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
+    # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
+    # mirrored-principal intersection and NOTHING else — owner/grants never
+    # apply.
+    #
+    # **No default, at any layer** (ADR-0019 §2: the mode is never defaulted at
+    # write time). There is deliberately no ORM ``default`` and no
+    # ``server_default``: migration 0040 backfilled the pre-existing upload/web
+    # rows and then DROPPED the server default in the same migration, so an
+    # insert that omits the mode is a NOT NULL violation rather than a silently
+    # owner/grant-governed document. The one write seam
+    # (``DocumentRepository.create``) takes it as a mandatory argument.
+    acl_enforced: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The mirrored principal-set (JSON array of `user:<uuid>` / `tenant`); NULL
+    # for non-connector documents. An empty array admits no one (fail closed).
+    acl_principals: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
+    # When the ACL was last examined/attested by a sync. NULL ⇒ stale ⇒ deny;
+    # the cascade stale-stamp (§3) sets it NULL for an immediate deny.
+    acl_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The container scope chain (drive id + ancestor folder ids) the cascade
+    # stale-stamp matches on (§3). JSON array of opaque scope ids; NULL for
+    # non-connector documents.
+    acl_scope_ids: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
+    # The provider's stable document id — identity-based reconcile (§3); NULL
+    # for direct uploads and full-replace connectors.
+    external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     collection: Mapped[Collection] = relationship(back_populates="documents")
     source: Mapped[Source | None] = relationship(back_populates="documents")
@@ -1610,9 +1661,7 @@ class SandboxSession(TenantScopedMixin, Base):
 
     __tablename__ = "sandbox_sessions"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "chat_session_id", name="uq_sandbox_sessions_tenant_chat"
-        ),
+        UniqueConstraint("tenant_id", "chat_session_id", name="uq_sandbox_sessions_tenant_chat"),
         Index("ix_sandbox_sessions_tenant_owner", "tenant_id", "owner_id"),
         CheckConstraint(
             "status in ('active', 'closed', 'error')",
@@ -1705,9 +1754,7 @@ class CodeRun(TenantScopedMixin, Base):
         ForeignKey("chat_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    sandbox_session_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
-    )
+    sandbox_session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     sandbox_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The parent agent run / trace — plain nullable UUIDs until those tables land.
     run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
@@ -1715,9 +1762,7 @@ class CodeRun(TenantScopedMixin, Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
     # The exact Python source executed — inspectable (E15-7/E6-5), reproducible.
     code: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_packages: Mapped[list[str]] = mapped_column(
-        StringArray, nullable=False, default=list
-    )
+    requested_packages: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
     # Captured output. Default empty (never null) so a queued run already has readable
     # output fields.
     stdout: Mapped[str] = mapped_column(Text, nullable=False, default="")

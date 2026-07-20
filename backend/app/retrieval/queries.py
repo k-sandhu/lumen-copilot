@@ -39,11 +39,14 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, String, and_, cast, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
+from app.db.repositories import to_document
+from app.domain.entities import Document
 from app.retrieval.permissions import AllowSet
+from app.search.filters import acl_freshness_floor
 
 # Preserve the row type of the SELECT through the permission-filter helper so the
 # typed columns survive (mypy --strict): a chunk-id select stays a chunk-id select.
@@ -131,18 +134,115 @@ def _grant_exists(allow_set: AllowSet) -> ColumnElement[bool]:
     )
 
 
-def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
-    """The document-level "owner OR granted" predicate (INV-2, deny-by-default).
+def _acl_principal_overlap(allow_set: AllowSet) -> ColumnElement[bool]:
+    """``acl_principals ∩ requester-principals ≠ ∅`` — portably (ADR-0019 §2).
 
-    The reusable boolean every chokepoint ANDs after the ``tenant_id`` predicate:
-    the document is owned by someone in the allow-set **or** an explicit grant to
-    the requester covers it (directly or via its collection). Absence of both =
-    excluded. Assumes ``documents`` is in the query's scope.
+    ``acl_principals`` is a JSON array of principal strings (``user:<uuid>`` /
+    ``tenant``) written exclusively by the fail-closed ``map_acl`` normalizer.
+    The overlap is expressed as an OR of quoted-substring matches against the
+    column's JSON text — portable across Postgres (JSONB) and the offline
+    SQLite (TEXT-backed JSON): a JSON string element always renders as
+    ``"<value>"`` in both dialects' text form, the vocabulary contains no
+    quote/escape characters, and the requester set is tiny (their own ``user:``
+    principal + ``tenant``). ``autoescape`` guards the LIKE metacharacters.
+    An empty requester set — or a NULL column — matches nothing (fail closed).
+    """
+    principals = sorted(allow_set.acl_principals)
+    if not principals:
+        return false()
+    rendered = cast(models.Document.acl_principals, String)
+    return or_(*[rendered.contains(f'"{p}"', autoescape=True) for p in principals])
+
+
+def _document_permitted(allow_set: AllowSet) -> ColumnElement[bool]:
+    """The document-level **mode-split** permission predicate (INV-2, deny-by-default).
+
+    The reusable boolean every chokepoint ANDs after the ``tenant_id``
+    predicate — since ADR-0019 §2 it is split on the exclusive enforcement
+    mode (spec 0004 §2.2), and this function plus the engine mirror
+    (``search/filters.SearchAllowFilter.to_engine_filter``) are the ONLY two
+    places the rule lives:
+
+    * ``acl_enforced = false`` (uploads, ``web``): today's predicate unchanged
+      — owned by someone in the allow-set OR an explicit grant covers it
+      (directly or via its collection);
+    * ``acl_enforced = true`` (managed-connector documents): a **fresh
+      mirrored-principal intersection, and nothing else** — the owner and
+      grant legs do NOT apply; an empty or stale mirror (``acl_synced_at``
+      NULL, or older than ``CONNECTOR_ACL_MAX_AGE_HOURS``) admits no one,
+      including the owner.
+
+    Absence of both = excluded. Assumes ``documents`` is in the query's scope.
     """
     return or_(
-        models.Document.owner_id.in_(allow_set.owner_ids),
-        _grant_exists(allow_set),
+        and_(
+            models.Document.acl_enforced.is_(False),
+            or_(
+                models.Document.owner_id.in_(allow_set.owner_ids),
+                _grant_exists(allow_set),
+            ),
+        ),
+        and_(
+            models.Document.acl_enforced.is_(True),
+            _acl_principal_overlap(allow_set),
+            # NULL acl_synced_at never satisfies >= (stale-stamp ⇒ deny now).
+            models.Document.acl_synced_at >= acl_freshness_floor(),
+        ),
     )
+
+
+async def get_permitted_document(
+    session: AsyncSession, *, allow_set: AllowSet, document_id: UUID
+) -> Document | None:
+    """The permitted-document **point read** — one row, one predicate (INV-2).
+
+    Every non-retrieval read path that resolves a single document by id routes
+    through here (``/documents/{id}``, its ``/content``, ``/text``, and the
+    presigned object URL), so a document point read is governed by **exactly**
+    the mode-split predicate retrieval uses — :func:`_document_permitted` — and
+    not by a second, weaker rule.
+
+    That matters because connector documents are *owned* by the connecting
+    admin: an ownership-only check would let that admin read any mirrored file
+    through the ``/documents`` surface even when ``acl_enforced=true`` and the
+    mirror is empty, stale, or does not list them — the exact escalation the
+    exclusive-mode split exists to prevent. Here, an ``acl_enforced`` document
+    requires the fresh mirrored-principal intersection and nothing else.
+
+    ``None`` for a missing id, a foreign-tenant id, or a document the requester
+    is not permitted — the caller maps all three to **404** (existence
+    non-disclosure, never 403). Document *management* (delete) is deliberately
+    NOT routed through this predicate: it stays an ownership decision.
+    """
+    stmt = select(models.Document).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        models.Document.id == document_id,
+        _document_permitted(allow_set),
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return to_document(row) if row is not None else None
+
+
+async def permitted_document_ids(
+    session: AsyncSession, *, allow_set: AllowSet, document_ids: Sequence[UUID]
+) -> set[UUID]:
+    """Which of ``document_ids`` the requester may see (the same predicate).
+
+    The bounded set-membership form of :func:`get_permitted_document`, for
+    listing paths that have already fetched a page of rows: one extra query
+    over at most a page of ids, so an owner-scoped listing cannot surface a
+    connector document whose mirror does not admit the caller. Ids outside the
+    allow-set are simply absent.
+    """
+    ids = list(document_ids)
+    if not ids:
+        return set()
+    stmt = select(models.Document.id).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        models.Document.id.in_(ids),
+        _document_permitted(allow_set),
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 def permitted_document_names(
@@ -155,20 +255,15 @@ def permitted_document_names(
     without reassembling any document text (this path needs names only).
     Ids outside the allow-set are simply absent (existence non-disclosure).
     """
-    stmt = (
-        select(models.Document.id, models.Document.filename)
-        .where(
-            models.Document.tenant_id == allow_set.tenant_id,
-            models.Document.id.in_(document_ids),
-            _document_permitted(allow_set),
-        )
+    stmt = select(models.Document.id, models.Document.filename).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        models.Document.id.in_(document_ids),
+        _document_permitted(allow_set),
     )
     return stmt
 
 
-def valid_chunk_pairs(
-    *, tenant_id: object, chunk_ids: list[UUID]
-) -> Select[tuple[UUID, UUID]]:
+def valid_chunk_pairs(*, tenant_id: object, chunk_ids: list[UUID]) -> Select[tuple[UUID, UUID]]:
     """(chunk_id, document_id) for chunks that really exist in this tenant.
 
     The defense-in-depth half of evidence rehydration (#446 round-2, finding

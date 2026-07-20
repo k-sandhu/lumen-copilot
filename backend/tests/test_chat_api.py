@@ -205,6 +205,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{ta.id}/taxes.pdf",
+                acl_enforced=False,
             )
             chunks = await ChunkRepository(seed, ta.id).replace_for_document(
                 doc.id,
@@ -1113,9 +1114,7 @@ async def test_session_usage_empty_then_404_foreign(client: AsyncClient, seeded:
     """AC-1/AC-N1: a fresh session reports zero totals and no `last`; a foreign
     (other-tenant) session id is a 404 (INV-1/INV-2 non-disclosure)."""
     token = await _login(client, seeded.alice_email)
-    resp = await client.post(
-        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "usage"}
-    )
+    resp = await client.post("/api/v1/chat/sessions", headers=_auth(token), json={"title": "usage"})
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
 
@@ -1137,18 +1136,14 @@ async def test_session_usage_empty_then_404_foreign(client: AsyncClient, seeded:
 
     # Another tenant's caller sees 404, never 403 (existence non-disclosure).
     carol = await _login(client, seeded.carol_email)
-    foreign = await client.get(
-        f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(carol)
-    )
+    foreign = await client.get(f"/api/v1/chat/sessions/{session_id}/usage", headers=_auth(carol))
     assert foreign.status_code == 404
 
 
 async def test_send_accepts_pinned_document_ids(client: AsyncClient, seeded: _Seeded) -> None:
     """Spec 0007 AC-4: document_ids is additive on send (202) and over-limit → 422."""
     token = await _login(client, seeded.alice_email)
-    resp = await client.post(
-        "/api/v1/chat/sessions", headers=_auth(token), json={"title": "pins"}
-    )
+    resp = await client.post("/api/v1/chat/sessions", headers=_auth(token), json={"title": "pins"})
     session_id = resp.json()["id"]
 
     ok = await client.post(
@@ -1202,9 +1197,7 @@ async def test_session_usage_budget_resolves_provider_model_window(
     assert body["window_known"] is True
     settings = get_settings()
     fallback_budget = (
-        settings.context_fallback_max_input_tokens
-        - settings.context_output_headroom_tokens
-        - 1024
+        settings.context_fallback_max_input_tokens - settings.context_output_headroom_tokens - 1024
     )
     assert body["input_budget_tokens"] != fallback_budget
 

@@ -109,6 +109,7 @@ async def seed_corpus(
             mime_type="text/plain",
             size_bytes=len(golden.text.encode("utf-8")),
             storage_key=f"{tenant_id}/{golden.filename}",
+            acl_enforced=False,
             status=DocumentStatus.READY,
         )
         chunks = chunk_text(golden.text, chunk_size=_CHUNK_SIZE, overlap=_CHUNK_OVERLAP)
@@ -178,7 +179,6 @@ class _GroundedGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         # The question is the last user message; the tool results (if any) are the

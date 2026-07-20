@@ -183,6 +183,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{ta.id}/taxes.pdf",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             chunks_a = await ChunkRepository(seed, ta.id).replace_for_document(
@@ -199,6 +200,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{tb.id}/carol-secret.pdf",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             chunks_c = await ChunkRepository(seed, tb.id).replace_for_document(

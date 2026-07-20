@@ -55,21 +55,57 @@ def test_dev_jwt_secret_allowed_in_local() -> None:
     assert s.jwt_secret
 
 
+# Every production-mandatory override in one place: the JWT secret + vault key
+# (#209), https OAuth URLs and a real Google client registration (ADR-0019 §1,
+# #452/#453) — the boot test below proves a fully-configured production env
+# constructs; each guard's negative test drops exactly one of these.
+_PROD_OVERRIDES = {
+    "JWT_SECRET": "a-real-production-secret",
+    "SECRETS_ENCRYPTION_KEY": _PROD_SECRETS_KEY,
+    "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "https://api.example.test",
+    "CONNECTOR_OAUTH_FRONTEND_RETURN_URL": "https://app.example.test/sources",
+    "GDRIVE_OAUTH_CLIENT_ID": "prod-google-client-id",
+    "GDRIVE_OAUTH_CLIENT_SECRET": "prod-google-client-secret",
+}
+
+
 def test_overridden_secret_boots_in_production() -> None:
     s = Settings(
         _env_file=None,
         **_BASE,
         ENVIRONMENT="production",
-        JWT_SECRET="a-real-production-secret",
-        # A deployed env must also override the vault key (issue #209).
-        SECRETS_ENCRYPTION_KEY=_PROD_SECRETS_KEY,
-        # ...and serve the OAuth callback/return over https (ADR-0019 §1, #452):
-        # state/code must never transit cleartext, so a non-local environment
-        # refuses to boot with the http compose defaults.
-        CONNECTOR_OAUTH_REDIRECT_BASE_URL="https://api.example.com",
-        CONNECTOR_OAUTH_FRONTEND_RETURN_URL="https://app.example.com/sources",
+        **_PROD_OVERRIDES,
     )
     assert s.environment == "production"
+
+
+def test_http_oauth_urls_rejected_outside_local() -> None:
+    # ADR-0019 §1: state/code never transit cleartext — an http callback base
+    # refuses to boot outside local (all other prod overrides supplied).
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_BASE,
+            ENVIRONMENT="production",
+            **{**_PROD_OVERRIDES, "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "http://api.example.test"},
+        )
+
+
+def test_blank_gdrive_client_rejected_outside_local() -> None:
+    # ADR-0019 §1 (#453): a deployed env without the Google client registration
+    # refuses to boot rather than failing deep inside the first connect flow.
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_BASE,
+            ENVIRONMENT="production",
+            **{**_PROD_OVERRIDES, "GDRIVE_OAUTH_CLIENT_SECRET": ""},
+        )
+
+
+def test_blank_gdrive_client_allowed_in_local() -> None:
+    s = Settings(_env_file=None, **_BASE, ENVIRONMENT="local")
+    assert s.gdrive_oauth_client_id == ""  # the local skeleton boots without one
 
 
 # --- Secrets-vault master key (issue #209 AC-5) ----------------------------

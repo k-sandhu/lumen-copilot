@@ -651,7 +651,15 @@ class Collection:
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """An uploaded file. Ownership-bearing; ingested into ``chunks`` (#21)."""
+    """An uploaded file. Ownership-bearing; ingested into ``chunks`` (#21).
+
+    The mirrored-ACL surface (ADR-0019 §2/§3, spec 0004 §2.2) is additive:
+    ``acl_enforced=False`` (uploads, ``web``) keeps the owner-or-grant model;
+    ``acl_enforced=True`` (managed connectors) makes retrieval require a fresh
+    mirrored-principal intersection and nothing else. ``external_id`` is the
+    provider's stable id (identity-based reconcile); ``acl_scope_ids`` is the
+    container scope chain the §3 cascade stale-stamp matches on.
+    """
 
     id: UUID
     tenant_id: UUID
@@ -665,6 +673,11 @@ class Document:
     error: str | None
     created_at: datetime
     updated_at: datetime
+    acl_enforced: bool = False
+    acl_principals: tuple[str, ...] | None = None
+    acl_synced_at: datetime | None = None
+    acl_scope_ids: tuple[str, ...] | None = None
+    external_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +716,18 @@ class Source:
     connect_generation: int = 0
     connected_account: dict[str, object] | None = None
     sync_cursor: str | None = None
+    # ACL-mirror health (ADR-0019 §2, F-CB-2): last mirrored-ACL refresh + the
+    # unmapped-document count the wire's GdriveSource surface reports.
+    acl_synced_at: datetime | None = None
+    unmapped_acl_count: int | None = None
+    # ADR-0019 §3's durable full-resync-required state. An
+    # ``integrity=incomplete`` page stale-stamps EVERY mirrored document of the
+    # source, and only a full re-examination can restore them — so the
+    # requirement is **sticky**: it survives a crash and outlives any number of
+    # incremental retries (a page-level retry can never satisfy a source-wide
+    # stamp), and only a completed full sync clears it. Internal sync state,
+    # not a wire field.
+    acl_resync_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

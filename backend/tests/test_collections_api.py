@@ -211,6 +211,7 @@ async def _seed_collection(
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key=f"{tenant_id}/k-{i}",
+                acl_enforced=False,
             )
         await session.commit()
         return coll.id

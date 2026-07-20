@@ -122,7 +122,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0039_connector_oauth"]
+    assert list(script.get_heads()) == ["0040_gdrive_acl"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -219,6 +219,12 @@ def test_migration_chain_is_linear_single_head() -> None:
     sandbox_sessions = script.get_revision("0038_sandbox_sessions")
     assert sandbox_sessions is not None
     assert sandbox_sessions.down_revision == "0037_session_summaries"
+    connector_oauth = script.get_revision("0039_connector_oauth")
+    assert connector_oauth is not None
+    assert connector_oauth.down_revision == "0038_sandbox_sessions"
+    gdrive_acl = script.get_revision("0040_gdrive_acl")
+    assert gdrive_acl is not None
+    assert gdrive_acl.down_revision == "0039_connector_oauth"
 
 
 def test_offline_reusable_sandbox_session_migration_round_trips(
@@ -565,7 +571,6 @@ def test_offline_tool_invocations_migration_round_trips(
     assert "drop table tool_invocations" in down
 
 
-
 def test_offline_artifacts_migration_round_trips(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -823,8 +828,7 @@ def test_offline_schedules_migration_round_trips(
     # The three tenant-leading indexes (owner list, by assistant, enabled sweep).
     assert "create index ix_schedules_tenant_owner on schedules (tenant_id, owner_id)" in up
     assert (
-        "create index ix_schedules_tenant_assistant on schedules "
-        "(tenant_id, assistant_id)" in up
+        "create index ix_schedules_tenant_assistant on schedules " "(tenant_id, assistant_id)" in up
     )
     assert "create index ix_schedules_tenant_enabled on schedules (tenant_id, enabled)" in up
     # The #235 residual FK: runs.schedule_id → schedules.id, SET NULL.
@@ -981,9 +985,7 @@ def test_offline_tenant_tool_policy_migration_round_trips(
     # The per-tenant-per-tool upsert UNIQUE.
     assert "uq_tenant_tool_policy_tenant_tool" in up
     # Tenant-leading index (the INV-1 predicate column).
-    assert (
-        "create index ix_tenant_tool_policy_tenant_id on tenant_tool_policy (tenant_id)" in up
-    )
+    assert "create index ix_tenant_tool_policy_tenant_id on tenant_tool_policy (tenant_id)" in up
     # The RLS backstop — same fail-closed GUC policy as 0007.
     assert "alter table tenant_tool_policy enable row level security" in up
     assert "alter table tenant_tool_policy force row level security" in up
@@ -1031,8 +1033,7 @@ def test_offline_tenant_sandbox_policy_migration_round_trips(
     assert "ck_tenant_sandbox_policy_runtime_pos" in up
     # Tenant-leading index (the INV-1 predicate column).
     assert (
-        "create index ix_tenant_sandbox_policy_tenant_id on tenant_sandbox_policy (tenant_id)"
-        in up
+        "create index ix_tenant_sandbox_policy_tenant_id on tenant_sandbox_policy (tenant_id)" in up
     )
     # The RLS backstop — same fail-closed GUC policy as 0007.
     assert "alter table tenant_sandbox_policy enable row level security" in up
@@ -1361,3 +1362,43 @@ def test_offline_session_summaries_migration_round_trips(
     down = capsys.readouterr().out.lower()
     assert "drop table session_summaries" in down
     assert "drop policy if exists rls_session_summaries" in down
+
+
+def test_offline_gdrive_acl_migration_drops_the_mode_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0040 adds the mirrored-ACL surface AND removes the backfill default (#453).
+
+    ADR-0019 §2's write-time discipline — *the mode is never defaulted* — only
+    holds if the ``server_default false`` that backfills the pre-existing
+    upload/``web`` rows is dropped again in the same migration. Left in place,
+    any future insert path that omits ``acl_enforced`` silently produces an
+    owner/grant-governed document out of connector content. Offline DDL render
+    (Postgres dialect), reversible — no DB needed (#70 lesson).
+    """
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0039_connector_oauth:0040_gdrive_acl", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table documents add column acl_enforced" in up
+    assert "not null" in up
+    # The backfill default exists...
+    assert "set default false" in up or "default false" in up
+    # ...and is dropped again, in this same migration (the load-bearing line).
+    assert "alter table documents alter column acl_enforced drop default" in up
+    assert "alter table documents add column acl_principals" in up
+    assert "alter table documents add column acl_synced_at" in up
+    assert "alter table documents add column acl_scope_ids" in up
+    assert "alter table documents add column external_id" in up
+    assert "uq_documents_source_external_id" in up
+    assert "where external_id is not null" in up
+    assert "alter table sources add column acl_synced_at" in up
+    assert "alter table sources add column unmapped_acl_count" in up
+    assert "alter table sources add column acl_resync_required" in up
+
+    command.downgrade(cfg, "0040_gdrive_acl:0039_connector_oauth", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop index uq_documents_source_external_id" in down
+    assert "alter table documents drop column acl_enforced" in down
+    assert "alter table sources drop column acl_resync_required" in down

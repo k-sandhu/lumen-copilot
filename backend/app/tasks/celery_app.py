@@ -43,6 +43,7 @@ celery_app.conf.update(
     imports=(
         "app.tasks.ingest",
         "app.tasks.sync_source",
+        "app.tasks.connector_poll",
         "app.tasks.artifact_retention",
         "app.tasks.run_assistant",
         "app.tasks.scheduler",

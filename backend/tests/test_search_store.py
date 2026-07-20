@@ -65,9 +65,7 @@ def _store(handler: httpx.MockTransport) -> OpenSearchStore:
         base_url="http://opensearch.test:9200",
         index="lumen-test",
         dimensions=_DIMS,
-        client=httpx.AsyncClient(
-            base_url="http://opensearch.test:9200", transport=handler
-        ),
+        client=httpx.AsyncClient(base_url="http://opensearch.test:9200", transport=handler),
     )
 
 
@@ -87,19 +85,25 @@ def test_allow_filter_rejects_empty_owner_set() -> None:
 
 
 def test_engine_filter_shape_owner_only() -> None:
-    """Without grants: exactly [tenant term, owner-should] — deny-by-default."""
+    """Without grants: [tenant term, mode-split bool] — deny-by-default.
+
+    Since ADR-0019 §2 the second clause is the exclusive mode split; the
+    non-enforced branch carries exactly the pre-0019 owner-should terms (the
+    full split shape is pinned in ``tests/test_acl_mode_split.py``).
+    """
     tenant, owner = uuid.uuid4(), uuid.uuid4()
-    clauses = SearchAllowFilter(
-        tenant_id=tenant, owner_ids=frozenset({owner})
-    ).to_engine_filter()
+    clauses = SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({owner})).to_engine_filter()
     assert clauses[0] == {"term": {"tenant_id": str(tenant)}}
-    should = clauses[1]["bool"]["should"]  # type: ignore[index]
+    not_enforced, _enforced = clauses[1]["bool"]["should"]  # type: ignore[index]
+    assert not_enforced["bool"]["filter"][0] == {"term": {"acl_enforced": False}}
+    should = not_enforced["bool"]["filter"][1]["bool"]["should"]
     assert should == [{"terms": {"owner_id": [str(owner)]}}]
     assert clauses[1]["bool"]["minimum_should_match"] == 1  # type: ignore[index]
 
 
 def test_engine_filter_includes_grant_sets_only_when_present() -> None:
-    """Grant clauses appear iff their id-set is non-empty (grants only widen)."""
+    """Grant clauses appear iff their id-set is non-empty (grants only widen
+    the NON-enforced branch — ADR-0019 §2 exclusive modes)."""
     tenant, owner = uuid.uuid4(), uuid.uuid4()
     doc, coll = uuid.uuid4(), uuid.uuid4()
     clauses = SearchAllowFilter(
@@ -108,7 +112,8 @@ def test_engine_filter_includes_grant_sets_only_when_present() -> None:
         granted_document_ids=frozenset({doc}),
         granted_collection_ids=frozenset({coll}),
     ).to_engine_filter()
-    should = clauses[1]["bool"]["should"]  # type: ignore[index]
+    not_enforced, _enforced = clauses[1]["bool"]["should"]  # type: ignore[index]
+    should = not_enforced["bool"]["filter"][1]["bool"]["should"]
     assert {"terms": {"document_id": [str(doc)]}} in should
     assert {"terms": {"collection_id": [str(coll)]}} in should
 
@@ -129,16 +134,25 @@ async def test_hybrid_query_carries_permission_filter_in_both_legs() -> None:
     tenant, owner = uuid.uuid4(), uuid.uuid4()
     allow = SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({owner}))
 
-    await store.hybrid_search(
-        query_text="budget", embedding=[0.0] * _DIMS, allow=allow, k=5
-    )
+    await store.hybrid_search(query_text="budget", embedding=[0.0] * _DIMS, allow=allow, k=5)
 
     assert captured["params"]["search_pipeline"] == "lumen-test-hybrid"
     assert captured["params"]["routing"] == str(tenant)
     legs = captured["body"]["query"]["hybrid"]["queries"]
-    expected = allow.to_engine_filter()
-    assert legs[0]["bool"]["filter"] == expected  # BM25 leg
-    assert legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"] == expected  # kNN leg
+
+    def _normalized(clauses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # The enforced branch's freshness floor is wall-clock derived; pin it
+        # to a placeholder so the two independently-built filters compare.
+        out = json.loads(json.dumps(clauses))
+        split = out[1]["bool"]["should"]
+        split[1]["bool"]["filter"][2]["range"]["acl_synced_at"]["gte"] = "<floor>"
+        return list(out)
+
+    expected = _normalized(allow.to_engine_filter())
+    assert _normalized(legs[0]["bool"]["filter"]) == expected  # BM25 leg
+    assert (
+        _normalized(legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"]) == expected
+    )  # kNN leg
     assert captured["body"]["size"] == 5
 
 
@@ -151,9 +165,7 @@ async def test_unreachable_engine_fails_closed() -> None:
     store = _store(httpx.MockTransport(handler))
     allow = SearchAllowFilter(tenant_id=uuid.uuid4(), owner_ids=frozenset({uuid.uuid4()}))
     with pytest.raises(DependencyError) as excinfo:
-        await store.hybrid_search(
-            query_text="q", embedding=[0.0] * _DIMS, allow=allow, k=3
-        )
+        await store.hybrid_search(query_text="q", embedding=[0.0] * _DIMS, allow=allow, k=3)
     assert excinfo.value.code == "search_unavailable"
 
 
@@ -263,6 +275,114 @@ async def test_upsert_failing_later_batch_fails_the_call(
     assert seen["count"] == 2  # stopped at the failing batch, no batch 3
 
 
+# --- schema: the ACL fields reach an ALREADY-EXISTING strict index -----------
+
+
+class _StrictEngine:
+    """A minimal ``dynamic: strict`` engine double (mapping-aware).
+
+    Models the one behaviour the regression is about: the index already exists
+    with a **pre-0040 mapping**, and a strict mapping rejects any document
+    carrying a field it does not know. ``PUT /{index}/_mapping`` widens the
+    known-field set (the additive, compatible operation ADR-0019 §2 calls for).
+    """
+
+    def __init__(self, *, exists: bool) -> None:
+        self.exists = exists
+        self.known_fields: set[str] = {
+            "chunk_id",
+            "tenant_id",
+            "document_id",
+            "owner_id",
+            "collection_id",
+            "ord",
+            "text",
+            "embedding",
+            "char_start",
+            "char_end",
+        }
+        self.requests: list[tuple[str, str]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.requests.append((request.method, path))
+        if request.method == "HEAD":
+            return httpx.Response(200 if self.exists else 404)
+        if request.method == "PUT" and path.endswith("/_mapping"):
+            body = json.loads(request.content.decode("utf-8"))
+            self.known_fields |= set(body["properties"])
+            return httpx.Response(200, json={"acknowledged": True})
+        if request.method == "PUT":  # create index / pipeline
+            if path == "/lumen-test":
+                body = json.loads(request.content.decode("utf-8"))
+                self.known_fields |= set(body["mappings"]["properties"])
+                self.exists = True
+            return httpx.Response(200, json={"acknowledged": True})
+        if path == "/_bulk":
+            lines = request.content.decode("utf-8").strip().split("\n")
+            for line in lines[1::2]:
+                unknown = set(json.loads(line)) - self.known_fields
+                if unknown:  # what a strict mapping does to an unmapped field
+                    return httpx.Response(200, json={"errors": True, "items": []})
+            return httpx.Response(200, json={"errors": False, "items": []})
+        return httpx.Response(200, json={})  # pragma: no cover — unused paths
+
+
+async def test_existing_strict_index_gets_the_acl_mapping_added() -> None:
+    """Regression (ADR-0019 §2): an index created BEFORE the mirrored-ACL
+    fields must still accept the new writes.
+
+    ``ensure_index`` only ever *created* the index, so a deployed
+    ``dynamic: strict`` index never learned ``acl_enforced`` /
+    ``acl_principals`` / ``acl_synced_at`` / ``acl_scope_ids`` and rejected
+    every subsequent bulk write. The additive ``PUT /{index}/_mapping`` is the
+    compatible migration; the documented reindex backfills existing rows.
+    """
+    engine = _StrictEngine(exists=True)
+    store = _store(httpx.MockTransport(engine))
+
+    await store.ensure_index()
+
+    assert ("PUT", "/lumen-test/_mapping") in engine.requests
+    assert ("PUT", "/lumen-test") not in engine.requests  # never re-created
+    assert {
+        "acl_enforced",
+        "acl_principals",
+        "acl_synced_at",
+        "acl_scope_ids",
+    } <= engine.known_fields
+    # The upgraded index now accepts a mirrored-ACL chunk write.
+    await store.upsert_chunks([_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())])
+
+
+async def test_fresh_index_creation_still_carries_the_acl_mapping() -> None:
+    """A brand-new index gets the fields from the create body (mapping PUT is a no-op)."""
+    engine = _StrictEngine(exists=False)
+    store = _store(httpx.MockTransport(engine))
+
+    await store.ensure_index()
+
+    assert ("PUT", "/lumen-test") in engine.requests
+    assert ("PUT", "/lumen-test/_mapping") in engine.requests
+    await store.upsert_chunks([_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())])
+
+
+async def test_rejected_mapping_update_fails_closed() -> None:
+    """An engine that refuses the mapping update is a hard dependency failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200)
+        if request.url.path.endswith("/_mapping"):
+            return httpx.Response(400, json={"error": "illegal_argument_exception"})
+        return httpx.Response(200, json={})  # pragma: no cover
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.ensure_index()
+    assert excinfo.value.code == "search_error"
+
+
 # --- Live round-trip against the base-stack engine (skips when offline) ------
 
 _OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
@@ -301,9 +421,7 @@ async def test_live_round_trip_hybrid_is_permission_filtered() -> None:
     dropped in teardown.
     """
     index = f"lumen-test-{uuid.uuid4().hex[:8]}"
-    store = OpenSearchStore(
-        base_url=_OS_URL, index=index, dimensions=_DIMS, timeout_seconds=15.0
-    )
+    store = OpenSearchStore(base_url=_OS_URL, index=index, dimensions=_DIMS, timeout_seconds=15.0)
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     u1, u2, u3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     own = _chunk(tenant_id=tenant_a, owner_id=u1, hot=1)
@@ -344,9 +462,7 @@ async def test_live_round_trip_hybrid_is_permission_filtered() -> None:
         assert foreign_tenant.chunk_id not in {h.chunk_id for h in granted_hits}
 
         # Deleting the caller's document removes its chunks from the index.
-        await store.delete_document(
-            tenant_id=tenant_a, document_id=own.document_id, refresh=True
-        )
+        await store.delete_document(tenant_id=tenant_a, document_id=own.document_id, refresh=True)
         after_delete = await store.hybrid_search(
             query_text="annual revenue growth strategy",
             embedding=embedding,

@@ -341,6 +341,13 @@ def configure_beat(settings: Settings | None = None) -> None:
                 "task": "lumen.build_run_digests",
                 "schedule": float(settings.run_digest_interval_seconds),
             },
+            # Periodic connector sync poll (ADR-0019 §3, #453): keeps every
+            # connected managed source's mirror fresh via the rate-limited
+            # enqueue seam.
+            "connector-sync-poll": {
+                "task": "lumen.poll_connector_syncs",
+                "schedule": float(settings.connector_sync_interval_minutes) * 60.0,
+            },
         },
     )
 

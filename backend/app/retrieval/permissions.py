@@ -65,21 +65,47 @@ class AllowSet:
     tenant_id: UUID
     owner_ids: frozenset[UUID]
     grant_principal_id: UUID
+    # The requester's mirrored-principal identity (ADR-0019 §2, spec 0004 §2.2):
+    # the principals a connector-ACL document's `acl_principals` set is
+    # intersected with — their own `user:<uuid>` plus the tenant-wide `tenant`
+    # principal. Gates ONLY the `acl_enforced` branch of the mode-split
+    # predicate; the owner/grant legs never apply there (exclusive modes).
+    acl_principals: frozenset[str] = frozenset()
 
     @classmethod
     def for_principal(cls, principal: Principal) -> AllowSet:
-        """Compute the MVP allow-set for ``principal`` (own + explicitly granted).
+        """Compute the allow-set for ``principal`` (own + granted + mirrored-ACL identity).
 
         Always includes the principal's own ``user_id`` as both the in-set owner
         and the grant principal, and never the empty set, so a query keyed off
         this returns the requester's own rows plus any resource explicitly granted
         to them — never another user's un-granted rows. The tenant comes from the
         token (``principal.tenant_id``), never request input (spec 0004 §2.3).
+
+        The mirrored-principal identity (ADR-0019 §2) is derived from the same
+        token-bound principal: ``user:<user_id>`` (a source ACL entry mapped to
+        this exact Lumen user admits them) plus ``tenant`` (an ``anyone``-shared
+        source item is tenant-wide). Group principals are a recorded follow-up;
+        they widen this same set without any caller changing.
+        """
+        return cls.for_user(tenant_id=principal.tenant_id, user_id=principal.user_id)
+
+    @classmethod
+    def for_user(cls, *, tenant_id: UUID, user_id: UUID) -> AllowSet:
+        """The same allow-set from an already-resolved tenant/user pair.
+
+        :meth:`for_principal` is the request-path entry point; services that
+        were constructed with the token-bound ``tenant_id``/``owner_id`` (the
+        documents use-case) build the identical object here rather than
+        re-deriving the rule. One constructor, one definition of "who this
+        requester is" — the SQL predicate is then the only place the *rule*
+        lives (``retrieval.queries._document_permitted``).
         """
         return cls(
-            tenant_id=principal.tenant_id,
-            owner_ids=frozenset({principal.user_id}),
-            grant_principal_id=principal.user_id,
+            tenant_id=tenant_id,
+            owner_ids=frozenset({user_id}),
+            grant_principal_id=user_id,
+            acl_principals=frozenset({f"user:{user_id}", "tenant"}),
         )
 
     def permits_owner(self, owner_id: UUID) -> bool:

@@ -367,8 +367,8 @@ def _to_response(source: Source) -> SourceResponse | GdriveSourceResponse:
         last_synced_at=source.last_synced_at,
         last_error=source.last_error,
         connected_account=_connected_account_response(source),
-        acl_synced_at=None,  # populated by the ACL mirror (F-CB-2)
-        unmapped_acl_count=None,  # populated by the ACL mirror (F-CB-2)
+        acl_synced_at=source.acl_synced_at,
+        unmapped_acl_count=source.unmapped_acl_count,
         reauthorize_required=_reauthorize_required(source),
         owner_id=source.owner_id,
         created_at=source.created_at,

@@ -83,6 +83,10 @@ def test_non_local_enabled_sandbox_requires_gvisor() -> None:
         # callback/return URLs — part of the minimal production boot env.
         "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "https://api.example.com",
         "CONNECTOR_OAUTH_FRONTEND_RETURN_URL": "https://app.example.com/sources",
+        # ADR-0019 §1 (#453): ... and a Google client registration (blank is
+        # refused outside local) — also part of the minimal production env.
+        "GDRIVE_OAUTH_CLIENT_ID": "prod-google-client-id",
+        "GDRIVE_OAUTH_CLIENT_SECRET": "prod-google-client-secret",
     }
     with pytest.raises(ValidationError, match="runsc"):
         Settings(**common, SANDBOX_RUNTIME="runc")  # type: ignore[arg-type]

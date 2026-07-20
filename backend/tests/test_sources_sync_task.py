@@ -672,6 +672,7 @@ async def test_delete_source_preserves_unrelated_docs_in_backing_collection(
             mime_type="application/pdf",
             size_bytes=10,
             storage_key="tenant/abc/my-own-upload.pdf",
+            acl_enforced=False,
             status=DocumentStatus.READY,
             source_id=None,
         )

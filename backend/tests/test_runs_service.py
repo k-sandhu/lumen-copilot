@@ -72,7 +72,7 @@ class _ScriptedGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if tool_choice == "none" or has_tool_result:
@@ -96,7 +96,7 @@ class _BoomGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — makes this an async generator
 
@@ -123,7 +123,7 @@ class _AppErrorGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         raise self._exc
         yield  # pragma: no cover — makes this an async generator
 
@@ -221,6 +221,7 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
                 mime_type="application/pdf",
                 size_bytes=10,
                 storage_key=f"{ta.id}/taxes.pdf",
+                acl_enforced=False,
             )
             chunks = await ChunkRepository(seed, ta.id).replace_for_document(
                 doc.id,
@@ -280,9 +281,7 @@ def _passage(ctx: _Ctx) -> RetrievedPassage:
     )
 
 
-def _patch_runtime(
-    monkeypatch: pytest.MonkeyPatch, *, gateway: object, retrieval: object
-) -> None:
+def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, gateway: object, retrieval: object) -> None:
     """Wire the fake gateway + retrieval into the runtime the run service builds."""
     real_cls = runs_service.ChatRuntime
 
@@ -414,9 +413,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
 # --- INV-1: cross-tenant run id → 404 --------------------------------------
 
 
-async def test_cross_tenant_run_is_not_found(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_cross_tenant_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-1: a run in tenant A is invisible to a reader scoped to tenant B (404)."""
     from app.core.errors import NotFoundError
 
@@ -434,9 +431,7 @@ async def test_cross_tenant_run_is_not_found(
             await reader.get(run_id)
 
 
-async def test_non_owner_run_is_not_found(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_non_owner_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-2: a run owned by another user in the same tenant is 404 (existence non-disclosure)."""
     from app.core.errors import NotFoundError
 
@@ -501,9 +496,7 @@ async def test_missing_version_fails_reproducibly(
 # --- INV-6: run start/finish audited ---------------------------------------
 
 
-async def test_run_start_and_finish_audited(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_start_and_finish_audited(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-6: a run emits run.started + run.finished, actor = the run owner."""
     _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
     run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
@@ -891,9 +884,7 @@ async def test_cross_tenant_cannot_resume_escalated_run_404(
             await control.resume(run_id)
 
 
-async def test_reroute_to_current_owner_is_422(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_reroute_to_current_owner_is_422(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-8: a no-op reroute (to the current owner) is malformed → 422."""
     from app.core.errors import ValidationError
 
@@ -905,9 +896,7 @@ async def test_reroute_to_current_owner_is_422(
             )
 
 
-async def test_reroute_to_unknown_target_is_404(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_reroute_to_unknown_target_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-1: rerouting to a user not in the tenant is 404 (existence non-disclosure)."""
     from app.core.errors import NotFoundError
 

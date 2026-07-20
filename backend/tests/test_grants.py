@@ -151,6 +151,7 @@ async def _make_document(
         mime_type="text/plain",
         size_bytes=10,
         storage_key="k",
+        acl_enforced=False,
         status=DocumentStatus.READY,
     )
     offset = 0
@@ -887,6 +888,7 @@ async def test_live_hybrid_search_honors_grant() -> None:
                 mime_type="text/plain",
                 size_bytes=1,
                 storage_key="k",
+                acl_enforced=False,
                 status=DocumentStatus.READY,
             )
             chunks_a = await ChunkRepository(sess, tenant).replace_for_document(
@@ -1054,6 +1056,7 @@ async def test_live_agent_tools_share_owner_or_grant_path() -> None:
                     mime_type="text/plain",
                     size_bytes=1,
                     storage_key="k",
+                    acl_enforced=False,
                     status=DocumentStatus.READY,
                 )
                 chunks = await ChunkRepository(sess, tenant).replace_for_document(
