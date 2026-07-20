@@ -122,19 +122,32 @@ allowed to know is already in that snapshot.
 | Forbidden | Because |
 |---|---|
 | the secrets vault (`app.services.secrets_service`) | the framework resolves credentials and hands you an authenticated client; a raw token never enters connector code |
-| **Lumen's** database (`app.db` — session, models, repositories) | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
-| **Lumen's** object store (`app.storage`) | same reason: return bytes on `FetchedDoc.data` |
+| **Lumen's** database — `app.db` (session, models, repositories) **and its `database_url` setting** | persistence — and its transaction boundaries — belong to the framework; you return state as `FetchedDoc`/`SyncPage` fields and it commits them atomically |
+| **Lumen's** object store — `app.storage` and the `s3_*` settings | same reason: return bytes on `FetchedDoc.data` |
+| **Lumen's** other infrastructure + keys — `redis_url`, `celery_broker_url`, `celery_result_backend`, `jwt_secret`, `secrets_encryption_key` | none of it is yours to reach; the vault master key in particular is the secrets prohibition through another door |
 | **mutable module-level state** | a connector must be re-entrant and hold nothing between runs; a module-level cache silently outlives the run and the tenant that filled it |
 
-Two things are explicitly **allowed**, because the rule is about *Lumen's* seams,
-not about categories of technology:
+Note that the rule is stated in **two** halves, because banning the import alone
+does not hold:
 
-- **`app.core.config`** — reading deployment-level, non-secret settings is
-  exactly what `oauth_spec()` does for the platform's client registration.
-- **A SQL client, including `sqlalchemy`, when your *external source* is a
-  database.** Talking to a data warehouse over SQL is a vendor boundary like any
-  other (ADR-0004); what you may not touch is Lumen's own session, models, or
-  repositories. The prohibition is `app.db`, not the existence of SQL.
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+create_async_engine(get_settings().database_url)   # imports nothing forbidden
+```
+
+That opens a connection straight into Lumen's database without touching
+`app.db`. The *setting* is what distinguishes "Lumen's datastore" from "your
+source", so the setting is pinned too.
+
+Which is exactly what makes the following **allowed**:
+
+- **`app.core.config` itself** — reading deployment-level, non-secret settings
+  is what `oauth_spec()` does for the platform's client registration
+  (`gdrive_oauth_client_id` and friends are fine).
+- **A SQL client, `sqlalchemy` included, when your *external source* is a
+  database.** Talking to a warehouse over SQL is a vendor boundary like any
+  other (ADR-0004). Point it at a URL from **your own** `sources.config`; the
+  prohibition is Lumen's database, not the existence of SQL.
 
 These are pinned structurally by an AST scan of your whole package
 (`tests/conformance/prohibitions.py`), covering imports that are deferred inside
@@ -142,14 +155,17 @@ a function body **and** relative ones (`from ...db import repositories`) — bot
 of the shapes a smuggled import actually takes. A module-level constant table
 (`_EXPORT_MIME = {...}`, `__all__ = [...]`) is fine: the scan flags *mutation*
 (`global`, a mutating method call, an item/attribute write) and mutable
-containers bound to non-constant names (`_cache = {}`), with real lexical
+containers bound to non-constant names (`_cache = {}`), with genuinely lexical
 scoping — a local of the same name inside a nested helper does not excuse a
-mutation in the enclosing function.
+mutation in the enclosing function, and **a class attribute does not excuse one
+in a method** (`CACHE.add(...)` inside a method resolves past `class C: CACHE =
+set()` to the module global, and is a real violation).
 
 **What the scan does not catch** — still on you and your reviewer: a dynamic
-import (`importlib.import_module`, `__import__`), state kept on a connector
-*instance* attribute rather than a module global, and mutation reached through
-an alias. The scan closes the accident-shaped holes; it is not a sandbox.
+import (`importlib.import_module`, `__import__`), dynamic attribute access
+(`getattr(settings, "database_url")`), state kept on a connector *instance*
+attribute rather than a module global, and mutation reached through an alias.
+The scan closes the accident-shaped holes; it is not a sandbox.
 
 **Trust model.** v1 connectors are first-party, in-repo, code-reviewed Python
 running **in-process** — the same trust boundary as the rest of the backend, so
@@ -345,11 +361,18 @@ safe prose: never a token, never a raw vendor error body.
 
 **This applies past `validate_config`.** Conformance drives your connector
 against a *failing* provider and requires that `sync()` and `fetch_changes()`
-surface a `ConnectorError` with a non-empty `code` — a leaked `httpx.HTTPError`
-or `ValueError` becomes a 500 with vendor detail instead of a recorded, safe
-`last_error`. And `health()` **reports** a fault (`ConnectorHealth(healthy=False,
-detail=…)`) rather than raising it: a raising probe turns one unreachable source
-into a failed request for the whole connector grid.
+surface a `ConnectorError` — a leaked `httpx.HTTPError` or `ValueError` becomes
+a 500 with vendor detail instead of a recorded, safe `last_error`. And
+`health()` **reports** a fault (`ConnectorHealth(healthy=False, detail=…)`)
+rather than raising it: a raising probe turns one unreachable source into a
+failed request for the whole connector grid.
+
+**"Stable" is checked, not assumed.** Each fault is driven **twice** and the
+code must be identical both times *and* equal to the value your harness declares
+(`sync_fault_code` / `changes_fault_code`). A per-occurrence code
+(`f"drive_error_{uuid4()}"`) is non-empty and still useless — nobody can match
+on it, search for it, or count it. Pin one code per failure mode; changing it
+later is a visible diff in the harness, which is the point.
 
 ## 6. Egress — the SSRF obligations
 
@@ -383,13 +406,20 @@ warning.
 2. **Add the contract enum value** for the new `SourceType` in `contracts/`.
 3. **Add a conformance harness** — `backend/tests/conformance/harnesses.py`: an
    offline `Source`, a `ConnectorRun` over an `httpx.MockTransport`, a
-   **faulting** run (so the typed-error rules have a real fault to classify),
-   the invalid configs your `validate_config` must reject, and one fixture per
-   declared capability — a replay cursor, an expired cursor, a transient-fault
-   cursor, and (if your source has containers) a cascade + an unprovable page;
-   ACL cases carrying the source's own allow-list for the subset proof.
-   **A connector package that does not enroll, or that enrolls without a
-   harness, fails the suite** — that is the point.
+   **faulting** run plus the stable `sync_fault_code` / `changes_fault_code` it
+   must report, the invalid configs your `validate_config` must reject, and one
+   fixture per declared capability — a replay cursor, an expired cursor, a
+   transient-fault cursor, and (if your source has containers) a cascade + an
+   unprovable page; ACL cases carrying the source's own allow-list for the
+   subset proof. **A connector package that does not enroll, or that enrolls
+   without a harness, fails the suite** — that is the point.
+
+   "Enrolls" is checked on the object, not the name: your package's own
+   `CONNECTOR` must be conformant, carry `name` equal to its directory, and be
+   the very object the registry resolved for that name. A package whose
+   `CONNECTOR` is broken does not quietly disappear from the suite — which is
+   what happened before, because registry discovery *skips* a non-conforming
+   `CONNECTOR` rather than raising.
 4. **Run the gates** from `backend/`:
    ```bash
    uv run --extra dev pytest tests/test_connector_conformance.py

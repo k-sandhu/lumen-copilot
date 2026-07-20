@@ -41,7 +41,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 from urllib.parse import urlsplit
 
 from app.connectors.base import (
@@ -402,25 +402,67 @@ def _assert_typed_fault(exc: BaseException, *, connector_name: str, where: str) 
     ), f"connector {connector_name!r}: the ConnectorError from {where} carries no `detail`"
 
 
-async def check_typed_sync_fault(
-    connector: Any, *, source: Source, run: Any, connector_name: str
+def _assert_stable_code(
+    codes: list[str], *, connector_name: str, where: str, expected: str | None
 ) -> None:
-    """A provider fault during ``sync`` is a typed ``ConnectorError``.
+    """The same fault twice yields the **same** code — and the declared one.
+
+    "Non-empty" is not "stable". A code that varies per occurrence
+    (``f"drive_error_{uuid4()}"``) satisfies every non-emptiness check and is
+    still useless: the framework and the API key off this value, so a caller
+    cannot match on it, an operator cannot search for it, and a dashboard cannot
+    count it. Running the identical fault twice is what turns the word "stable"
+    in the ADR into something a test can hold.
+    """
+    assert len(set(codes)) == 1, (
+        f"connector {connector_name!r}: the SAME fault in {where} produced different "
+        f"codes across runs ({codes}) — `code` is the STABLE, machine-readable "
+        "discriminator the framework records and the API surfaces; a per-occurrence "
+        f"value cannot be matched, searched, or counted ({_GUIDE})"
+    )
+    if expected is not None:
+        assert codes[0] == expected, (
+            f"connector {connector_name!r}: {where} reported code {codes[0]!r} but its "
+            f"harness declares {expected!r} — pin one code per failure mode and do not "
+            "churn it; callers depend on the exact string"
+        )
+
+
+async def check_typed_sync_fault(
+    connector: Any,
+    *,
+    source: Source,
+    run: Any,
+    connector_name: str,
+    expected_code: str | None = None,
+) -> None:
+    """A provider fault during ``sync`` is a typed ``ConnectorError`` with a
+    **stable** code.
 
     The config rule alone is not the ADR's "typed `ConnectorError` mapping": the
     faults a connector actually meets at 3am are a 500, a dropped connection, a
     malformed body. Those must arrive at the framework typed and vendor-free, or
-    the sync task's error handling degrades into "something threw".
+    the sync task's error handling degrades into "something threw". The fault is
+    driven **twice** so the code's stability is proven, not assumed.
     """
-    try:
-        result = await connector.sync(source, run)
-        list(result)
-    except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
-        _assert_typed_fault(exc, connector_name=connector_name, where="sync() on a failing source")
-        return
-    raise AssertionError(
-        f"connector {connector_name!r}: sync() completed against a failing provider — the "
-        "harness's fault scenario must actually fault, or this rule proves nothing"
+    codes: list[str] = []
+    for attempt in (1, 2):
+        try:
+            result = await connector.sync(source, run)
+            list(result)
+        except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
+            _assert_typed_fault(
+                exc, connector_name=connector_name, where="sync() on a failing source"
+            )
+            codes.append(cast(ConnectorError, exc).code)
+            continue
+        raise AssertionError(
+            f"connector {connector_name!r}: sync() completed against a failing provider "
+            f"(attempt {attempt}) — the harness's fault scenario must actually fault, or "
+            "this rule proves nothing"
+        )
+    _assert_stable_code(
+        codes, connector_name=connector_name, where="sync()", expected=expected_code
     )
 
 
@@ -431,9 +473,10 @@ async def check_typed_changes_fault(
     cursor: str,
     run: Any,
     connector_name: str,
+    expected_code: str | None = None,
 ) -> None:
-    """A provider fault during a replay is a typed ``ConnectorError`` — and is
-    **not** ``CursorExpiredError``.
+    """A provider fault during a replay is a typed ``ConnectorError`` with a
+    **stable** code — and is **not** ``CursorExpiredError``.
 
     The distinction is load-bearing: a cursor-expired signal makes the framework
     discard the cursor and resync in full, while an ordinary fault must leave
@@ -441,24 +484,31 @@ async def check_typed_changes_fault(
     Collapsing the two would throw away a valid resume point on every transient
     500.
     """
-    try:
-        async for _page in fetch_changes(source, cursor, run):
-            pass
-    except CursorExpiredError as exc:
+    codes: list[str] = []
+    for attempt in (1, 2):
+        try:
+            async for _page in fetch_changes(source, cursor, run):
+                pass
+        except CursorExpiredError as exc:
+            raise AssertionError(
+                f"connector {connector_name!r}: an ordinary provider fault during a replay "
+                "raised CursorExpiredError — that signal means the cursor is dead and makes "
+                "the framework discard a still-valid resume point; use ConnectorError for a "
+                "transient fault"
+            ) from exc
+        except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
+            _assert_typed_fault(
+                exc, connector_name=connector_name, where="fetch_changes() on a failing provider"
+            )
+            codes.append(cast(ConnectorError, exc).code)
+            continue
         raise AssertionError(
-            f"connector {connector_name!r}: an ordinary provider fault during a replay "
-            "raised CursorExpiredError — that signal means the cursor is dead and makes "
-            "the framework discard a still-valid resume point; use ConnectorError for a "
-            "transient fault"
-        ) from exc
-    except BaseException as exc:  # noqa: BLE001 — classifying the fault IS the check
-        _assert_typed_fault(
-            exc, connector_name=connector_name, where="fetch_changes() on a failing provider"
+            f"connector {connector_name!r}: fetch_changes() drained cleanly against a "
+            f"failing provider (attempt {attempt}) — the harness's fault scenario must "
+            "actually fault"
         )
-        return
-    raise AssertionError(
-        f"connector {connector_name!r}: fetch_changes() drained cleanly against a failing "
-        "provider — the harness's fault scenario must actually fault"
+    _assert_stable_code(
+        codes, connector_name=connector_name, where="fetch_changes()", expected=expected_code
     )
 
 

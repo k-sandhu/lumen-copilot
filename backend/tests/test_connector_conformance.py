@@ -58,7 +58,7 @@ from app.connectors.base import (
     get_oauth_spec,
 )
 from app.connectors.oauth import OAuthSpec
-from app.connectors.registry import get_connector, registered_types
+from app.connectors.registry import UnknownConnectorError, get_connector, registered_types
 from app.domain.entities import Source
 from tests.conformance import kit
 from tests.conformance.harnesses import ConnectorHarness, harness_for, harness_names
@@ -66,15 +66,21 @@ from tests.conformance.prohibitions import (
     Violation,
     check_execution_context_prohibitions,
     check_registry_enrollment,
+    connector_package_names,
     connector_package_path,
-    connectors_root,
-    discover_connector_packages,
+    packages_under,
     scan_package,
 )
 
 # Every connector the registry discovers — the suite is parametrized over the
 # real thing, never a curated list (a curated list is how a connector skips).
 CONNECTOR_TYPES = sorted(registered_types())
+
+# The registry's exact package universe (same pkgutil scan it performs). The
+# structural rules run over THIS, not over the registry keys: a package the
+# registry silently skipped still has to be scanned, or a malformed connector
+# escapes every check by failing to enroll.
+CONNECTOR_PACKAGES = connector_package_names()
 
 
 @pytest.fixture(params=CONNECTOR_TYPES)
@@ -92,41 +98,93 @@ def test_registry_is_non_empty() -> None:
     assert {"web", "gdrive"} <= set(CONNECTOR_TYPES)
 
 
-def _diagnose_unenrolled(package: str) -> str | None:
-    """Why did the registry drop this package? (imported, then protocol-checked)"""
+def _load_connector(package: str) -> object | None:
+    """Import a connector package and hand back its own ``CONNECTOR``."""
     import importlib
 
+    module = importlib.import_module(f"app.connectors.{package}")
+    return getattr(module, "CONNECTOR", None)
+
+
+def _resolve_registered(name: str) -> object | None:
+    """What the registry actually enrolled under ``name`` (or nothing)."""
     try:
-        module = importlib.import_module(f"app.connectors.{package}")
-        candidate = getattr(module, "CONNECTOR", None)
-    except Exception as exc:  # pragma: no cover — an import-time defect
-        return f"importing app.connectors.{package} raised {type(exc).__name__}: {exc}"
-    if candidate is None:  # pragma: no cover — guarded by the AST check first
-        return "CONNECTOR is None"
-    try:
-        kit.check_protocol_surface(candidate, expected_name=package)
-    except AssertionError as exc:
-        return str(exc)
-    return None  # pragma: no cover — a conformant connector would have enrolled
+        return get_connector(name)
+    except UnknownConnectorError:
+        return None
+
+
+def _check_surface(candidate: object, package: str) -> None:
+    kit.check_protocol_surface(candidate, expected_name=package)
 
 
 def test_every_connector_package_enrolls_in_the_registry() -> None:
-    """Every connector package **on disk** must actually enroll (ADR-0008 §3).
+    """Every connector package's **own** ``CONNECTOR`` is what enrolled.
 
     The hole this closes: ``registry._registry()`` *skips* a ``CONNECTOR`` that
     fails the runtime protocol check instead of raising. A newly dropped
     connector missing (say) ``health`` is therefore absent from
     ``registered_types()`` — so a suite parametrized over the registry passes
     green while the connector the author just added was never tested at all.
-    Enrollment has to be checked from the filesystem, the only side that can see
-    a package the registry dropped.
+
+    Name-membership is not enough to close it: a key can be present because a
+    *different* package claimed that ``name``, and a package whose ``CONNECTOR``
+    is junk passes as soon as its directory name happens to be a registry key.
+    So the check is on the object — conforming, named for its directory, and
+    **identical** to what the registry resolved.
     """
-    check_registry_enrollment(connectors_root(), registered_types(), diagnose=_diagnose_unenrolled)
+    check_registry_enrollment(
+        CONNECTOR_PACKAGES,
+        load=_load_connector,
+        resolve=_resolve_registered,
+        check_surface=_check_surface,
+    )
 
 
-def test_enrollment_check_sees_the_real_packages() -> None:
-    """Anti-vacuity: the disk scan must find the connectors we know exist."""
-    assert {"web", "gdrive"} <= set(discover_connector_packages(connectors_root()))
+def test_enrollment_sees_the_real_connectors() -> None:
+    """Anti-vacuity: the universe must contain the connectors we know exist."""
+    assert {"web", "gdrive"} <= set(CONNECTOR_PACKAGES)
+
+
+def test_package_universe_adds_no_conventions_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The discovery rule must not add conventions the registry does not have.
+
+    ``registry._registry()`` scans **every** subpackage, ``_``-prefixed included.
+    A scan of ours that skipped them would leave a blind spot with a specific
+    exploit: a conforming ``_alias`` registering under ``name="foo"`` satisfies
+    the registry key while a malformed ``foo/`` goes unexamined.
+
+    The property under test is *ours* — "``packages_under`` filters nothing" —
+    so ``pkgutil`` is stubbed rather than exercised. An earlier version of this
+    test built a real directory tree and asserted what ``pkgutil`` made of it;
+    that passed alone and failed inside the full suite, because it was really
+    asserting filesystem/import-machinery behaviour rather than the wrapper's
+    one job. A hermetic stub cannot drift like that, and it still fails the
+    moment someone adds a name filter here.
+    """
+    import pkgutil
+
+    fake = [
+        pkgutil.ModuleInfo(None, "_alias", True),
+        pkgutil.ModuleInfo(None, "foo", True),
+        pkgutil.ModuleInfo(None, "not_a_package", False),
+    ]
+    monkeypatch.setattr(pkgutil, "iter_modules", lambda _paths: iter(fake))
+    # Subpackages only (the registry's `if info.ispkg`), and no name filtering.
+    assert packages_under(["/nowhere"]) == ["_alias", "foo"]
+
+
+def test_package_universe_matches_the_registrys_own_scan() -> None:
+    """And on the real package, our universe equals the registry's, exactly."""
+    import pkgutil
+
+    import app.connectors as connectors_package
+
+    assert CONNECTOR_PACKAGES == sorted(
+        info.name for info in pkgutil.iter_modules(connectors_package.__path__) if info.ispkg
+    )
 
 
 def test_every_registered_connector_has_a_harness() -> None:
@@ -223,12 +281,17 @@ async def test_sync_fault_is_a_typed_connector_error(
     and a leaked ``httpx.HTTPError`` there becomes a 500 with vendor detail
     rather than a recorded, safe ``last_error``.
     """
+    assert harness.sync_fault_code, (
+        f"harness for {harness.name!r} declares no sync_fault_code — 'stable' is only "
+        "provable against a pinned expected value"
+    )
     async with harness.faulting_run(monkeypatch) as run:
         await kit.check_typed_sync_fault(
             get_connector(harness.name),
             source=harness.source(),
             run=run,
             connector_name=harness.name,
+            expected_code=harness.sync_fault_code,
         )
 
 
@@ -268,20 +331,25 @@ async def test_changes_fault_is_typed_and_not_cursor_expiry(
             cursor=harness.fault_cursor,
             run=run,
             connector_name=harness.name,
+            expected_code=harness.changes_fault_code,
         )
 
 
 # --- execution-context prohibitions (ADR-0019 §4) ----------------------------
 
 
-@pytest.mark.parametrize("name", CONNECTOR_TYPES)
+@pytest.mark.parametrize("name", CONNECTOR_PACKAGES)
 def test_execution_context_prohibitions(name: str) -> None:
-    """No vault, no DB, no mutable module state — pinned structurally.
+    """No vault, no Lumen DB/infra, no mutable module state — pinned structurally.
 
     The ADR's own words: *"connectors never read the vault, the DB, or mutable
     module state; the conformance kit pins these prohibitions"*. Behavioural
     tests cannot prove this (a connector that resolves its own credential passes
     every green path), so the check is an AST scan of the whole package.
+
+    Parametrized over the **package universe**, not the registry keys: a package
+    the registry silently skipped still has to be scanned, or a malformed
+    connector escapes every structural rule simply by failing to enroll.
     """
     check_execution_context_prohibitions(connector_package_path(name))
 
@@ -750,6 +818,71 @@ async def test_kit_bites_codeless_sync_fault() -> None:
         )
 
 
+class _UnstableCodeConnector(_GoodConnector):
+    """A code that changes per occurrence — non-empty, and useless.
+
+    The reviewer's reproduction: `random_1` then `random_2`. Nobody can match,
+    search, or count a discriminator that is different every time.
+    """
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+        self._n += 1
+        raise ConnectorError("provider is unwell", code=f"random_{self._n}")
+
+
+async def test_kit_bites_unstable_sync_fault_code() -> None:
+    with pytest.raises(AssertionError, match=r"produced different\s+codes across runs"):
+        await kit.check_typed_sync_fault(
+            _UnstableCodeConnector(), source=_stub_source(), run=None, connector_name="synthetic"
+        )
+
+
+class _StableButRenamedConnector(_GoodConnector):
+    """Stable across runs, but not the code the harness declares."""
+
+    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+        raise ConnectorError("provider is unwell", code="renamed_code")
+
+
+async def test_kit_bites_sync_fault_code_that_drifted_from_the_declared_one() -> None:
+    """Stable but changed: the harness pins the exact string callers depend on."""
+    with pytest.raises(AssertionError, match=r"but its harness declares"):
+        await kit.check_typed_sync_fault(
+            _StableButRenamedConnector(),
+            source=_stub_source(),
+            run=None,
+            connector_name="synthetic",
+            expected_code="fetch_failed",
+        )
+
+
+class _UnstableChangesCodeConnector:
+    """The same instability on the incremental path."""
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    async def fetch_changes(self, source: Source, cursor: str, run: Any) -> AsyncIterator[SyncPage]:
+        self._n += 1
+        raise ConnectorError("provider is unwell", code=f"random_{self._n}")
+        yield  # pragma: no cover — unreachable, keeps this an async generator
+
+
+async def test_kit_bites_unstable_changes_fault_code() -> None:
+    connector = _UnstableChangesCodeConnector()
+    with pytest.raises(AssertionError, match=r"produced different\s+codes across runs"):
+        await kit.check_typed_changes_fault(
+            connector.fetch_changes,
+            source=_stub_source(),
+            cursor="fault",
+            run=None,
+            connector_name="synthetic",
+        )
+
+
 class _RaisingHealthConnector(_GoodConnector):
     """A probe that raises — one dead source breaks the whole grid request."""
 
@@ -1070,6 +1203,7 @@ def test_kit_bites_missing_harness() -> None:
 _CONFORMANT_MODULE = '''
 """A conformant connector package body."""
 import sqlalchemy  # an EXTERNAL SQL source is a legitimate vendor boundary
+from sqlalchemy.ext.asyncio import create_async_engine
 from app.connectors.base import ConnectorHealth
 from app.core.config import get_settings
 from .helpers import thing
@@ -1082,6 +1216,15 @@ def helper(items: list[str]) -> list[str]:
     local.append(items[0])
     return local
 
+def connect_to_MY_OWN_source(config: dict) -> object:
+    # The allowance made explicit: a SQL engine pointed at the connector's own
+    # source URL, from its own sources.config. Reading a Lumen setting instead
+    # is what the scan forbids.
+    return create_async_engine(config["warehouse_url"])
+
+def reads_allowed_config() -> str:
+    return get_settings().gdrive_oauth_client_id
+
 CACHE_LIKE = set()
 
 def own_scope_shadow() -> None:
@@ -1091,6 +1234,11 @@ def own_scope_shadow() -> None:
 
 def comprehension_target() -> list[str]:
     return [CACHE_LIKE for CACHE_LIKE in ["a", "b"]]
+
+class ClassBodyScope:
+    # A class body DOES see its own namespace, so this one is not module state.
+    CACHE_LIKE = set()
+    CACHE_LIKE.add("class-level")
 '''
 
 # Each entry: (module body, a substring the failure message must contain).
@@ -1147,6 +1295,42 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
         "        CACHE.add('inner')\n",
         "`CACHE.add(...)` mutates module state",
     ),
+    # Round-2 finding 2: a class namespace is NOT an enclosing scope. The method's
+    # unqualified CACHE resolves past `class C` straight to the module global.
+    "mutates module state from a method despite a class attribute": (
+        "CACHE = set()\n\n"
+        "class C:\n"
+        "    CACHE = set()\n\n"
+        "    def mutate(self) -> None:\n"
+        "        CACHE.add('x')\n",
+        "`CACHE.add(...)` mutates module state",
+    ),
+    "mutates module state from a comprehension inside a class body": (
+        "TABLE = dict()\n\n"
+        "class C:\n"
+        "    TABLE = dict()\n"
+        "    ROWS = [TABLE.setdefault(k, k) for k in ('a',)]\n",
+        "`TABLE.setdefault(...)` mutates module state",
+    ),
+    # Round-2 finding 7: the exact bypass the reviewer reproduced — no forbidden
+    # import anywhere, yet it opens a connection into Lumen's own database.
+    "opens an engine on Lumen's database_url": (
+        "from sqlalchemy.ext.asyncio import create_async_engine\n"
+        "from app.core.config import get_settings\n\n"
+        "def go() -> object:\n"
+        "    return create_async_engine(get_settings().database_url)\n",
+        "reads the `database_url` setting",
+    ),
+    "reads Lumen's object-store credentials": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    return get_settings().s3_secret_key\n",
+        "reads the `s3_secret_key` setting",
+    ),
+    "reads the vault master key": (
+        "def go(settings: object) -> str:\n    return settings.secrets_encryption_key\n",
+        "reads the `secrets_encryption_key` setting",
+    ),
 }
 
 
@@ -1201,83 +1385,123 @@ def _write_connector_package(root: Path, name: str, *, init_body: str) -> Path:
     return package
 
 
-def test_enrollment_bites_a_malformed_newly_dropped_connector(tmp_path: Path) -> None:
-    """The blocker this closes: a new connector the registry silently dropped.
+class _FakeTree:
+    """A synthetic package universe: what each package exposes, what enrolled."""
 
-    Simulates the real drop-in: a package on disk exposing ``CONNECTOR`` whose
-    implementation is incomplete, so ``registered_types()`` never contains it.
-    Without this check the whole registry-parametrized suite would pass green
-    while the connector the author just added went completely untested.
+    def __init__(
+        self, exposes: dict[str, object], enrolled: dict[str, object] | None = None
+    ) -> None:
+        self.exposes = exposes
+        self.enrolled = exposes if enrolled is None else enrolled
+
+    @property
+    def packages(self) -> list[str]:
+        return sorted(self.exposes)
+
+    def load(self, package: str) -> object | None:
+        value = self.exposes[package]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def resolve(self, name: str) -> object | None:
+        return self.enrolled.get(name)
+
+
+def _conforming(name: str) -> object:
+    """A minimal conformant connector carrying ``name``."""
+
+    class _Ok(_GoodConnector):
+        pass
+
+    connector = _Ok()
+    connector.name = name  # type: ignore[misc]
+    return connector
+
+
+def test_enrollment_bites_a_junk_connector_whose_name_is_a_registry_key() -> None:
+    """The reviewer's reproduction: name-membership is not enrollment.
+
+    ``foo`` exposes ``object()`` and the registry key ``foo`` exists (claimed by
+    something else entirely). A membership check passes this; checking the
+    object does not.
     """
-    _write_connector_package(tmp_path, "web", init_body="CONNECTOR = object()\n")
-    _write_connector_package(tmp_path, "newconnector", init_body="CONNECTOR = object()\n")
+    tree = _FakeTree(exposes={"foo": object()}, enrolled={"foo": _conforming("foo")})
+    with pytest.raises(AssertionError, match=r"does not satisfy the connector protocol"):
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
 
-    # The registry enrolled only `web` — `newconnector` failed its protocol check.
-    with pytest.raises(AssertionError, match=r"did not enroll it under the name 'newconnector'"):
-        check_registry_enrollment(tmp_path, frozenset({"web"}))
 
+def test_enrollment_bites_a_shadowing_alias_package() -> None:
+    """A conforming ``_alias`` registering as ``name="foo"`` covers for ``foo``.
 
-def test_enrollment_failure_carries_the_diagnosis(tmp_path: Path) -> None:
-    """The message names the missing method, not just "did not enroll".
-
-    This is the wiring that turns a mystery into a fix: the real suite passes a
-    diagnoser that imports the package and runs the protocol rules over its
-    ``CONNECTOR``, so the author is told *which* method the registry choked on.
+    Conformance would then exercise ``_alias`` while the enrollment scan is
+    satisfied by ``foo`` — the identity check is what separates them. Note the
+    package universe includes ``_``-prefixed directories, because the registry's
+    own scan does.
     """
-
-    class _Incomplete:
-        name = "newconnector"
-
-        def validate_config(self, config: dict[str, object]) -> dict[str, object]:
-            return config
-
-        async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
-            return []
-
-    def _diagnose(_package: str) -> str | None:
-        try:
-            kit.check_protocol_surface(_Incomplete(), expected_name="newconnector")
-        except AssertionError as exc:
-            return str(exc)
-        raise AssertionError("expected the protocol check to fail")  # pragma: no cover
-
-    _write_connector_package(tmp_path, "newconnector", init_body="CONNECTOR = object()\n")
-    with pytest.raises(AssertionError, match=r"is missing `health`"):
-        check_registry_enrollment(tmp_path, frozenset(), diagnose=_diagnose)
-
-
-def test_enrollment_accepts_a_reexported_connector(tmp_path: Path) -> None:
-    """Regression: ``from .connector import CONNECTOR`` is a real drop-in shape.
-
-    The ``web`` connector re-exports its instance rather than assigning one here.
-    An assignment-only check would flag the repo's own connector as unregistered
-    — a false positive that would make the enrollment rule untrustworthy on day
-    one.
-    """
-    _write_connector_package(
-        tmp_path, "reexport", init_body="from app.connectors.web.connector import CONNECTOR\n"
+    impostor = _conforming("foo")
+    tree = _FakeTree(
+        exposes={"_alias": impostor, "foo": _conforming("foo")},
+        enrolled={"foo": impostor},
     )
-    check_registry_enrollment(tmp_path, frozenset({"reexport"}))
+    with pytest.raises(AssertionError, match=r"resolved a DIFFERENT object for the name 'foo'"):
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
 
 
-def test_enrollment_bites_a_package_without_connector(tmp_path: Path) -> None:
+def test_enrollment_bites_a_connector_named_for_another_directory() -> None:
+    """``bar/CONNECTOR.name == "foo"`` — the directory and the key must agree."""
+    tree = _FakeTree(exposes={"bar": _conforming("foo")}, enrolled={"foo": _conforming("foo")})
+    with pytest.raises(AssertionError, match=r"does not satisfy the connector protocol"):
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
+
+
+def test_enrollment_bites_a_package_without_connector() -> None:
     """A connector package that forgot the drop-in sentinel entirely."""
-    _write_connector_package(tmp_path, "forgot", init_body='"""No CONNECTOR here."""\n')
+    tree = _FakeTree(exposes={"forgot": None})
     with pytest.raises(AssertionError, match=r"has no module-level CONNECTOR"):
-        check_registry_enrollment(tmp_path, frozenset())
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
 
 
-def test_enrollment_passes_a_fully_enrolled_tree(tmp_path: Path) -> None:
-    """Control: every package present and enrolled is clean."""
-    _write_connector_package(tmp_path, "alpha", init_body="CONNECTOR = object()\n")
-    _write_connector_package(tmp_path, "beta", init_body="CONNECTOR = object()\n")
-    check_registry_enrollment(tmp_path, frozenset({"alpha", "beta"}))
+def test_enrollment_bites_an_unimportable_package() -> None:
+    """A package that raises on import is skipped by the registry too."""
+    tree = _FakeTree(exposes={"broken": ImportError("boom")})
+    with pytest.raises(AssertionError, match=r"could not be imported"):
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
 
 
-def test_enrollment_refuses_to_pass_vacuously(tmp_path: Path) -> None:
-    """An empty tree is a broken scan, not a clean bill of health."""
-    with pytest.raises(AssertionError, match=r"no connector packages found"):
-        check_registry_enrollment(tmp_path, frozenset())
+def test_enrollment_bites_a_conforming_but_unregistered_connector() -> None:
+    """Conformant, but the registry has no entry at all for its name."""
+    tree = _FakeTree(exposes={"alpha": _conforming("alpha")}, enrolled={})
+    with pytest.raises(AssertionError, match=r"the registry has\s+no entry"):
+        check_registry_enrollment(
+            tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+        )
+
+
+def test_enrollment_passes_a_fully_enrolled_tree() -> None:
+    """Control: conformant, correctly named, and identical to what enrolled."""
+    tree = _FakeTree(exposes={"alpha": _conforming("alpha"), "beta": _conforming("beta")})
+    check_registry_enrollment(
+        tree.packages, load=tree.load, resolve=tree.resolve, check_surface=_check_surface
+    )
+
+
+def test_enrollment_refuses_to_pass_vacuously() -> None:
+    """An empty universe is a broken scan, not a clean bill of health."""
+    with pytest.raises(AssertionError, match=r"no connector packages discovered"):
+        check_registry_enrollment(
+            [], load=lambda _p: None, resolve=lambda _n: None, check_surface=_check_surface
+        )
 
 
 # --- the framework's own contract the guide documents ------------------------

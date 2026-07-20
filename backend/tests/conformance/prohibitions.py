@@ -33,27 +33,43 @@ the object store. Deliberately **not** banned: ``sqlalchemy`` itself. The ADR
 prohibits touching *Lumen's* database, not the existence of SQL — a future
 connector whose external source is a SQL warehouse legitimately imports a SQL
 client, and the SDK has no business prohibiting a vendor boundary.
-``app.core.config`` is likewise allowed: reading deployment-level, non-secret
-settings is what ``oauth_spec()`` does for the platform's client registration.
 
-**P2 — no mutable module-level state**, detected as *mutation*, not as
+**P2 — no reads of Lumen's infrastructure settings**
+(:data:`FORBIDDEN_SETTINGS`). P1 alone does not survive contact: ::
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    create_async_engine(get_settings().database_url)      # never imports app.db
+
+opens a connection straight into Lumen's database while importing nothing
+forbidden. The *setting* is what distinguishes "Lumen's datastore" from "the
+connector's own source", so it is the setting that is pinned. ``app.core.config``
+stays importable — reading ``gdrive_oauth_client_id`` is what ``oauth_spec()``
+is *for* — but the infrastructure and credential fields are off limits. Together
+P1 and P2 state the rule the ADR actually makes: never Lumen's DB, whatever
+route you take to it.
+
+**P3 — no mutable module-level state**, detected as *mutation*, not as
 container type: a module-level lookup table (``_EXPORT_MIME = {...}``) that is
 only ever read is a constant, while ``_cache = {}`` plus a ``.setdefault`` in a
-method is cross-run state. The scope analysis is real (:class:`_ScopeWalker`) —
-a binding inside a *nested* function does not suppress a genuine mutation in
-the enclosing one.
+method is cross-run state. The scope analysis is genuinely lexical
+(:class:`_ScopeWalker`): a binding inside a *nested* function does not suppress a
+mutation in the enclosing one, and a **class body is not an enclosing scope** —
+a method's unqualified name resolves past its class straight to the module
+global, so `class C: CACHE = set()` does not excuse `CACHE.add(...)` in a method.
 
 Blind spots, recorded honestly (see the guide's *What this does not catch*):
-dynamic imports (``importlib.import_module("app.db…")``, ``__import__``), state
-held on a connector *instance* attribute, and mutation reached through an alias
-rather than the module-level name. Those stay review-caught; the scan closes
-the accident-shaped holes, not a determined author.
+dynamic imports (``importlib.import_module("app.db…")``, ``__import__``),
+dynamic attribute access (``getattr(settings, "database_url")``), state held on
+a connector *instance* attribute, and mutation reached through an alias rather
+than the module-level name. Those stay review-caught; the scan closes the
+accident-shaped holes, not a determined author.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Iterator
+import pkgutil
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
@@ -61,12 +77,14 @@ from pathlib import Path
 __all__ = [
     "CONNECTOR_ATTR",
     "FORBIDDEN_IMPORTS",
+    "FORBIDDEN_SETTINGS",
     "Violation",
     "check_execution_context_prohibitions",
     "check_registry_enrollment",
+    "connector_package_names",
     "connector_package_path",
     "connectors_root",
-    "discover_connector_packages",
+    "packages_under",
     "scan_package",
 ]
 
@@ -89,6 +107,34 @@ FORBIDDEN_IMPORTS: dict[str, str] = {
     "app.storage": (
         "Lumen's object store — persisting content is the framework's job; a "
         "connector returns bytes on FetchedDoc.data"
+    ),
+}
+
+# Settings attributes that ARE Lumen's own infrastructure and credentials
+# (`app/core/config.py`). Banning the import of ``app.db`` is not enough on its
+# own: ``create_async_engine(get_settings().database_url)`` never imports
+# ``app.db`` and still opens a connection straight into Lumen's database. The
+# *setting* is what identifies "Lumen's datastore" as opposed to the connector's
+# own source, so that is where the pin belongs.
+#
+# This is deliberately the complement of the SQL-client allowance: a connector
+# whose external source is a warehouse may absolutely
+# ``from sqlalchemy.ext.asyncio import create_async_engine`` and point it at a
+# URL from **its own** ``sources.config``. What it may not do is aim any client
+# at Lumen's infrastructure.
+FORBIDDEN_SETTINGS: dict[str, str] = {
+    "database_url": "Lumen's own database URL — connectors never open a connection to it",
+    "redis_url": "Lumen's Redis (cache / broker / WS backplane)",
+    "celery_broker_url": "Lumen's task broker — a connector does not enqueue its own work",
+    "celery_result_backend": "Lumen's task result backend",
+    "s3_endpoint_url": "Lumen's object store — return bytes on FetchedDoc.data instead",
+    "s3_access_key": "Lumen's object-store credential",
+    "s3_secret_key": "Lumen's object-store credential",
+    "s3_bucket": "Lumen's object-store bucket",
+    "jwt_secret": "Lumen's token-signing key",
+    "secrets_encryption_key": (
+        "the vault's master key — reading it is the secrets-service prohibition "
+        "through another door"
     ),
 }
 
@@ -171,96 +217,113 @@ def connector_package_path(name: str) -> Path:
     return Path(locations[0])
 
 
-def discover_connector_packages(root: Path) -> list[str]:
-    """Every connector-shaped subpackage directory under ``root``.
+def packages_under(search_paths: Sequence[str]) -> list[str]:
+    """Subpackages of ``search_paths`` — the registry's discovery rule, verbatim.
 
-    Filesystem-first on purpose: this must see a package the *registry* refused
-    to enroll, which is exactly the malformed-new-connector case.
+    Deliberately the same ``pkgutil.iter_modules(...) if info.ispkg`` the
+    registry performs, and **no extra conventions of our own**: no skipping
+    ``_``-prefixed directories, no "looks like a connector" heuristic. Two
+    discovery sets that differ by even one rule let a package exist in one view
+    and not the other — which is precisely how a malformed ``foo`` hides behind
+    a conforming ``_alias`` that registers under the name ``foo``.
+
+    Split out from :func:`connector_package_names` so this rule is testable
+    against a synthetic tree rather than only against whatever the repo happens
+    to contain today.
     """
-    return sorted(
-        entry.name
-        for entry in root.iterdir()
-        if entry.is_dir()
-        and not entry.name.startswith((".", "_"))
-        and (entry / "__init__.py").is_file()
-    )
+    return sorted(info.name for info in pkgutil.iter_modules(list(search_paths)) if info.ispkg)
 
 
-def _declares_connector(package: Path) -> bool:
-    """Does ``__init__.py`` bind a module-level ``CONNECTOR``? (AST, no import)
+def connector_package_names() -> list[str]:
+    """The registry's **exact** package universe for ``app.connectors``."""
+    import app.connectors as package
 
-    Both real shapes count, because both are how the registry finds it:
-    assigning the instance here (``CONNECTOR = GdriveConnector()``) **or**
-    re-exporting one built in a submodule (``from .connector import CONNECTOR``,
-    which is what the ``web`` connector does).
-    """
-    tree = ast.parse((package / "__init__.py").read_text(encoding="utf-8"))
-    for node in tree.body:
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        elif isinstance(node, ast.Import | ast.ImportFrom):
-            for alias in node.names:
-                bound = alias.asname or alias.name.split(".")[0]
-                if bound == CONNECTOR_ATTR:
-                    return True
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name) and target.id == CONNECTOR_ATTR:
-                return True
-    return False
+    return packages_under(list(package.__path__))
 
 
 def check_registry_enrollment(
-    root: Path,
-    registered: frozenset[str],
+    packages: Sequence[str],
     *,
-    diagnose: Callable[[str], str | None] | None = None,
+    load: Callable[[str], object | None],
+    resolve: Callable[[str], object | None],
+    check_surface: Callable[[object, str], None],
 ) -> None:
-    """Every connector package on disk actually enrolls in the registry.
+    """Every connector package's **own** ``CONNECTOR`` is the object that enrolled.
 
-    ``registry._registry()`` **skips** a ``CONNECTOR`` that fails the runtime
+    ``registry._registry()`` *skips* a ``CONNECTOR`` that fails the runtime
     ``Connector`` protocol check rather than raising, so an incomplete new
     connector vanishes from ``registered_types()`` instead of failing. A suite
     parametrized over the registry would then pass green while the connector the
-    author just added is not tested at all. This closes that hole from the
-    filesystem side — the only side that can see a package the registry dropped.
+    author just added is not tested at all.
 
-    ``diagnose`` optionally turns "not enrolled" into the precise reason (which
-    protocol method is missing) for a package the caller is able to import.
+    Checking "is this directory's name among the registry's keys" does **not**
+    close that. Two things defeat it, and both are real:
+
+    * the key can be present because a *different* package registered under that
+      ``name`` — a conforming ``_alias`` claiming ``name="foo"`` covers for a
+      malformed ``foo/``, and conformance then exercises ``_alias`` while the
+      enrollment scan is satisfied by ``foo``;
+    * a package whose ``CONNECTOR`` is junk (``object()``) passes as soon as its
+      name happens to be a registry key, because nothing ever looks at the
+      object.
+
+    So each package is verified on the object itself: its ``CONNECTOR`` exists,
+    **is conforming**, is named for its own directory, and is *identical* (``is``)
+    to what the registry resolved for that name. ``load`` / ``resolve`` /
+    ``check_surface`` are injected so the same rule runs against the real
+    registry and against synthetic offenders.
     """
-    packages = discover_connector_packages(root)
     assert packages, (
-        f"no connector packages found under {root} — the enrollment scan is looking in "
-        "the wrong place, and would pass vacuously"
+        "no connector packages discovered — the enrollment scan is looking in the "
+        "wrong place, and would pass vacuously"
     )
 
     problems: list[str] = []
     for package in packages:
-        if not _declares_connector(root / package):
+        try:
+            candidate = load(package)
+        except Exception as exc:  # noqa: BLE001 — an import fault IS the finding
             problems.append(
-                f"`{package}` has no module-level {CONNECTOR_ATTR} in __init__.py — a "
-                "connector registers by drop-in (ADR-0008 §3): "
-                f"connectors/{package}/__init__.py must set {CONNECTOR_ATTR} = <impl>()"
+                f"`{package}` could not be imported ({type(exc).__name__}: {exc}) — the "
+                "registry silently skips a package that raises on import, so this "
+                "connector would simply not exist"
             )
             continue
-        if package not in registered:
-            reason = diagnose(package) if diagnose is not None else None
+        if candidate is None:
             problems.append(
-                f"`{package}` exposes {CONNECTOR_ATTR} but the registry did not enroll it "
-                f"under the name {package!r}. Registry discovery SKIPS a CONNECTOR that "
-                "does not satisfy the runtime Connector protocol, so an incomplete "
-                "connector silently disappears instead of failing — and every "
-                "registry-parametrized conformance test would pass without ever seeing "
-                "it. Check that the connector implements name/validate_config/sync/"
-                "health and that its `name` equals its package directory name."
-                + (f"\n      diagnosis: {reason}" if reason else "")
+                f"`{package}` has no module-level {CONNECTOR_ATTR} — a connector "
+                "registers by drop-in (ADR-0008 §3): connectors/"
+                f"{package}/__init__.py must expose {CONNECTOR_ATTR} (assigned there "
+                "or re-exported from a submodule)"
+            )
+            continue
+        try:
+            check_surface(candidate, package)
+        except AssertionError as exc:
+            problems.append(
+                f"`{package}`'s {CONNECTOR_ATTR} does not satisfy the connector protocol, "
+                "so registry discovery SKIPPED it — an incomplete connector silently "
+                "disappears instead of failing, and every registry-parametrized "
+                f"conformance test would pass without ever seeing it.\n      cause: {exc}"
+            )
+            continue
+        enrolled = resolve(package)
+        if enrolled is None:
+            problems.append(
+                f"`{package}` exposes a conforming {CONNECTOR_ATTR} but the registry has "
+                f"no entry for the name {package!r} — check that `name` equals the "
+                "package directory name"
+            )
+        elif enrolled is not candidate:
+            problems.append(
+                f"the registry resolved a DIFFERENT object for the name {package!r} than "
+                f"the one `{package}` exposes — another package is registering under "
+                "this name and shadowing it, so conformance would exercise the impostor "
+                "while this package goes untested"
             )
 
     assert not problems, (
-        "connector packages on disk do not match the registry (see "
+        "connector packages do not match the registry (see "
         "docs/guides/building-a-connector.md):\n  " + "\n  ".join(problems)
     )
 
@@ -330,6 +393,21 @@ def _forbidden_import(module: str) -> tuple[str, str] | None:
         if module == prefix or module.startswith(prefix + "."):
             return prefix, reason
     return None
+
+
+def _lumen_infra_settings(tree: ast.AST) -> Iterator[tuple[str, int]]:
+    """Reads of a Lumen infrastructure/credential setting, anywhere in the module.
+
+    Matched on the **attribute name** rather than on the object it hangs off,
+    because the object is written a dozen ways (``settings.database_url``,
+    ``get_settings().database_url``, ``self._cfg.database_url``) and the field
+    name is the stable part. The cost is a false positive if a connector invents
+    its own attribute called ``database_url`` — cheap to rename, and the message
+    says so.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_SETTINGS:
+            yield node.attr, node.lineno
 
 
 # --- module-level state ------------------------------------------------------
@@ -452,15 +530,37 @@ def _own_scope_bindings(node: ast.AST) -> frozenset[str]:
 
 
 class _ScopeWalker(ast.NodeVisitor):
-    """Finds writes to module-level names, honouring lexical scope."""
+    """Finds writes to module-level names, honouring lexical scope.
+
+    Scopes are tagged, because **a class namespace is not an enclosing scope**.
+    A method does not close over its class body: in::
+
+        CACHE = set()
+        class C:
+            CACHE = set()
+            def mutate(self): CACHE.add("x")   # ← the MODULE global
+
+    the unqualified ``CACHE`` inside ``mutate`` resolves to the module global,
+    not to ``C.CACHE`` — so that is a real cross-run mutation, and treating the
+    class body as an enclosing scope would silently excuse it.
+    """
 
     def __init__(self, module_names: frozenset[str]) -> None:
         self.module_names = module_names
-        self.scopes: list[frozenset[str]] = []
+        # (kind, names) where kind ∈ {"function", "class", "comprehension"}.
+        self.scopes: list[tuple[str, frozenset[str]]] = []
         self.findings: list[tuple[str, int]] = []
 
     def _shadowed(self, name: str) -> bool:
-        return any(name in scope for scope in self.scopes)
+        for depth, (kind, names) in enumerate(reversed(self.scopes)):
+            # Python's rule, exactly: a class namespace is visible only to code
+            # running directly in the class body (depth 0), never to a nested
+            # function or comprehension.
+            if kind == "class" and depth > 0:
+                continue
+            if name in names:
+                return True
+        return False
 
     def _is_module_state(self, name: str) -> bool:
         return name in self.module_names and not self._shadowed(name)
@@ -472,7 +572,7 @@ class _ScopeWalker(ast.NodeVisitor):
         self._visit_function(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        self.scopes.append(_own_scope_bindings(node))
+        self.scopes.append(("function", _own_scope_bindings(node)))
         self.visit(node.body)
         self.scopes.pop()
 
@@ -480,8 +580,8 @@ class _ScopeWalker(ast.NodeVisitor):
         self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
     ) -> None:
         # A comprehension is its own scope in Python 3: its targets shadow there
-        # and nowhere else.
-        self.scopes.append(_own_scope_bindings(node))
+        # and nowhere else — and, like a function, it does not see a class body.
+        self.scopes.append(("comprehension", _own_scope_bindings(node)))
         self.generic_visit(node)
         self.scopes.pop()
 
@@ -500,7 +600,7 @@ class _ScopeWalker(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
-        self.scopes.append(_own_scope_bindings(node))
+        self.scopes.append(("class", _own_scope_bindings(node)))
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
@@ -509,7 +609,7 @@ class _ScopeWalker(ast.NodeVisitor):
         # Decorators and defaults evaluate in the ENCLOSING scope.
         for decorator in node.decorator_list:
             self.visit(decorator)
-        self.scopes.append(_own_scope_bindings(node))
+        self.scopes.append(("function", _own_scope_bindings(node)))
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
@@ -580,6 +680,22 @@ def scan_package(package: Path) -> list[Violation]:
                         detail=f"imports `{imported}` ({prefix}): {reason}",
                     )
                 )
+        for attr, line in _lumen_infra_settings(tree):
+            violations.append(
+                Violation(
+                    rule="no-lumen-infra",
+                    module=module,
+                    line=line,
+                    detail=(
+                        f"reads the `{attr}` setting ({FORBIDDEN_SETTINGS[attr]}) — "
+                        "banning `import app.db` alone does not stop "
+                        "`create_async_engine(get_settings().database_url)`; the SETTING "
+                        "is what identifies Lumen's own infrastructure. A connector may "
+                        "bring its own SQL/HTTP client for its own source, pointed at a "
+                        "URL from its own sources.config"
+                    ),
+                )
+            )
         for name, line in _mutable_literal_state(tree):
             violations.append(
                 Violation(

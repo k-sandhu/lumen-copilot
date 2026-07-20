@@ -83,6 +83,11 @@ class ConnectorHarness:
     name: str
     valid_config: dict[str, object]
     invalid_configs: tuple[dict[str, object], ...]
+    # The exact stable `code` each fault path must report, every time. Declared
+    # here rather than inferred so a churned code is a visible diff, not a
+    # silently-accepted change (ADR-0009 §1: the code is the API's contract).
+    sync_fault_code: str | None = None
+    changes_fault_code: str | None = None
     # fetch_changes fixtures (ADR-0019 §3)
     start_cursor: str | None = None
     expired_cursor: str | None = None
@@ -185,6 +190,7 @@ _WEB = _WebHarness(
         {"url": "http://127.0.0.1/x"},
         {"url": "http://169.254.169.254/latest/meta-data"},
     ),
+    sync_fault_code="fetch_failed",
 )
 
 
@@ -430,6 +436,8 @@ _GDRIVE = _GdriveHarness(
         {"mode": "shared_drive"},
         {"mode": "shared_drive", "drive_id": "d1", "folder_id": "f1"},
     ),
+    sync_fault_code="drive_api_error",
+    changes_fault_code="drive_api_error",
     start_cursor="cursor-1",
     expired_cursor="cursor-expired",
     fault_cursor="cursor-fault",
