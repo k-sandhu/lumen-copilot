@@ -35,7 +35,7 @@ match descendants (§3).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -100,9 +100,30 @@ _CASCADE_REFETCH_BUDGET = 200
 # Upper bound on ancestor-chain walks (cycle/defect guard).
 _MAX_ANCESTOR_DEPTH = 64
 
-# Per-run memo of ``file id → parent id`` (``None`` = no/unreadable parent), so
-# the subtree proofs a change page needs cost one lookup per distinct ancestor.
-_ParentCache = dict[str, "str | None"]
+
+@dataclass(slots=True)
+class _Ancestry:
+    """Per-run memo of ``file id → parent id`` for the subtree proofs (§3/§5).
+
+    Keeps **"this file provably has no parent"** (``parents[id] is None``)
+    distinct from **"we could not read this file"** (``id in unreadable``). That
+    distinction is load-bearing: collapsing an unreadable ancestor into "no
+    parent" makes an *unprovable* container look like a proven outside-scope
+    one, which silently drops its permission cascade. Memoized so a change page
+    full of siblings costs one lookup per distinct ancestor, not one per file.
+    """
+
+    parents: dict[str, str | None] = field(default_factory=dict)
+    unreadable: set[str] = field(default_factory=set)
+
+
+class _AncestryUnknown(Exception):
+    """A container's ancestor chain could not be established this run.
+
+    Module-private control flow: the caller must fail the page closed
+    (``integrity=incomplete``) rather than guess a scope relation — an
+    unprovable relation is never "outside".
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,43 +398,71 @@ class GdriveConnector:
         return files, chains
 
     async def _walk_up(
-        self, http: httpx.AsyncClient, start_id: str, *, cache: _ParentCache | None = None
+        self,
+        http: httpx.AsyncClient,
+        start_id: str,
+        *,
+        memo: _Ancestry | None = None,
+        strict: bool = False,
     ) -> tuple[str, ...]:
         """The ancestor ids ABOVE a container (``files.get`` walk, bounded).
 
         Drive files have a single parent (multi-parenting was removed in 2020),
         so ``parents[0]`` is *the* position — the walk is a chain, not a graph.
-        ``cache`` memoizes ``child → parent`` for one run so a change page full
-        of siblings costs one lookup per distinct ancestor, not per file.
+
+        ``strict`` picks the failure posture, and the two callers genuinely
+        differ:
+
+        * ``strict=False`` (default) — **watch-set widening**: the chain is
+          persisted as ``acl_scope_ids`` so a later container change can match
+          descendants. An unreadable link (the My Drive root is routinely
+          unreadable) simply ends the walk; the ids collected so far still
+          widen the set.
+        * ``strict=True`` — **scope proofs** (:meth:`_is_within_root`,
+          :meth:`_container_relation`): here a truncated chain is not a smaller
+          answer, it is a *wrong* one — it would make an unprovable container
+          look like a proven outside-scope one. An unreadable link raises
+          :class:`_AncestryUnknown` so the page fails closed.
         """
-        parents = cache if cache is not None else {}
+        ancestry = memo if memo is not None else _Ancestry()
         ancestors: list[str] = []
         current = start_id
         for _ in range(_MAX_ANCESTOR_DEPTH):
-            parent = await self._parent_of(http, current, cache=parents)
+            parent = await self._parent_of(http, current, memo=ancestry, strict=strict)
             if parent is None or parent in ancestors:
-                # The top of a chain may be unreadable (e.g. the My Drive
-                # root); the ids collected so far still widen the watch set.
                 break
             ancestors.append(parent)
             current = parent
         return tuple(ancestors)
 
     async def _parent_of(
-        self, http: httpx.AsyncClient, file_id: str, *, cache: _ParentCache
+        self, http: httpx.AsyncClient, file_id: str, *, memo: _Ancestry, strict: bool
     ) -> str | None:
-        """The file's parent id (memoized); ``None`` = no/unreadable parent."""
-        if file_id in cache:
-            return cache[file_id]
+        """The file's parent id (memoized); ``None`` = **provably** no parent.
+
+        Raises:
+            _AncestryUnknown: the file could not be read, so its position is
+                unknown — only when ``strict`` (see :meth:`_walk_up`). The
+                failure is memoized either way so one broken ancestor costs one
+                request per run, not one per changed file.
+        """
+        if file_id in memo.parents:
+            return memo.parents[file_id]
+        if file_id in memo.unreadable:
+            if strict:
+                raise _AncestryUnknown(file_id)
+            return None
         try:
             entry = await api.get_file(http, file_id)
-        except ConnectorError:
-            cache[file_id] = None
+        except ConnectorError as exc:
+            memo.unreadable.add(file_id)
+            if strict:
+                raise _AncestryUnknown(file_id) from exc
             return None
         raw = entry.get("parents")
         parent = raw[0] if isinstance(raw, list) and raw else None
         resolved = parent if isinstance(parent, str) and parent else None
-        cache[file_id] = resolved
+        memo.parents[file_id] = resolved
         return resolved
 
     async def _is_within_root(
@@ -422,7 +471,7 @@ class GdriveConnector:
         file: Mapping[str, Any],
         cfg: _ModeConfig,
         *,
-        cache: _ParentCache,
+        memo: _Ancestry,
     ) -> bool:
         """Is this file **currently** inside the configured subtree? (§5 scope).
 
@@ -430,9 +479,13 @@ class GdriveConnector:
         Drive changes feed is per-user (or per-Shared-Drive) and reports every
         file the account can see, so an incremental replay MUST prove a changed
         file's current ancestor chain still contains the configured
-        ``folder_id`` before importing it. A file whose position cannot be
-        established (no readable parent) counts as **outside** — the connector
-        never imports content it cannot place inside the configured scope.
+        ``folder_id`` before importing it. A file that provably has no parent
+        is outside (we never import content we cannot place in scope).
+
+        Raises:
+            _AncestryUnknown: the chain could not be walked — neither "inside"
+                nor "outside" is provable, and guessing "outside" would delete
+                a legitimate row. The caller fails the page closed instead.
         """
         if cfg.mode != "folder" or cfg.folder_id is None:
             return True  # my_drive / shared_drive: the whole log IS the scope
@@ -442,7 +495,7 @@ class GdriveConnector:
             return False
         if parent == cfg.folder_id:
             return True
-        return cfg.folder_id in await self._walk_up(http, parent, cache=cache)
+        return cfg.folder_id in await self._walk_up(http, parent, memo=memo, strict=True)
 
     async def _container_relation(
         self,
@@ -450,7 +503,7 @@ class GdriveConnector:
         container_id: str,
         cfg: _ModeConfig,
         *,
-        cache: _ParentCache,
+        memo: _Ancestry,
     ) -> str:
         """How a changed container relates to the configured root (§3 cascade).
 
@@ -462,15 +515,24 @@ class GdriveConnector:
           re-examination starts at the configured root — never at the
           ancestor's own subtree, which would enumerate siblings the source was
           never configured to ingest;
-        * ``"outside"`` — unrelated to the configured subtree: ignored.
+        * ``"outside"`` — **provably** unrelated to the configured subtree:
+          ignored.
+
+        Raises:
+            _AncestryUnknown: the relation is unprovable. This is emphatically
+                not ``"outside"``: dropping the cascade of a container that may
+                well be in scope would leave its descendants' mirrors fresh
+                after a permission change — a fail-open. The caller marks the
+                page ``integrity=incomplete`` so the source-wide stale stamp
+                and the held cursor engage.
         """
         if cfg.mode != "folder" or cfg.folder_id is None:
             return "inside"  # the whole drive/feed is the configured scope
         if container_id == cfg.folder_id:
             return "inside"
-        if cfg.folder_id in await self._walk_up(http, container_id, cache=cache):
+        if cfg.folder_id in await self._walk_up(http, container_id, memo=memo, strict=True):
             return "inside"
-        if container_id in await self._walk_up(http, cfg.folder_id, cache=cache):
+        if container_id in await self._walk_up(http, cfg.folder_id, memo=memo, strict=True):
             return "above"
         return "outside"
 
@@ -614,7 +676,7 @@ class GdriveConnector:
         ctx = run.acl_context
         token = cursor
         refetch_budget = _CASCADE_REFETCH_BUDGET
-        parents: _ParentCache = {}
+        memo = _Ancestry()
         while True:
             payload = await api.list_changes_page(
                 run.http, page_token=token, drive_id=cfg.change_log_drive_id
@@ -663,18 +725,36 @@ class GdriveConnector:
                     # A container change cascades (Drive emits no per-
                     # descendant events): signal the scope for the framework's
                     # immediate stale-stamp, then re-examine descendants below.
-                    relation = await self._container_relation(run.http, file_id, cfg, cache=parents)
+                    try:
+                        relation = await self._container_relation(run.http, file_id, cfg, memo=memo)
+                    except _AncestryUnknown:
+                        # We cannot prove whether this container is in scope, so
+                        # we cannot prove its cascade is irrelevant either.
+                        # Ignoring it would leave descendants' mirrors fresh
+                        # after a permission change (fail-open); fail closed.
+                        log.warning("gdrive.container_scope_unprovable", file_id=file_id)
+                        incomplete = True
+                        continue
                     if relation == "outside":
                         continue  # a container we do not sync — not our cascade
                     stale_scopes.add(file_id)
                     refetch_roots.add(file_id if relation == "inside" else str(cfg.folder_id))
                     continue
-                if not await self._is_within_root(run.http, file, cfg, cache=parents):
+                try:
+                    within_root = await self._is_within_root(run.http, file, cfg, memo=memo)
+                except _AncestryUnknown:
+                    # Position unprovable: importing could pull in out-of-scope
+                    # content, and "reconcile as deleted" could destroy a
+                    # legitimate row. Neither guess is safe — fail closed.
+                    log.warning("gdrive.file_scope_unprovable", file_id=file_id)
+                    incomplete = True
+                    continue
+                if not within_root:
                     # Outside the configured subtree *now*: never import it, and
                     # reconcile away a row left behind by a move OUT of scope.
                     deleted.add(file_id)
                     continue
-                chain = await self._change_scope_chain(run.http, file, cfg, cache=parents)
+                chain = await self._change_scope_chain(run.http, file, cfg, memo=memo)
                 try:
                     doc = await self._fetch_doc(run.http, file, scope_chain=chain, ctx=ctx, cap=cap)
                 except _AclUnavailable:
@@ -736,9 +816,15 @@ class GdriveConnector:
         file: Mapping[str, Any],
         cfg: _ModeConfig,
         *,
-        cache: _ParentCache | None = None,
+        memo: _Ancestry | None = None,
     ) -> tuple[str, ...]:
-        """A changed file's scope chain: drive id + upward ancestor walk."""
+        """A changed file's scope chain: drive id + upward ancestor walk.
+
+        Watch-set widening, so the non-strict walk applies (see
+        :meth:`_walk_up`). In ``folder`` mode the strict proof has already
+        walked — and memoized — this exact chain, so an unreadable link here
+        can only happen in the modes where the whole feed is in scope.
+        """
         chain: list[str] = []
         if cfg.drive_id is not None:
             chain.append(cfg.drive_id)
@@ -750,7 +836,7 @@ class GdriveConnector:
         if isinstance(parent, str):
             chain.append(parent)
             try:
-                uppers = await self._walk_up(http, parent, cache=cache)
+                uppers = await self._walk_up(http, parent, memo=memo)
             except ConnectorError:
                 uppers = ()
             chain.extend(a for a in uppers if a not in chain)

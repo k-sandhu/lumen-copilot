@@ -86,6 +86,7 @@ class FakeDrive:
         self.start_token = "start-token-1"
         self.changes_pages: dict[str, dict[str, Any]] = {}
         self.fail_children_of: set[str] = set()
+        self.fail_get_ids: set[str] = set()  # files.get returns 500 for these
         self.rate_limit_next: int = 0  # serve N 429s before succeeding
         self.calls: list[str] = []  # ordered request paths (with intent tags)
         # Chunked (streamed) media bodies + how many chunks were actually
@@ -198,6 +199,8 @@ class FakeDrive:
                     return self._streamed(file_id)
                 return httpx.Response(200, content=self.media.get(file_id, b""))
             self.calls.append(f"files.get {file_id}")
+            if file_id in self.fail_get_ids:
+                return httpx.Response(500)
             meta = self.files.get(file_id)
             if meta is None:
                 return httpx.Response(404)
@@ -729,6 +732,64 @@ async def test_changed_file_with_unreadable_acl_marks_incomplete(
     assert page.integrity is PageIntegrity.INCOMPLETE
 
 
+async def test_unprovable_container_ancestry_fails_the_page_closed(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """Regression (fail-open): an ancestor lookup failure used to read as
+    "outside".
+
+    ``_parent_of`` turned every ``files.get`` ``ConnectorError`` into "no
+    parent", so ``_container_relation`` labelled an *unprovable* folder
+    ``outside`` and the replay silently dropped its permission cascade while
+    still reporting ``integrity=complete`` — the framework then advanced the
+    cursor with the folder's descendants' mirrors still fresh. Unknown is now
+    distinct from a proven outside, and the page fails closed: the framework's
+    INCOMPLETE handling stamps every mirrored document of the source stale and
+    HOLDS the cursor (pinned in tests/test_gdrive_sync_task.py).
+    """
+    _folder_tree(fake_drive)
+    fake_drive.add_file("in1", name="Inside", mime=_GDOC, parents=["sub"], export=b"x")
+    fake_drive.add_file("mystery", name="Mystery", mime=_FOLDER, parents=["unknown-parent"])
+    fake_drive.fail_get_ids.add("mystery")  # ancestry cannot be walked
+    _change(fake_drive, "mystery")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.INCOMPLETE  # never silently ignored
+    assert page.upserts == ()
+    assert page.deleted_external_ids == frozenset()
+
+
+async def test_unprovable_file_ancestry_is_neither_imported_nor_deleted(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """A changed FILE whose position cannot be walked is equally unprovable:
+    importing could pull in out-of-scope content and "reconcile as deleted"
+    could destroy a legitimate row, so the page fails closed instead."""
+    _folder_tree(fake_drive)
+    fake_drive.add_file("orphan", name="Orphan", mime=_GDOC, parents=["ghost"], export=b"o")
+    fake_drive.fail_get_ids.add("ghost")
+    _change(fake_drive, "orphan")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.INCOMPLETE
+    assert page.upserts == ()
+    assert page.deleted_external_ids == frozenset()  # never a guessed deletion
+
+
+async def test_provably_outside_container_is_still_ignored(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """The fail-closed path must not swallow the *provable* case: a container
+    whose ancestry reads cleanly and does not contain the root stays ignored,
+    and the page stays complete."""
+    _folder_tree(fake_drive)
+    _change(fake_drive, "elsewhere")
+    async with _client(fake_drive) as http:
+        [page] = await _drain(CONNECTOR.fetch_changes(_folder_source(), "cur-1", _Run(http)))  # type: ignore[arg-type]
+    assert page.integrity is PageIntegrity.COMPLETE
+    assert page.stale_scope_ids == frozenset()
+
+
 async def test_my_drive_mode_keeps_consuming_the_whole_feed(
     guard_stub: None, fake_drive: FakeDrive
 ) -> None:
@@ -787,6 +848,36 @@ async def test_chunked_oversize_export_stops_reading_at_the_cap(
         payload = await gdrive_api.export_file(http, "exp1", mime_type="text/plain", max_bytes=32)
     assert payload is None
     assert len(fake_drive.served_chunks) == 3
+
+
+def test_append_capped_never_grows_past_cap_plus_one() -> None:
+    """Regression: the accumulator itself is bounded, not just the verdict.
+
+    The first fix extended the buffer with the WHOLE yielded chunk before
+    testing the cap, so one large transport frame — or a compressed body that
+    decodes large — landed in memory in full and the "hard cap" was a fiction.
+    Each append is now sliced to the remaining budget.
+    """
+    from app.connectors.gdrive.api import _append_capped
+
+    buffer = bytearray()
+    assert _append_capped(buffer, b"x" * 1_000_000, 32) is True  # over cap
+    assert len(buffer) == 33  # cap + 1 — the proof, and not one byte more
+
+    small = bytearray()
+    assert _append_capped(small, b"abc", 32) is False
+    assert bytes(small) == b"abc"
+
+
+async def test_single_chunk_far_larger_than_the_cap_is_refused(
+    guard_stub: None, fake_drive: FakeDrive
+) -> None:
+    """One chunk, 100 KB, cap 32 bytes: refused after that single read."""
+    fake_drive.stream_media["mega1"] = [b"m" * 100_000]
+    async with _client(fake_drive) as http:
+        payload = await gdrive_api.download_file(http, "mega1", max_bytes=32)
+    assert payload is None
+    assert len(fake_drive.served_chunks) == 1  # nothing more was pulled
 
 
 async def test_under_cap_download_returns_the_whole_body(

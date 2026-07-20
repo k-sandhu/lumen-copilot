@@ -43,6 +43,10 @@ _MAX_RETRY_AFTER_SECONDS = 30.0
 # One page of files/changes/permissions per request (Drive's default max ballpark).
 _PAGE_SIZE = 100
 
+# Bytes per iteration step when streaming content — bounds how much of a body
+# is materialized per loop, independent of the transport's own frame sizes.
+_STREAM_CHUNK_BYTES = 64 * 1024
+
 # The per-file fields every enumeration asks for (ADR-0019 §2: the effective
 # permission list is fetched separately; the file carries the inheritance flag).
 FILE_FIELDS = (
@@ -189,6 +193,22 @@ async def list_permissions(http: httpx.AsyncClient, file_id: str) -> list[dict[s
         page_token = token
 
 
+def _append_capped(buffer: bytearray, chunk: bytes, max_bytes: int) -> bool:
+    """Append at most ``max_bytes + 1 - len(buffer)`` bytes; ``True`` = over cap.
+
+    The cap has to bound **memory**, not just the return value, so the chunk is
+    *sliced* rather than appended whole: a single large transport frame — or a
+    large decoded frame from a compressed response — would otherwise land in the
+    accumulator in full before the size test ran, and the bound would be a
+    fiction. ``cap + 1`` bytes is the most this buffer can ever hold: exactly
+    enough to prove the body exceeds the cap, and never more.
+    """
+    room = max_bytes + 1 - len(buffer)
+    if room > 0:
+        buffer.extend(chunk[:room])
+    return len(buffer) > max_bytes
+
+
 def _declared_over_cap(response: httpx.Response, max_bytes: int) -> bool:
     """True iff the response *declares* a body larger than the cap."""
     raw = response.headers.get("Content-Length")
@@ -214,10 +234,13 @@ async def _stream_capped(
 
     * an oversized declared ``Content-Length`` is rejected **before** the body
       is read at all (no egress, no memory);
-    * otherwise the body is consumed chunk-by-chunk and reading **stops** as
-      soon as ``max_bytes`` is exceeded — a missing or lying ``size`` on the
-      file metadata can therefore never make a worker buffer an unbounded
-      response (the connection is dropped by exiting the stream context).
+    * otherwise the body is consumed in bounded steps and reading **stops** as
+      soon as ``max_bytes`` is exceeded, with each step appended through
+      :func:`_append_capped` so the accumulator itself never exceeds
+      ``cap + 1`` bytes — a missing or lying ``size`` on the file metadata, a
+      huge single frame, or a compressed body that decodes large can therefore
+      never make a worker buffer an unbounded response (the connection is
+      dropped by exiting the stream context).
 
     Returns ``None`` for both over-cap outcomes so the caller can skip-and-count
     the file (ADR-0019 §5), and the same bounded 429/410/error posture as
@@ -241,10 +264,17 @@ async def _stream_capped(
                 if _declared_over_cap(response, max_bytes):
                     return None
                 buffer = bytearray()
-                async for chunk in response.aiter_bytes():
-                    buffer.extend(chunk)
-                    if len(buffer) > max_bytes:
-                        # cap + 1 bytes is all the proof an over-cap body needs.
+                # Bounded iteration size AND a bounded append. The step size is
+                # capped by the *budget* as well as by the ceiling: httpx's
+                # chunker accumulates up to `chunk_size` before it yields, so
+                # asking for 64KB when the budget is 32 bytes would pull far
+                # more of the body than the decision needs. `_append_capped`
+                # then slices whatever still arrives, so neither a large
+                # transport frame nor a large decoded frame can grow the
+                # accumulator past cap + 1.
+                step = min(_STREAM_CHUNK_BYTES, max_bytes + 1)
+                async for chunk in response.aiter_bytes(chunk_size=step):
+                    if _append_capped(buffer, chunk, max_bytes):
                         return None
                 return bytes(buffer)
         except httpx.HTTPError as exc:
