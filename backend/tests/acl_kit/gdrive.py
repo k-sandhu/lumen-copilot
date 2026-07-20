@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from app.connectors.base import AclMappingContext
 from app.connectors.gdrive.acl import CONTENT_READ_ROLES, map_acl
 
+from .gdrive_probes import PROBES
 from .subject import AclCase, AclSubject
 
 # The kit's tenant directory. `alice` is attested (the connecting admin),
@@ -334,6 +335,22 @@ _CASES: tuple[AclCase, ...] = (
         why="a malformed permission list denies everything",
     ),
     AclCase(
+        id="missing_acl_payload",
+        raw={},
+        admits=frozenset(),
+        why=(
+            "the ACL field is ABSENT, not empty: an unknown field state grants "
+            "nobody (a mapper defaulting a missing list to the tenant principal "
+            "would pass every other fixture)"
+        ),
+    ),
+    AclCase(
+        id="missing_inheritance_flag",
+        raw={"permissions": [_user(ALICE)]},
+        admits=frozenset({f"user:{_IDS[ALICE]}"}),
+        why="an absent inheritance flag means no reduction — the list counts as-is",
+    ),
+    AclCase(
         id="no_details_under_reduction",
         raw=_raw(_user(ALICE), direct_only=True),
         admits=frozenset(),
@@ -345,18 +362,24 @@ _CASES: tuple[AclCase, ...] = (
         admits=frozenset({f"user:{_IDS[BOB]}"}),
         why="without the flag the effective list (direct + inherited) is consumed as-is",
     ),
-    AclCase(
-        id="every_content_read_role",
-        raw=_raw(*[_user(ALICE, role=role) for role in sorted(CONTENT_READ_ROLES)]),
-        admits=frozenset({f"user:{_IDS[ALICE]}"}),
-        why="every role in the content-read set admits",
-    ),
+    # One case PER content-read role. A single payload carrying all of them
+    # would still map to {alice} if only ONE role admitted — the union hides the
+    # others — so each role is its own equality assertion.
+    *[
+        AclCase(
+            id=f"content_read_role:{role}",
+            raw=_raw(_user(ALICE, role=role)),
+            admits=frozenset({f"user:{_IDS[ALICE]}"}),
+            why=f"{role} is in the content-read set and admits on its own",
+        )
+        for role in sorted(CONTENT_READ_ROLES)
+    ],
 )
 
 
 SUBJECT = AclSubject(
     name="gdrive",
-    map_acl=map_acl,
+    declared_map_acl=map_acl,
     context=CONTEXT,
     tenant_users=dict(_IDS),
     attested_email=ALICE,
@@ -368,6 +391,7 @@ SUBJECT = AclSubject(
     source_admits=_source_admits,
     generate=_generate,
     single_user_acl=lambda email: _raw(_user(email)),
+    cascade_probes=PROBES,
 )
 
 __all__ = ["ALICE", "BOB", "CONTEXT", "GUEST", "MALLORY", "SHARING_DOMAIN", "SUBJECT"]

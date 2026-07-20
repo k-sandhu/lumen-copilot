@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import random
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 
-from app.connectors.base import AclMappingContext
+from app.connectors.base import (
+    AclMappingContext,
+    ConnectorError,
+    FetchedDoc,
+    PageIntegrity,
+    SourceAcl,
+    SyncPage,
+)
 
-from .subject import AclCase, AclSubject
+from .subject import AclCase, AclSubject, CascadeProbe
 
 SHARING_DOMAIN = "widgets.test"
 ADA = "ada@widgets.test"
@@ -276,12 +283,137 @@ _CASES: tuple[AclCase, ...] = (
         admits=frozenset(),
         why="a malformed grant list denies everything",
     ),
+    AclCase(
+        id="missing_acl_payload",
+        raw={},
+        admits=frozenset(),
+        why="the grant field is ABSENT, not empty: an unknown field state grants nobody",
+    ),
+    # One case per read level — see the gdrive subject for why the union form
+    # would be weaker.
+    *[
+        AclCase(
+            id=f"content_read_role:{level}",
+            raw=_raw(_person(ADA, level=level)),
+            admits=frozenset({f"user:{_IDS[ADA]}"}),
+            why=f"{level} is in the read set and admits on its own",
+        )
+        for level in sorted(READ_LEVELS)
+    ],
 )
+
+
+# --- a genuine (miniature) change-replay capability ---------------------------
+#
+# The cascade probes must induce REAL failures, not script a pre-formed
+# ``INCOMPLETE`` page — that would re-prove the framework's reaction and call it
+# a producer test. So this connector carries an actual container tree, an actual
+# per-run re-examination budget, and an enumeration step that can actually fail;
+# its probes then break those, exactly as the gdrive probes break Drive's.
+
+CASCADE_REFETCH_BUDGET = 8
+
+
+class SourceTree:
+    """An in-memory container tree the fake connector enumerates."""
+
+    def __init__(self) -> None:
+        self.children: dict[str, list[str]] = {}
+        self.fail_enumeration_of: set[str] = set()
+
+    def add(self, container: str, *items: str) -> None:
+        self.children.setdefault(container, []).extend(items)
+
+    def enumerate(self, container: str) -> list[str]:
+        if container in self.fail_enumeration_of:
+            raise ConnectorError("subtree listing failed", code="enumerate_failed")
+        return list(self.children.get(container, ()))
+
+
+async def fetch_changes(
+    tree: SourceTree, changed_container: str, *, budget: int = CASCADE_REFETCH_BUDGET
+) -> AsyncIterator[SyncPage]:
+    """Replay one container permission change (the §3 cascade path).
+
+    Emits the container in ``stale_scope_ids`` and re-examines its descendants
+    within ``budget``. A failed enumeration or an over-budget subtree leaves the
+    affected set unprovable ⇒ ``integrity=incomplete`` (fail closed).
+    """
+    complete = True
+    upserts: list[FetchedDoc] = []
+    try:
+        descendants = tree.enumerate(changed_container)
+    except ConnectorError:
+        descendants, complete = [], False  # enumeration failure ⇒ unprovable
+    for used, item in enumerate(descendants):
+        if used >= budget:
+            complete = False  # budget exhausted ⇒ unprovable
+            break
+        upserts.append(
+            FetchedDoc(
+                title=item,
+                text=f"{item} body",
+                url=f"https://fake.invalid/{item}",
+                external_id=item,
+                acl=SourceAcl(
+                    principals=frozenset({"tenant"}), scope_ids=frozenset({changed_container})
+                ),
+            )
+        )
+    yield SyncPage(
+        upserts=tuple(upserts),
+        deleted_external_ids=frozenset(),
+        next_cursor="cursor-2",
+        stale_scope_ids=frozenset({changed_container}),
+        integrity=PageIntegrity.COMPLETE if complete else PageIntegrity.INCOMPLETE,
+    )
+
+
+async def _drain(tree: SourceTree, *, budget: int = CASCADE_REFETCH_BUDGET) -> list[SyncPage]:
+    return [page async for page in fetch_changes(tree, "folder-1", budget=budget)]
+
+
+async def _induce_enumeration_failure() -> list[SyncPage]:
+    tree = SourceTree()
+    tree.add("folder-1", "a", "b")
+    tree.fail_enumeration_of.add("folder-1")
+    return await _drain(tree)
+
+
+async def _induce_budget_exhaustion() -> list[SyncPage]:
+    tree = SourceTree()
+    tree.add("folder-1", *[f"item{i}" for i in range(CASCADE_REFETCH_BUDGET + 1)])
+    return await _drain(tree)
+
+
+async def _induce_healthy_cascade() -> list[SyncPage]:
+    tree = SourceTree()
+    tree.add("folder-1", "a", "b")
+    return await _drain(tree)
+
+
+PROBES: dict[str, CascadeProbe] = {
+    "enumeration_failure": CascadeProbe(
+        id="enumeration_failure",
+        why="the subtree listing of the changed container raises",
+        induce=_induce_enumeration_failure,
+    ),
+    "budget_exhausted": CascadeProbe(
+        id="budget_exhausted",
+        why="the changed container holds more descendants than one run may re-examine",
+        induce=_induce_budget_exhaustion,
+    ),
+    "healthy_cascade": CascadeProbe(
+        id="healthy_cascade",
+        why="control: an in-budget, fully enumerable cascade stays complete",
+        induce=_induce_healthy_cascade,
+    ),
+}
 
 
 SUBJECT = AclSubject(
     name="lumen-fake",
-    map_acl=map_acl,
+    declared_map_acl=map_acl,
     context=CONTEXT,
     tenant_users=dict(_IDS),
     attested_email=ADA,
@@ -293,6 +425,7 @@ SUBJECT = AclSubject(
     source_admits=_source_admits,
     generate=_generate,
     single_user_acl=lambda mail: _raw(_person(mail)),
+    cascade_probes=PROBES,
 )
 
 __all__ = ["ADA", "CONTEXT", "LIN", "NOAH", "SHARING_DOMAIN", "SUBJECT", "VISITOR", "map_acl"]
