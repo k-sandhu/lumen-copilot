@@ -136,7 +136,11 @@ describe('ServerDetailDrawer — content', () => {
 
   it('shows an unreachable server clearly (status error + reason), not blank (AC-N)', async () => {
     mockRoutes({
-      server: makeServer({ status: 'error', last_error: 'connection refused', discovered_tool_count: 0 }),
+      server: makeServer({
+        status: 'error',
+        last_error: 'connection refused',
+        discovered_tool_count: 0,
+      }),
       tools: [],
     });
     renderWithQuery(<ServerDetailDrawer serverId="m1" onClose={() => {}} />);

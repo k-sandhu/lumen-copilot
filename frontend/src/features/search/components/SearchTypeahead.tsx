@@ -170,7 +170,10 @@ export function SearchTypeahead({
         Search your sources
       </label>
       <div className="relative flex items-center">
-        <span className="pointer-events-none absolute left-3 text-foreground-muted" aria-hidden="true">
+        <span
+          className="pointer-events-none absolute left-3 text-foreground-muted"
+          aria-hidden="true"
+        >
           <Icon name="search" />
         </span>
         <input

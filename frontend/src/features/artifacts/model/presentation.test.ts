@@ -54,9 +54,9 @@ describe('previewKind (AC-2)', () => {
   it('routes svg + html + office + unknown to a download card (never inline active content)', () => {
     expect(previewKind('image/svg+xml')).toBe('download');
     expect(previewKind('text/html')).toBe('download');
-    expect(
-      previewKind('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
-    ).toBe('download');
+    expect(previewKind('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')).toBe(
+      'download',
+    );
     expect(previewKind('application/octet-stream')).toBe('download');
   });
   it('ignores a charset parameter on the mime type', () => {

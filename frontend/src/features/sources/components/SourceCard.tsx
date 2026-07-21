@@ -256,5 +256,7 @@ export function SourceCard({
 /** The mirrored-ACL freshness pill (managed sources only). */
 function AclFreshness({ source }: { source: Extract<Source, { type: 'gdrive' }> }) {
   const acl = aclFreshness(source);
-  return <FreshnessPill label={acl.label} stale={acl.stale} title={source.acl_synced_at ?? undefined} />;
+  return (
+    <FreshnessPill label={acl.label} stale={acl.stale} title={source.acl_synced_at ?? undefined} />
+  );
 }

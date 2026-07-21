@@ -1,5 +1,7 @@
 dist
 node_modules
+# Contract file — agents may not edit without approval (root AGENTS.md §5); keep it out of format:check
+AGENTS.md
 src/api/generated
 pnpm-lock.yaml
 playwright-report

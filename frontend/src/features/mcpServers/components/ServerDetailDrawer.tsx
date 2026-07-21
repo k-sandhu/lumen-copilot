@@ -101,7 +101,11 @@ function DetailBody({ serverId }: { serverId: string }) {
             ? serverErrorMessage(detail.error)
             : 'Could not load this server.'
         }
-        onRetry={detail.error instanceof ApiError && detail.error.status === 401 ? undefined : () => void detail.refetch()}
+        onRetry={
+          detail.error instanceof ApiError && detail.error.status === 401
+            ? undefined
+            : () => void detail.refetch()
+        }
         busy={detail.isFetching}
       />
     );
@@ -231,7 +235,9 @@ function ToolsBody({
             ? serverErrorMessage(tools.error)
             : 'Could not load the discovered tools.'
         }
-        onRetry={tools.error instanceof ApiError && tools.error.status === 401 ? undefined : onRetry}
+        onRetry={
+          tools.error instanceof ApiError && tools.error.status === 401 ? undefined : onRetry
+        }
         busy={tools.isFetching}
       />
     );
@@ -296,7 +302,11 @@ function ToolsSkeleton() {
     <div role="status" aria-busy="true" aria-live="polite" className="space-y-2">
       <span className="sr-only">Loading discovered tools…</span>
       {[0, 1, 2].map((i) => (
-        <div key={i} className="h-16 rounded-lg border border-border bg-surface p-3" aria-hidden="true">
+        <div
+          key={i}
+          className="h-16 rounded-lg border border-border bg-surface p-3"
+          aria-hidden="true"
+        >
           <div className="lc-skeleton" style={{ width: '50%' }} />
           <div className="lc-skeleton" style={{ width: '80%', marginTop: 8 }} />
         </div>

@@ -82,9 +82,9 @@ export function TestPanel({ assistantId }: TestPanelProps) {
         <p className="mt-1 flex items-start gap-1.5 text-xs text-foreground-muted">
           <Icon name="shield-check" className="mt-px shrink-0" aria-hidden="true" />
           <span>
-            A safe preview of your working draft. Tools that write are{' '}
-            <strong>simulated</strong> and code execution is <strong>disabled</strong> — no file,
-            no external effect, nothing is saved.
+            A safe preview of your working draft. Tools that write are <strong>simulated</strong>{' '}
+            and code execution is <strong>disabled</strong> — no file, no external effect, nothing
+            is saved.
           </span>
         </p>
       </div>
@@ -140,7 +140,10 @@ export function TestPanel({ assistantId }: TestPanelProps) {
                   <p className="truncate text-xs text-foreground-muted">{c.input}</p>
                 </div>
                 {c.expected ? (
-                  <span className="shrink-0 text-xs text-foreground-muted" title="Expected in answer">
+                  <span
+                    className="shrink-0 text-xs text-foreground-muted"
+                    title="Expected in answer"
+                  >
                     expects “{c.expected}”
                   </span>
                 ) : null}
@@ -231,7 +234,11 @@ function TraceView({
               role="alert"
               className="rounded-md border border-danger/40 bg-danger/10 p-2 text-xs text-danger"
             >
-              {String((e as { detail?: unknown; title?: unknown }).detail ?? (e as { title?: unknown }).title ?? 'The test run failed.')}
+              {String(
+                (e as { detail?: unknown; title?: unknown }).detail ??
+                  (e as { title?: unknown }).title ??
+                  'The test run failed.',
+              )}
             </li>
           ))}
         </ul>

@@ -161,10 +161,7 @@ export function SearchScreen() {
                   // The active scope filtered every row away. Keep the sidebar
                   // (above) so the user can see and clear the scope, and offer a
                   // one-click reset here.
-                  <FilteredEmptyState
-                    query={data.query}
-                    onClear={() => setFilters({})}
-                  />
+                  <FilteredEmptyState query={data.query} onClear={() => setFilters({})} />
                 ) : (
                   <>
                     {data.direct_answer ? (
@@ -191,8 +188,7 @@ export function SearchScreen() {
                               result={result}
                               {...(documentId
                                 ? {
-                                    onOpen: () =>
-                                      setPreview({ documentId, title: result.title }),
+                                    onOpen: () => setPreview({ documentId, title: result.title }),
                                   }
                                 : {})}
                             />

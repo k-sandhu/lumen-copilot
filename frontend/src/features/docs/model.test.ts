@@ -72,9 +72,9 @@ describe('resolveDocLink', () => {
   });
 
   it('strips anchors/queries before matching', () => {
-    expect(
-      resolveDocLink('AGENTS.md', 'docs/specs/0001-open-decisions.md#section-2', index),
-    ).toBe('/docs/specs/0001-open-decisions');
+    expect(resolveDocLink('AGENTS.md', 'docs/specs/0001-open-decisions.md#section-2', index)).toBe(
+      '/docs/specs/0001-open-decisions',
+    );
   });
 
   it('returns null for external, anchor-only, unknown, and missing links', () => {

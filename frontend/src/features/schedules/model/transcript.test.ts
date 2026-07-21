@@ -5,12 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { Citation, RunStep } from '@/api';
-import {
-  assembleAnswer,
-  citationToPassage,
-  toTranscript,
-  traceSummary,
-} from './transcript';
+import { assembleAnswer, citationToPassage, toTranscript, traceSummary } from './transcript';
 
 const STEPS: RunStep[] = [
   { seq: 0, kind: 'delta', payload: { text: 'Hello ' }, created_at: 't' },
@@ -38,7 +33,9 @@ describe('toTranscript', () => {
     expect(items[2]?.label).toMatch(/Passage cited/);
   });
   it('labels an error step', () => {
-    const items = toTranscript([{ seq: 0, kind: 'error', payload: { code: 'boom' }, created_at: 't' }]);
+    const items = toTranscript([
+      { seq: 0, kind: 'error', payload: { code: 'boom' }, created_at: 't' },
+    ]);
     expect(items[0]?.label).toBe('Error');
     expect(items[0]?.detail).toMatch(/boom/);
   });
@@ -55,7 +52,9 @@ describe('citationToPassage', () => {
       char_start: 0,
       char_end: 14,
     };
-    expect(citationToPassage(citation)).toEqual({ runs: [{ text: 'the cited text', highlight: true }] });
+    expect(citationToPassage(citation)).toEqual({
+      runs: [{ text: 'the cited text', highlight: true }],
+    });
   });
 });
 

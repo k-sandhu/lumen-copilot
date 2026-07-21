@@ -63,7 +63,12 @@ export function toTranscript(steps: RunStep[] | undefined): TranscriptItem[] {
             detail: payloadDetail(s.payload),
           };
         case 'citation':
-          return { seq: s.seq, kind: s.kind, label: 'Passage cited', detail: citationSnippet(s.payload) };
+          return {
+            seq: s.seq,
+            kind: s.kind,
+            label: 'Passage cited',
+            detail: citationSnippet(s.payload),
+          };
         case 'error':
           return { seq: s.seq, kind: s.kind, label: 'Error', detail: payloadDetail(s.payload) };
         default:
@@ -106,7 +111,10 @@ export function citationToPassage(citation: Citation): SourcePassage {
 }
 
 /** A count summary for the RetrievalTrace header, e.g. "2 tool calls · 3 citations". */
-export function traceSummary(steps: RunStep[] | undefined, citations: Citation[] | undefined): string {
+export function traceSummary(
+  steps: RunStep[] | undefined,
+  citations: Citation[] | undefined,
+): string {
   const toolCalls = (steps ?? []).filter((s) => s.kind === 'tool_call').length;
   const citeCount = citations?.length ?? 0;
   const parts: string[] = [];

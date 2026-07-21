@@ -42,7 +42,9 @@ function GovernanceTable({ rows }: { rows: GovernanceRow[] }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse text-left text-sm">
-        <caption className="sr-only">Models allowed for this tenant and their governance tier</caption>
+        <caption className="sr-only">
+          Models allowed for this tenant and their governance tier
+        </caption>
         <thead>
           <tr className="border-b border-border text-xs uppercase tracking-wide text-foreground-muted">
             <th scope="col" className="px-4 py-2 font-medium">

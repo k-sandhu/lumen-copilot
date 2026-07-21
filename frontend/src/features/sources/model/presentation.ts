@@ -159,7 +159,10 @@ export function safeHost(url: string): string | null {
  * Relative-time label, e.g. "8m ago" / "3h ago" / "just now". `now` is injectable
  * so the unit tests are deterministic. Returns `null` for a missing/future stamp.
  */
-export function relativeTime(iso: string | null | undefined, now: number = Date.now()): string | null {
+export function relativeTime(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): string | null {
   if (!iso) return null;
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return null;
@@ -260,7 +263,9 @@ export function createSourceErrorMessage(error: ApiError): string {
     }
     const fieldError = error.problem?.errors?.[0]?.message;
     return (
-      fieldError ?? error.problem?.detail ?? "That link couldn't be added. Check the URL and try again."
+      fieldError ??
+      error.problem?.detail ??
+      "That link couldn't be added. Check the URL and try again."
     );
   }
   if (error.status === 403) {
@@ -281,7 +286,8 @@ export function deleteSourceErrorMessage(error: ApiError): string {
   if (error.status === 403) {
     return 'Only a tenant admin can remove a managed source — your role may have changed.';
   }
-  if (error.status === 404) return 'That source no longer exists — it may already have been removed.';
+  if (error.status === 404)
+    return 'That source no longer exists — it may already have been removed.';
   if (error.status === 401) return 'Your session expired. Sign in again to remove this source.';
   return error.displayMessage || "Couldn't remove this source. Please try again.";
 }

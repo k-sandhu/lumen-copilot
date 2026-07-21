@@ -31,10 +31,7 @@ import {
   usePublishAssistant,
   useUpdateAssistant,
 } from '../model/queries';
-import {
-  AUTONOMY_OPTIONS,
-  STATUS_LABEL,
-} from '../model/presentation';
+import { AUTONOMY_OPTIONS, STATUS_LABEL } from '../model/presentation';
 import {
   canPublish,
   emptyForm,
@@ -89,9 +86,7 @@ export function AssistantEditor({ assistantId, initialForm, advisory }: Assistan
 
   // Precedence: an existing head (edit mode) → a builder-supplied draft (new mode) →
   // an empty form. `initialForm` only applies when there is no head to load.
-  const initial = detail.data
-    ? formFromAssistant(detail.data)
-    : (initialForm ?? emptyForm());
+  const initial = detail.data ? formFromAssistant(detail.data) : (initialForm ?? emptyForm());
 
   return (
     <EditorForm
@@ -203,219 +198,225 @@ function EditorForm({
 
   return (
     <div className="mx-auto max-w-3xl space-y-8 px-5 py-6">
-    <form
-      className="space-y-6"
-      onSubmit={(e) => {
-        e.preventDefault();
-        handleSave();
-      }}
-      noValidate
-    >
-      <EditorHeader current={current} isNew={isNew} />
+      <form
+        className="space-y-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSave();
+        }}
+        noValidate
+      >
+        <EditorHeader current={current} isNew={isNew} />
 
-      {advisory ? <DraftAdvisories advisory={advisory} /> : null}
+        {advisory ? <DraftAdvisories advisory={advisory} /> : null}
 
-      {formError ? (
-        <p
-          role="alert"
-          className="flex items-start gap-1.5 rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
-        >
-          <Icon name="alert-triangle" className="mt-px shrink-0" />
-          <span>{formError}</span>
-        </p>
-      ) : null}
-      {saved ? (
-        <p role="status" className="rounded-md border border-ok/40 bg-ok/10 p-3 text-sm text-ok">
-          Saved.
-        </p>
-      ) : null}
-
-      {/* --- Identity --- */}
-      <section className="space-y-4">
-        <Field label="Name" htmlFor="assistant-name" required error={nameError}>
-          <input
-            id="assistant-name"
-            ref={nameRef}
-            type="text"
-            value={form.name}
-            maxLength={200}
-            disabled={busy}
-            aria-invalid={nameError ? true : undefined}
-            aria-describedby={nameError ? 'assistant-name-error' : undefined}
-            onChange={(e) => {
-              set('name', e.target.value);
-              if (nameError) setNameError(null);
-            }}
-            placeholder="e.g. Benefits helper"
-            className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60 aria-[invalid=true]:border-danger"
-          />
-        </Field>
-
-        <Field label="Description" htmlFor="assistant-description">
-          <input
-            id="assistant-description"
-            type="text"
-            value={form.description}
-            disabled={busy}
-            onChange={(e) => set('description', e.target.value)}
-            placeholder="A one-line summary shown on the assistant card."
-            className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
-          />
-        </Field>
-
-        <Field
-          label="Instructions"
-          htmlFor="assistant-instructions"
-          hint="Plain-language guidance injected at run time (persona / role). Grounding and citation rules are always enforced."
-        >
-          <textarea
-            id="assistant-instructions"
-            value={form.instructions}
-            disabled={busy}
-            rows={5}
-            onChange={(e) => set('instructions', e.target.value)}
-            placeholder="You are a friendly benefits assistant. Answer from the HR handbook and cite the policy you used…"
-            className="w-full resize-y rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
-          />
-        </Field>
-      </section>
-
-      {/* --- Model --- */}
-      <section className="space-y-2">
-        <h2 className="text-sm font-medium">Model</h2>
-        <ModelSelect
-          models={models.data?.items}
-          isPending={models.isPending}
-          isError={models.isError}
-          value={form.model}
-          disabled={busy}
-          onChange={(id) => set('model', id)}
-        />
-      </section>
-
-      {/* --- Knowledge scope --- */}
-      <section className="space-y-2">
-        <h2 className="text-sm font-medium">Knowledge</h2>
-        <KnowledgeScopePicker
-          value={form.knowledgeScope}
-          disabled={busy}
-          onChange={(scope) => set('knowledgeScope', scope)}
-        />
-      </section>
-
-      {/* --- Tools --- */}
-      <section>
-        <ToolAllowlist
-          value={form.toolAllowlist}
-          disabled={busy}
-          onChange={(tools) => set('toolAllowlist', tools)}
-        />
-      </section>
-
-      {/* --- Autonomy --- */}
-      <section className="space-y-2">
-        <Field label="Autonomy" htmlFor="assistant-autonomy" hint={autonomyHint(form)}>
-          <select
-            id="assistant-autonomy"
-            value={form.autonomyLevel}
-            disabled={busy}
-            onChange={(e) => set('autonomyLevel', e.target.value as AssistantFormState['autonomyLevel'])}
-            className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+        {formError ? (
+          <p
+            role="alert"
+            className="flex items-start gap-1.5 rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
           >
-            {AUTONOMY_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </section>
-
-      {/* --- Ownership --- */}
-      <section className="space-y-2">
-        <h2 className="text-sm font-medium">Ownership</h2>
-        {isNew ? (
-          <p className="rounded-md border border-border bg-surface-muted p-3 text-xs text-foreground-muted">
-            You’ll be set as the owner when you save the draft. Set a backup owner then to enable
-            publishing.
+            <Icon name="alert-triangle" className="mt-px shrink-0" />
+            <span>{formError}</span>
           </p>
-        ) : (
-          <OwnerPickers
-            owner={form.owner || null}
-            backupOwner={form.backupOwner || null}
-            onOwnerChange={(id) => set('owner', id ?? '')}
-            onBackupChange={(id) => set('backupOwner', id ?? '')}
-            members={members.data?.items}
-            isPending={members.isPending}
-            isError={members.isError}
-            error={members.error}
-            onRetry={() => void members.refetch()}
-            disabled={busy}
-          />
-        )}
-      </section>
-
-      {/* --- Actions --- */}
-      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-4">
-        <button
-          type="submit"
-          disabled={busy}
-          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
-        >
-          <Icon name="check" className="shrink-0" />
-          {isNew ? (create.isPending ? 'Creating…' : 'Save draft') : update.isPending ? 'Saving…' : 'Save'}
-        </button>
-
-        {!isNew ? (
-          <button
-            type="button"
-            onClick={handlePublish}
-            disabled={busy || !publishable}
-            title={
-              publishable
-                ? undefined
-                : 'Set an owner and a distinct backup owner to publish.'
-            }
-            className="inline-flex items-center gap-1.5 rounded-md border border-accent px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
-          >
-            <Icon name="send" className="shrink-0" />
-            {publish.isPending ? 'Publishing…' : 'Publish'}
-          </button>
+        ) : null}
+        {saved ? (
+          <p role="status" className="rounded-md border border-ok/40 bg-ok/10 p-3 text-sm text-ok">
+            Saved.
+          </p>
         ) : null}
 
-        <button
-          type="button"
-          onClick={() => navigate('/assistants')}
-          disabled={busy}
-          className="ml-auto rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
-        >
-          Back to library
-        </button>
-      </div>
+        {/* --- Identity --- */}
+        <section className="space-y-4">
+          <Field label="Name" htmlFor="assistant-name" required error={nameError}>
+            <input
+              id="assistant-name"
+              ref={nameRef}
+              type="text"
+              value={form.name}
+              maxLength={200}
+              disabled={busy}
+              aria-invalid={nameError ? true : undefined}
+              aria-describedby={nameError ? 'assistant-name-error' : undefined}
+              onChange={(e) => {
+                set('name', e.target.value);
+                if (nameError) setNameError(null);
+              }}
+              placeholder="e.g. Benefits helper"
+              className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60 aria-[invalid=true]:border-danger"
+            />
+          </Field>
 
-      {!isNew && !publishable ? (
-        <p className="text-xs text-foreground-muted">
-          Publishing needs an owner and a distinct backup owner (ADR-0011 §4).
-        </p>
-      ) : null}
-    </form>
+          <Field label="Description" htmlFor="assistant-description">
+            <input
+              id="assistant-description"
+              type="text"
+              value={form.description}
+              disabled={busy}
+              onChange={(e) => set('description', e.target.value)}
+              placeholder="A one-line summary shown on the assistant card."
+              className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+            />
+          </Field>
 
-    {/* Test/preview/debug (#215) — edit mode only; a draft with no id cannot be
+          <Field
+            label="Instructions"
+            htmlFor="assistant-instructions"
+            hint="Plain-language guidance injected at run time (persona / role). Grounding and citation rules are always enforced."
+          >
+            <textarea
+              id="assistant-instructions"
+              value={form.instructions}
+              disabled={busy}
+              rows={5}
+              onChange={(e) => set('instructions', e.target.value)}
+              placeholder="You are a friendly benefits assistant. Answer from the HR handbook and cite the policy you used…"
+              className="w-full resize-y rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+            />
+          </Field>
+        </section>
+
+        {/* --- Model --- */}
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">Model</h2>
+          <ModelSelect
+            models={models.data?.items}
+            isPending={models.isPending}
+            isError={models.isError}
+            value={form.model}
+            disabled={busy}
+            onChange={(id) => set('model', id)}
+          />
+        </section>
+
+        {/* --- Knowledge scope --- */}
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">Knowledge</h2>
+          <KnowledgeScopePicker
+            value={form.knowledgeScope}
+            disabled={busy}
+            onChange={(scope) => set('knowledgeScope', scope)}
+          />
+        </section>
+
+        {/* --- Tools --- */}
+        <section>
+          <ToolAllowlist
+            value={form.toolAllowlist}
+            disabled={busy}
+            onChange={(tools) => set('toolAllowlist', tools)}
+          />
+        </section>
+
+        {/* --- Autonomy --- */}
+        <section className="space-y-2">
+          <Field label="Autonomy" htmlFor="assistant-autonomy" hint={autonomyHint(form)}>
+            <select
+              id="assistant-autonomy"
+              value={form.autonomyLevel}
+              disabled={busy}
+              onChange={(e) =>
+                set('autonomyLevel', e.target.value as AssistantFormState['autonomyLevel'])
+              }
+              className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+            >
+              {AUTONOMY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </section>
+
+        {/* --- Ownership --- */}
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">Ownership</h2>
+          {isNew ? (
+            <p className="rounded-md border border-border bg-surface-muted p-3 text-xs text-foreground-muted">
+              You’ll be set as the owner when you save the draft. Set a backup owner then to enable
+              publishing.
+            </p>
+          ) : (
+            <OwnerPickers
+              owner={form.owner || null}
+              backupOwner={form.backupOwner || null}
+              onOwnerChange={(id) => set('owner', id ?? '')}
+              onBackupChange={(id) => set('backupOwner', id ?? '')}
+              members={members.data?.items}
+              isPending={members.isPending}
+              isError={members.isError}
+              error={members.error}
+              onRetry={() => void members.refetch()}
+              disabled={busy}
+            />
+          )}
+        </section>
+
+        {/* --- Actions --- */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-4">
+          <button
+            type="submit"
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+          >
+            <Icon name="check" className="shrink-0" />
+            {isNew
+              ? create.isPending
+                ? 'Creating…'
+                : 'Save draft'
+              : update.isPending
+                ? 'Saving…'
+                : 'Save'}
+          </button>
+
+          {!isNew ? (
+            <button
+              type="button"
+              onClick={handlePublish}
+              disabled={busy || !publishable}
+              title={
+                publishable ? undefined : 'Set an owner and a distinct backup owner to publish.'
+              }
+              className="inline-flex items-center gap-1.5 rounded-md border border-accent px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+            >
+              <Icon name="send" className="shrink-0" />
+              {publish.isPending ? 'Publishing…' : 'Publish'}
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => navigate('/assistants')}
+            disabled={busy}
+            className="ml-auto rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+          >
+            Back to library
+          </button>
+        </div>
+
+        {!isNew && !publishable ? (
+          <p className="text-xs text-foreground-muted">
+            Publishing needs an owner and a distinct backup owner (ADR-0011 §4).
+          </p>
+        ) : null}
+      </form>
+
+      {/* Test/preview/debug (#215) — edit mode only; a draft with no id cannot be
         tested. Runs the working config with write-tier tools simulated/denied —
         no real side effect — and shows the debug trace. */}
-    {!isNew && assistantId ? (
-      <div className="border-t border-border pt-6">
-        <TestPanel assistantId={assistantId} />
-      </div>
-    ) : null}
+      {!isNew && assistantId ? (
+        <div className="border-t border-border pt-6">
+          <TestPanel assistantId={assistantId} />
+        </div>
+      ) : null}
 
-    {/* Version history + rollback (#214) — edit mode only; a draft with no id
+      {/* Version history + rollback (#214) — edit mode only; a draft with no id
         has no history to show. Publishing above appends a version here. */}
-    {!isNew && current ? (
-      <div className="border-t border-border pt-6">
-        <VersionHistory assistant={current} members={members.data?.items} />
-      </div>
-    ) : null}
+      {!isNew && current ? (
+        <div className="border-t border-border pt-6">
+          <VersionHistory assistant={current} members={members.data?.items} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -453,8 +454,8 @@ function DraftAdvisories({ advisory }: { advisory: DraftAdvisory }) {
       {clarifications.length > 0 ? (
         <section className="rounded-md border border-accent/40 bg-accent/10 p-3 text-sm">
           <p className="mb-1 flex items-center gap-1.5 font-medium text-accent">
-            <Icon name="sparkles" className="shrink-0" aria-hidden="true" />
-            A few questions to answer
+            <Icon name="sparkles" className="shrink-0" aria-hidden="true" />A few questions to
+            answer
           </p>
           <ul className="list-disc space-y-0.5 pl-5 text-foreground">
             {clarifications.map((q) => (
@@ -523,7 +524,14 @@ function ModelSelect({
   onChange: (id: string) => void;
 }) {
   if (isPending) {
-    return <div role="status" aria-label="Loading models" className="lc-skeleton" style={{ width: '50%' }} />;
+    return (
+      <div
+        role="status"
+        aria-label="Loading models"
+        className="lc-skeleton"
+        style={{ width: '50%' }}
+      />
+    );
   }
   if (isError || !models || models.length === 0) {
     // Degrade gracefully: a free-text model id keeps the form usable even if the
@@ -593,7 +601,12 @@ function Field({
 
 function EditorSkeleton() {
   return (
-    <div role="status" aria-busy="true" aria-live="polite" className="mx-auto max-w-3xl space-y-4 px-5 py-6">
+    <div
+      role="status"
+      aria-busy="true"
+      aria-live="polite"
+      className="mx-auto max-w-3xl space-y-4 px-5 py-6"
+    >
       <span className="sr-only">Loading assistant…</span>
       {[0, 1, 2, 3, 4].map((i) => (
         <div key={i} className="space-y-2" aria-hidden="true">

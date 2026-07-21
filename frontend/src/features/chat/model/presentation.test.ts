@@ -119,7 +119,11 @@ describe('buildRetrievalSummary', () => {
 
   it('counts distinct sources and summed passages', () => {
     const result = buildRetrievalSummary(
-      [cite({ documentId: 'doc-1' }), cite({ id: 'c2', documentId: 'doc-2' }), cite({ id: 'c3', documentId: 'doc-1' })],
+      [
+        cite({ documentId: 'doc-1' }),
+        cite({ id: 'c2', documentId: 'doc-2' }),
+        cite({ id: 'c3', documentId: 'doc-1' }),
+      ],
       [doneTool({ hitCount: 800 }), doneTool({ callId: 't2', hitCount: 404 })],
     );
     expect(result.summary).toBe('Looked at 2 sources · 1,204 passages');

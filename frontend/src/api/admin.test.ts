@@ -111,7 +111,11 @@ describe('admin api boundary', () => {
       json({
         items: [
           { tier: 'T0', description: 'Read-only.', approval: 'none' },
-          { tier: 'T3', description: 'Destructive external.', approval: 'human approval + risk tier' },
+          {
+            tier: 'T3',
+            description: 'Destructive external.',
+            approval: 'human approval + risk tier',
+          },
         ],
       }),
     );

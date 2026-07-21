@@ -215,7 +215,8 @@ function EditorForm({
         />
         {!isNew ? (
           <p className="text-xs text-foreground-muted">
-            The assistant is fixed for an existing schedule. Create a new schedule to run a different one.
+            The assistant is fixed for an existing schedule. Create a new schedule to run a
+            different one.
           </p>
         ) : null}
       </section>
@@ -291,7 +292,9 @@ function EditorForm({
           id="sched-overlap"
           value={form.overlapPolicy}
           disabled={busy}
-          onChange={(e) => set('overlapPolicy', e.target.value as ScheduleFormState['overlapPolicy'])}
+          onChange={(e) =>
+            set('overlapPolicy', e.target.value as ScheduleFormState['overlapPolicy'])
+          }
           className="w-full max-w-sm rounded-md border border-border bg-surface px-3 py-2 text-sm"
         >
           {OVERLAP_OPTIONS.map((o) => (
@@ -380,7 +383,14 @@ function AssistantSelect({
   error?: string;
 }) {
   if (isPending) {
-    return <div role="status" aria-label="Loading assistants" className="lc-skeleton" style={{ width: '50%' }} />;
+    return (
+      <div
+        role="status"
+        aria-label="Loading assistants"
+        className="lc-skeleton"
+        style={{ width: '50%' }}
+      />
+    );
   }
   if (isError) {
     return (

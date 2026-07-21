@@ -96,9 +96,9 @@ describe('statusTone / statusLabel / statusBadge', () => {
 
 describe('glyph / name / detail / mode / host', () => {
   it('derives a 2-letter glyph from the URL host (www-stripped, uppercased)', () => {
-    expect(sourceGlyph(makeSource({ config: { url: 'https://www.notion.so/x', mode: 'page' } }))).toBe(
-      'NO',
-    );
+    expect(
+      sourceGlyph(makeSource({ config: { url: 'https://www.notion.so/x', mode: 'page' } })),
+    ).toBe('NO');
   });
 
   it('falls back to WB when the URL has no parseable host', () => {
@@ -173,9 +173,10 @@ describe('relativeTime / freshness', () => {
   });
 
   it('marks a pending_auth source as awaiting consent', () => {
-    expect(
-      freshness(makeGdrive({ status: 'pending_auth', last_synced_at: null }), now),
-    ).toEqual({ label: 'Awaiting consent', stale: false });
+    expect(freshness(makeGdrive({ status: 'pending_auth', last_synced_at: null }), now)).toEqual({
+      label: 'Awaiting consent',
+      stale: false,
+    });
   });
 
   it('flags a ready source synced over a day ago as stale', () => {
@@ -270,7 +271,9 @@ describe('createSourceErrorMessage', () => {
 
 describe('deleteSourceErrorMessage', () => {
   it('maps 403 to the action-time admin/role gate (INV-5), 404 to already-gone, 401 to session expiry', () => {
-    expect(deleteSourceErrorMessage(new ApiError('x', 403))).toMatch(/tenant admin.*role may have changed/i);
+    expect(deleteSourceErrorMessage(new ApiError('x', 403))).toMatch(
+      /tenant admin.*role may have changed/i,
+    );
     expect(deleteSourceErrorMessage(new ApiError('x', 404))).toMatch(/no longer exists/i);
     expect(deleteSourceErrorMessage(new ApiError('x', 401))).toMatch(/session expired/i);
   });

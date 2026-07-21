@@ -67,17 +67,13 @@ describe('ServersPanel — states', () => {
     renderWithQuery(<ServersPanel />);
     expect(await screen.findByText(/loading mcp servers/i)).toBeInTheDocument();
     resolve(json(list([makeServer()])));
-    expect(
-      await screen.findByRole('article', { name: /acme ticketing/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('article', { name: /acme ticketing/i })).toBeInTheDocument();
   });
 
   it('renders the EMPTY state with a primary CTA when there are no servers', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(list([])));
     renderWithQuery(<ServersPanel />);
-    expect(
-      await screen.findByText(/register your first mcp server/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/register your first mcp server/i)).toBeInTheDocument();
   });
 
   it('renders an actionable ERROR with retry on a transient failure', async () => {

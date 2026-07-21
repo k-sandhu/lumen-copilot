@@ -216,9 +216,9 @@ export function MembersPanel() {
           Members &amp; roles
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          This tenant&rsquo;s members and their RBAC roles. Attesting a member&rsquo;s identity
-          lets connector permission mirroring map source access to them (audited) — unattested
-          members never receive mirrored connector access.
+          This tenant&rsquo;s members and their RBAC roles. Attesting a member&rsquo;s identity lets
+          connector permission mirroring map source access to them (audited) — unattested members
+          never receive mirrored connector access.
         </p>
       </header>
       <PanelBody

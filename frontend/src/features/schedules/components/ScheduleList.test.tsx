@@ -169,7 +169,9 @@ describe('ScheduleList', () => {
     await screen.findByRole('list', { name: /schedules/i });
 
     await user.click(screen.getByRole('button', { name: /run weekly digest now/i }));
-    expect(await screen.findByText(/assistant is unavailable or a run is already active/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/assistant is unavailable or a run is already active/i),
+    ).toBeInTheDocument();
   });
 
   it('enables Next when a cursor is returned', async () => {

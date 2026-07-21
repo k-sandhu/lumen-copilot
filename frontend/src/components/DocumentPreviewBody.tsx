@@ -121,7 +121,8 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
         const textTypeKnown = mimeType !== undefined && TEXT_PREVIEW_MIME_TYPES.has(mimeType);
         setState({
           kind: 'error',
-          message: error instanceof ApiError ? error.displayMessage : 'Could not load the document.',
+          message:
+            error instanceof ApiError ? error.displayMessage : 'Could not load the document.',
           downloadOnly: textTypeKnown,
         });
       });

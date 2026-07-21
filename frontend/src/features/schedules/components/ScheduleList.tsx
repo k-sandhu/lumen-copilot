@@ -99,7 +99,10 @@ export function ScheduleList() {
           className="flex flex-wrap items-end gap-3"
           onSubmit={(e) => e.preventDefault()}
         >
-          <label htmlFor="sched-assistant" className="flex flex-col gap-1 text-xs text-foreground-muted">
+          <label
+            htmlFor="sched-assistant"
+            className="flex flex-col gap-1 text-xs text-foreground-muted"
+          >
             <span>Assistant</span>
             <select
               id="sched-assistant"
@@ -119,7 +122,10 @@ export function ScheduleList() {
             </select>
           </label>
 
-          <label htmlFor="sched-enabled" className="flex flex-col gap-1 text-xs text-foreground-muted">
+          <label
+            htmlFor="sched-enabled"
+            className="flex flex-col gap-1 text-xs text-foreground-muted"
+          >
             <span>Status</span>
             <select
               id="sched-enabled"
@@ -171,7 +177,9 @@ export function ScheduleList() {
             assistantName={assistantName}
             onToggleEnabled={onToggleEnabled}
             onRunNow={onRunNow}
-            togglingId={pause.isPending ? pause.variables : resume.isPending ? resume.variables : null}
+            togglingId={
+              pause.isPending ? pause.variables : resume.isPending ? resume.variables : null
+            }
             runningId={runNow.isPending ? runNow.variables : null}
           />
         </ScrollArea>

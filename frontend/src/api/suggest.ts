@@ -28,7 +28,10 @@ export function suggestSearch(
 }
 
 /** The caller's recent search queries, newest first. */
-export function listRecentSearches(limit?: number, signal?: AbortSignal): Promise<RecentSearchList> {
+export function listRecentSearches(
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<RecentSearchList> {
   const qs = limit !== undefined ? `?limit=${limit}` : '';
   return request<RecentSearchList>(`/search/recent${qs}`, { signal });
 }

@@ -41,9 +41,7 @@ export function loadTestCases(assistantId: string): AssistantTestCase[] {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(isTestCase)
-      .sort((a, b) => b.savedAt - a.savedAt);
+    return parsed.filter(isTestCase).sort((a, b) => b.savedAt - a.savedAt);
   } catch {
     return [];
   }
@@ -60,10 +58,7 @@ export function saveTestCases(assistantId: string, cases: AssistantTestCase[]): 
 }
 
 /** Add (or update, by id) a case and persist. Returns the new list (newest first). */
-export function upsertTestCase(
-  assistantId: string,
-  next: AssistantTestCase,
-): AssistantTestCase[] {
+export function upsertTestCase(assistantId: string, next: AssistantTestCase): AssistantTestCase[] {
   const existing = loadTestCases(assistantId).filter((c) => c.id !== next.id);
   const list = [next, ...existing].sort((a, b) => b.savedAt - a.savedAt);
   saveTestCases(assistantId, list);

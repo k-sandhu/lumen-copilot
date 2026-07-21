@@ -8,12 +8,7 @@ export { CodeRunPanel, type CodeRunPanelProps } from './components/CodeRunPanel'
 export { CodeRunDetail, type CodeRunDetailProps } from './components/CodeRunDetail';
 export { CodeRunInspector, type CodeRunInspectorProps } from './components/CodeRunInspector';
 export { useCodeRun, codeRunKeys } from './model/queries';
-export {
-  viewFromActivity,
-  viewFromRecord,
-  mergeView,
-  type CodeRunView,
-} from './model/view';
+export { viewFromActivity, viewFromRecord, mergeView, type CodeRunView } from './model/view';
 export {
   CODE_RUN_STATUS_LABEL,
   CODE_RUN_STATUS_TONE,

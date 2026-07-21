@@ -91,9 +91,7 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
     mutationFn: (memberId) => attestMemberIdentity(memberId),
     onSuccess: (member) => {
       qc.setQueryData<MemberList>(membersQueryKey, (prev) =>
-        prev
-          ? { ...prev, items: prev.items.map((m) => (m.id === member.id ? member : m)) }
-          : prev,
+        prev ? { ...prev, items: prev.items.map((m) => (m.id === member.id ? member : m)) } : prev,
       );
       void qc.invalidateQueries({ queryKey: membersQueryKey });
     },

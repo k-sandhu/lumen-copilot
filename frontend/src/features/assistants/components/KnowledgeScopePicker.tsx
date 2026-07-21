@@ -126,7 +126,10 @@ function ModeToggle({
 }) {
   const id = useId();
   return (
-    <label htmlFor={id} className="flex cursor-pointer items-start gap-2 rounded-md border border-border p-2">
+    <label
+      htmlFor={id}
+      className="flex cursor-pointer items-start gap-2 rounded-md border border-border p-2"
+    >
       <input
         id={id}
         type="checkbox"
@@ -176,13 +179,20 @@ function ScopeList<T extends { id: string }>({
     <fieldset disabled={disabled} className="min-w-0">
       <legend className="text-sm font-medium">{legend}</legend>
       {isPending ? (
-        <div role="status" className="mt-2 space-y-2" aria-label={`Loading ${legend.toLowerCase()}`}>
+        <div
+          role="status"
+          className="mt-2 space-y-2"
+          aria-label={`Loading ${legend.toLowerCase()}`}
+        >
           {[0, 1].map((i) => (
             <div key={i} className="lc-skeleton" style={{ width: '70%' }} aria-hidden="true" />
           ))}
         </div>
       ) : isError ? (
-        <div role="alert" className="mt-2 rounded-md border border-danger/40 bg-danger/10 p-2 text-xs">
+        <div
+          role="alert"
+          className="mt-2 rounded-md border border-danger/40 bg-danger/10 p-2 text-xs"
+        >
           <p className="text-danger">
             {error instanceof ApiError && error.status === 401
               ? 'Your session expired — sign in again.'

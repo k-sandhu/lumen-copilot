@@ -27,9 +27,7 @@ export function DocumentsPanel() {
   const collections = useCollections();
   const firstId = collections.data?.items[0]?.id;
   const effectiveId =
-    selectedId && collections.data?.items.some((c) => c.id === selectedId)
-      ? selectedId
-      : firstId;
+    selectedId && collections.data?.items.some((c) => c.id === selectedId) ? selectedId : firstId;
   const selectedCollection = collections.data?.items.find((c) => c.id === effectiveId);
 
   // Identify the signed-in user so the Owner column can read "You" for their own

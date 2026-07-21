@@ -78,7 +78,11 @@ describe('validateForm', () => {
 
 describe('toCreateBody', () => {
   it('builds a create body with delivery, overlap, enabled, and params', () => {
-    const form = { ...emptyForm('a1'), params: [{ key: 'topic', value: 'x' }], digest: 'weekly' as const };
+    const form = {
+      ...emptyForm('a1'),
+      params: [{ key: 'topic', value: 'x' }],
+      digest: 'weekly' as const,
+    };
     const body = toCreateBody(form);
     expect(body.assistant_id).toBe('a1');
     expect(body.timezone).toBe(form.timezone);

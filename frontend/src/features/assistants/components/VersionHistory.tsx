@@ -56,15 +56,13 @@ export function VersionHistory({ assistant, members }: VersionHistoryProps) {
           Version history
         </h2>
         {assistant.version != null ? (
-          <span className="text-xs text-foreground-muted">
-            Current: v{assistant.version}
-          </span>
+          <span className="text-xs text-foreground-muted">Current: v{assistant.version}</span>
         ) : null}
       </div>
 
       <p className="text-xs text-foreground-muted">
-        Every publish freezes an immutable version. Rolling back creates a new
-        version equal to the chosen one — history is never changed.
+        Every publish freezes an immutable version. Rolling back creates a new version equal to the
+        chosen one — history is never changed.
       </p>
 
       {versions.isPending ? (
@@ -152,9 +150,7 @@ function VersionCard({
       <CardHeader className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle>Version {version.version}</CardTitle>
-          {isCurrent ? (
-            <StatusBadge tone="ok">Current</StatusBadge>
-          ) : null}
+          {isCurrent ? <StatusBadge tone="ok">Current</StatusBadge> : null}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-foreground-muted">
           <span>{ownerLabel(version.author, members)}</span>
@@ -279,8 +275,8 @@ function HistoryEmpty() {
       <Icon name="clock" aria-hidden="true" className="mx-auto text-foreground-muted" />
       <p className="mt-2 text-sm font-medium">No versions yet</p>
       <p className="mt-1 text-xs text-foreground-muted">
-        Publish this assistant to freeze its first immutable version. Every publish
-        adds one to this history.
+        Publish this assistant to freeze its first immutable version. Every publish adds one to this
+        history.
       </p>
     </div>
   );

@@ -29,12 +29,7 @@ import {
   isFailureOrEscalation,
   isTerminal,
 } from '../model/presentation';
-import {
-  assembleAnswer,
-  citationToPassage,
-  toTranscript,
-  traceSummary,
-} from '../model/transcript';
+import { assembleAnswer, citationToPassage, toTranscript, traceSummary } from '../model/transcript';
 import { EscalationActions } from './EscalationActions';
 import { ErrorState, SkeletonRows } from './StateViews';
 
@@ -109,7 +104,10 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                 {TRIGGER_LABEL[run.trigger]}
               </span>
               {live ? (
-                <span className="inline-flex items-center gap-1 text-xs text-foreground-muted" aria-live="polite">
+                <span
+                  className="inline-flex items-center gap-1 text-xs text-foreground-muted"
+                  aria-live="polite"
+                >
                   <StatusDot tone="sync" title="Live" />
                   Updating…
                 </span>
@@ -131,9 +129,13 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                   : 'space-y-1 rounded-lg border border-warn/50 bg-warn/10 p-4'
               }
             >
-              <p className={`flex items-center gap-1.5 text-sm font-semibold ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}>
+              <p
+                className={`flex items-center gap-1.5 text-sm font-semibold ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}
+              >
                 <Icon name="alert-triangle" className="shrink-0" />
-                {run.status === 'failed' ? 'This run failed' : 'This run was escalated — it needs a human'}
+                {run.status === 'failed'
+                  ? 'This run failed'
+                  : 'This run was escalated — it needs a human'}
               </p>
               {run.error ? (
                 <>
@@ -141,7 +143,9 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                   <p className="font-mono text-xs text-foreground-muted">code: {run.error.code}</p>
                 </>
               ) : (
-                <p className="text-sm text-foreground-muted">No reason was recorded for this run.</p>
+                <p className="text-sm text-foreground-muted">
+                  No reason was recorded for this run.
+                </p>
               )}
               {/* The human handoff (E7-5, #239) — resume / cancel / reroute the escalated run. */}
               {run.status === 'escalated' ? <EscalationActions run={run} /> : null}

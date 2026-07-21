@@ -53,7 +53,9 @@ describe('useChatStream', () => {
 
   it('is idle with no socket when streamId is null', () => {
     const h = harness();
-    const { result } = renderHook(() => useChatStream({ streamId: null, makeClient: h.makeClient }));
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: null, makeClient: h.makeClient }),
+    );
     expect(result.current.phase).toBe('idle');
   });
 

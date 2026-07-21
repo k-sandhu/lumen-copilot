@@ -99,7 +99,7 @@ coherent:
   would leave a **visible answer with dropped / literal citations** (an uncited
   answer — spec 0004 INV-3, #118). Routing `type` through the server keeps the
   answer's citations always resolvable to a present, visible row.
-- The type facet's *values* are still derived from the data (never a hardcoded list
+- The type facet's _values_ are still derived from the data (never a hardcoded list
   the backend can't serve), so a faceted type can never imply content the MVP
   doesn't index. As with the source facet, selecting a type collapses the facet to
   that type; the always-present "Any type" reset row clears it.

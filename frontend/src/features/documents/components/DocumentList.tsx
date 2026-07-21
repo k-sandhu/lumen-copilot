@@ -336,9 +336,7 @@ function DocumentRow({
             </div>
           </div>
         </td>
-        <td className="px-3 py-2.5 align-middle text-foreground-muted">
-          {collectionName ?? '—'}
-        </td>
+        <td className="px-3 py-2.5 align-middle text-foreground-muted">{collectionName ?? '—'}</td>
         <td className="px-3 py-2.5 align-middle">
           <PermissionPill level={vis.level} label={vis.label} title={vis.title} />
         </td>

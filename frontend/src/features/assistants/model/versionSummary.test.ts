@@ -8,7 +8,13 @@ import type { AssistantVersionConfig, ChatModelInfo } from '@/api';
 import { configDiff, configSummary, scopeSummary } from './versionSummary';
 
 const models: ChatModelInfo[] = [
-  { id: 'anthropic/claude', label: 'Claude', provider: 'anthropic', tier: 'frontier', is_default: true },
+  {
+    id: 'anthropic/claude',
+    label: 'Claude',
+    provider: 'anthropic',
+    tier: 'frontier',
+    is_default: true,
+  },
 ];
 
 function config(overrides: Partial<AssistantVersionConfig> = {}): AssistantVersionConfig {
@@ -45,7 +51,10 @@ describe('configSummary', () => {
   });
 
   it('shows "Smart default" for a null model and a placeholder for empty fields', () => {
-    const rows = configSummary(config({ model: null, description: null, instructions: null }), models);
+    const rows = configSummary(
+      config({ model: null, description: null, instructions: null }),
+      models,
+    );
     expect(rows.find((r) => r.key === 'model')?.value).toBe('Smart default');
     expect(rows.find((r) => r.key === 'description')?.value).toBe('—');
     expect(rows.find((r) => r.key === 'instructions')?.value).toBe('—');
@@ -53,7 +62,10 @@ describe('configSummary', () => {
 
   it('summarises an empty tool allowlist and empty scope without a blank', () => {
     const rows = configSummary(
-      config({ toolAllowlist: [], knowledgeScope: { collectionIds: [], sourceIds: [], modes: [] } }),
+      config({
+        toolAllowlist: [],
+        knowledgeScope: { collectionIds: [], sourceIds: [], modes: [] },
+      }),
       models,
     );
     expect(rows.find((r) => r.key === 'toolAllowlist')?.value).toBe('No tools');
@@ -76,7 +88,10 @@ describe('scopeSummary', () => {
 describe('configDiff', () => {
   it('returns the changed fields with both from/to display values', () => {
     const version = config({ model: null, toolAllowlist: ['search_text'] });
-    const head = config({ model: 'anthropic/claude', toolAllowlist: ['search_text', 'run_python'] });
+    const head = config({
+      model: 'anthropic/claude',
+      toolAllowlist: ['search_text', 'run_python'],
+    });
     const diff = configDiff(version, head, models);
     const keys = diff.map((d) => d.key);
     expect(keys).toContain('model');
@@ -98,15 +113,21 @@ describe('configDiff', () => {
 
   it('ignores incidental scope order but flags a real scope change', () => {
     const reordered = configDiff(
-      config({ knowledgeScope: { collectionIds: ['c1', 'c2'], sourceIds: [], modes: ['company'] } }),
-      config({ knowledgeScope: { collectionIds: ['c2', 'c1'], sourceIds: [], modes: ['company'] } }),
+      config({
+        knowledgeScope: { collectionIds: ['c1', 'c2'], sourceIds: [], modes: ['company'] },
+      }),
+      config({
+        knowledgeScope: { collectionIds: ['c2', 'c1'], sourceIds: [], modes: ['company'] },
+      }),
       models,
     );
     expect(reordered).toEqual([]);
 
     const changed = configDiff(
       config({ knowledgeScope: { collectionIds: ['c1'], sourceIds: [], modes: ['company'] } }),
-      config({ knowledgeScope: { collectionIds: ['c1'], sourceIds: [], modes: ['company', 'web'] } }),
+      config({
+        knowledgeScope: { collectionIds: ['c1'], sourceIds: [], modes: ['company', 'web'] },
+      }),
       models,
     );
     expect(changed.map((d) => d.key)).toEqual(['knowledgeScope']);

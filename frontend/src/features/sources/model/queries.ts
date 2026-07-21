@@ -14,12 +14,7 @@
  * refetches on an interval so the pending → syncing → ready/error transitions
  * surface; it goes quiet once every source is settled.
  */
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type UseQueryResult,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { connectSource, createSource, deleteSource, listSources, syncSource } from '@/api';
 import type { Source, SourceConnectResponse, SourceCreate, SourceList } from '@/api';
 

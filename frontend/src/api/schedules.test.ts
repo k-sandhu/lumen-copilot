@@ -114,7 +114,9 @@ describe('schedules api boundary', () => {
   });
 
   it('DELETE /schedules/{id} issues a DELETE', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
     await deleteSchedule('s1');
     const { url, init } = lastCall(spy);
     expect(url).toContain('/schedules/s1');
@@ -135,9 +137,7 @@ describe('schedules api boundary', () => {
   });
 
   it('POST /schedules/{id}/run-now accepts the 202 and returns the run id', async () => {
-    const spy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(json({ run_id: 'r99' }, 202));
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ run_id: 'r99' }, 202));
     const res = await runScheduleNow('s1');
     expect(lastCall(spy).url).toContain('/schedules/s1/run-now');
     expect(res.run_id).toBe('r99');

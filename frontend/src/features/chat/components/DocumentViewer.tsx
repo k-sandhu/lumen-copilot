@@ -132,7 +132,6 @@ export function DocumentViewer({
             </div>
           ))}
         </dl>
-
       </div>
 
       <div className="min-h-0 flex-1">

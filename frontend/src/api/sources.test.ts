@@ -152,7 +152,9 @@ describe('sources api boundary', () => {
   });
 
   it('DELETE /sources/{id} removes a source (204)', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
     await expect(deleteSource(sampleSource.id)).resolves.toBeUndefined();
     const { url, init } = lastCall(spy);
     expect(url).toContain(`/sources/${sampleSource.id}`);
@@ -198,13 +200,13 @@ describe('sources api boundary', () => {
   });
 
   it('POST /sources/{id}/connect returns the consent authorization_url', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      json({ authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=opaque' }),
-    );
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        json({ authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=opaque' }),
+      );
     const res = await connectSource(sampleGdrive.id);
-    expect(res.authorization_url).toBe(
-      'https://accounts.google.com/o/oauth2/v2/auth?state=opaque',
-    );
+    expect(res.authorization_url).toBe('https://accounts.google.com/o/oauth2/v2/auth?state=opaque');
     const { url, init } = lastCall(spy);
     expect(url).toContain(`/sources/${sampleGdrive.id}/connect`);
     expect(init.method).toBe('POST');

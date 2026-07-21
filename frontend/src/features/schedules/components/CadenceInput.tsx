@@ -42,8 +42,7 @@ export function CadenceInput({ value, onChange, disabled, error }: CadenceInputP
 
   // Live (as-you-type) validation for the active mode, so the message appears
   // before submit; the parent error (a server 422) takes precedence when present.
-  const liveError =
-    value.mode === 'cron' ? validateCron(value.cron) : validateTimeOfDay(value.at);
+  const liveError = value.mode === 'cron' ? validateCron(value.cron) : validateTimeOfDay(value.at);
   const shownError = error ?? liveError;
   const errId = `${cronId}-error`;
 

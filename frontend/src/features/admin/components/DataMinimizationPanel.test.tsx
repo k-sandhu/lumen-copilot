@@ -14,12 +14,8 @@ import { DataMinimizationPanel } from './DataMinimizationPanel';
 describe('DataMinimizationPanel', () => {
   it('renders the data-minimization heading and the not-yet-exposed stance', () => {
     render(<DataMinimizationPanel />);
-    expect(
-      screen.getByRole('heading', { name: /^data minimization$/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/not yet exposed by the backend/i),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^data minimization$/i })).toBeInTheDocument();
+    expect(screen.getByText(/not yet exposed by the backend/i)).toBeInTheDocument();
   });
 
   it('is explicit that the per-policy controls are a deferred, coming-soon write surface', () => {

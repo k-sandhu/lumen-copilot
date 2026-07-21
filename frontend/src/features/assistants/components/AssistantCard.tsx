@@ -94,7 +94,10 @@ export function AssistantCard({
       </div>
 
       {assistant.description ? (
-        <p className="mt-2 line-clamp-2 text-sm text-foreground-muted" title={assistant.description}>
+        <p
+          className="mt-2 line-clamp-2 text-sm text-foreground-muted"
+          title={assistant.description}
+        >
           {assistant.description}
         </p>
       ) : (

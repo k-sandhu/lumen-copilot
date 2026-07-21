@@ -158,7 +158,11 @@ function Body({
   if (query.isPending) return <LoadingGrid />;
   if (query.isError) {
     return (
-      <ErrorState error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        busy={query.isFetching}
+      />
     );
   }
   if (items.length === 0) return <EmptyState onRegister={onRegister} />;
@@ -299,7 +303,11 @@ function LoadingGrid() {
       <span className="sr-only">Loading MCP servers…</span>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="rounded-xl border border-border bg-surface p-4" aria-hidden="true">
+          <div
+            key={i}
+            className="rounded-xl border border-border bg-surface p-4"
+            aria-hidden="true"
+          >
             <div className="lc-skeleton" style={{ width: '60%' }} />
             <div className="lc-skeleton" style={{ width: '40%', marginTop: 12, height: 24 }} />
           </div>

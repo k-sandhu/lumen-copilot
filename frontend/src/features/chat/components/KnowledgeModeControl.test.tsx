@@ -14,7 +14,11 @@ import { resolveAvailability } from '../model/knowledgeModes';
 describe('KnowledgeModeControl', () => {
   it('marks active modes via aria-pressed and offers all four (E3-12 visible)', () => {
     render(
-      <KnowledgeModeControl value={['company', 'web']} availability={{ web: { available: true } }} onChange={() => {}} />,
+      <KnowledgeModeControl
+        value={['company', 'web']}
+        availability={{ web: { available: true } }}
+        onChange={() => {}}
+      />,
     );
     const group = screen.getByRole('group', { name: /knowledge modes/i });
     expect(group).toBeInTheDocument();

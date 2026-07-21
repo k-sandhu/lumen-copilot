@@ -69,12 +69,7 @@ export function AccountMenu() {
           </div>
           <div className="lc-menu__sep" />
           <div style={{ padding: '2px 4px' }}>
-            <Link
-              to="/settings"
-              role="menuitem"
-              className="lc-menu__link"
-              onClick={toggle}
-            >
+            <Link to="/settings" role="menuitem" className="lc-menu__link" onClick={toggle}>
               Settings
             </Link>
           </div>

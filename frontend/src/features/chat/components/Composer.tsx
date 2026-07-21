@@ -27,10 +27,7 @@ import { Icon } from '@/ui';
 import { useMentionSuggestions } from '../model/queries';
 import { mentionQueryOf, type PinnedDocument } from '../model/composerHelpers';
 import { ModelPicker } from './ModelPicker';
-import {
-  KnowledgeModeControl,
-  type ModeAvailability,
-} from './KnowledgeModeControl';
+import { KnowledgeModeControl, type ModeAvailability } from './KnowledgeModeControl';
 
 export type { PinnedDocument } from '../model/composerHelpers';
 
@@ -255,7 +252,8 @@ export function Composer({
       // taller draft, ArrowUp stays ordinary caret movement.
       const onFirstLine = !el.value.slice(0, el.selectionStart).includes('\n');
       if (!onFirstLine) return;
-      const next = historyIndex === null ? 0 : Math.min(historyIndex + 1, historyEntries.length - 1);
+      const next =
+        historyIndex === null ? 0 : Math.min(historyIndex + 1, historyEntries.length - 1);
       if (historyIndex === null) stashRef.current = draft;
       if (next === historyIndex) return; // already at the oldest entry
       e.preventDefault();
@@ -436,10 +434,7 @@ export function Composer({
           />
           {model && onSetDefaultModel ? (
             model === defaultModelId ? (
-              <span
-                className="lc-default-tag"
-                title="This is your default model for new chats"
-              >
+              <span className="lc-default-tag" title="This is your default model for new chats">
                 <Icon name="check" />
                 Default
               </span>
@@ -457,7 +452,12 @@ export function Composer({
           ) : null}
           <div className="lc-composer__bar-spacer" />
           {streaming ? (
-            <button type="button" onClick={onStop} aria-label="Stop generating" className="lc-stop-btn">
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop generating"
+              className="lc-stop-btn"
+            >
               <span className="lc-stop-glyph" aria-hidden="true" />
               Stop
             </button>

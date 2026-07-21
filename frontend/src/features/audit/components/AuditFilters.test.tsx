@@ -95,8 +95,8 @@ describe('AuditFilters form', () => {
         onClear={vi.fn()}
       />,
     );
-    expect(screen.getAllByRole('button', { name: /clear/i }).some((b) => !b.hasAttribute('disabled'))).toBe(
-      true,
-    );
+    expect(
+      screen.getAllByRole('button', { name: /clear/i }).some((b) => !b.hasAttribute('disabled')),
+    ).toBe(true);
   });
 });

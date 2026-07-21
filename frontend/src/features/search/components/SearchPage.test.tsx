@@ -37,14 +37,10 @@ describe('SearchPage', () => {
     // toggle, and no account menu of its own.
     expect(screen.queryByRole('link', { name: /chat/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /app/i })).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: /toggle color theme/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /toggle color theme/i })).not.toBeInTheDocument();
 
     // Search functionality is intact: the combobox and initial prompt render.
     expect(screen.getByRole('combobox')).toBeInTheDocument();
-    expect(
-      screen.getByText(/search across your connected sources/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/search across your connected sources/i)).toBeInTheDocument();
   });
 });

@@ -25,7 +25,11 @@ function json(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
-function problem(status: number, title: string, errors?: { field: string; message: string }[]): Response {
+function problem(
+  status: number,
+  title: string,
+  errors?: { field: string; message: string }[],
+): Response {
   return new Response(JSON.stringify({ type: 'about:blank', title, status, errors }), {
     status,
     headers: { 'Content-Type': 'application/problem+json' },
@@ -80,7 +84,9 @@ function mockRoutes(opts: {
       return Promise.resolve(opts.onPublish ? opts.onPublish() : json(makeAssistant(), 200));
     }
     if (url.includes('/assistants/a1/versions') && method === 'GET') {
-      return Promise.resolve(json({ items: opts.versions ? opts.versions() : [], next_cursor: null }));
+      return Promise.resolve(
+        json({ items: opts.versions ? opts.versions() : [], next_cursor: null }),
+      );
     }
     if (url.match(/\/assistants\/a1$/) && method === 'PATCH') {
       return Promise.resolve(opts.onPatch ? opts.onPatch() : json(makeAssistant(), 200));
@@ -92,9 +98,11 @@ function mockRoutes(opts: {
       if (a === 'error-500') return Promise.resolve(problem(500, 'Server Error'));
       return Promise.resolve(json(a ?? makeAssistant()));
     }
-    if (url.includes('/admin/members')) return Promise.resolve(json({ items: members, next_cursor: null }));
+    if (url.includes('/admin/members'))
+      return Promise.resolve(json({ items: members, next_cursor: null }));
     if (url.includes('/models')) return Promise.resolve(json({ items: [] }));
-    if (url.includes('/collections')) return Promise.resolve(json({ items: [], next_cursor: null }));
+    if (url.includes('/collections'))
+      return Promise.resolve(json({ items: [], next_cursor: null }));
     if (url.includes('/sources')) return Promise.resolve(json({ items: [], next_cursor: null }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
   });

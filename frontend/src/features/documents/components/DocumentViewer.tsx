@@ -185,4 +185,3 @@ function StatusLine({ doc }: { doc: Document }) {
           : 'Queued';
   return <StatusDot tone={tone} label={label} />;
 }
-

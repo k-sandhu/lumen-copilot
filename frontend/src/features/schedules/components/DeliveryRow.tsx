@@ -50,7 +50,9 @@ export function DeliveryRow({
         </span>
       </div>
 
-      <p className={`mt-1.5 line-clamp-2 text-sm ${failed ? 'text-danger' : 'text-foreground-muted'}`}>
+      <p
+        className={`mt-1.5 line-clamp-2 text-sm ${failed ? 'text-danger' : 'text-foreground-muted'}`}
+      >
         {delivery.summary ??
           (failed
             ? 'This run’s delivery could not be produced — open the run to review and retry.'

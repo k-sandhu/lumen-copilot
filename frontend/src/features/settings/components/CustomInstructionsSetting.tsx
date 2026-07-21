@@ -19,7 +19,8 @@ const MAX_CHARS = 2000;
 function describeError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 401) return 'Your session has expired. Sign in again.';
-    if (error.status === 422) return 'Those instructions are too long. Keep them under 2000 characters.';
+    if (error.status === 422)
+      return 'Those instructions are too long. Keep them under 2000 characters.';
     return error.displayMessage;
   }
   if (error instanceof Error) return error.message;
@@ -66,7 +67,10 @@ export function CustomInstructionsSetting() {
 
   if (prefs.isLoading) {
     return (
-      <section aria-labelledby="settings-instructions-heading" className="rounded-lg border border-border">
+      <section
+        aria-labelledby="settings-instructions-heading"
+        className="rounded-lg border border-border"
+      >
         <header className="border-b border-border px-4 py-3">
           <h2 id="settings-instructions-heading" className="text-sm font-semibold text-foreground">
             Custom instructions
@@ -78,14 +82,17 @@ export function CustomInstructionsSetting() {
   }
 
   return (
-    <section aria-labelledby="settings-instructions-heading" className="rounded-lg border border-border">
+    <section
+      aria-labelledby="settings-instructions-heading"
+      className="rounded-lg border border-border"
+    >
       <header className="border-b border-border px-4 py-3">
         <h2 id="settings-instructions-heading" className="text-sm font-semibold text-foreground">
           Custom instructions
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          Standing context added to the start of every chat (your persona, tone, or
-          preferences). Grounding and citations always still apply.
+          Standing context added to the start of every chat (your persona, tone, or preferences).
+          Grounding and citations always still apply.
         </p>
       </header>
 
@@ -134,7 +141,9 @@ export function CustomInstructionsSetting() {
         {status ? (
           <p
             role={status.kind === 'error' ? 'alert' : 'status'}
-            className={status.kind === 'error' ? 'text-xs text-danger' : 'text-xs text-foreground-muted'}
+            className={
+              status.kind === 'error' ? 'text-xs text-danger' : 'text-xs text-foreground-muted'
+            }
           >
             {status.message}
           </p>

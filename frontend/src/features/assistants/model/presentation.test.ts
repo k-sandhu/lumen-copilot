@@ -4,18 +4,20 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatModelInfo, Member } from '@/api';
-import {
-  autonomyLabel,
-  modelLabel,
-  ownerLabel,
-  shortId,
-  statusTone,
-} from './presentation';
+import { autonomyLabel, modelLabel, ownerLabel, shortId, statusTone } from './presentation';
 
 const models: ChatModelInfo[] = [
-  { id: 'anthropic/claude', label: 'Claude', provider: 'anthropic', tier: 'frontier', is_default: true },
+  {
+    id: 'anthropic/claude',
+    label: 'Claude',
+    provider: 'anthropic',
+    tier: 'frontier',
+    is_default: true,
+  },
 ];
-const members: Member[] = [{ id: 'u-123456789', email: 'ada@acme.com', role: ['member'], email_attested_at: null }];
+const members: Member[] = [
+  { id: 'u-123456789', email: 'ada@acme.com', role: ['member'], email_attested_at: null },
+];
 
 describe('statusTone', () => {
   it('maps each lifecycle status to a tone', () => {

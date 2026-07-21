@@ -83,9 +83,9 @@ export function AutonomyGovernancePanel() {
           Autonomy cap
         </h2>
         <p className="mt-0.5 text-xs text-foreground-muted">
-          The maximum autonomy any assistant in this tenant may run at. An assistant
-          configured above the cap is rejected at publish and clamped at run time — its
-          effective autonomy is the lower of its own level and this ceiling.
+          The maximum autonomy any assistant in this tenant may run at. An assistant configured
+          above the cap is rejected at publish and clamped at run time — its effective autonomy is
+          the lower of its own level and this ceiling.
         </p>
       </header>
       {toast ? (

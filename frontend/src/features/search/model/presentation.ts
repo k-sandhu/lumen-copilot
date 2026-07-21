@@ -144,7 +144,9 @@ export const SOURCE_FILTERS: ResultSource[] = ['upload', 'chat', 'connector'];
  * so the source facet can show honest, data-backed counts. Only source kinds the
  * server actually returned appear — never an invented connector with a faked count.
  */
-export function sourceFacets(results: SearchResult[]): Array<{ source: ResultSource; count: number }> {
+export function sourceFacets(
+  results: SearchResult[],
+): Array<{ source: ResultSource; count: number }> {
   const counts = new Map<ResultSource, number>();
   for (const r of results) counts.set(r.source, (counts.get(r.source) ?? 0) + 1);
   return SOURCE_FILTERS.filter((s) => counts.has(s)).map((s) => ({

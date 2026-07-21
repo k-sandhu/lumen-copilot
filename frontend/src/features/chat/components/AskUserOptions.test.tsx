@@ -10,10 +10,7 @@ import type { AskUserQuestion } from '@/api';
 
 const QUESTION: AskUserQuestion = {
   question: 'Which quarter did you mean?',
-  options: [
-    { label: 'Q1 2026', description: 'January through March' },
-    { label: 'Q2 2026' },
-  ],
+  options: [{ label: 'Q1 2026', description: 'January through March' }, { label: 'Q2 2026' }],
   allow_free_text: true,
 };
 

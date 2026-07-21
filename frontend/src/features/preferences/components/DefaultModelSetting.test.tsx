@@ -85,9 +85,7 @@ describe('DefaultModelSetting', () => {
     })) as HTMLSelectElement;
     expect(select.value).toBe('anthropic/claude-opus-4.8');
     // A "use server default" choice is offered (clears the override).
-    expect(
-      screen.getByRole('option', { name: /server default/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /server default/i })).toBeInTheDocument();
   });
 
   it('shows "server default" selected when no override is set', async () => {

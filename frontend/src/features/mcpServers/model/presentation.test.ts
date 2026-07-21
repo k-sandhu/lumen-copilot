@@ -111,7 +111,9 @@ describe('registerErrorMessage', () => {
   });
 
   it('falls back to a generic 422 message', () => {
-    expect(registerErrorMessage(problem(422))).toMatch(/couldn.t be registered|check the endpoint/i);
+    expect(registerErrorMessage(problem(422))).toMatch(
+      /couldn.t be registered|check the endpoint/i,
+    );
   });
 
   it('messages a 401 as a re-auth prompt', () => {

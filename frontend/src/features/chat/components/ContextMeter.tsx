@@ -13,7 +13,6 @@ export interface ContextMeterProps {
   sessionId: string;
 }
 
-
 export function ContextMeter({ sessionId }: ContextMeterProps) {
   const usage = useSessionUsage(sessionId);
   // Silent on loading/error AND on a malformed payload — the meter is a
@@ -28,7 +27,8 @@ export function ContextMeter({ sessionId }: ContextMeterProps) {
   const percent = Math.min(100, Math.round((lastPrompt / Math.max(1, budget)) * 100));
   // Threshold coloring (research pass — Claude Code statusline convention):
   // calm below 50%, warn to 80%, hot above.
-  const tone = percent >= 80 ? 'lc-ctx-meter__fill--hot' : percent >= 50 ? 'lc-ctx-meter__fill--warn' : '';
+  const tone =
+    percent >= 80 ? 'lc-ctx-meter__fill--hot' : percent >= 50 ? 'lc-ctx-meter__fill--warn' : '';
   const label =
     totals.answers === 0
       ? `Context ${formatTokens(budget)} available`

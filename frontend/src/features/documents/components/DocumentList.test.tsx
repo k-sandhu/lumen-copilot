@@ -91,9 +91,7 @@ describe('DocumentList', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       jsonResponse({ items: [doc({ owner_id: 'someone-else-123' })], next_cursor: null }),
     );
-    renderWithQuery(
-      <DocumentList collectionId="col-1" currentUserId="u-1" onOpen={() => {}} />,
-    );
+    renderWithQuery(<DocumentList collectionId="col-1" currentUserId="u-1" onOpen={() => {}} />);
     await screen.findByText('msa.pdf');
     const table = screen.getByRole('table');
     expect(within(table).queryByText('You')).not.toBeInTheDocument();
@@ -182,9 +180,7 @@ describe('DocumentList', () => {
     await user.click(screen.getByRole('button', { name: /delete msa.pdf/i }));
     const dialog = await screen.findByRole('alertdialog');
     expect(within(dialog).getByText(/delete document\?/i)).toBeInTheDocument();
-    expect(
-      fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE'),
-    ).toBe(false);
+    expect(fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false);
 
     // Confirming fires DELETE /documents/doc-1.
     await user.click(within(dialog).getByRole('button', { name: /^delete$/i }));

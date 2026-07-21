@@ -106,7 +106,7 @@ contract change** and **no invented data**:
 - **Source-inspector metadata grid** (in `DocumentViewer`): the wireframe's
   **owner / last-modified / last-indexed** rows. The chat/citation wire
   (`Citation` / `ChatCitation`) carries **none** of these — and the only timestamp
-  a chat turn has is the **answer/message time**, which is the answer's age, *not*
+  a chat turn has is the **answer/message time**, which is the answer's age, _not_
   when the source was indexed or modified (that source-indexing metadata lives on
   the separate search-result contract, not the chat citation wire). So every row —
   owner, last-modified, **and last-indexed** — renders **"Not available"** unless

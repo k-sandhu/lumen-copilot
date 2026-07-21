@@ -119,10 +119,7 @@ export function relativeTime(
 }
 
 /** Human "last checked" label for the detail view / card health line. */
-export function lastCheckedLabel(
-  server: McpServer,
-  now: number = Date.now(),
-): string {
+export function lastCheckedLabel(server: McpServer, now: number = Date.now()): string {
   if (server.status === 'pending') return 'Never tested';
   const rel = relativeTime(server.last_health_at, now);
   return rel ? `Checked ${rel}` : 'Not checked yet';

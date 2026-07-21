@@ -45,9 +45,7 @@ function urlOf(input: RequestInfo | URL): string {
  * request URL so a test can assert / honor the server-side filter params (the
  * content-type facet is a server `type` param — spec 0004 INV-3, #118).
  */
-function mockSearch(
-  searchResponse: Response | ((url: string) => Response | Promise<Response>),
-) {
+function mockSearch(searchResponse: Response | ((url: string) => Response | Promise<Response>)) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = urlOf(input);
     // The typeahead fires suggest/recent/saved on mount + as you type; route them
@@ -184,7 +182,9 @@ describe('SearchScreen', () => {
   });
 
   it('shows the EMPTY state for a submitted query with no results', async () => {
-    mockSearch(json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse));
+    mockSearch(
+      json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse),
+    );
     renderWithQuery(<SearchScreen />);
     await runSearch('no hits here');
     expect(await screen.findByText(/no results for/i)).toBeInTheDocument();
@@ -272,9 +272,7 @@ describe('SearchScreen', () => {
     // Narrow to the "message" content type → the server query carries `type=message`
     // and only the chat result remains.
     await userEvent.setup().click(within(filters).getByRole('checkbox', { name: /^message/i }));
-    expect(
-      await screen.findByRole('heading', { name: /pricing thread/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
     const list = screen.getByRole('list', { name: /search results/i });
     expect(within(list).queryByRole('heading', { name: /PTO Policy/i })).toBeNull();
 
@@ -350,9 +348,9 @@ describe('SearchScreen', () => {
     await runSearch('pricing');
 
     const filters = await screen.findByRole('navigation', { name: /search filters/i });
-    await userEvent.setup().click(
-      within(filters).getByRole('checkbox', { name: /uploaded documents/i }),
-    );
+    await userEvent
+      .setup()
+      .click(within(filters).getByRole('checkbox', { name: /uploaded documents/i }));
 
     // Filtered-empty: a status (not the bare "no results for" empty) AND the sidebar
     // is still on screen so the scope can be cleared.

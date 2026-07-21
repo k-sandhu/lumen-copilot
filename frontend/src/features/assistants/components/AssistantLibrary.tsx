@@ -176,11 +176,7 @@ function startChatErrorMessage(error: unknown): string {
   return base;
 }
 
-function filterAssistants(
-  items: Assistant[],
-  search: string,
-  status: StatusFilter,
-): Assistant[] {
+function filterAssistants(items: Assistant[], search: string, status: StatusFilter): Assistant[] {
   const q = search.trim().toLowerCase();
   return items.filter((a) => {
     if (status !== 'all' && a.status !== status) return false;
@@ -212,17 +208,18 @@ function Body({
   if (query.isPending) return <LoadingGrid />;
   if (query.isError) {
     return (
-      <ErrorState error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        busy={query.isFetching}
+      />
     );
   }
   if (items.length === 0) return <EmptyState />;
   if (filtered.length === 0) return <NoMatches />;
 
   return (
-    <ul
-      aria-label="Assistants"
-      className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3"
-    >
+    <ul aria-label="Assistants" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {filtered.map((assistant) => (
         <li key={assistant.id} className="min-w-0">
           <AssistantCard

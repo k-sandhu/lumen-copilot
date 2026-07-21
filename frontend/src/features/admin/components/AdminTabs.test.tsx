@@ -36,10 +36,7 @@ describe('AdminTabs', () => {
     expect(active).toHaveAttribute('aria-controls', adminTabIds('admin', 'models').panel);
     // Roving tabindex: only the active tab is in the tab order.
     expect(active).toHaveAttribute('tabindex', '0');
-    expect(screen.getByRole('tab', { name: /members & roles/i })).toHaveAttribute(
-      'tabindex',
-      '-1',
-    );
+    expect(screen.getByRole('tab', { name: /members & roles/i })).toHaveAttribute('tabindex', '-1');
   });
 
   it('calls onChange when a tab is clicked', async () => {

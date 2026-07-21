@@ -84,7 +84,10 @@ describe('ArtifactPanel', () => {
   });
 
   it('download issues the content request (AC-1)', async () => {
-    listArtifacts.mockResolvedValue({ items: [art({ mime_type: 'application/octet-stream' })], next_cursor: null });
+    listArtifacts.mockResolvedValue({
+      items: [art({ mime_type: 'application/octet-stream' })],
+      next_cursor: null,
+    });
     // An octet-stream is download-only (no preview fetch), so the only content
     // request comes from the Download button — a clean assertion.
     renderWithQuery(<ArtifactPanel />);
@@ -119,7 +122,10 @@ describe('ArtifactPanel', () => {
   });
 
   it('surfaces a failed download inline (AC-3 negative)', async () => {
-    listArtifacts.mockResolvedValue({ items: [art({ mime_type: 'application/octet-stream' })], next_cursor: null });
+    listArtifacts.mockResolvedValue({
+      items: [art({ mime_type: 'application/octet-stream' })],
+      next_cursor: null,
+    });
     fetchArtifactContent.mockRejectedValue(new ApiError('nope', 500));
     renderWithQuery(<ArtifactPanel />);
     const download = await screen.findByRole('button', { name: /^download$/i });

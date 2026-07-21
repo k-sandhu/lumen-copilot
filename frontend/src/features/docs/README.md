@@ -34,12 +34,14 @@ has shipped (a static SPA can't query GitHub at runtime), rendered as status-bad
 cards grouped by area. Each entry links to the ADR/spec/PR it came from.
 
 ### Maintenance rule
+
 When a feature lands, **add or flip its entry in `catalog.ts` in the same PR**
 (AGENTS.md §7.6, living docs). Every internal `/docs/…` link in the catalog must
 resolve to a real bundled doc — `catalog.test.ts` fails otherwise, so a
 renamed/removed doc is caught instead of shipping a dead link.
 
 ## Gating — build-time eliminable (issue #40)
+
 These pages surface internal docs/research, so they are gated behind
 `VITE_ENABLE_DEV_PAGES` (**OFF by default**, see `.env.example`). The gate is
 **build-time**, not merely runtime — the security property is "the bytes are not

@@ -346,8 +346,7 @@ function setupControlled(initial: Partial<React.ComponentProps<typeof Composer>>
   );
   const view = render(wrap({}));
   return {
-    rerender: (over: Partial<React.ComponentProps<typeof Composer>>) =>
-      view.rerender(wrap(over)),
+    rerender: (over: Partial<React.ComponentProps<typeof Composer>>) => view.rerender(wrap(over)),
   };
 }
 
@@ -377,9 +376,7 @@ describe('Composer mention picker key precedence (#434 finding 4)', () => {
     // Enter must NOT send the literal "@nomatch" — it dismisses the picker.
     await user.keyboard('{Enter}');
     expect(onSend).not.toHaveBeenCalled();
-    expect(
-      screen.queryByRole('listbox', { name: 'Pin a document' }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('listbox', { name: 'Pin a document' })).not.toBeInTheDocument();
     // A second Enter (picker closed) sends the draft as usual.
     await user.keyboard('{Enter}');
     expect(onSend).toHaveBeenCalledWith('@nomatch');

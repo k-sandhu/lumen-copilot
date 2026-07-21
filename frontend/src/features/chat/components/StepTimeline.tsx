@@ -30,7 +30,10 @@ export function StepTimeline({ steps }: StepTimelineProps) {
       {steps.map((step) => {
         const running = step.state === 'started';
         return (
-          <li key={step.key} className={`lc-step ${running ? 'lc-step--running' : 'lc-step--done'}`}>
+          <li
+            key={step.key}
+            className={`lc-step ${running ? 'lc-step--running' : 'lc-step--done'}`}
+          >
             {running ? (
               <span className="lc-step__dot animate-pulse" aria-hidden="true" />
             ) : (

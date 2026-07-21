@@ -254,9 +254,7 @@ export const deliveryKeys = {
  * A short stale time + refetch-on-focus keeps a completed run's delivery appearing
  * without a manual reload.
  */
-export function useRunDeliveries(
-  query: RunDeliveryPageQuery,
-): UseQueryResult<RunDeliveryList> {
+export function useRunDeliveries(query: RunDeliveryPageQuery): UseQueryResult<RunDeliveryList> {
   return useQuery<RunDeliveryList>({
     queryKey: deliveryKeys.list(query),
     queryFn: ({ signal }) => listRunDeliveries({ ...query, limit: PAGE_LIMIT }, signal),

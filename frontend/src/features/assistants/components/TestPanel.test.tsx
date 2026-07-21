@@ -38,7 +38,12 @@ function makeTrace(overrides: Partial<AssistantTestTrace> = {}): AssistantTestTr
     model: 'openrouter/openai/gpt-5.5',
     retrieval: [{ documentName: 'taxes.pdf', snippet: '…$14,600…' }],
     toolCalls: [
-      { callId: 'c1', tool: 'search_text', args: { query: 'x' }, result: { ok: true, summary: 'searched' } },
+      {
+        callId: 'c1',
+        tool: 'search_text',
+        args: { query: 'x' },
+        result: { ok: true, summary: 'searched' },
+      },
     ],
     outputs: 'The 2024 standard deduction is $14,600.',
     errors: [],
@@ -174,9 +179,7 @@ describe('TestPanel — saved cases (client-side regression)', () => {
 
     // Re-run it → a PASS verdict (the expected substring is in the outputs).
     await user.click(within(cases).getByRole('button', { name: /re-run/i }));
-    await waitFor(() =>
-      expect(screen.getByText(/regression: pass/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/regression: pass/i)).toBeInTheDocument());
   });
 
   it('shows a FAIL verdict when the expected substring is absent', async () => {
@@ -191,9 +194,7 @@ describe('TestPanel — saved cases (client-side regression)', () => {
     await user.click(screen.getByRole('button', { name: /save as case/i }));
     const cases = await screen.findByRole('list', { name: /saved test cases/i });
     await user.click(within(cases).getByRole('button', { name: /re-run/i }));
-    await waitFor(() =>
-      expect(screen.getByText(/regression: fail/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/regression: fail/i)).toBeInTheDocument());
   });
 
   it('deletes a saved case', async () => {

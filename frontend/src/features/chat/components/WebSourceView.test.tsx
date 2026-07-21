@@ -42,9 +42,7 @@ describe('WebSourceView', () => {
   });
 
   it('renders NO outbound link for an unsafe url (never an unsafe link)', () => {
-    render(
-      <WebSourceView citation={{ ...WEB, url: 'javascript:alert(1)' }} onClose={() => {}} />,
-    );
+    render(<WebSourceView citation={{ ...WEB, url: 'javascript:alert(1)' }} onClose={() => {}} />);
     expect(screen.queryByRole('link', { name: /open page/i })).not.toBeInTheDocument();
   });
 

@@ -20,7 +20,11 @@ const collection: Collection = {
   updated_at: '2026-01-01T00:00:00Z',
 };
 
-function result(source: SearchResult['source'], type: string, id = `${source}-${type}`): SearchResult {
+function result(
+  source: SearchResult['source'],
+  type: string,
+  id = `${source}-${type}`,
+): SearchResult {
   return {
     id,
     title: 't',
@@ -88,8 +92,9 @@ describe('SearchFilters', () => {
 
   it('marks the active facet checked (aria-checked)', () => {
     renderFilters({ source: 'upload' }, [result('upload', 'document')]);
-    expect(
-      screen.getByRole('checkbox', { name: /uploaded documents/i }),
-    ).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('checkbox', { name: /uploaded documents/i })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
   });
 });

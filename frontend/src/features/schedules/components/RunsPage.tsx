@@ -37,10 +37,7 @@ export function RunsPage() {
 function TabbedRuns({ tab }: { tab: 'history' | 'inbox' }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <nav
-        aria-label="Runs views"
-        className="flex shrink-0 gap-1 border-b border-border px-4 pt-2"
-      >
+      <nav aria-label="Runs views" className="flex shrink-0 gap-1 border-b border-border px-4 pt-2">
         <RunsTab to="/runs" end label="History" />
         <RunsTab to="/runs/inbox" label="Inbox" />
       </nav>

@@ -33,7 +33,9 @@ function problem(status: number, title: string): Response {
   });
 }
 
-const members: Member[] = [{ id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null }];
+const members: Member[] = [
+  { id: 'u1', email: 'ada@acme.com', role: ['member'], email_attested_at: null },
+];
 
 function makeConfig(overrides: Partial<AssistantVersionConfig> = {}): AssistantVersionConfig {
   return {
@@ -211,9 +213,7 @@ describe('VersionHistory — rollback (E6-7, AC-2)', () => {
     // On success the versions endpoint is refetched (invalidation).
     await waitFor(() => {
       const getVersionsCalls = fetchMock.mock.calls.filter(([url, init]) => {
-        return (
-          String(url).includes('/assistants/a1/versions') && (init?.method ?? 'GET') === 'GET'
-        );
+        return String(url).includes('/assistants/a1/versions') && (init?.method ?? 'GET') === 'GET';
       });
       expect(getVersionsCalls.length).toBeGreaterThanOrEqual(2);
     });
