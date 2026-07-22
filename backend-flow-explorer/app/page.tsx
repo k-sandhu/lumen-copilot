@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
+import { endpointCatalog, type EndpointDefinition } from "./generated-endpoints";
 
 type Runtime = "browser" | "backend" | "postgres" | "redis" | "search" | "provider";
 type Layer = "transport" | "api" | "service" | "adapter" | "external";
@@ -33,7 +34,7 @@ type FlowNode = {
   guarantee: string;
 };
 
-const nodes: FlowNode[] = [
+const chatNodes: FlowNode[] = [
   {
     id: "browser-post",
     step: "01",
@@ -435,7 +436,7 @@ type Edge = {
   tone?: "normal" | "async" | "loop" | "return";
 };
 
-const edges: Edge[] = [
+const chatEdges: Edge[] = [
   { from: "browser-post", to: "deps", direction: "right", x: 277, y: 166, length: 63 },
   { from: "deps", to: "router", direction: "right", x: 547, y: 166, length: 63 },
   { from: "router", to: "chat-service", direction: "right", x: 817, y: 166, length: 63 },
@@ -475,7 +476,7 @@ const layerLabels: Record<Layer, string> = {
   external: "External system",
 };
 
-const traceOrder = [
+const chatTraceOrder = [
   "browser-post",
   "deps",
   "router",
@@ -497,6 +498,78 @@ const traceOrder = [
   "redis",
   "websocket",
   "browser-stream",
+];
+
+const serviceByTag: Record<string, string> = {
+  health: "Readiness probes", auth: "AuthService", collections: "CollectionService",
+  documents: "DocumentService", artifacts: "ArtifactService", chat: "ChatService",
+  models: "ModelCatalogService", search: "SearchService", audit: "AuditQueryService",
+  admin: "AdminGovernanceService", sources: "SourceService", preferences: "PreferencesService",
+  user: "UserProfileService", "saved-searches": "SavedSearchService", "mcp-servers": "McpServerService",
+  assistants: "AssistantService", "code-runs": "CodeRunService", schedules: "ScheduleService",
+  runs: "RunControlService", "run-deliveries": "RunDeliveryService", realtime: "Realtime gateway",
+};
+
+function genericNodes(endpoint: EndpointDefinition): FlowNode[] {
+  const isPublic = endpoint.auth === "Public";
+  const isWrite = ["POST", "PUT", "PATCH", "DELETE"].includes(endpoint.method);
+  const isSearch = endpoint.tag === "search" || endpoint.operationId === "getDocumentText";
+  const isStorage = endpoint.operationId === "uploadDocument" || endpoint.operationId === "updateAvatar" || endpoint.path.endsWith("/content");
+  const isJob = endpoint.tag === "schedules" || endpoint.tag === "runs" || endpoint.operationId === "syncSource";
+  const isSandbox = endpoint.tag === "code-runs" || endpoint.path.includes("/sandbox");
+  const isOAuth = endpoint.operationId === "connectSource" || endpoint.operationId === "oauthCallback";
+  const boundary = isSearch
+    ? { title: "Permissioned retrieval", subtitle: "retrieval/ chokepoint", runtime: "search" as Runtime, symbol: "IDX", file: "backend/app/retrieval/", method: "retrieve_authorized(...)", responsibility: "Queries through the single retrieval boundary and removes anything the caller cannot access.", calls: "search/ → OpenSearch", returns: "Permission-trimmed hits with provenance", guarantee: "Unauthorized hits are excluded at retrieval time." }
+    : isStorage
+      ? { title: "Object storage", subtitle: "storage/ adapter", runtime: "provider" as Runtime, symbol: "S3", file: "backend/app/storage/", method: "ObjectStore.get_or_put(...)", responsibility: "Keeps S3/MinIO mechanics behind Lumen's object-storage interface.", calls: "MinIO container", returns: "Object metadata or byte stream", guarantee: "Only storage/ knows provider-specific object APIs." }
+      : isJob || isSandbox
+        ? { title: isSandbox ? "Sandbox execution" : "Background task", subtitle: isSandbox ? "isolated container" : "Celery worker", runtime: "redis" as Runtime, symbol: isSandbox ? "BOX" : "JOB", file: isSandbox ? "backend/app/services/sandbox/" : "backend/app/tasks/", method: isSandbox ? "SandboxRuntime.execute(...)" : "task.delay(...)", responsibility: isSandbox ? "Runs user code away from the API process under tenant policy." : "Moves durable, retryable work out of the request lifecycle.", calls: isSandbox ? "Sandbox container" : "Redis broker → Celery worker", returns: isSandbox ? "Captured output and artifacts" : "Task id and durable run state", guarantee: isSandbox ? "User code never runs inside the API container." : "A disconnect does not cancel committed work." }
+        : isOAuth
+          ? { title: "Connector provider", subtitle: "OAuth boundary", runtime: "provider" as Runtime, symbol: "OA", file: "backend/app/connectors/", method: "ConnectorOAuthAdapter.exchange(...)", responsibility: "Validates OAuth state and maps provider data into Lumen domain types.", calls: "External OAuth provider", returns: "Connector identity and protected credentials", guarantee: "Provider types and tokens remain inside connectors/." }
+          : { title: endpoint.tag === "admin" ? "Apply governance" : "Repository operation", subtitle: endpoint.tag === "admin" ? "role + policy checks" : "tenant-scoped SQL", runtime: "postgres" as Runtime, symbol: endpoint.tag === "admin" ? "GOV" : "DB", file: endpoint.tag === "admin" ? "backend/app/services/" : "backend/app/db/repositories.py", method: endpoint.tag === "admin" ? "PolicyService.apply(...)" : "Repository.execute(...)", responsibility: endpoint.tag === "admin" ? "Checks role and risk policy before governed state is read or changed." : "Loads or changes relational state through the database boundary.", calls: "PostgreSQL through async SQLAlchemy", returns: "Domain entities or non-disclosing not found", guarantee: "Cross-tenant or unauthorized direct fetches resolve to 404." };
+
+  const common = (partial: Partial<FlowNode> & Pick<FlowNode, "id" | "step" | "title" | "subtitle" | "x" | "y" | "runtime" | "layer" | "symbol">): FlowNode => ({
+    file: endpoint.source, method: `${endpoint.handler}(...)`, responsibility: endpoint.summary,
+    happens: ["Receives domain-safe inputs from the preceding boundary.", "Returns an explicit result to the next named boundary."],
+    calls: "Next named component", returns: "Typed result or mapped error", guarantee: "Tenant and permission scope stay attached to the request.", ...partial,
+  });
+
+  if (endpoint.transport === "WebSocket") {
+    const chat = endpoint.path.includes("chat");
+    return [
+      common({ id: "ws-open", step: "01", title: "Open socket", subtitle: endpoint.path, x: 70, y: 110, runtime: "browser", layer: "transport", symbol: "WS", file: "frontend/src/api/ws.ts", method: `new WebSocket(${endpoint.path})`, responsibility: "Starts the long-lived realtime connection.", happens: [chat ? "Includes the token and stream id returned by sendMessage." : "Uses the public health channel.", "Negotiates the WebSocket upgrade."], calls: endpoint.source, returns: "Open socket or close code", guarantee: "Realtime transport stays separate from REST." }),
+      common({ id: "ws-handler", step: "02", title: endpoint.handler, subtitle: "WebSocket route", x: 340, y: 110, runtime: "backend", layer: "api", symbol: "API", responsibility: "Accepts the transport and establishes connection scope.", happens: [chat ? "Validates the access token before subscribing." : "Accepts the minimal health protocol.", "Closes deliberately on invalid input or disconnect."], calls: chat ? "auth/ + ownership check" : "health loop", returns: "Accepted connection", guarantee: chat ? "Authentication precedes subscription." : "No tenant data crosses this route." }),
+      common({ id: "ws-owner", step: "03", title: chat ? "Verify stream owner" : "Handle keepalive", subtitle: chat ? "user + tenant binding" : "ping / pong", x: 610, y: 110, runtime: chat ? "redis" : "backend", layer: chat ? "adapter" : "service", symbol: chat ? "ACL" : "PING", file: chat ? "backend/app/realtime/backplane.py" : endpoint.source, method: chat ? "assert_owner(...)" : "receive_text(...) ", responsibility: chat ? "Confirms this principal owns the requested answer stream." : "Maintains a minimal liveness conversation.", happens: [chat ? "Loads the binding minted by ChatService." : "Receives a health ping.", chat ? "Rejects expired or different-owner bindings." : "Returns a pong."], calls: chat ? "Redis ownership record" : "Socket transport", returns: chat ? "Authorized subscription" : "Health response", guarantee: chat ? "Guessing a stream id grants no access." : "No application data is exposed." }),
+      common({ id: "ws-sub", step: "04", title: chat ? "Subscribe to events" : "Keep connection alive", subtitle: chat ? "Redis pub/sub" : "socket loop", x: 880, y: 110, runtime: chat ? "redis" : "backend", layer: "adapter", symbol: chat ? "SUB" : "LOOP", responsibility: chat ? "Receives owned producer events from the shared backplane." : "Waits for the next probe.", happens: [chat ? "Subscribes only after ownership succeeds." : "Uses no database or model resources.", "Cleans up on disconnect."], calls: chat ? "Redis pub/sub" : "WebSocket receive", returns: "Versioned envelopes", guarantee: "Connection cleanup is deterministic." }),
+      common({ id: "ws-ui", step: "05", title: chat ? "Render streamed answer" : "Observe health", subtitle: "browser consumer", x: 610, y: 375, runtime: "browser", layer: "transport", symbol: "UI", file: "frontend/src/", method: "onmessage(event)", responsibility: chat ? "Updates the visible cited answer as events arrive." : "Reports socket liveness.", happens: [chat ? "Applies delta, citation, usage, done, and error envelopes." : "Reads the pong envelope.", "Handles close/reconnect in the transport layer."], calls: "React state", returns: chat ? "Progressive answer" : "Realtime health", guarantee: "The UI consumes versioned envelope shapes only." }),
+    ];
+  }
+
+  return [
+    common({ id: "request", step: "01", title: endpoint.method === "GET" ? "Start request" : "Submit command", subtitle: `${endpoint.method} ${endpoint.path}`, x: 70, y: 110, runtime: "browser", layer: "transport", symbol: endpoint.method, file: "frontend/src/api/generated.ts", method: `${endpoint.method} ${endpoint.path}`, responsibility: "Starts this contracted operation from the generated client or another API caller.", happens: ["Serializes fields defined by contracts/openapi.yaml.", isPublic ? "Calls a deliberately public route." : "Attaches a bearer token; IDs do not establish authority."], calls: "FastAPI middleware", returns: "HTTP response or operation handle", guarantee: "OpenAPI is the wire source of truth." }),
+    common({ id: "scope", step: "02", title: isPublic ? "Build public scope" : "Resolve trusted scope", subtitle: isPublic ? "request dependencies" : "auth + tenant dependencies", x: 340, y: 110, runtime: "backend", layer: "api", symbol: isPublic ? "DI" : "AUTH", file: isPublic ? "backend/app/api/deps.py" : "backend/app/auth/", method: isPublic ? "FastAPI dependencies" : "get_current_user(...) ", responsibility: isPublic ? "Provides shared dependencies without requiring identity." : "Verifies identity and derives tenant, roles, and principal scope.", happens: [isPublic ? "Opens only the adapters this public route needs." : "Validates the token before endpoint code runs.", "Injects request-scoped adapters."], calls: "Config, auth, db factories", returns: isPublic ? "Request dependencies" : "CurrentUser + tenant scope", guarantee: isPublic ? "Public exposure is explicit." : "tenant_id comes from verified identity." }),
+    common({ id: "handler", step: "03", title: endpoint.handler, subtitle: "FastAPI route handler", x: 610, y: 110, runtime: "backend", layer: "api", symbol: "API", responsibility: "Validates the wire shape, invokes one service, and maps its result to the contract.", happens: ["FastAPI/Pydantic rejects malformed input first.", "The router contains no SQL, retrieval, or provider logic."], calls: serviceByTag[endpoint.tag] ?? "Application service", returns: "Contract response or mapped error", guarantee: "The api/ → services/ → domain/ direction stays one-way." }),
+    common({ id: "service", step: "04", title: serviceByTag[endpoint.tag] ?? "Application service", subtitle: endpoint.operationId, x: 880, y: 110, runtime: "backend", layer: "service", symbol: "SVC", file: "backend/app/services/", method: `${serviceByTag[endpoint.tag] ?? "Service"}.${endpoint.handler}(...)`, responsibility: `Owns the ${endpoint.domain.toLowerCase()} use case and coordinates rules with named adapters.`, happens: ["Applies visibility, role, transition, and domain checks.", "Passes domain types across infrastructure boundaries."], calls: boundary.title, returns: "Domain result", guarantee: "Business behavior stays out of routers." }),
+    common({ id: "boundary", step: "05", x: 1150, y: 110, layer: "adapter", happens: [boundary.responsibility, isWrite ? "Records the state transition before success is returned." : "Maps infrastructure output back to domain types."], ...boundary }),
+    common({ id: "audit", step: "06", title: isWrite ? "Commit + audit" : "Emit audit event", subtitle: "durability + provenance", x: 880, y: 375, runtime: "postgres", layer: "adapter", symbol: "AUD", file: "backend/app/audit/", method: "AuditSink.record(...) ", responsibility: "Makes the operation explainable and aligns responses with durable state.", happens: ["Records actor, tenant, target, outcome, and correlation.", isWrite ? "Commits before reporting success." : "Captures read provenance without exposing scope."], calls: "Audit repository", returns: "Committed state + audit event", guarantee: "A required operation without its audit event fails verification." }),
+    common({ id: "response", step: "07", title: "Return contract result", subtitle: "HTTP response", x: 610, y: 375, runtime: "browser", layer: "transport", symbol: "OUT", file: "contracts/openapi.yaml", method: `${endpoint.operationId} response`, responsibility: "Returns only fields and status codes defined by the contract.", happens: ["Hidden resources map to the same 404 as missing resources.", "The generated client deserializes frontend types."], calls: "React state", returns: endpoint.summary, guarantee: "Adapter/provider types cannot leak into the response." }),
+  ];
+}
+
+const genericEdges: Edge[] = [
+  { from: "request", to: "scope", direction: "right", x: 277, y: 176, length: 63 },
+  { from: "scope", to: "handler", direction: "right", x: 547, y: 176, length: 63 },
+  { from: "handler", to: "service", direction: "right", x: 817, y: 176, length: 63 },
+  { from: "service", to: "boundary", direction: "right", x: 1087, y: 176, length: 63 },
+  { from: "boundary", to: "audit", direction: "down", x: 1253, y: 242, length: 95 },
+  { from: "audit", to: "response", direction: "left", x: 817, y: 441, length: 63, tone: "return" },
+];
+
+const websocketEdges: Edge[] = [
+  { from: "ws-open", to: "ws-handler", direction: "right", x: 277, y: 176, length: 63 },
+  { from: "ws-handler", to: "ws-owner", direction: "right", x: 547, y: 176, length: 63 },
+  { from: "ws-owner", to: "ws-sub", direction: "right", x: 817, y: 176, length: 63 },
+  { from: "ws-sub", to: "ws-ui", direction: "down", x: 983, y: 242, length: 95, tone: "return" },
 ];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -554,6 +627,10 @@ function AppNode({ node, selected, active, faded, onSelect }: {
 }
 
 export default function Home() {
+  const defaultEndpoint = endpointCatalog.find((item) => item.operationId === "sendMessage") ?? endpointCatalog[0];
+  const [endpointId, setEndpointId] = useState(defaultEndpoint.id);
+  const [query, setQuery] = useState("");
+  const [transport, setTransport] = useState<"all" | "HTTP" | "WebSocket">("all");
   const [selectedId, setSelectedId] = useState("router");
   const [scale, setScale] = useState(0.76);
   const [pan, setPan] = useState({ x: 16, y: 20 });
@@ -564,14 +641,32 @@ export default function Home() {
   const dragRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const viewportRef = useRef<HTMLDivElement>(null);
 
+  const endpoint = endpointCatalog.find((item) => item.id === endpointId) ?? defaultEndpoint;
+  const isDetailedChat = endpoint.operationId === "sendMessage";
+  const nodes = useMemo(() => isDetailedChat ? chatNodes : genericNodes(endpoint), [endpoint, isDetailedChat]);
+  const edges = isDetailedChat ? chatEdges : endpoint.transport === "WebSocket" ? websocketEdges : genericEdges;
+  const traceOrder = useMemo(() => isDetailedChat ? chatTraceOrder : nodes.map((node) => node.id), [isDetailedChat, nodes]);
+  const filteredEndpoints = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return endpointCatalog.filter((item) =>
+      (transport === "all" || item.transport === transport) &&
+      (!needle || `${item.method} ${item.path} ${item.handler} ${item.domain} ${item.summary}`.toLowerCase().includes(needle)),
+    );
+  }, [query, transport]);
+  const endpointGroups = useMemo(() => {
+    const result = new Map<string, EndpointDefinition[]>();
+    for (const item of filteredEndpoints) result.set(item.domain, [...(result.get(item.domain) ?? []), item]);
+    return [...result.entries()];
+  }, [filteredEndpoints]);
+
   const selected = useMemo(
-    () => nodes.find((node) => node.id === selectedId) ?? nodes[2],
-    [selectedId],
+    () => nodes.find((node) => node.id === selectedId) ?? nodes[Math.min(2, nodes.length - 1)],
+    [nodes, selectedId],
   );
 
   const fit = useCallback(() => {
     const width = viewportRef.current?.clientWidth ?? 1200;
-    const nextScale = clamp((width - 48) / 1660, 0.52, 0.88);
+    const nextScale = clamp((width - 48) / 1660, 0.42, 0.88);
     setScale(nextScale);
     setPan({ x: 22, y: 22 });
   }, []);
@@ -594,7 +689,7 @@ export default function Home() {
       });
     }, 860);
     return () => window.clearInterval(timer);
-  }, [playing]);
+  }, [nodes, playing, traceOrder]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -623,7 +718,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [nodes, traceOrder]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -663,23 +758,59 @@ export default function Home() {
           </span>
         </div>
         <div className="endpoint-picker" aria-label="Selected endpoint">
-          <span className="method-badge">POST</span>
-          <span>/api/v1/chat/sessions/:id/messages</span>
-          <span className="version-chip">first slice</span>
+          <span className={`method-badge method-badge--${endpoint.method.toLowerCase()}`}>{endpoint.method}</span>
+          <span>{endpoint.path.replace(/\{[^}]+Id\}/g, ":id").replace(/\{([^}]+)\}/g, ":$1")}</span>
+          <span className="version-chip">{endpoint.transport}</span>
         </div>
         <div className="topbar__meta">
           <span className="status-dot" />
-          traced from main · 38d4dcc
+          114 endpoints · code-grounded
         </div>
       </header>
 
       <section className="workspace">
+        <aside className="catalog">
+          <div className="catalog__header">
+            <p className="eyebrow">Endpoint catalog</p>
+            <strong>114 endpoints</strong>
+            <span>112 HTTP · 2 WebSocket</span>
+          </div>
+          <label className="search-box">
+            <span aria-hidden="true">⌕</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search endpoints" aria-label="Search endpoints" />
+          </label>
+          <div className="transport-filter" role="group" aria-label="Filter transport">
+            {(["all", "HTTP", "WebSocket"] as const).map((value) => (
+              <button key={value} type="button" className={transport === value ? "is-active" : ""} onClick={() => setTransport(value)}>
+                {value === "all" ? "All" : value === "WebSocket" ? "WS" : value}
+              </button>
+            ))}
+          </div>
+          <div className="catalog__list">
+            {endpointGroups.map(([domain, items]) => (
+              <section className="endpoint-group" key={domain}>
+                <h2>{domain}<span>{items.length}</span></h2>
+                {items.map((item) => (
+                  <button key={item.id} type="button" className={`endpoint-row ${item.id === endpoint.id ? "is-selected" : ""}`} onClick={() => {
+                    setEndpointId(item.id);
+                    setSelectedId(item.operationId === "sendMessage" ? "router" : item.transport === "WebSocket" ? "ws-handler" : "handler");
+                    setTraceIndex(-1);
+                    setPlaying(false);
+                  }}>
+                    <span className={`mini-method mini-method--${item.method.toLowerCase()}`}>{item.method}</span>
+                    <span><strong>{item.path}</strong><small>{item.handler}</small></span>
+                  </button>
+                ))}
+              </section>
+            ))}
+          </div>
+        </aside>
         <div className="canvas-panel">
           <div className="canvas-heading">
             <div>
-              <p className="eyebrow">Endpoint flow 01</p>
-              <h1>What happens after “Send”?</h1>
-              <p>Follow one chat turn from the browser, through the Python call stack, into retrieval and back over WebSocket.</p>
+              <p className="eyebrow">{endpoint.domain} · {endpoint.transport}</p>
+              <h1>{isDetailedChat ? "What happens after “Send”?" : endpoint.summary}</h1>
+              <p>{isDetailedChat ? "Follow one chat turn from the browser, through the Python call stack, into retrieval and back over WebSocket." : <>Trace the call stack, encapsulation boundaries, and runtime containers for <code>{endpoint.operationId}</code>.</>}</p>
             </div>
             <div className="view-switch" role="group" aria-label="Focus the diagram">
               {(["all", "backend", "data"] as const).map((value) => (
@@ -748,10 +879,10 @@ export default function Home() {
             <div
               className="flow-canvas"
               style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}
-              onClick={() => setSelectedId("router")}
+              onClick={() => setSelectedId(nodes[0].id)}
             >
               <div className="boundary boundary--request"><span>FastAPI request lifecycle</span></div>
-              <div className="boundary boundary--answer"><span>Tracked async answer producer</span></div>
+              {isDetailedChat ? <div className="boundary boundary--answer"><span>Tracked async answer producer</span></div> : null}
               <div className="boundary boundary--data"><span>External & persistence boundaries</span></div>
               {edges.map((edge, index) => (
                 <EdgeLine
@@ -778,14 +909,14 @@ export default function Home() {
                   />
                 );
               })}
-              <div className="loop-note">
+              {isDetailedChat ? <div className="loop-note">
                 <strong>Bounded agent loop</strong>
                 <span>model → tool intent → governed result → model</span>
-              </div>
-              <div className="commit-note">
+              </div> : null}
+              {isDetailedChat ? <div className="commit-note">
                 <strong>Commit before done</strong>
                 <span>The final stream event points at durable data.</span>
-              </div>
+              </div> : null}
             </div>
             <div className="canvas-hint">Drag canvas · Ctrl + scroll to zoom · J/K to step · Space to play</div>
           </div>
