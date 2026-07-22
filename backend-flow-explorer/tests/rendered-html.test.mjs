@@ -55,6 +55,12 @@ test("keeps the requested interaction and responsive affordances in the standalo
   assert.match(page, /Boundary guarantee/);
   assert.match(page, /Search endpoints/);
   assert.match(page, /endpointCatalog/);
+  assert.match(page, /node-quicklook/);
+  assert.match(page, /closest\("button"\)/);
+  assert.match(page, /from: "service", to: "boundary", direction: "down"/);
+  assert.match(page, /from: "service", to: "boundary"/);
+  assert.match(page, /from: "boundary", to: "audit"/);
+  assert.match(page, /from: "audit", to: "response"/);
   assert.equal((generated.match(/transport: /g) ?? []).length, 114);
   assert.equal(new Set(generated.match(/id: "[^"]+"/g) ?? []).size, 114);
   assert.match(css, /@media \(max-width: 760px\)/);

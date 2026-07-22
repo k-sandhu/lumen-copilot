@@ -12,7 +12,7 @@ import {
 } from "react";
 import { endpointCatalog, type EndpointDefinition } from "./generated-endpoints";
 
-type Runtime = "browser" | "backend" | "postgres" | "redis" | "search" | "provider";
+type Runtime = "browser" | "backend" | "postgres" | "redis" | "search" | "worker" | "storage" | "provider";
 type Layer = "transport" | "api" | "service" | "adapter" | "external";
 
 type FlowNode = {
@@ -465,6 +465,8 @@ const runtimeMeta: Record<Runtime, { label: string; sub: string; color: string }
   postgres: { label: "PostgreSQL", sub: "relational truth + RLS", color: "#d9b2ff" },
   redis: { label: "Redis", sub: "stream backplane", color: "#ff9b8e" },
   search: { label: "OpenSearch", sub: "hybrid retrieval", color: "#ffc96a" },
+  worker: { label: "Sandbox / worker", sub: "isolated execution container", color: "#ffb08f" },
+  storage: { label: "Object storage", sub: "MinIO through the S3 adapter", color: "#70dfc1" },
   provider: { label: "Model provider", sub: "via LiteLLM", color: "#7dd9ff" },
 };
 
@@ -518,12 +520,17 @@ function genericNodes(endpoint: EndpointDefinition): FlowNode[] {
   const isJob = endpoint.tag === "schedules" || endpoint.tag === "runs" || endpoint.operationId === "syncSource";
   const isSandbox = endpoint.tag === "code-runs" || endpoint.path.includes("/sandbox");
   const isOAuth = endpoint.operationId === "connectSource" || endpoint.operationId === "oauthCallback";
+  const serviceName = isSandbox ? "SandboxSessionService" : serviceByTag[endpoint.tag] ?? "Application service";
+  const serviceFile = isSandbox ? "backend/app/sandbox/service.py" : "backend/app/services/";
+  const serviceMethod = isSandbox
+    ? `SandboxSessionService.${endpoint.operationId === "closeSandboxSession" ? "close" : endpoint.handler.replace("_sandbox_session", "")}(...)`
+    : `${serviceName}.${endpoint.handler}(...)`;
   const boundary = isSearch
     ? { title: "Permissioned retrieval", subtitle: "retrieval/ chokepoint", runtime: "search" as Runtime, symbol: "IDX", file: "backend/app/retrieval/", method: "retrieve_authorized(...)", responsibility: "Queries through the single retrieval boundary and removes anything the caller cannot access.", calls: "search/ → OpenSearch", returns: "Permission-trimmed hits with provenance", guarantee: "Unauthorized hits are excluded at retrieval time." }
     : isStorage
-      ? { title: "Object storage", subtitle: "storage/ adapter", runtime: "provider" as Runtime, symbol: "S3", file: "backend/app/storage/", method: "ObjectStore.get_or_put(...)", responsibility: "Keeps S3/MinIO mechanics behind Lumen's object-storage interface.", calls: "MinIO container", returns: "Object metadata or byte stream", guarantee: "Only storage/ knows provider-specific object APIs." }
+      ? { title: "Object storage", subtitle: "storage/ adapter", runtime: "storage" as Runtime, symbol: "S3", file: "backend/app/storage/", method: "ObjectStore.get_or_put(...)", responsibility: "Keeps S3/MinIO mechanics behind Lumen's object-storage interface.", calls: "MinIO container", returns: "Object metadata or byte stream", guarantee: "Only storage/ knows provider-specific object APIs." }
       : isJob || isSandbox
-        ? { title: isSandbox ? "Sandbox execution" : "Background task", subtitle: isSandbox ? "isolated container" : "Celery worker", runtime: "redis" as Runtime, symbol: isSandbox ? "BOX" : "JOB", file: isSandbox ? "backend/app/services/sandbox/" : "backend/app/tasks/", method: isSandbox ? "SandboxRuntime.execute(...)" : "task.delay(...)", responsibility: isSandbox ? "Runs user code away from the API process under tenant policy." : "Moves durable, retryable work out of the request lifecycle.", calls: isSandbox ? "Sandbox container" : "Redis broker → Celery worker", returns: isSandbox ? "Captured output and artifacts" : "Task id and durable run state", guarantee: isSandbox ? "User code never runs inside the API container." : "A disconnect does not cancel committed work." }
+        ? { title: isSandbox ? "Sandbox runner" : "Background task", subtitle: isSandbox ? "isolated container boundary" : "Celery worker", runtime: "worker" as Runtime, symbol: isSandbox ? "BOX" : "JOB", file: isSandbox ? "backend/app/sandbox/runner.py" : "backend/app/tasks/", method: isSandbox ? "HttpSandboxRunner.close_session(...)" : "task.delay(...)", responsibility: isSandbox ? "Destroys the reusable sandbox through the isolated runner boundary." : "Moves durable, retryable work out of the request lifecycle.", calls: isSandbox ? "Sandbox runner container over HTTP" : "Redis broker → Celery worker", returns: isSandbox ? "Confirmed container teardown" : "Task id and durable run state", guarantee: isSandbox ? "Sandbox lifecycle operations never run user containers inside the API process." : "A disconnect does not cancel committed work." }
         : isOAuth
           ? { title: "Connector provider", subtitle: "OAuth boundary", runtime: "provider" as Runtime, symbol: "OA", file: "backend/app/connectors/", method: "ConnectorOAuthAdapter.exchange(...)", responsibility: "Validates OAuth state and maps provider data into Lumen domain types.", calls: "External OAuth provider", returns: "Connector identity and protected credentials", guarantee: "Provider types and tokens remain inside connectors/." }
           : { title: endpoint.tag === "admin" ? "Apply governance" : "Repository operation", subtitle: endpoint.tag === "admin" ? "role + policy checks" : "tenant-scoped SQL", runtime: "postgres" as Runtime, symbol: endpoint.tag === "admin" ? "GOV" : "DB", file: endpoint.tag === "admin" ? "backend/app/services/" : "backend/app/db/repositories.py", method: endpoint.tag === "admin" ? "PolicyService.apply(...)" : "Repository.execute(...)", responsibility: endpoint.tag === "admin" ? "Checks role and risk policy before governed state is read or changed." : "Loads or changes relational state through the database boundary.", calls: "PostgreSQL through async SQLAlchemy", returns: "Domain entities or non-disclosing not found", guarantee: "Cross-tenant or unauthorized direct fetches resolve to 404." };
@@ -541,18 +548,18 @@ function genericNodes(endpoint: EndpointDefinition): FlowNode[] {
       common({ id: "ws-handler", step: "02", title: endpoint.handler, subtitle: "WebSocket route", x: 340, y: 110, runtime: "backend", layer: "api", symbol: "API", responsibility: "Accepts the transport and establishes connection scope.", happens: [chat ? "Validates the access token before subscribing." : "Accepts the minimal health protocol.", "Closes deliberately on invalid input or disconnect."], calls: chat ? "auth/ + ownership check" : "health loop", returns: "Accepted connection", guarantee: chat ? "Authentication precedes subscription." : "No tenant data crosses this route." }),
       common({ id: "ws-owner", step: "03", title: chat ? "Verify stream owner" : "Handle keepalive", subtitle: chat ? "user + tenant binding" : "ping / pong", x: 610, y: 110, runtime: chat ? "redis" : "backend", layer: chat ? "adapter" : "service", symbol: chat ? "ACL" : "PING", file: chat ? "backend/app/realtime/backplane.py" : endpoint.source, method: chat ? "assert_owner(...)" : "receive_text(...) ", responsibility: chat ? "Confirms this principal owns the requested answer stream." : "Maintains a minimal liveness conversation.", happens: [chat ? "Loads the binding minted by ChatService." : "Receives a health ping.", chat ? "Rejects expired or different-owner bindings." : "Returns a pong."], calls: chat ? "Redis ownership record" : "Socket transport", returns: chat ? "Authorized subscription" : "Health response", guarantee: chat ? "Guessing a stream id grants no access." : "No application data is exposed." }),
       common({ id: "ws-sub", step: "04", title: chat ? "Subscribe to events" : "Keep connection alive", subtitle: chat ? "Redis pub/sub" : "socket loop", x: 880, y: 110, runtime: chat ? "redis" : "backend", layer: "adapter", symbol: chat ? "SUB" : "LOOP", responsibility: chat ? "Receives owned producer events from the shared backplane." : "Waits for the next probe.", happens: [chat ? "Subscribes only after ownership succeeds." : "Uses no database or model resources.", "Cleans up on disconnect."], calls: chat ? "Redis pub/sub" : "WebSocket receive", returns: "Versioned envelopes", guarantee: "Connection cleanup is deterministic." }),
-      common({ id: "ws-ui", step: "05", title: chat ? "Render streamed answer" : "Observe health", subtitle: "browser consumer", x: 610, y: 375, runtime: "browser", layer: "transport", symbol: "UI", file: "frontend/src/", method: "onmessage(event)", responsibility: chat ? "Updates the visible cited answer as events arrive." : "Reports socket liveness.", happens: [chat ? "Applies delta, citation, usage, done, and error envelopes." : "Reads the pong envelope.", "Handles close/reconnect in the transport layer."], calls: "React state", returns: chat ? "Progressive answer" : "Realtime health", guarantee: "The UI consumes versioned envelope shapes only." }),
+      common({ id: "ws-ui", step: "05", title: chat ? "Render streamed answer" : "Observe health", subtitle: "browser consumer", x: 880, y: 375, runtime: "browser", layer: "transport", symbol: "UI", file: "frontend/src/", method: "onmessage(event)", responsibility: chat ? "Updates the visible cited answer as events arrive." : "Reports socket liveness.", happens: [chat ? "Applies delta, citation, usage, done, and error envelopes." : "Reads the pong envelope.", "Handles close/reconnect in the transport layer."], calls: "React state", returns: chat ? "Progressive answer" : "Realtime health", guarantee: "The UI consumes versioned envelope shapes only." }),
     ];
   }
 
   return [
     common({ id: "request", step: "01", title: endpoint.method === "GET" ? "Start request" : "Submit command", subtitle: `${endpoint.method} ${endpoint.path}`, x: 70, y: 110, runtime: "browser", layer: "transport", symbol: endpoint.method, file: "frontend/src/api/generated.ts", method: `${endpoint.method} ${endpoint.path}`, responsibility: "Starts this contracted operation from the generated client or another API caller.", happens: ["Serializes fields defined by contracts/openapi.yaml.", isPublic ? "Calls a deliberately public route." : "Attaches a bearer token; IDs do not establish authority."], calls: "FastAPI middleware", returns: "HTTP response or operation handle", guarantee: "OpenAPI is the wire source of truth." }),
     common({ id: "scope", step: "02", title: isPublic ? "Build public scope" : "Resolve trusted scope", subtitle: isPublic ? "request dependencies" : "auth + tenant dependencies", x: 340, y: 110, runtime: "backend", layer: "api", symbol: isPublic ? "DI" : "AUTH", file: isPublic ? "backend/app/api/deps.py" : "backend/app/auth/", method: isPublic ? "FastAPI dependencies" : "get_current_user(...) ", responsibility: isPublic ? "Provides shared dependencies without requiring identity." : "Verifies identity and derives tenant, roles, and principal scope.", happens: [isPublic ? "Opens only the adapters this public route needs." : "Validates the token before endpoint code runs.", "Injects request-scoped adapters."], calls: "Config, auth, db factories", returns: isPublic ? "Request dependencies" : "CurrentUser + tenant scope", guarantee: isPublic ? "Public exposure is explicit." : "tenant_id comes from verified identity." }),
-    common({ id: "handler", step: "03", title: endpoint.handler, subtitle: "FastAPI route handler", x: 610, y: 110, runtime: "backend", layer: "api", symbol: "API", responsibility: "Validates the wire shape, invokes one service, and maps its result to the contract.", happens: ["FastAPI/Pydantic rejects malformed input first.", "The router contains no SQL, retrieval, or provider logic."], calls: serviceByTag[endpoint.tag] ?? "Application service", returns: "Contract response or mapped error", guarantee: "The api/ → services/ → domain/ direction stays one-way." }),
-    common({ id: "service", step: "04", title: serviceByTag[endpoint.tag] ?? "Application service", subtitle: endpoint.operationId, x: 880, y: 110, runtime: "backend", layer: "service", symbol: "SVC", file: "backend/app/services/", method: `${serviceByTag[endpoint.tag] ?? "Service"}.${endpoint.handler}(...)`, responsibility: `Owns the ${endpoint.domain.toLowerCase()} use case and coordinates rules with named adapters.`, happens: ["Applies visibility, role, transition, and domain checks.", "Passes domain types across infrastructure boundaries."], calls: boundary.title, returns: "Domain result", guarantee: "Business behavior stays out of routers." }),
-    common({ id: "boundary", step: "05", x: 1150, y: 110, layer: "adapter", happens: [boundary.responsibility, isWrite ? "Records the state transition before success is returned." : "Maps infrastructure output back to domain types."], ...boundary }),
-    common({ id: "audit", step: "06", title: isWrite ? "Commit + audit" : "Emit audit event", subtitle: "durability + provenance", x: 880, y: 375, runtime: "postgres", layer: "adapter", symbol: "AUD", file: "backend/app/audit/", method: "AuditSink.record(...) ", responsibility: "Makes the operation explainable and aligns responses with durable state.", happens: ["Records actor, tenant, target, outcome, and correlation.", isWrite ? "Commits before reporting success." : "Captures read provenance without exposing scope."], calls: "Audit repository", returns: "Committed state + audit event", guarantee: "A required operation without its audit event fails verification." }),
-    common({ id: "response", step: "07", title: "Return contract result", subtitle: "HTTP response", x: 610, y: 375, runtime: "browser", layer: "transport", symbol: "OUT", file: "contracts/openapi.yaml", method: `${endpoint.operationId} response`, responsibility: "Returns only fields and status codes defined by the contract.", happens: ["Hidden resources map to the same 404 as missing resources.", "The generated client deserializes frontend types."], calls: "React state", returns: endpoint.summary, guarantee: "Adapter/provider types cannot leak into the response." }),
+    common({ id: "handler", step: "03", title: endpoint.handler, subtitle: "FastAPI route handler", x: 610, y: 110, runtime: "backend", layer: "api", symbol: "API", responsibility: "Validates the wire shape, invokes one service, and maps its result to the contract.", happens: ["FastAPI/Pydantic rejects malformed input first.", "The router contains no SQL, retrieval, or provider logic."], calls: serviceName, returns: "Contract response or mapped error", guarantee: "The api/ → services/ → domain/ direction stays one-way." }),
+    common({ id: "service", step: "04", title: serviceName, subtitle: endpoint.operationId, x: 880, y: 110, runtime: "backend", layer: "service", symbol: "SVC", file: serviceFile, method: serviceMethod, responsibility: `Owns the ${endpoint.domain.toLowerCase()} use case and coordinates rules with named adapters.`, happens: ["Applies visibility, role, transition, and domain checks.", "Passes domain types across infrastructure boundaries."], calls: boundary.title, returns: "Domain result", guarantee: "Business behavior stays out of routers." }),
+    common({ id: "boundary", step: "05", x: 880, y: 375, layer: "adapter", happens: [boundary.responsibility, isWrite ? "Records the state transition before success is returned." : "Maps infrastructure output back to domain types."], ...boundary }),
+    common({ id: "audit", step: "06", title: isWrite ? "Commit + audit" : "Emit audit event", subtitle: "durability + provenance", x: 610, y: 375, runtime: "postgres", layer: "adapter", symbol: "AUD", file: "backend/app/audit/", method: "AuditSink.record(...) ", responsibility: "Makes the operation explainable and aligns responses with durable state.", happens: ["Records actor, tenant, target, outcome, and correlation.", isWrite ? "Commits before reporting success." : "Captures read provenance without exposing scope."], calls: "Audit repository", returns: "Committed state + audit event", guarantee: "A required operation without its audit event fails verification." }),
+    common({ id: "response", step: "07", title: "Return contract result", subtitle: "HTTP response", x: 340, y: 375, runtime: "browser", layer: "transport", symbol: "OUT", file: "contracts/openapi.yaml", method: `${endpoint.operationId} response`, responsibility: "Returns only fields and status codes defined by the contract.", happens: ["Hidden resources map to the same 404 as missing resources.", "The generated client deserializes frontend types."], calls: "React state", returns: endpoint.summary, guarantee: "Adapter/provider types cannot leak into the response." }),
   ];
 }
 
@@ -560,16 +567,16 @@ const genericEdges: Edge[] = [
   { from: "request", to: "scope", direction: "right", x: 277, y: 176, length: 63 },
   { from: "scope", to: "handler", direction: "right", x: 547, y: 176, length: 63 },
   { from: "handler", to: "service", direction: "right", x: 817, y: 176, length: 63 },
-  { from: "service", to: "boundary", direction: "right", x: 1087, y: 176, length: 63 },
-  { from: "boundary", to: "audit", direction: "down", x: 1253, y: 242, length: 95 },
-  { from: "audit", to: "response", direction: "left", x: 817, y: 441, length: 63, tone: "return" },
+  { from: "service", to: "boundary", direction: "down", x: 983, y: 242, length: 133 },
+  { from: "boundary", to: "audit", direction: "left", x: 817, y: 441, length: 63 },
+  { from: "audit", to: "response", direction: "left", x: 547, y: 441, length: 63, tone: "return" },
 ];
 
 const websocketEdges: Edge[] = [
   { from: "ws-open", to: "ws-handler", direction: "right", x: 277, y: 176, length: 63 },
   { from: "ws-handler", to: "ws-owner", direction: "right", x: 547, y: 176, length: 63 },
   { from: "ws-owner", to: "ws-sub", direction: "right", x: 817, y: 176, length: 63 },
-  { from: "ws-sub", to: "ws-ui", direction: "down", x: 983, y: 242, length: 95, tone: "return" },
+  { from: "ws-sub", to: "ws-ui", direction: "down", x: 983, y: 242, length: 133, tone: "return" },
 ];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -622,6 +629,8 @@ function AppNode({ node, selected, active, faded, onSelect }: {
       </span>
       <span className="flow-node__port flow-node__port--in" />
       <span className="flow-node__port flow-node__port--out" />
+      <span className="flow-node__port flow-node__port--top" />
+      <span className="flow-node__port flow-node__port--bottom" />
     </button>
   );
 }
@@ -632,6 +641,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [transport, setTransport] = useState<"all" | "HTTP" | "WebSocket">("all");
   const [selectedId, setSelectedId] = useState("router");
+  const [hasNodeSelection, setHasNodeSelection] = useState(false);
   const [scale, setScale] = useState(0.76);
   const [pan, setPan] = useState({ x: 16, y: 20 });
   const [dragging, setDragging] = useState(false);
@@ -647,10 +657,11 @@ export default function Home() {
   const edges = isDetailedChat ? chatEdges : endpoint.transport === "WebSocket" ? websocketEdges : genericEdges;
   const traceOrder = useMemo(() => isDetailedChat ? chatTraceOrder : nodes.map((node) => node.id), [isDetailedChat, nodes]);
   const filteredEndpoints = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+    const normalizeSearch = (value: string) => value.toLowerCase().replace(/[_-]/g, " ");
+    const needle = normalizeSearch(query.trim());
     return endpointCatalog.filter((item) =>
       (transport === "all" || item.transport === transport) &&
-      (!needle || `${item.method} ${item.path} ${item.handler} ${item.domain} ${item.summary}`.toLowerCase().includes(needle)),
+      (!needle || normalizeSearch(`${item.method} ${item.path} ${item.handler} ${item.domain} ${item.summary}`).includes(needle)),
     );
   }, [query, transport]);
   const endpointGroups = useMemo(() => {
@@ -666,10 +677,11 @@ export default function Home() {
 
   const fit = useCallback(() => {
     const width = viewportRef.current?.clientWidth ?? 1200;
-    const nextScale = clamp((width - 48) / 1660, 0.42, 0.88);
+    const contentWidth = isDetailedChat ? 1660 : 1180;
+    const nextScale = clamp((width - 48) / contentWidth, 0.42, 0.88);
     setScale(nextScale);
     setPan({ x: 22, y: 22 });
-  }, []);
+  }, [isDetailedChat]);
 
   useEffect(() => {
     fit();
@@ -697,6 +709,7 @@ export default function Home() {
       if (target?.matches("input, textarea, select")) return;
       if (event.key === "ArrowRight" || event.key.toLowerCase() === "j") {
         event.preventDefault();
+        setHasNodeSelection(true);
         setTraceIndex((current) => {
           const next = Math.min(traceOrder.length - 1, current + 1);
           setSelectedId(traceOrder[next]);
@@ -705,6 +718,7 @@ export default function Home() {
       }
       if (event.key === "ArrowLeft" || event.key.toLowerCase() === "k") {
         event.preventDefault();
+        setHasNodeSelection(true);
         setTraceIndex((current) => {
           const next = Math.max(0, current - 1);
           setSelectedId(traceOrder[next]);
@@ -722,6 +736,7 @@ export default function Home() {
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button")) return;
     setDragging(true);
     dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -794,6 +809,7 @@ export default function Home() {
                   <button key={item.id} type="button" className={`endpoint-row ${item.id === endpoint.id ? "is-selected" : ""}`} onClick={() => {
                     setEndpointId(item.id);
                     setSelectedId(item.operationId === "sendMessage" ? "router" : item.transport === "WebSocket" ? "ws-handler" : "handler");
+                    setHasNodeSelection(false);
                     setTraceIndex(-1);
                     setPlaying(false);
                   }}>
@@ -872,14 +888,19 @@ export default function Home() {
           >
             <div className="lane-labels" aria-hidden="true">
               <span style={{ top: 96 }}>REQUEST PATH</span>
-              <span style={{ top: 351 }}>ANSWER TASK</span>
-              <span style={{ top: 631 }}>ADAPTERS & DATA</span>
-              <span style={{ top: 846 }}>STREAM RETURN</span>
+              {isDetailedChat ? <>
+                <span style={{ top: 351 }}>ANSWER TASK</span>
+                <span style={{ top: 631 }}>ADAPTERS & DATA</span>
+                <span style={{ top: 846 }}>STREAM RETURN</span>
+              </> : <span style={{ top: 366 }}>INFRASTRUCTURE & RETURN</span>}
             </div>
             <div
-              className="flow-canvas"
+              className={`flow-canvas ${isDetailedChat ? "flow-canvas--chat" : "flow-canvas--compact"}`}
               style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}
-              onClick={() => setSelectedId(nodes[0].id)}
+              onClick={() => {
+                setSelectedId(nodes[0].id);
+                setHasNodeSelection(false);
+              }}
             >
               <div className="boundary boundary--request"><span>FastAPI request lifecycle</span></div>
               {isDetailedChat ? <div className="boundary boundary--answer"><span>Tracked async answer producer</span></div> : null}
@@ -905,6 +926,7 @@ export default function Home() {
                     onSelect={() => {
                       setPlaying(false);
                       setSelectedId(node.id);
+                      setHasNodeSelection(true);
                     }}
                   />
                 );
@@ -918,6 +940,16 @@ export default function Home() {
                 <span>The final stream event points at durable data.</span>
               </div> : null}
             </div>
+            {hasNodeSelection ? <section className="node-quicklook" aria-live="polite">
+              <div className="node-quicklook__header">
+                <span>STEP {selected.step} · {runtimeMeta[selected.runtime].label}</span>
+                <button type="button" aria-label="Close node details" onClick={() => setHasNodeSelection(false)}>×</button>
+              </div>
+              <h3>{selected.title}</h3>
+              <p>{selected.responsibility}</p>
+              <code>{selected.method}</code>
+              <small>Full inputs, outputs, guarantees, and source are in the inspector.</small>
+            </section> : null}
             <div className="canvas-hint">Drag canvas · Ctrl + scroll to zoom · J/K to step · Space to play</div>
           </div>
         </div>
