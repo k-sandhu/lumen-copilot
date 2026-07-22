@@ -29,15 +29,20 @@ test("server-renders the endpoint explorer with site-specific metadata", async (
   assert.match(html, /\/api\/v1\/chat\/sessions\/:id\/messages/);
   assert.match(html, /ChatRuntime\.run/);
   assert.match(html, /RedisBackplane\.publish/);
+  assert.match(html, /114 endpoints/);
+  assert.match(html, /Endpoint catalog/);
+  assert.match(html, /\/health/);
+  assert.match(html, /\/ws\/chat\/\{stream_id\}/);
   assert.match(html, /https:\/\/backend-flow\.test\/og\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
 test("keeps the requested interaction and responsive affordances in the standalone page", async () => {
-  const [page, css, hosting] = await Promise.all([
+  const [page, css, hosting, generated] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/generated-endpoints.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /onPointerDown/);
@@ -48,6 +53,16 @@ test("keeps the requested interaction and responsive affordances in the standalo
   assert.match(page, /Call stack/);
   assert.match(page, /Containers/);
   assert.match(page, /Boundary guarantee/);
+  assert.match(page, /Search endpoints/);
+  assert.match(page, /endpointCatalog/);
+  assert.match(page, /node-quicklook/);
+  assert.match(page, /closest\("button"\)/);
+  assert.match(page, /from: "service", to: "boundary", direction: "down"/);
+  assert.match(page, /from: "service", to: "boundary"/);
+  assert.match(page, /from: "boundary", to: "audit"/);
+  assert.match(page, /from: "audit", to: "response"/);
+  assert.equal((generated.match(/transport: /g) ?? []).length, 114);
+  assert.equal(new Set(generated.match(/id: "[^"]+"/g) ?? []).size, 114);
   assert.match(css, /@media \(max-width: 760px\)/);
   assert.match(css, /prefers-reduced-motion/);
   const hostingConfig = JSON.parse(hosting);

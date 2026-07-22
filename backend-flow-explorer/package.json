@@ -6,6 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "generate:endpoints": "node scripts/generate-endpoint-catalog.mjs",
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
