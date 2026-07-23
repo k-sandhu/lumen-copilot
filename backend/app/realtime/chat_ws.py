@@ -112,8 +112,13 @@ async def chat_ws(
         async for envelope in subscription:
             await websocket.send_json(envelope)
             if is_terminal(envelope):
+                # Relay the terminal, but do NOT break: the backplane may still
+                # relay one post-terminal ``event:suggestions`` for a
+                # ``done(pendingSuggestions=true)`` (#489) before it ends the
+                # generator. ``subscribe`` owns the exactly-one-terminal +
+                # bounded-grace lifecycle, so the loop ends when it stops yielding
+                # (immediately for a non-pending terminal — unchanged behaviour).
                 log.info("ws_chat.terminal", stream_id=stream_id, terminal=envelope.get("type"))
-                break
     except WebSocketDisconnect:
         # Client closed mid-stream — stop relaying (the producer is decoupled and
         # continues/finishes independently; cancellation of generation is handled

@@ -286,4 +286,71 @@ describe('useChatStream', () => {
     renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
     expect(h.get().opts.path).toBe(`/chat/${SID}`);
   });
+
+  // --- #489: post-terminal suggestions window --------------------------------
+
+  it('holds the socket open on a pendingSuggestions done and accepts the trailing suggestions (AC-2)', async () => {
+    const h = harness();
+    const onDone = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, onDone, suggestionsGraceMs: 5_000 }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer.' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+      });
+    });
+    // Terminal settled + onDone fired, but the socket is STILL OPEN for the
+    // post-terminal suggestions (unlike a plain done, which closes at once).
+    expect(result.current.phase).toBe('done');
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(h.get().closed).toBe(false);
+
+    // The suggestions event arrives AFTER the stream closed to the reducer.
+    act(() => {
+      h.get().emit({
+        type: 'event',
+        streamId: SID,
+        seq: 3,
+        name: 'suggestions',
+        data: { messageId: 'm', suggestions: ['What next?', 'Who owns it?'] },
+      });
+    });
+    expect(result.current.phase).toBe('done'); // still settled — not un-terminaled
+    expect(result.current.suggestions).toEqual({
+      messageId: 'm',
+      suggestions: ['What next?', 'Who owns it?'],
+    });
+    // Got what we waited for → socket closed, no disconnect error synthesized.
+    expect(h.get().closed).toBe(true);
+    expect(result.current.problem).toBeNull();
+  });
+
+  it('closes the socket at grace expiry when no suggestions follow a pendingSuggestions done', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 1,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+      });
+    });
+    expect(h.get().closed).toBe(false); // held open during the grace
+    act(() => vi.advanceTimersByTime(5_000));
+    // Grace expired: socket closed, terminal stands, no disconnect error.
+    expect(h.get().closed).toBe(true);
+    expect(result.current.phase).toBe('done');
+    expect(result.current.problem).toBeNull();
+  });
 });

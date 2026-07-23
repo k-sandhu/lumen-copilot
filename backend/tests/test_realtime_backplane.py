@@ -129,6 +129,86 @@ async def test_aclose_unregisters_the_subscriber() -> None:
     await backplane.publish("s4", envelopes.done("s4", 1))
 
 
+# --- #489: bounded post-terminal suggestions window -------------------------
+
+
+def _done_pending(stream_id: str, seq: int) -> dict[str, object]:
+    return envelopes.done(stream_id, seq, data={"messageId": "m", "pendingSuggestions": True})
+
+
+def _suggestions(stream_id: str, seq: int) -> dict[str, object]:
+    return envelopes.event(
+        stream_id, seq, name="suggestions", data={"messageId": "m", "suggestions": ["Next?"]}
+    )
+
+
+async def test_pending_done_relays_one_post_terminal_suggestions_live() -> None:
+    """A ``done(pendingSuggestions=true)`` does NOT stop the subscriber: it holds
+    open and relays the one trailing ``event:suggestions`` published after it."""
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=2.0)
+    consumer = asyncio.create_task(_collect(backplane, "s"))
+    await asyncio.sleep(0)
+
+    await backplane.publish("s", envelopes.start("s", 0))
+    await backplane.publish("s", _done_pending("s", 1))
+    await backplane.publish("s", _suggestions("s", 2))
+    # Anything after the suggestions event must NOT be relayed (window closed).
+    await backplane.publish("s", envelopes.delta("s", 3, {"text": "late"}))
+
+    received = await asyncio.wait_for(consumer, timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done", "event"]
+    assert received[-1]["name"] == "suggestions"
+    # Exactly one terminal was relayed; the post-terminal event is not a terminal.
+    assert sum(1 for e in received if is_terminal(e)) == 1
+
+
+async def test_late_subscriber_replays_done_then_post_terminal_suggestions() -> None:
+    """The realistic 202→connect client: the producer finished (``done`` +
+    suggestions already buffered in replay). The late subscriber must fall THROUGH
+    the replayed terminal and still receive the trailing suggestions event (#489)."""
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=2.0)
+    await backplane.publish("s", envelopes.start("s", 0))
+    await backplane.publish("s", _done_pending("s", 1))
+    await backplane.publish("s", _suggestions("s", 2))
+
+    received = await asyncio.wait_for(_collect(backplane, "s"), timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done", "event"]
+    assert received[-1]["name"] == "suggestions"
+    assert sum(1 for e in received if is_terminal(e)) == 1
+
+
+async def test_pending_done_without_suggestions_stops_at_grace_expiry() -> None:
+    """A ``done(pendingSuggestions=true)`` whose suggestions never come (the
+    failure/timeout case) stops at grace expiry — the terminal stands, and the
+    consumer does not hang."""
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=0.05)
+    consumer = asyncio.create_task(_collect(backplane, "s"))
+    await asyncio.sleep(0)
+
+    await backplane.publish("s", envelopes.start("s", 0))
+    await backplane.publish("s", _done_pending("s", 1))
+    # No suggestions ever published.
+
+    received = await asyncio.wait_for(consumer, timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done"]
+    assert received[-1]["data"]["pendingSuggestions"] is True
+
+
+async def test_non_pending_done_still_stops_immediately() -> None:
+    """A plain ``done`` (no pendingSuggestions) keeps the classic behaviour: the
+    subscriber stops at once and a later suggestions event is NOT relayed."""
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=2.0)
+    consumer = asyncio.create_task(_collect(backplane, "s"))
+    await asyncio.sleep(0)
+
+    await backplane.publish("s", envelopes.start("s", 0))
+    await backplane.publish("s", envelopes.done("s", 1, data={"messageId": "m"}))
+    await backplane.publish("s", _suggestions("s", 2))
+
+    received = await asyncio.wait_for(consumer, timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done"]
+
+
 @pytest.mark.parametrize("stream_id", ["a", "b", "c"])
 async def test_streams_are_isolated(stream_id: str) -> None:
     backplane = InMemoryBackplane()

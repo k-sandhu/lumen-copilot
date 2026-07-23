@@ -57,7 +57,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.principal import Principal
-from app.core.errors import AppError
+from app.core.errors import AppError, DependencyError
 from app.core.logging import get_logger
 from app.db.repositories import (
     AuditEventRepository,
@@ -167,6 +167,18 @@ _DEFAULT_TOOL_CONCURRENCY = 4
 # must not stall the answer.
 _RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 2.0)
 _RETRY_AFTER_CAP_SECONDS = 10.0
+# Interactive per-turn deadline (#489). ``None`` (the module default, and every
+# non-interactive / offline caller) = no runtime-level turn deadline: the gateway's
+# ``llm_timeout_seconds`` request budget governs, unchanged. When the chat API wires
+# ``Settings.llm_interactive_timeout_seconds`` a live answer caps each resilient
+# turn (all same-route retries + backoffs + one failover attempt) at that budget
+# via an ``asyncio.timeout``, so a hung/unreachable provider surfaces one typed 503
+# within the budget instead of stacking the batch timeout per retry.
+_DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
+# Interactive attempt cap (#489). ``None`` = the full same-route retry ladder
+# (``1 + len(_RETRY_BACKOFF_SECONDS)`` = 3 attempts). The chat API wires 2 (one
+# retry) so a live turn does not stack the ladder inside the interactive budget.
+_DEFAULT_INTERACTIVE_MAX_ATTEMPTS: int | None = None
 
 
 @dataclass(slots=True)
@@ -442,6 +454,8 @@ class ChatRuntime:
         text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
         text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
         clock: Callable[[], float] | None = None,
+        turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
+        interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -529,6 +543,16 @@ class ChatRuntime:
         self._text_coalesce_chars = text_coalesce_chars
         self._text_coalesce_seconds = text_coalesce_seconds
         self._clock: Callable[[], float] = clock or time.monotonic
+        # Interactive timeout budget (#489). ``turn_timeout_seconds`` caps a whole
+        # resilient turn (all same-route retries + backoffs + one failover) as an
+        # asyncio deadline — the load-bearing bound for a hung provider; ``None``
+        # leaves the batch behaviour (the gateway request timeout only).
+        # ``interactive_max_attempts`` caps the same-route retry ladder for a live
+        # turn (2 = one retry); ``None`` keeps the full 3-attempt ladder for
+        # batch/headless callers. Neither is set by the headless/preview/offline
+        # constructors, so their behaviour is byte-identical to pre-#489.
+        self._turn_timeout_seconds = turn_timeout_seconds
+        self._interactive_max_attempts = interactive_max_attempts
 
     def _new_coalescer(self) -> _TextCoalescer:
         """The per-stream text buffer, built from this runtime's flush policy."""
@@ -656,39 +680,19 @@ class ChatRuntime:
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
             return False
 
-        if state.terminal_sent:
-            # A terminal already fired (e.g. cancellation mid-commit raced ahead);
-            # never publish a second terminal — exactly-one-terminal contract.
-            return False
-        state.terminal_sent = True
-        await self._publish(
-            state,
-            envelopes.done(
-                stream_id,
-                await self._next_seq(state),
-                data={
-                    "messageId": str(assistant_message_id),
-                    "finishReason": result.finish_reason,
-                    # The model that ACTUALLY answered (#413) — differs from
-                    # ``start``'s requested model after a failover.
-                    "model": result.model_used,
-                    "citationCount": len(result.citations),
-                    "usage": {
-                        "promptTokens": result.prompt_tokens,
-                        "completionTokens": result.completion_tokens,
-                        "totalTokens": result.total_tokens,
-                        # Provider cache accounting (#409, ADR-0016 §2.6) —
-                        # additive contract fields; zero when the provider
-                        # reports no cache detail.
-                        "cachedPromptTokens": result.cached_prompt_tokens,
-                        "cacheWriteTokens": result.cache_write_tokens,
-                    },
-                },
-            ),
-        )
-        # The KPI emits ONLY here — after the commit above and the successful
-        # ``done`` publication — so a failed answer can never appear in the
-        # per-successful-answer series (round-2 review, NEW-1).
+        # The terminal ``done`` is now published INSIDE ``_answer`` (#489), BEFORE
+        # follow-up suggestions are generated, so the UI settles the instant the
+        # answer is complete instead of waiting on the suggestions nicety. It rides
+        # the still-open answer transaction: the message/citations/evidence are
+        # flushed before it, and the only DB work left after it is the usage rows +
+        # this commit. A commit failure after a published ``done`` is the documented
+        # rollback-after-terminal exposure (deltas + citations already went on the
+        # wire pre-commit too); the ``terminal_sent`` guard keeps it to exactly one
+        # terminal and this KPI stays gated on a SUCCESSFUL commit below.
+        # The KPI emits ONLY here — after the commit above and after ``_answer``
+        # published its terminal ``done`` — so a failed answer (including a commit
+        # failure, which lands in the ``except`` arms above) never appears in the
+        # per-successful-answer series (round-2 review NEW-1; #489 keeps the gate).
         _log_cache_kpi(result)
         return True
 
@@ -1270,7 +1274,7 @@ class ChatRuntime:
             )
             await self._emit_ask_user(state, assistant_message_id, ask_question)
             answer_usage = _answer_usage_totals(route_state, usage)
-            return _RunResult(
+            ask_result = _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
                 citation_count=0,
@@ -1281,6 +1285,15 @@ class ChatRuntime:
                 cached_prompt_tokens=answer_usage.cached_prompt_tokens,
                 cache_write_tokens=answer_usage.cache_write_tokens,
             )
+            # The clarifying question IS the terminal (spec 0006): no suggestions
+            # follow it, so ``done`` stops the stream at once (no pending window).
+            await self._publish_terminal_done(
+                state,
+                assistant_message_id=assistant_message_id,
+                result=ask_result,
+                pending_suggestions=False,
+            )
+            return ask_result
 
         if finish_reason == "length":
             # Length continuation (ADR-0016 §4, #413): the answer hit the output
@@ -1390,24 +1403,54 @@ class ChatRuntime:
         )
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="completed")
 
+        # Suggestions are OFF the critical path now (#489). Whether they will be
+        # ATTEMPTED is decided here — config-gated, and suppressed for the honest
+        # "couldn't find it" fallback (HAX guideline 10 / AC-5: follow-ups to a
+        # refusal read as engagement bait). The decision is declared to the client
+        # on the terminal (``pendingSuggestions``) so the consumer knows to hold a
+        # bounded grace open for the one post-terminal event.
+        will_suggest = self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK
+
+        # The answer's summed usage as reported on the terminal — the ANSWER's cost
+        # (turn loop + any failover scopes), computed BEFORE the suggestions nicety
+        # runs. ``done.usage`` is the answer terminal, so it must not wait on (nor
+        # include) the post-terminal nicety; the suggestions tokens are still
+        # accounted in the DB row below (#409 / AC-3).
+        answer_usage = _answer_usage_totals(route_state, usage)
+        run_result = _RunResult(
+            finish_reason=finish_reason,
+            model_used=route_state.model,
+            citation_count=len(stored_citations),
+            citations=tuple(stored_citations),
+            prompt_tokens=answer_usage.prompt_tokens,
+            completion_tokens=answer_usage.completion_tokens,
+            total_tokens=answer_usage.total_tokens,
+            cached_prompt_tokens=answer_usage.cached_prompt_tokens,
+            cache_write_tokens=answer_usage.cache_write_tokens,
+        )
+
+        # Publish the terminal ``done`` FIRST (#489 AC-1) — the UI settles the
+        # instant the answer is complete. It rides the still-open transaction; the
+        # message/citations/evidence are already flushed, and the only DB work left
+        # is the usage rows + the commit in ``run``.
+        await self._publish_terminal_done(
+            state,
+            assistant_message_id=assistant_message_id,
+            result=run_result,
+            pending_suggestions=will_suggest,
+        )
+
         # Follow-up suggestions (spec 0006 #429): one config-gated, time-bounded
         # completion over the visible conversation tail — no retrieval, so no new
-        # INV-2 surface. Any failure / parse miss ⇒ no event, never an error. Its
-        # token usage folds into ``usage`` BEFORE the answer's single llm_usage
-        # row records below, so the nicety's real cost is accounted (#409).
-        # Skipped for the honest "couldn't find it" fallback (HAX guideline 10:
-        # suppress suggestions on low-confidence/refusal answers — follow-ups to
-        # a failed answer read as engagement bait).
-        if self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK:
-            await self._emit_step(
-                state, key="suggest", label="Suggesting follow-ups", step_state="started"
-            )
+        # INV-2 surface. Now generated AFTER the terminal and delivered as a bounded
+        # POST-terminal ``event:suggestions`` (#489). Any failure / timeout / parse
+        # miss ⇒ no event, never touching the already-published terminal (AC-6). Its
+        # token usage folds into ``usage`` BEFORE the answer's single llm_usage row
+        # records below, so the nicety's real cost is still accounted (#409 / AC-3).
+        if will_suggest:
             suggestions_route = await self._resolve_suggestions_route(session, route_state.route)
             suggestions = await self._generate_suggestions(
                 question=question, answer=answer_text, route=suggestions_route, usage=usage
-            )
-            await self._emit_step(
-                state, key="suggest", label="Suggesting follow-ups", step_state="completed"
             )
             if suggestions:
                 await self._publish(
@@ -1424,13 +1467,13 @@ class ChatRuntime:
                 )
 
         # Record the answer's summed token/cache usage (#409) — one row per
-        # answer, in the SAME transaction as the message it accounts for. Runs
+        # answer, in the SAME transaction as the message it accounts for. Still runs
         # AFTER suggestion generation so the row carries the whole answer's cost
-        # (turn loop + the suggestions nicety, spec 0006 #429). ``model`` is the
-        # requested id so a per-tenant ``provider:`` id stays attributable,
-        # matching the message row. Zeroed fields (a provider that omitted
-        # usage) still record: the answer happened, and "no usage reported"
-        # must be visible, not a gap.
+        # (turn loop + the suggestions nicety), even though ``done.usage`` above
+        # reported the answer-only total. ``model`` is the requested id so a
+        # per-tenant ``provider:`` id stays attributable, matching the message row.
+        # Zeroed fields (a provider that omitted usage) still record: the answer
+        # happened, and "no usage reported" must be visible, not a gap.
         await self._record_usage_scopes(
             session=session,
             tenant_id=tenant_id,
@@ -1440,18 +1483,7 @@ class ChatRuntime:
             assistant_message_id=assistant_message_id,
         )
 
-        answer_usage = _answer_usage_totals(route_state, usage)
-        return _RunResult(
-            finish_reason=finish_reason,
-            model_used=route_state.model,
-            citation_count=len(stored_citations),
-            citations=tuple(stored_citations),
-            prompt_tokens=answer_usage.prompt_tokens,
-            completion_tokens=answer_usage.completion_tokens,
-            total_tokens=answer_usage.total_tokens,
-            cached_prompt_tokens=answer_usage.cached_prompt_tokens,
-            cache_write_tokens=answer_usage.cache_write_tokens,
-        )
+        return run_result
 
     async def _resolve_mcp_tools(
         self, session: AsyncSession, allowed: frozenset[str]
@@ -1641,6 +1673,16 @@ class ChatRuntime:
         A partially-consumed failed turn may already have folded provider
         ``usage`` into the running totals — deliberately kept: those tokens
         were genuinely spent, and the usage row is billing-honest.
+
+        **Interactive deadline (#489).** When ``turn_timeout_seconds`` is set (the
+        chat API path), the WHOLE resilient turn — every same-route retry, its
+        backoffs, and any failover attempt — is bounded by one ``asyncio.timeout``.
+        A hung/unreachable provider therefore surfaces a typed 503 within the budget
+        (AC-4) instead of stacking the batch request timeout per retry. A fired
+        deadline is re-raised as a typed :class:`DependencyError` (503) — never a raw
+        ``TimeoutError``, which would bypass ``run``'s ``except AppError`` arm and
+        become an opaque 500. ``None`` (batch/headless/offline) keeps the pre-#489
+        behaviour: the gateway's request timeout is the only bound.
         """
         emitted = {"narration": False}
 
@@ -1656,60 +1698,93 @@ class ChatRuntime:
             if narrate is not None and text:
                 await narrate(text)
 
-        while True:
-            last: LlmProviderError | None = None
-            for attempt in range(1 + len(_RETRY_BACKOFF_SECONDS)):
-                if attempt:
-                    delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
-                    hint = last.retry_after_seconds if last is not None else None
-                    if hint is not None:
-                        delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
-                    await self._retry_sleep(delay)
-                try:
-                    return await self._stream_one_turn(
-                        messages=messages,
-                        route=route_state.route,
-                        usage=usage,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        narrate=(
-                            _narrate_and_close_window if narrate is not None else None
-                        ),
-                    )
-                except LlmProviderError as exc:
-                    if not exc.retryable or emitted["narration"]:
-                        # Terminal — or the turn already emitted narration
-                        # (ADR-0016 §4: the retry window closed at first
-                        # emission; a retry could duplicate wire output).
-                        raise
-                    last = exc
-                    # Class-name-derived detail only — never vendor text (#36 AC-7).
-                    log.warning(
-                        "llm.turn_retryable_fault",
-                        model=route_state.model,
-                        attempt=attempt,
-                        code=exc.code,
-                    )
-            # Retries exhausted on this route. Fail over if a candidate remains:
-            # close the dying route's usage scope (its spend stays attributed to
-            # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
-            # tokenizer/window (#440 review, finding 3): a smaller fallback must
-            # get a prompt trimmed for ITS budget, not the primary's.
-            if last is None:  # pragma: no cover — the loop always sets it
-                raise RuntimeError("retry loop exited without a fault")
-            dying_model = route_state.model
-            if not allow_failover:
-                # The length-continuation turn (#440 round-2 NEW-5): visible
-                # answer text is already on the wire from the CURRENT route, so
-                # switching models mid-answer would make ``done.model`` (and
-                # every attribution surface) name a model that produced only
-                # part of the visible content. Retries stay; failover does not.
-                raise last
-            if not await self._advance_to_fallback(session, route_state):
-                raise last
-            route_state.spent.append((dying_model, usage.snapshot_and_reset()))
-            if refit is not None:
-                messages = refit(route_state.route.model)
+        async def _run_attempts() -> tuple[list[ToolCall], str, list[str]]:
+            nonlocal messages
+            while True:
+                last: LlmProviderError | None = None
+                for attempt in range(self._turn_attempt_count()):
+                    if attempt:
+                        delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
+                        hint = last.retry_after_seconds if last is not None else None
+                        if hint is not None:
+                            delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
+                        await self._retry_sleep(delay)
+                    try:
+                        return await self._stream_one_turn(
+                            messages=messages,
+                            route=route_state.route,
+                            usage=usage,
+                            tools=tools,
+                            tool_choice=tool_choice,
+                            narrate=(
+                                _narrate_and_close_window if narrate is not None else None
+                            ),
+                        )
+                    except LlmProviderError as exc:
+                        if not exc.retryable or emitted["narration"]:
+                            # Terminal — or the turn already emitted narration
+                            # (ADR-0016 §4: the retry window closed at first
+                            # emission; a retry could duplicate wire output).
+                            raise
+                        last = exc
+                        # Class-name-derived detail only — never vendor text (#36 AC-7).
+                        log.warning(
+                            "llm.turn_retryable_fault",
+                            model=route_state.model,
+                            attempt=attempt,
+                            code=exc.code,
+                        )
+                # Retries exhausted on this route. Fail over if a candidate remains:
+                # close the dying route's usage scope (its spend stays attributed to
+                # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
+                # tokenizer/window (#440 review, finding 3): a smaller fallback must
+                # get a prompt trimmed for ITS budget, not the primary's.
+                if last is None:  # pragma: no cover — the loop always sets it
+                    raise RuntimeError("retry loop exited without a fault")
+                dying_model = route_state.model
+                if not allow_failover:
+                    # The length-continuation turn (#440 round-2 NEW-5): visible
+                    # answer text is already on the wire from the CURRENT route, so
+                    # switching models mid-answer would make ``done.model`` (and
+                    # every attribution surface) name a model that produced only
+                    # part of the visible content. Retries stay; failover does not.
+                    raise last
+                if not await self._advance_to_fallback(session, route_state):
+                    raise last
+                route_state.spent.append((dying_model, usage.snapshot_and_reset()))
+                if refit is not None:
+                    messages = refit(route_state.route.model)
+
+        budget = self._turn_timeout_seconds
+        if budget is None:
+            return await _run_attempts()
+        try:
+            async with asyncio.timeout(budget) as cm:
+                return await _run_attempts()
+        except TimeoutError:
+            if cm.expired():
+                # The interactive per-turn budget expired on a hung/unreachable
+                # provider (#489 AC-4). Surface it as the same typed 503 the
+                # gateway maps a provider timeout to — the client gets one terminal
+                # error within the budget, not the ~182s retry cliff.
+                log.warning("llm.turn_timeout", model=route_state.model, budget=budget)
+                raise DependencyError(
+                    "The model did not respond within the interactive time budget."
+                ) from None
+            raise
+
+    def _turn_attempt_count(self) -> int:
+        """Same-route attempts for one turn — capped for the interactive path (#489).
+
+        The full ladder is ``1 + len(_RETRY_BACKOFF_SECONDS)`` (3 attempts, the
+        batch/headless default). The chat API caps it via ``interactive_max_attempts``
+        (2 = one retry) so a live turn does not stack the ladder inside the
+        interactive budget. Never exceeds the number of defined backoffs + 1.
+        """
+        attempts = 1 + len(_RETRY_BACKOFF_SECONDS)
+        if self._interactive_max_attempts is not None:
+            attempts = min(attempts, self._interactive_max_attempts)
+        return attempts
 
     async def _advance_to_fallback(
         self, session: AsyncSession, route_state: _RouteState
@@ -2295,6 +2370,59 @@ class ChatRuntime:
                     **({"score": citation.score} if citation.score is not None else {}),
                 },
             ),
+        )
+
+    async def _publish_terminal_done(
+        self,
+        state: _StreamState,
+        *,
+        assistant_message_id: UUID,
+        result: _RunResult,
+        pending_suggestions: bool,
+    ) -> None:
+        """Publish the terminal ``done`` (the exactly-one terminal; #489).
+
+        Moved out of ``run`` into ``_answer`` so the terminal settles the UI BEFORE
+        the follow-up-suggestions nicety runs (AC-1). ``done.usage`` carries the
+        ANSWER's summed usage (the suggestions call had not run yet); its cost is
+        still recorded on the DB usage row afterwards (#409). ``pending_suggestions``
+        declares that one post-terminal ``event:suggestions`` may still follow within
+        the consumer's grace window; absent/false keeps the classic stop-at-terminal
+        behaviour. The ``terminal_sent`` guard preserves exactly-one-terminal across
+        the shutdown race (issue #156) exactly as ``run`` did before.
+
+        The payload is byte-identical to the pre-#489 ``done`` (built in ``run``)
+        except for the additive ``pendingSuggestions`` flag: the ACTUAL post-failover
+        model, the citation count, and the answer usage sub-object.
+        """
+        if state.terminal_sent:
+            # A terminal already fired (e.g. cancellation mid-answer raced ahead);
+            # never publish a second terminal — exactly-one-terminal contract.
+            return
+        state.terminal_sent = True
+        data: dict[str, object] = {
+            "messageId": str(assistant_message_id),
+            "finishReason": result.finish_reason,
+            # The model that ACTUALLY answered (#413) — differs from ``start``'s
+            # requested model after a failover.
+            "model": result.model_used,
+            "citationCount": result.citation_count,
+            "usage": {
+                "promptTokens": result.prompt_tokens,
+                "completionTokens": result.completion_tokens,
+                "totalTokens": result.total_tokens,
+                # Provider cache accounting (#409, ADR-0016 §2.6) — additive
+                # contract fields; zero when the provider reports no cache detail.
+                "cachedPromptTokens": result.cached_prompt_tokens,
+                "cacheWriteTokens": result.cache_write_tokens,
+            },
+        }
+        if pending_suggestions:
+            # One post-terminal ``event:suggestions`` may still follow (#489); the
+            # subscriber holds a bounded grace open for it.
+            data["pendingSuggestions"] = True
+        await self._publish(
+            state, envelopes.done(state.stream_id, await self._next_seq(state), data=data)
         )
 
     async def _terminal_error(

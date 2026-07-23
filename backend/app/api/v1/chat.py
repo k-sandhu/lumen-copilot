@@ -851,6 +851,12 @@ def _schedule_answer(
         # Streamed-text coalescing knobs (issue #487).
         text_coalesce_chars=settings.chat_text_coalesce_chars,
         text_coalesce_seconds=settings.chat_text_coalesce_seconds,
+        # Interactive timeout budget (#489): a live chat turn is capped at the
+        # interactive deadline (a human is waiting) with a shortened retry ladder,
+        # so a hung provider surfaces a typed 503 within the budget instead of
+        # stacking the 60s batch timeout per retry (the ~182s cliff → <=30s, AC-4).
+        turn_timeout_seconds=settings.llm_interactive_timeout_seconds,
+        interactive_max_attempts=settings.llm_interactive_max_attempts,
     )
     history = _to_chat_messages(result.history)
 

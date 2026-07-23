@@ -78,8 +78,17 @@ its composer — that together turn a static Q&A into a guided conversation:
   cost is real, so it is accounted. Also skipped for the honest "couldn't find
   it" fallback answer (suppress suggestions on refusal/low-confidence answers —
   HAX guideline 10), and the client promotes chips/ghost only after a successful
-  terminal `done` (a `suggestions` event followed by a terminal `error` renders
-  nothing).
+  terminal `done`.
+  - **Off the critical path (#489).** Suggestions no longer sit *before* `done` on
+    the answer's latency path. The terminal `done` is published FIRST — declaring
+    `pendingSuggestions=true` when the nicety will be attempted — so the UI settles
+    the instant the answer is complete; the suggestions are then generated and
+    delivered as a **post-terminal** `event:suggestions` within a bounded server
+    grace window (`CHAT_SUGGESTIONS_GRACE_SECONDS`, the suggestions timeout + a
+    margin). `done.usage` reports the ANSWER only, while the single `llm_usage` row
+    still folds in the suggestions cost (#409). A failure/timeout produces no event
+    and cannot touch the already-published terminal; there is still exactly one
+    terminal, and it is still `done`.
 - **Prefill is a ghost, never a write.** The top suggestion renders as ghost text
   in the *empty* composer with an explicit accept affordance (Tab or click);
   typing anything dismisses it. The composer's draft is never overwritten —
@@ -101,7 +110,7 @@ New `event.name` values riding the existing chat stream:
 |---|---|---|
 | `event:step` | `ChatStep { key, label, state: started\|completed, detail?, turn? }` | many; phases in run order; a re-`started` key restarts that row (e.g. `think` per turn) |
 | `event:ask_user` | `ChatAskUser { messageId, question, options[{label, description?}], allowFreeText }` | ≤ 1 per stream; if present the stream has no suggestions and ends `done(finishReason="ask_user")` |
-| `event:suggestions` | `ChatSuggestions { messageId, suggestions: string[1..N] }` | ≤ 1 per stream; after the final `delta`/`citation`, before `done` |
+| `event:suggestions` | `ChatSuggestions { messageId, suggestions: string[1..N] }` | ≤ 1 per stream; POST-terminal (#489) — after `done(pendingSuggestions=true)`, within a bounded grace window |
 
 Step keys fixed by this spec: `prepare` (context assembly), `think` (one model
 turn; `turn` ordinal, `detail` set on completion), `finalize` (persist +

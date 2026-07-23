@@ -1775,6 +1775,14 @@ export interface ChatDoneData {
    * fallback. Additive — older servers omit it.
    */
   model?: string;
+  /**
+   * When true (#489), the server will attempt follow-up suggestions AFTER this
+   * terminal and MAY deliver one post-terminal `event:suggestions` within a
+   * bounded grace window. The client settles the UI as terminal as usual, but
+   * keeps the socket open for that one event; absent/false ⇒ the stream stops
+   * here (a refusal / ask_user answer, or suggestions disabled). Additive.
+   */
+  pendingSuggestions?: boolean;
   citationCount: number;
   usage?: {
     promptTokens?: number;

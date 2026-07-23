@@ -275,6 +275,79 @@ async def test_subscriber_connected_first_receives_the_live_channel() -> None:
     await backplane.aclose()
 
 
+def _done_pending(stream_id: str, seq: int) -> dict[str, Any]:
+    return envelopes.done(stream_id, seq, data={"messageId": "m", "pendingSuggestions": True})
+
+
+def _suggestions(stream_id: str, seq: int) -> dict[str, Any]:
+    return envelopes.event(
+        stream_id, seq, name="suggestions", data={"messageId": "m", "suggestions": ["Next?"]}
+    )
+
+
+async def test_pending_terminal_relays_post_terminal_suggestions_from_replay() -> None:
+    """#489: the producer finished (start, done(pendingSuggestions), suggestions all
+    buffered). The REAL RedisBackplane subscribe must fall THROUGH the replayed
+    terminal (not return at it) and relay the trailing suggestions event."""
+    backplane, _server = _fake_backplane()
+    stream_id = uuid.uuid4().hex
+
+    await backplane.publish(stream_id, envelopes.start(stream_id, 0))
+    await backplane.publish(stream_id, _done_pending(stream_id, 1))
+    await backplane.publish(stream_id, _suggestions(stream_id, 2))
+
+    received = await asyncio.wait_for(_drain(backplane, stream_id), timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done", "event"]
+    assert received[-1]["name"] == "suggestions"
+    assert sum(1 for e in received if is_terminal(e)) == 1
+    await backplane.aclose()
+
+
+async def test_pending_terminal_relays_live_post_terminal_suggestions() -> None:
+    """#489: a subscriber connected BEFORE publishing gets ``done`` then the live
+    post-terminal suggestions event over the live channel (grace window)."""
+    backplane, _server = _fake_backplane()
+    stream_id = uuid.uuid4().hex
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)  # SUBSCRIBE + confirmation land
+
+    await backplane.publish(stream_id, envelopes.start(stream_id, 0))
+    await backplane.publish(stream_id, _done_pending(stream_id, 1))
+    await backplane.publish(stream_id, _suggestions(stream_id, 2))
+
+    received = await asyncio.wait_for(consumer, timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done", "event"]
+    assert received[-1]["name"] == "suggestions"
+    await backplane.aclose()
+
+
+async def test_pending_terminal_stops_at_grace_when_no_suggestions_come() -> None:
+    """#489: a pending terminal with no trailing suggestions stops at grace expiry
+    — the RedisBackplane subscribe must not hang the consumer."""
+    server = _FakeServer()
+
+    def factory() -> Any:
+        client = _FakeClient(server)
+        server.clients.append(client)
+        return client
+
+    backplane = RedisBackplane(
+        "redis://unused/0", client_factory=factory, post_terminal_grace_seconds=0.05
+    )
+    stream_id = uuid.uuid4().hex
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await backplane.publish(stream_id, envelopes.start(stream_id, 0))
+    await backplane.publish(stream_id, _done_pending(stream_id, 1))
+    # No suggestions — the grace must expire and the subscriber return.
+
+    received = await asyncio.wait_for(consumer, timeout=2.0)
+    assert [e["type"] for e in received] == ["start", "done"]
+    await backplane.aclose()
+
+
 async def test_subscribe_does_not_close_the_pooled_publisher_client() -> None:
     """``subscribe`` owns a DEDICATED connection; its teardown must not
 

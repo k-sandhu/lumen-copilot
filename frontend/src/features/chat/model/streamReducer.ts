@@ -300,8 +300,27 @@ function deltaText(data: unknown): string | null {
 
 /** Fold one envelope into the stream state. Pure; returns a new state object. */
 export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamState {
-  // Already terminal — ignore stragglers after done/error.
-  if (state.phase === 'done' || state.phase === 'error') return state;
+  // Already terminal — ignore stragglers after done/error, with ONE exception:
+  // a `done` that declared `pendingSuggestions` (#489) accepts exactly one
+  // post-terminal `event:suggestions`. It attaches the follow-ups WITHOUT
+  // un-settling the terminal (phase stays 'done'); a second suggestions event,
+  // any other post-terminal envelope, and any post-`error` envelope are still
+  // ignored by identity (so useReducer bails out and nothing re-renders).
+  if (state.phase === 'done' || state.phase === 'error') {
+    if (
+      state.phase === 'done' &&
+      state.done?.pendingSuggestions === true &&
+      state.suggestions === null &&
+      envelope.type === 'event' &&
+      envelope.name === 'suggestions' &&
+      envelope.seq > state.lastSeq
+    ) {
+      const suggestions = asSuggestions(envelope.data);
+      if (!suggestions) return state;
+      return { ...state, lastSeq: envelope.seq, suggestions };
+    }
+    return state;
+  }
   // Dedupe / out-of-order guard: only apply strictly-newer envelopes.
   if (envelope.seq <= state.lastSeq) return state;
 
