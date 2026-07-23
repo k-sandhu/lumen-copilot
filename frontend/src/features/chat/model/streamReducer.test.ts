@@ -139,6 +139,24 @@ function errorEnv(seq: number): ErrorEnvelope {
     problem: { title: 'Upstream error', status: 502, detail: 'model unavailable', code: 'upstream' },
   };
 }
+/** A `done` that opts into the post-terminal suggestions window (#489). */
+function donePending(seq: number, citationCount: number): DoneEnvelope {
+  return {
+    type: 'done',
+    streamId: SID,
+    seq,
+    data: { messageId: 'm', finishReason: 'stop', citationCount, pendingSuggestions: true },
+  };
+}
+function suggestions(seq: number, items: string[]): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'suggestions',
+    data: { messageId: 'm', suggestions: items },
+  };
+}
 
 function fold(state: StreamState, ...envs: Parameters<typeof reduceStream>[1][]): StreamState {
   return envs.reduce(reduceStream, state);
@@ -249,6 +267,47 @@ describe('reduceStream', () => {
     const after = fold(initialStreamState, start(0), done(1, 0), delta(2, 'late'));
     expect(after.phase).toBe('done');
     expect(after.text).toBe('');
+  });
+
+  // --- #489: post-terminal suggestions window --------------------------------
+
+  it('accepts one post-terminal suggestions event after a pendingSuggestions done (AC-2)', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      delta(1, 'Answer.'),
+      donePending(2, 0),
+      suggestions(3, ['What next?', 'Who owns it?']),
+    );
+    // The terminal stays settled...
+    expect(s.phase).toBe('done');
+    expect(s.text).toBe('Answer.');
+    // ...and the follow-ups were attached AFTER it.
+    expect(s.suggestions).toEqual({ messageId: 'm', suggestions: ['What next?', 'Who owns it?'] });
+  });
+
+  it('does not accept post-terminal suggestions when done did NOT declare pending', () => {
+    const settled = fold(initialStreamState, start(0), done(1, 0));
+    const after = reduceStream(settled, suggestions(2, ['nope']));
+    // Plain done: post-terminal stragglers are ignored by identity (no re-render).
+    expect(after).toBe(settled);
+    expect(after.suggestions).toBeNull();
+  });
+
+  it('ignores anything other than suggestions after a pendingSuggestions done', () => {
+    const settled = fold(initialStreamState, start(0), donePending(1, 0));
+    const afterDelta = reduceStream(settled, delta(2, 'late'));
+    expect(afterDelta).toBe(settled);
+    const afterCitation = reduceStream(settled, citation(2, 'c1'));
+    expect(afterCitation).toBe(settled);
+  });
+
+  it('accepts only ONE post-terminal suggestions event, ignoring a second', () => {
+    const one = fold(initialStreamState, start(0), donePending(1, 0), suggestions(2, ['first']));
+    const two = reduceStream(one, suggestions(3, ['second']));
+    // The second is ignored by identity — at most one suggestions per stream.
+    expect(two).toBe(one);
+    expect(two.suggestions).toEqual({ messageId: 'm', suggestions: ['first'] });
   });
 
   it('terminateWithDisconnect marks a dropped stream as error (AC-5)', () => {

@@ -109,8 +109,16 @@ def get_backplane() -> Backplane:
     offline tests override it with an in-memory implementation (the streaming
     lifecycle is then exercised without a running Redis) — ``realtime/`` stays the
     only Redis owner (ADR-0004).
+
+    The post-terminal grace (#489) is wired from ``Settings`` so the WS relay holds
+    a ``done(pendingSuggestions=true)`` subscription open long enough to relay the
+    one trailing ``event:suggestions`` (the suggestions timeout plus a margin).
     """
-    return RedisBackplane(get_settings().redis_url)
+    settings = get_settings()
+    return RedisBackplane(
+        settings.redis_url,
+        post_terminal_grace_seconds=settings.chat_suggestions_grace_seconds,
+    )
 
 
 async def aclose_backplane() -> None:

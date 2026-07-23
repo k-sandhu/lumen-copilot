@@ -308,6 +308,8 @@ def _runtime(
     text_coalesce_chars: int | None = None,
     text_coalesce_seconds: float | None = None,
     clock: object = None,
+    turn_timeout_seconds: float | None = None,
+    interactive_max_attempts: int | None = None,
 ) -> ChatRuntime:
     extra: dict[str, object] = {}
     if text_coalesce_chars is not None:
@@ -320,6 +322,10 @@ def _runtime(
         extra["suggestions_model"] = suggestions_model
     if model_route_resolver is not None:
         extra["model_route_resolver"] = model_route_resolver
+    if turn_timeout_seconds is not None:
+        extra["turn_timeout_seconds"] = turn_timeout_seconds
+    if interactive_max_attempts is not None:
+        extra["interactive_max_attempts"] = interactive_max_attempts
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -1778,8 +1784,10 @@ async def test_ask_user_not_intercepted_when_non_interactive(ctx: _Ctx) -> None:
 
 
 async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
-    """AC-3: one suggestions event after the final delta, before done; its
-    usage folds into the answer's llm_usage row (#409)."""
+    """#489 AC-1/AC-2/AC-3: the terminal ``done`` is published BEFORE suggestions
+    are generated, declaring ``pendingSuggestions``; the one suggestions event
+    then arrives POST-terminal; ``done.usage`` is answer-only while the llm_usage
+    ROW still folds in the suggestions cost (#409)."""
     import asyncio
 
     gateway = _ScriptedGateway(
@@ -1827,23 +1835,27 @@ async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
         "What changed vs Q1?",
         "Who owns this?",
     ]
-    done = envs[-1]
-    assert done["type"] == "done"
+    # AC-1: exactly one terminal ``done``, and it is published BEFORE the
+    # suggestions were generated — its seq precedes the suggestions event's.
+    dones = [e for e in envs if e["type"] == "done"]
+    assert len(dones) == 1
+    done = dones[0]
+    assert done["data"]["pendingSuggestions"] is True  # type: ignore[index]
     assert sugg[0]["data"]["messageId"] == done["data"]["messageId"]  # type: ignore[index]
-    # Ordering: after the last delta, before the terminal.
-    last_delta = max(i for i, e in enumerate(envs) if e["type"] == "delta")
-    assert envs.index(sugg[0]) > last_delta
-    # suggest step bracketed the call.
-    assert ("suggest", "started") in _steps(envs)
-    assert ("suggest", "completed") in _steps(envs)
-    # The nicety's tokens are accounted in the done usage (and the llm_usage row).
-    assert done["data"]["usage"]["totalTokens"] == 27  # type: ignore[index]
+    # AC-2: the suggestions arrive POST-terminal (after done), by seq and by index.
+    assert done["seq"] < sugg[0]["seq"]  # type: ignore[operator]
+    assert envs.index(sugg[0]) > envs.index(done)
+    # The suggest phase is no longer a live step (it runs after the UI settled).
+    assert not any(k == "suggest" for k, _ in _steps(envs))
+    # AC-3: ``done.usage`` reports the ANSWER only (the nicety had not run yet)...
+    assert done["data"]["usage"]["totalTokens"] == 15  # type: ignore[index]
+    # ...while the single llm_usage ROW still accounts the suggestions cost too.
     from app.db.repositories import LlmUsageRepository
 
     async with ctx.sessionmaker() as session:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assert len(rows) == 1
-        assert rows[0].total_tokens == 27
+        assert rows[0].total_tokens == 27  # 15 answer + 12 suggestions (#409)
 
 
 class _ModelCapturingGateway(_ScriptedGateway):
@@ -1984,14 +1996,19 @@ async def test_suggestions_default_to_the_answer_route_when_unconfigured(ctx: _C
 
 
 async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:
-    """AC-N2: a failing suggestions call changes nothing -- no event, no error."""
+    """#489 AC-6: a failing suggestions call changes nothing about the ALREADY
+    published terminal -- no event, no error. ``done`` still declared
+    ``pendingSuggestions`` (the attempt was optimistic); the consumer's bounded
+    grace expires with no suggestions and the terminal stands."""
     import asyncio
 
     gateway = _ScriptedGateway(
         [[StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")]],
         chat_completion=None,  # chat() raises -- the nicety must be swallowed
     )
-    backplane = InMemoryBackplane()
+    # Small grace so the consumer's post-terminal wait (a suggestions event that
+    # never comes) resolves fast instead of holding the default window.
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=0.05)
     stream_id = uuid.uuid4().hex
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -2015,9 +2032,13 @@ async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:
     assert gateway.chat_calls == 1
     names = [e.get("name") for e in envs if e["type"] == "event"]
     assert "suggestions" not in names
-    assert envs[-1]["type"] == "done"  # the answer was untouched by the failure
-    # The suggest step still closed -- no orphaned spinner.
-    assert ("suggest", "completed") in _steps(envs)
+    # Exactly one terminal, and it is the ``done`` -- the answer was untouched by
+    # the failure; no error terminal was published on the nicety's behalf.
+    assert envs[-1]["type"] == "done"
+    assert sum(1 for e in envs if e["type"] in ("done", "error")) == 1
+    assert envs[-1]["data"]["pendingSuggestions"] is True  # type: ignore[index]
+    # The suggest phase is no longer a live step (#489).
+    assert not any(k == "suggest" for k, _ in _steps(envs))
 
 
 async def test_ask_user_turn_skips_suggestions(ctx: _Ctx) -> None:
@@ -2487,7 +2508,14 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
         collection_ids=None,
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
-    assert envs[-1]["type"] == "done"
+    # #489: the terminal ``done`` precedes the post-terminal suggestions event.
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1
+    done_idx = types.index("done")
+    sugg_idx = next(
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "suggestions"
+    )
+    assert sugg_idx > done_idx
 
     async with ctx.sessionmaker() as session:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
@@ -3947,6 +3975,64 @@ async def test_done_payload_validates_against_the_canonical_contract(ctx: _Ctx) 
     )
 
 
+async def test_pending_done_and_post_terminal_suggestions_validate_the_contract(
+    ctx: _Ctx,
+) -> None:
+    """#489: the runtime-emitted ``done`` carrying ``pendingSuggestions`` AND the
+    post-terminal ``event:suggestions`` both validate against the canonical
+    ``contracts/`` schema — the additive field + the post-terminal window are on
+    contract, not hand-rolled drift."""
+    import jsonschema
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    schema = _ws_schema()
+    defs = schema["$defs"]
+
+    done = next(e for e in envs if e["type"] == "done")
+    assert done["data"]["pendingSuggestions"] is True  # type: ignore[index]
+    # The whole terminal envelope validates against the transport oneOf...
+    jsonschema.validate(done, schema)
+    # ...and its data against ChatDoneData (the additive pendingSuggestions field).
+    jsonschema.validate(
+        done["data"],
+        {"$ref": "#/$defs/ChatDoneData", "$defs": defs},  # type: ignore[index]
+    )
+
+    sugg = next(e for e in envs if e["type"] == "event" and e.get("name") == "suggestions")
+    jsonschema.validate(sugg, schema)
+    jsonschema.validate(
+        sugg["data"],
+        {"$ref": "#/$defs/ChatSuggestions", "$defs": defs},  # type: ignore[index]
+    )
+
+
 async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
     """#440 round-2 NEW-2: the primary SPENDS on a successful tool turn, then
     primary AND fallback exhaust — the answer errors, the answer transaction
@@ -4538,6 +4624,138 @@ async def test_run_reports_answer_outcome_for_enqueue_gating(ctx: _Ctx) -> None:
     assert answered is False
 
 
+# --- #489: interactive per-turn timeout budget -------------------------------
+
+
+class _HangingGateway:
+    """A gateway whose ``stream_tools`` never yields — models an unreachable /
+    hung provider (a connection that establishes then stalls mid-stream, which a
+    LiteLLM request timeout does NOT catch). The runtime's per-turn asyncio
+    deadline (#489) is what must bound it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls += 1
+        await asyncio.Event().wait()  # never returns
+        yield StreamEvent(finish_reason="stop")  # pragma: no cover — unreachable
+
+
+async def test_interactive_timeout_bounds_a_hung_provider(ctx: _Ctx) -> None:
+    """#489 AC-4: with an unreachable provider that never responds, the client
+    gets ONE typed 503 terminal within the interactive budget — not the ~182s
+    retry cliff. Proven with a fast fake budget (0.2s) + a genuinely hanging
+    provider, so the test never waits the real 25s."""
+    import asyncio
+
+    gateway = _HangingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=0.2,
+        interactive_max_attempts=2,
+    )
+    # Pay LiteLLM's one-time lazy-import cost (the first token_counter call during
+    # context assembly) BEFORE timing, so the measured elapsed reflects the turn
+    # budget, not a cold import that has nothing to do with the deadline.
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    # The whole run is bounded by the per-turn budget; 5s is a generous ceiling
+    # that would only trip if the deadline were NOT enforced.
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is False
+    envs = await _drain(backplane, stream_id)
+    # Exactly one typed terminal, and it is a 503 dependency_unavailable error.
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "error"
+    problem = cast("dict[str, object]", terminals[0]["problem"])
+    assert problem["status"] == 503
+    assert problem["code"] == "dependency_unavailable"
+    # Bounded by the budget (worst case ~= budget + a little), nowhere near 25s.
+    assert elapsed < 2.0
+
+
+def test_interactive_budget_default_meets_the_30s_bound() -> None:
+    """#489 AC-4: the DEFAULT interactive budget keeps worst-case time to a typed
+    terminal on an unreachable provider under 30s. The per-turn asyncio deadline
+    caps the WHOLE resilient turn, so the worst case is the budget plus a small
+    settle margin — assert the configured default leaves headroom under 30s."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    assert settings.llm_interactive_timeout_seconds <= 27.0
+    # The retry ladder is shortened for the interactive path (3 -> 2 attempts),
+    # and it lives INSIDE the single budget, so it cannot stack past it.
+    assert settings.llm_interactive_max_attempts == 2
+
+
+async def test_interactive_max_attempts_caps_the_retry_ladder(ctx: _Ctx) -> None:
+    """#489: the interactive path makes 2 attempts (one retry) on a retryable
+    fault, not the full 3 — one fewer round trip inside the budget."""
+    # Two retryable faults in a row: with a 2-attempt cap the second exhausts the
+    # ladder (no fallback configured) and the answer terminates.
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="unused"), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]},
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    _sleeps, recorder = _sleep_recorder()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        interactive_max_attempts=2,
+    )
+    # patch the retry sleeper so no real backoff elapses
+    runtime._retry_sleep = recorder  # type: ignore[assignment]
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    # Exactly 2 attempts on the one route (the cap), not the default 3.
+    assert gateway.models_called == [_PRIMARY, _PRIMARY]
+    assert len(_sleeps) == 1  # one backoff between the two attempts
+    envs = await _drain(backplane, stream_id)
+    assert envs[-1]["type"] == "error"
+
+
 # --- #414 (ADR-0016 §6): narration streaming ---------------------------------
 
 
@@ -4909,9 +5127,12 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
 async def test_cache_kpi_not_emitted_when_commit_fails(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-2 NEW-1: the answer streams fine but the transaction COMMIT
-    fails — the stream ends in the error terminal and the KPI must NOT have
-    been emitted (it fires only after commit + ``done`` publication)."""
+    """Round-2 NEW-1, amended by #489: the answer streams fine and its terminal
+    ``done`` is published (it now precedes the commit — #489 AC-1), but the
+    transaction COMMIT then fails. The KPI must NOT be emitted (it fires only
+    AFTER a successful commit), no SECOND terminal is published (exactly-one-
+    terminal holds: the ``done`` already went out), and ``run`` reports False so
+    the caller never feeds the unpersisted answer into memory."""
     log_rec = _patch_runtime_log(monkeypatch)
 
     def _failing_commit_sessionmaker() -> AsyncSession:
@@ -4950,8 +5171,13 @@ async def test_cache_kpi_not_emitted_when_commit_fails(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert ok is False
-    assert envs[-1]["type"] == "error"
-    assert not any(e["type"] == "done" for e in envs)
+    # #489: the terminal ``done`` is published INSIDE the answer, before the
+    # commit — so a commit failure leaves that (already-sent) success terminal on
+    # the wire. Exactly one terminal: no error is published on top of it, and the
+    # KPI still did not fire (it is strictly after a successful commit).
+    assert envs[-1]["type"] == "done"
+    assert sum(1 for e in envs if e["type"] in ("done", "error")) == 1
+    assert not any(e["type"] == "error" for e in envs)
     assert log_rec.kpis() == []
 
 

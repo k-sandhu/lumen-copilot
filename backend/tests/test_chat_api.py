@@ -546,6 +546,45 @@ def test_ws_relays_published_envelopes(
     assert received[-1]["data"]["citationCount"] == 0
 
 
+def test_ws_relays_post_terminal_suggestions(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
+    """#489 AC-2: a ``done(pendingSuggestions=true)`` does not close the relay —
+    the WS keeps relaying and delivers the one post-terminal ``event:suggestions``
+    before the socket closes."""
+    from app.realtime import envelopes
+
+    stream_id = "ws-test-pending"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    _fill_replay(
+        backplane,
+        [
+            envelopes.start(stream_id, 0, data={"model": "m"}),
+            envelopes.delta(stream_id, 1, {"text": "hi"}),
+            envelopes.done(
+                stream_id,
+                2,
+                data={"messageId": "m", "citationCount": 0, "pendingSuggestions": True},
+            ),
+            envelopes.event(
+                stream_id, 3, name="suggestions", data={"messageId": "m", "suggestions": ["Next?"]}
+            ),
+        ],
+    )
+
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
+        ).json()["access_token"]
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            received = [ws.receive_json() for _ in range(4)]
+
+    assert [e["type"] for e in received] == ["start", "delta", "done", "event"]
+    assert received[2]["data"]["pendingSuggestions"] is True
+    assert received[-1]["name"] == "suggestions"
+    assert received[-1]["data"]["suggestions"] == ["Next?"]
+
+
 def test_ws_terminal_error_is_terminal(
     app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
 ) -> None:

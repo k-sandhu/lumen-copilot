@@ -428,7 +428,28 @@ class Settings(BaseSettings):
     llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
+    # This is the BATCH budget — ingestion, summarisation, headless runs — where a
+    # human is not waiting; 60s tolerates a slow-but-alive provider.
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
+    # The INTERACTIVE per-turn deadline for a live chat answer (#489). A human is
+    # waiting, so a single model turn (one streamed completion, including its
+    # bounded same-route retries and backoffs) is capped here — a hung/unreachable
+    # provider surfaces a typed 503 within this budget instead of stacking the
+    # 60s batch timeout across every retry (the ~182s cliff). Enforced at the
+    # runtime as an asyncio deadline around the whole resilient turn, so it also
+    # catches a provider that connects then stalls mid-stream (which the LiteLLM
+    # request timeout does not). Worst case to a typed terminal on an unreachable
+    # provider is this budget + a small margin, which must stay <= 30s (#489 AC-4).
+    llm_interactive_timeout_seconds: float = Field(
+        default=25.0, gt=0, le=30, alias="LLM_INTERACTIVE_TIMEOUT_SECONDS"
+    )
+    # How many attempts a single interactive turn makes before failing over /
+    # terminating (#489): 2 = one retry. The batch/headless path keeps the fuller
+    # ladder (3 attempts). Bounded [1, 3]: 1 disables the same-route retry, >3
+    # risks stacking beyond the interactive budget.
+    llm_interactive_max_attempts: int = Field(
+        default=2, ge=1, le=3, alias="LLM_INTERACTIVE_MAX_ATTEMPTS"
+    )
 
     # #395 — operational/cost controls for the search path (config-driven per
     # backend/AGENTS.md: limits are never hardcoded at call sites).
@@ -477,6 +498,33 @@ class Settings(BaseSettings):
     chat_suggestions_model: str = Field(
         default="openrouter/anthropic/claude-haiku-4.5", alias="CHAT_SUGGESTIONS_MODEL"
     )
+    # Post-terminal grace window the WS consumer holds a subscription open for a
+    # `done(pendingSuggestions=true)` (#489): suggestions are generated AFTER the
+    # terminal, so the backplane/relay keep relaying for this bounded window and
+    # stop at the first `event:suggestions` OR at grace expiry, whichever comes
+    # first. Derived from the suggestions timeout plus a small margin (the extra
+    # covers scheduling + the one publish after the completion returns) — it must
+    # comfortably outlast a suggestions attempt that runs to its full timeout, or
+    # a slow-but-succeeding suggestion would be cut off. Validated below.
+    chat_suggestions_grace_seconds: float = Field(
+        default=10.0, gt=0, le=90, alias="CHAT_SUGGESTIONS_GRACE_SECONDS"
+    )
+
+    @model_validator(mode="after")
+    def _suggestions_grace_outlasts_timeout(self) -> Settings:
+        """The post-terminal grace must exceed the suggestions timeout (#489).
+
+        A grace shorter than the generation timeout could close the subscription
+        before a slow-but-successful suggestion is published — silently dropping
+        it. Fail fast at boot rather than lose suggestions intermittently.
+        """
+        if self.chat_suggestions_grace_seconds <= self.chat_suggestions_timeout_seconds:
+            raise ValueError(
+                "CHAT_SUGGESTIONS_GRACE_SECONDS must exceed "
+                "CHAT_SUGGESTIONS_TIMEOUT_SECONDS (#489): the post-terminal window "
+                "has to outlast a suggestions attempt that runs to its full timeout."
+            )
+        return self
 
     # Rolling session summary (#416, ADR-0016 §3.2): the async post-answer
     # summarizer. ``keep_messages`` is the verbatim tail never summarized (the

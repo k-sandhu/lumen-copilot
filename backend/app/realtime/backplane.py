@@ -55,6 +55,17 @@ import redis.asyncio as aioredis
 # (exactly-one-terminal lifecycle, contracts/websocket-envelopes.schema.json).
 _TERMINAL_TYPES = frozenset({"done", "error"})
 
+# Post-terminal suggestions window (#489). A chat answer publishes its terminal
+# ``done`` BEFORE generating follow-up suggestions (they were on the critical
+# path). When ``done`` declares ``data.pendingSuggestions == True``, the terminal
+# still settles the stream, but the subscriber holds open for a BOUNDED grace to
+# relay one trailing ``event:suggestions`` — then stops at that event or at grace
+# expiry, whichever comes first. Absent/false ⇒ today's behaviour exactly (stop at
+# the terminal). This default is the offline/test fallback; the API constructs the
+# production backplane with ``Settings.chat_suggestions_grace_seconds`` (suggestions
+# timeout + margin), and it is always overridable per instance.
+_DEFAULT_POST_TERMINAL_GRACE_SECONDS = 10.0
+
 # Channel namespace so chat streams never collide with other realtime traffic.
 _CHANNEL_PREFIX = "chat:stream:"
 # Key namespace for the stream→owner binding (separate from the pub/sub channel).
@@ -115,6 +126,19 @@ def _loads(raw: Any) -> dict[str, Any]:
 def is_terminal(envelope: dict[str, Any]) -> bool:
     """True iff ``envelope`` is a terminal (``done``/``error``) envelope."""
     return envelope.get("type") in _TERMINAL_TYPES
+
+
+def _declares_pending_suggestions(envelope: dict[str, Any]) -> bool:
+    """True iff ``envelope`` is a ``done`` that opts into a post-terminal window (#489)."""
+    if envelope.get("type") != "done":
+        return False
+    data = envelope.get("data")
+    return isinstance(data, dict) and data.get("pendingSuggestions") is True
+
+
+def _is_suggestions(envelope: dict[str, Any]) -> bool:
+    """True iff ``envelope`` is the post-terminal ``event:suggestions`` (#489)."""
+    return envelope.get("type") == "event" and envelope.get("name") == "suggestions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +224,7 @@ class RedisBackplane:
         redis_url: str,
         *,
         client_factory: RedisClientFactory | None = None,
+        post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS,
     ) -> None:
         self._redis_url = redis_url
         self._client_factory: RedisClientFactory = client_factory or self._connect
@@ -208,6 +233,9 @@ class RedisBackplane:
         # singleton in ``api/deps.py`` can be built at import time).
         self._pool: Any | None = None
         self._pool_loop: asyncio.AbstractEventLoop | None = None
+        # How long ``subscribe`` holds open after a ``done`` that declared
+        # ``pendingSuggestions`` (#489), waiting for one trailing suggestions event.
+        self._post_terminal_grace_seconds = post_terminal_grace_seconds
 
     def _connect(self) -> Any:
         """Open a new client for this backplane's URL (the default factory)."""
@@ -308,6 +336,16 @@ class RedisBackplane:
         always closed in the ``finally`` (disconnect / cancellation / terminal), so
         no Redis connection leaks.
 
+        **Post-terminal suggestions window (#489).** When the terminal is a ``done``
+        that declares ``data.pendingSuggestions``, the subscription does NOT stop at
+        it: it keeps relaying for a bounded grace and stops at the first
+        ``event:suggestions`` OR at grace expiry. This holds whether the terminal was
+        found in the replay (the realistic 202→connect client whose replay already
+        buffered ``done``, so the replay loop must fall THROUGH rather than return) or
+        on the live channel (the concurrent subscriber). The trailing suggestions
+        event carries a ``seq`` strictly above the terminal's — it is the same
+        producer's monotonic counter — so the replay/live dedup below is unaffected.
+
         Deliberately **not** on the pooled publisher client (#487): a pub/sub
         connection cannot carry ordinary commands, and this one's lifetime is the
         subscription's — closing it here must never take the process-wide
@@ -326,37 +364,90 @@ class RedisBackplane:
 
             # Replay the head the producer published before we connected (incl. a
             # terminal if it already finished). Track the high-water seq so the
-            # live loop relays each envelope exactly once.
+            # live loop relays each envelope exactly once. ``awaiting_suggestions``
+            # flips once a pending-suggestions terminal is relayed (#489).
             replayed_seq = -1
+            awaiting_suggestions = False
             for raw in await client.lrange(_replay_key(stream_id), 0, -1):
                 envelope = _loads(raw)
                 seq = envelope.get("seq")
                 if isinstance(seq, int):
                     replayed_seq = max(replayed_seq, seq)
                 yield envelope
-                if is_terminal(envelope):
-                    return
+                if awaiting_suggestions:
+                    # The pending terminal was already replayed; the suggestions
+                    # event may be the very next buffered entry.
+                    if _is_suggestions(envelope):
+                        return
+                elif is_terminal(envelope):
+                    if not _declares_pending_suggestions(envelope):
+                        return
+                    awaiting_suggestions = True
 
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                raw = message.get("data")
-                if raw is None:
-                    continue
-                envelope = _loads(raw)
-                seq = envelope.get("seq")
-                # Drop anything the replay already delivered (seq is monotonic per
-                # stream), so an envelope in both the list and the live channel is
-                # relayed once.
-                if isinstance(seq, int) and seq <= replayed_seq:
-                    continue
-                yield envelope
-                if is_terminal(envelope):
-                    return
+            # Live relay — only while no terminal has been seen yet. Once a
+            # pending-suggestions terminal is relayed (here or from the replay
+            # above), the UNBOUNDED ``listen()`` is skipped for the bounded
+            # ``_grace_relay`` so a producer that never publishes the trailing
+            # event cannot hang the consumer (#489).
+            if not awaiting_suggestions:
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    raw = message.get("data")
+                    if raw is None:
+                        continue
+                    envelope = _loads(raw)
+                    seq = envelope.get("seq")
+                    # Drop anything the replay already delivered (seq is monotonic
+                    # per stream), so an envelope in both the list and the live
+                    # channel is relayed once.
+                    if isinstance(seq, int) and seq <= replayed_seq:
+                        continue
+                    yield envelope
+                    if is_terminal(envelope):
+                        if not _declares_pending_suggestions(envelope):
+                            return
+                        awaiting_suggestions = True
+                        break
+
+            if awaiting_suggestions:
+                async for envelope in self._grace_relay(pubsub, replayed_seq):
+                    yield envelope
+                    if _is_suggestions(envelope):
+                        return
         finally:
             await pubsub.unsubscribe(channel)
             await pubsub.aclose()
             await client.aclose()
+
+    async def _grace_relay(
+        self, pubsub: Any, replayed_seq: int
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Relay live envelopes for the bounded post-terminal grace, then stop (#489).
+
+        Entered only after a ``done`` that declared ``pendingSuggestions``. Uses a
+        single wall-clock deadline (``get_message`` with the remaining budget) so a
+        producer that never publishes the trailing event cannot hold the consumer
+        open past the grace. The caller stops at the first ``event:suggestions``.
+        """
+        deadline = asyncio.get_running_loop().time() + self._post_terminal_grace_seconds
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            message = await pubsub.get_message(timeout=remaining)
+            if message is None:
+                return
+            if message.get("type") != "message":
+                continue
+            raw = message.get("data")
+            if raw is None:
+                continue
+            envelope = _loads(raw)
+            seq = envelope.get("seq")
+            if isinstance(seq, int) and seq <= replayed_seq:
+                continue
+            yield envelope
 
     @staticmethod
     async def _await_subscribe_confirmed(pubsub: Any) -> None:
@@ -394,10 +485,15 @@ class InMemoryBackplane:
     testable without Redis.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS
+    ) -> None:
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._replay: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._owners: dict[str, StreamOwner] = {}
+        # Mirrors the Redis path (#489): how long ``subscribe`` holds open after a
+        # ``done(pendingSuggestions=true)`` for the one trailing suggestions event.
+        self._post_terminal_grace_seconds = post_terminal_grace_seconds
 
     async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
         buf = self._replay[stream_id]
@@ -424,8 +520,27 @@ class InMemoryBackplane:
             while True:
                 envelope = await queue.get()
                 yield envelope
-                if is_terminal(envelope):
+                if not is_terminal(envelope):
+                    continue
+                # A non-pending terminal stops here (today's behaviour). A
+                # ``done(pendingSuggestions=true)`` holds open for the bounded
+                # grace and stops at the first ``event:suggestions`` OR at grace
+                # expiry — the same post-terminal window the Redis path relays (#489).
+                if not _declares_pending_suggestions(envelope):
                     return
+                deadline = asyncio.get_running_loop().time() + self._post_terminal_grace_seconds
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        return
+                    try:
+                        envelope = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    except TimeoutError:
+                        return
+                    yield envelope
+                    if _is_suggestions(envelope):
+                        return
+                # unreachable: both inner branches return
         finally:
             subs = self._subscribers.get(stream_id)
             if subs is not None:

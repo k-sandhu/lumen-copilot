@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
   "title": "Lumen Copilot WebSocket envelope",
-  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
+  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The terminal is the last envelope that SETTLES the stream. One narrow exception (chat, #489): a terminal `done` MAY declare `data.pendingSuggestions=true`, in which case at most one `event:suggestions` envelope may still follow it within a bounded server-side grace window; the subscription holds open for that one post-terminal event and then closes. There is still exactly one terminal, it is still `done`, and nothing else may follow it. The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
   "$defs": {
     "BaseEnvelope": {
       "type": "object",
@@ -68,7 +68,7 @@
         "type": { "const": "done" },
         "data": {
           "type": "object",
-          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData)."
+          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData). The terminal that settles the stream. Chat (#489) may set `data.pendingSuggestions=true` to signal that one post-terminal `event:suggestions` may still follow within a bounded grace window (see the root description); absent/false ⇒ the stream stops at this terminal."
         }
       },
       "required": ["type", "streamId", "seq"]
@@ -176,6 +176,10 @@
           "type": "string",
           "description": "The model that ACTUALLY produced this answer (#413, ADR-0016 §4): equals start.model unless a mid-answer failover switched to a tenant-configured fallback. Authoritative for attribution; additive (older servers omit it)."
         },
+        "pendingSuggestions": {
+          "type": "boolean",
+          "description": "When true (#489), the server will attempt follow-up suggestions AFTER this terminal and MAY deliver exactly one post-terminal `event:suggestions` within a bounded grace window; a subscriber must hold the subscription open for it and accept that one event without un-settling this terminal. Absent/false ⇒ the stream stops at this terminal (the default, and the case for a refusal/ask_user answer or when suggestions are disabled). Optimistic: `done.usage` covers the ANSWER only, and a suggestions attempt that fails/times out simply produces no event. Additive; older clients ignore it and close at the terminal as before."
+        },
         "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",
@@ -252,7 +256,7 @@
     "ChatSuggestions": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream, emitted after the final delta/citation and before done; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
+      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream. Emitted OFF the answer's critical path (#489): the terminal `done` is published first (declaring `pendingSuggestions=true`), then this event arrives POST-terminal within a bounded grace window; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
       "required": ["messageId", "suggestions"],
       "properties": {
         "messageId": { "type": "string", "format": "uuid", "description": "The settled assistant message these follow-ups attach under." },
@@ -341,7 +345,7 @@
 
   "x-chatStream": {
     "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via run_python (ADR-0020 #457), sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) )* -> done(ChatDoneData) | error(Problem) -> [ event:suggestions(ChatSuggestions) ]?. Exactly one terminal (done|error). Constraints (spec 0006 #429 / #489): at most one ask_user per stream (then finishReason=ask_user, no suggestions); suggestions are OFF the critical path — the terminal done is published FIRST with data.pendingSuggestions=true, then at most one event:suggestions may follow POST-terminal within a bounded server grace window (derived from the suggestions timeout plus a small margin). The post-terminal event does not un-settle the terminal; nothing else may follow done, and a done without pendingSuggestions closes the stream immediately.",
     "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full run record (code, stdout/stderr, resource_usage, sandbox generation) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
