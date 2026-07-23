@@ -46,7 +46,8 @@ _OTHER_EMAIL = "dev@globex.test"
 _EXPECTED_FRONTIER = {"openrouter/anthropic/claude-opus-4.8", "openrouter/openai/gpt-5.5"}
 _EXPECTED_FAST = {"openrouter/google/gemini-3.5-flash", "openrouter/anthropic/claude-haiku-4.5"}
 _EXPECTED_OSS = {"openrouter/deepseek/deepseek-v3.2", "openrouter/qwen/qwen3.7-max"}
-_DEFAULT_MODEL_ID = "openrouter/anthropic/claude-opus-4.8"
+# #490 AC-1: the shipped default moved off the frontier tier onto a FAST entry.
+_DEFAULT_MODEL_ID = "openrouter/anthropic/claude-haiku-4.5"
 
 
 async def _seed_provider(

@@ -300,6 +300,8 @@ def _runtime(
     context_config: object = None,
     interactive: bool = True,
     suggestions_enabled: bool = False,
+    suggestions_model: str | None = None,
+    model_route_resolver: object = None,
     retrieval_factory: object = None,
     mcp_tools_factory: object = None,
     sessionmaker: object = None,
@@ -314,6 +316,10 @@ def _runtime(
         extra["text_coalesce_seconds"] = text_coalesce_seconds
     if clock is not None:
         extra["clock"] = clock
+    if suggestions_model is not None:
+        extra["suggestions_model"] = suggestions_model
+    if model_route_resolver is not None:
+        extra["model_route_resolver"] = model_route_resolver
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -1838,6 +1844,143 @@ async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assert len(rows) == 1
         assert rows[0].total_tokens == 27
+
+
+class _ModelCapturingGateway(_ScriptedGateway):
+    """Records the ``model`` each ``stream_tools`` (answer) and ``chat``
+    (suggestions) call was routed to — the #490 AC-2 observation seam."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.answer_models: list[object] = []
+        self.suggestion_models: list[object] = []
+
+    async def chat(
+        self,
+        messages: object,
+        *,
+        model: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        max_tokens: object = None,
+    ) -> Completion:
+        self.suggestion_models.append(model)
+        return await super().chat(
+            messages, model=model, api_key=api_key, api_base=api_base, max_tokens=max_tokens
+        )
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.answer_models.append(model)
+        async for ev in super().stream_tools(
+            messages,
+            tools=tools,
+            model=model,
+            tool_choice=tool_choice,
+            api_key=api_key,
+            api_base=api_base,
+            cache_key=cache_key,
+        ):
+            yield ev
+
+
+async def test_suggestions_use_dedicated_model_not_the_answer_route(ctx: _Ctx) -> None:
+    """#490 AC-2: follow-up suggestions run on their OWN configured model, not
+    the answer's route. A <=400-token nicety on the critical path must not ride
+    the answer's (possibly frontier) model. The answer turn still routes to the
+    session model; only the suggestions completion uses the dedicated FAST id."""
+    import asyncio
+
+    answer_model = "openrouter/anthropic/claude-opus-4.8"  # a frontier answer route
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"  # dedicated FAST id
+    gateway = _ModelCapturingGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=7, total_tokens=12),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # The answer turn used the session's model; the suggestions call did NOT.
+    assert gateway.answer_models == [answer_model]
+    assert gateway.suggestion_models == [suggestions_model]
+    # The suggestions still landed (distinct model, same behaviour).
+    sugg = [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
+    assert len(sugg) == 1
+
+
+async def test_suggestions_default_to_the_answer_route_when_unconfigured(ctx: _Ctx) -> None:
+    """#490: with no dedicated suggestions model configured (the constructor
+    default / headless callers), suggestions fall back to the answer route —
+    the exact pre-#490 behaviour, so nothing regresses for callers that don't
+    opt in."""
+    import asyncio
+
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    gateway = _ModelCapturingGateway(
+        [[StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(content='["A?", "B?"]', model=answer_model),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    assert gateway.suggestion_models == [answer_model]
 
 
 async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:

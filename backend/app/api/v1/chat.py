@@ -843,10 +843,11 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
-        # Follow-up suggestions knobs (spec 0006 #429).
+        # Follow-up suggestions knobs (spec 0006 #429; dedicated model #490).
         suggestions_enabled=settings.chat_suggestions_enabled,
         suggestions_count=settings.chat_suggestions_count,
         suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
+        suggestions_model=settings.chat_suggestions_model,
         # Streamed-text coalescing knobs (issue #487).
         text_coalesce_chars=settings.chat_text_coalesce_chars,
         text_coalesce_seconds=settings.chat_text_coalesce_seconds,

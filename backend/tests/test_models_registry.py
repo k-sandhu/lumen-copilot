@@ -64,7 +64,50 @@ def test_default_registry_is_the_seed_set() -> None:
 
 def test_seed_registry_has_exactly_one_default() -> None:
     defaults = [m for m in _DEFAULT_CHAT_MODEL_REGISTRY if m.is_default]
-    assert [m.id for m in defaults] == ["openrouter/anthropic/claude-opus-4.8"]
+    # #490 AC-1: the shipped default moved off the frontier tier (it set the
+    # floor for perceived chat speed — #486) onto a FAST-tier entry.
+    assert [m.id for m in defaults] == ["openrouter/anthropic/claude-haiku-4.5"]
+
+
+def test_seed_default_is_fast_tier_not_frontier() -> None:
+    """#490 AC-1: exactly one ``is_default`` and its tier is FAST, never FRONTIER.
+
+    A frontier default is inherited by two side calls (summaries, suggestions)
+    and buffered whole before the user sees it, so it sets the floor for
+    perceived chat speed (#486). This is the invariant that keeps the flip in
+    place; reverting it is a single registry line, caught here.
+    """
+    defaults = [m for m in _DEFAULT_CHAT_MODEL_REGISTRY if m.is_default]
+    assert len(defaults) == 1
+    assert defaults[0].tier is ModelTier.FAST
+    assert defaults[0].tier is not ModelTier.FRONTIER
+
+
+def test_frontier_entries_remain_present_and_selectable() -> None:
+    """#490 AC-3: frontier stays in the registry (an explicit per-session /
+    per-tenant choice), it is merely no longer the default."""
+    settings = _settings()
+    frontier_ids = {m.id for m in settings.chat_model_registry if m.tier is ModelTier.FRONTIER}
+    assert frontier_ids == {
+        "openrouter/anthropic/claude-opus-4.8",
+        "openrouter/openai/gpt-5.5",
+    }
+    # Still allow-listed, so a session or tenant may pin it (the picker + the
+    # per-tenant provider overrides drive that selection).
+    for fid in frontier_ids:
+        assert is_allowed_model(fid, settings) is True
+
+
+def test_llm_model_is_not_the_chat_default() -> None:
+    """#490 AC-5: ``LLM_MODEL`` is the gateway fallback for callers that pass
+    ``model=None`` (in practice only the /search direct answer), NOT the chat
+    default. Chat resolves its default from the registry ``is_default`` entry
+    (``ChatService._default_model``). They are deliberately different values;
+    this guards against silently conflating the two (the config trap #490
+    documents in .env.example and the ``llm_model`` field description)."""
+    settings = _settings()
+    chat_default = next(m.id for m in settings.chat_model_registry if m.is_default)
+    assert settings.llm_model != chat_default
 
 
 def test_registry_override_via_env_json_replaces_seed() -> None:

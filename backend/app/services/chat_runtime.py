@@ -204,6 +204,11 @@ class _RouteState:
 _DEFAULT_SUGGESTIONS_ENABLED = False
 _DEFAULT_SUGGESTIONS_COUNT = 3
 _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS = 8.0
+# The dedicated suggestions model (#490). Empty ⇒ inherit the answer route (the
+# pre-#490 behaviour and the default for headless / offline callers that never
+# configure one). The chat API wires ``Settings.chat_suggestions_model`` (a
+# FAST-tier id) so the nicety never rides the answer's frontier model.
+_DEFAULT_SUGGESTIONS_MODEL = ""
 _SUGGESTIONS_ANSWER_TAIL_CHARS = 4000
 _SUGGESTIONS_QUESTION_HEAD_CHARS = 1000
 _SUGGESTIONS_MAX_TOKENS = 400
@@ -433,6 +438,7 @@ class ChatRuntime:
         suggestions_enabled: bool = _DEFAULT_SUGGESTIONS_ENABLED,
         suggestions_count: int = _DEFAULT_SUGGESTIONS_COUNT,
         suggestions_timeout_seconds: float = _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS,
+        suggestions_model: str = _DEFAULT_SUGGESTIONS_MODEL,
         text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
         text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
         clock: Callable[[], float] | None = None,
@@ -512,6 +518,10 @@ class ChatRuntime:
         self._suggestions_enabled = suggestions_enabled
         self._suggestions_count = suggestions_count
         self._suggestions_timeout_seconds = suggestions_timeout_seconds
+        # The dedicated suggestions model (#490): resolved to its own route so
+        # the nicety runs on a FAST model, not the answer's (possibly frontier)
+        # route. Empty ⇒ inherit the answer route (pre-#490 behaviour).
+        self._suggestions_model = suggestions_model
         # Streamed-text coalescing knobs (#487): the character budget and the
         # elapsed-time deadline, whichever fires first. ``clock`` is the
         # MONOTONIC time source, injectable so tests are deterministic without
@@ -1392,8 +1402,9 @@ class ChatRuntime:
             await self._emit_step(
                 state, key="suggest", label="Suggesting follow-ups", step_state="started"
             )
+            suggestions_route = await self._resolve_suggestions_route(session, route_state.route)
             suggestions = await self._generate_suggestions(
-                question=question, answer=answer_text, route=route_state.route, usage=usage
+                question=question, answer=answer_text, route=suggestions_route, usage=usage
             )
             await self._emit_step(
                 state, key="suggest", label="Suggesting follow-ups", step_state="completed"
@@ -1779,6 +1790,22 @@ class ChatRuntime:
         if self._model_route_resolver is None:
             return ModelRoute(model=model)
         return await self._model_route_resolver(session, model)
+
+    async def _resolve_suggestions_route(
+        self, session: AsyncSession, answer_route: ModelRoute
+    ) -> ModelRoute:
+        """The follow-up-suggestions gateway route (#490).
+
+        A DEDICATED model, resolved through the SAME per-tenant route seam as
+        the answer, so the <=400-token nicety runs on a FAST id instead of the
+        answer's (possibly frontier) route. An empty ``suggestions_model`` (the
+        constructor default, and headless/offline callers) falls back to the
+        answer route — the exact pre-#490 behaviour, so nothing regresses for
+        callers that do not configure one.
+        """
+        if not self._suggestions_model:
+            return answer_route
+        return await self._resolve_model_route(session, self._suggestions_model)
 
     async def _stream_one_turn(
         self,
