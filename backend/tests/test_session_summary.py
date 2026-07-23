@@ -694,3 +694,117 @@ async def test_same_second_backlog_converges_across_passes(
     assert "skipped_stale_coverage" not in outcomes
     assert versions[:3] == [1, 2, 3]
     assert versions[-1] == 3
+
+
+# --- #491 AC-2: the retuned defaults reach first compaction earlier ----------
+
+
+def test_default_summary_thresholds_reach_first_compaction_before_turn_seven() -> None:
+    """AC-2: the retuned defaults make the FIRST summarisation fire earlier.
+
+    The first summarise fires once ``keep + min_batch`` messages have
+    accumulated. The old 8 + 4 = 12 needed ~6 turns (a 2-msg/turn session) —
+    "roughly turn 7" in #491. The retuned 4 + 2 = 6 fires at ~turn 3, well
+    before turn 7. Pinned on the FIELD defaults so ambient env cannot mask a
+    regression of the code default.
+    """
+    from app.core.config import Settings
+
+    keep = Settings.model_fields["chat_summary_keep_messages"].default
+    min_batch = Settings.model_fields["chat_summary_min_batch"].default
+    assert keep == 4
+    assert min_batch == 2
+    first_compaction_messages = keep + min_batch
+    assert first_compaction_messages == 6  # ~turn 3, a 2-msg/turn session
+    assert first_compaction_messages < 12  # strictly earlier than the old ~turn 7
+
+
+@pytest_asyncio.fixture
+async def six_message_ctx() -> AsyncIterator[_Ctx]:
+    """A 3-turn (6-message) session — the smallest the retuned defaults summarise."""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import update as _upd
+
+    from app.db import models as _models
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    prev_maker = db_session._sessionmaker  # noqa: SLF001
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        db_session._sessionmaker = factory  # noqa: SLF001
+        async with factory() as seed:
+            tenant = await TenantRepository(seed).create(name="Acme")
+            user = await UserRepository(seed, tenant.id).create(
+                email="bob@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            chat = await ChatSessionRepository(seed, tenant.id).create(
+                owner_id=user.id, model="m", title="t"
+            )
+            messages = MessageRepository(seed, tenant.id)
+            ids: list[uuid.UUID] = []
+            for i in range(6):
+                role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+                m = await messages.add(
+                    session_id=chat.id, role=role, content=f"turn {i}: the sky is {i}"
+                )
+                ids.append(m.id)
+            for i, mid in enumerate(ids):
+                await seed.execute(
+                    _upd(_models.Message)
+                    .where(_models.Message.id == mid)
+                    .values(created_at=_dt(2021, 1, 1, 0, i))
+                )
+            await seed.commit()
+            yield _Ctx(
+                sessionmaker=factory,
+                tenant_id=tenant.id,
+                session_id=chat.id,
+                message_ids=ids,
+            )
+    finally:
+        db_session._sessionmaker = prev_maker  # noqa: SLF001
+        await engine.dispose()
+
+
+async def test_six_message_session_summarises_under_retuned_defaults(
+    six_message_ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 behavioural: a 3-turn session summarises under the retuned defaults
+    (keep=4, min_batch=2) but would have SKIPPED under the old (keep=8, min_batch
+    =4) — the same 6 messages did not reach the old ~turn-7 threshold."""
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
+
+    # Old thresholds on the SAME 6-message session: below batch → no summary.
+    monkeypatch.setattr(
+        task_module, "get_settings", lambda: _summary_settings(keep=8, min_batch=4)
+    )
+    old_outcome = await task_module._summarize(  # noqa: SLF001
+        six_message_ctx.tenant_id, six_message_ctx.session_id
+    )
+    assert old_outcome == "skipped_below_batch"
+
+    # Retuned defaults: 6 - keep 4 = 2 uncovered >= min_batch 2 → summarises.
+    monkeypatch.setattr(
+        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
+    )
+    new_outcome = await task_module._summarize(  # noqa: SLF001
+        six_message_ctx.tenant_id, six_message_ctx.session_id
+    )
+    assert new_outcome == "summarized"
+    async with six_message_ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, six_message_ctx.tenant_id).get_for_session(
+            six_message_ctx.session_id
+        )
+        assert row is not None and row.version == 1
+        # keep=4 preserves the last 2 turns (messages 2-5) verbatim; turns 0-1
+        # (messages 0-1) roll into the summary.
+        assert row.covers_through_message_id == six_message_ctx.message_ids[1]

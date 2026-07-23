@@ -1117,6 +1117,78 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
     assert third.cached_prompt_tokens > second.cached_prompt_tokens
 
 
+@live
+@pytest.mark.live
+async def test_live_prompt_cache_session_shaped_reads_on_turn_two(
+    _live_gateway: LLMGateway,
+) -> None:
+    """#491 AC-4: turn-2 cache reads on an Anthropic route for a SESSION-shaped
+    prompt — the REAL grounded system prompt + the REAL default tool schemas,
+    assembled through ``assemble_context`` exactly as the chat runtime builds
+    the first call, then grown by one tool exchange (the append-only loop shape).
+
+    The grounded prompt alone (~350 tokens) is below the provider's minimum
+    cacheable prefix, so the system message is padded with a realistic reference
+    preamble to clear it with a wide margin — this keeps the assertion about the
+    cache MECHANICS (the message-0 breakpoint writes a prefix on turn 1 that turn
+    2 reads back), independent of the open question of whether the tools block
+    itself rides inside the cached prefix (documented in
+    docs/runbooks/prompt-cache-kpi.md).
+    """
+    from app.domain.llm import ChatMessage, Role, ToolCall
+    from app.llm.context import assemble_context
+    from app.services.prompts.grounded_answer import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
+
+    preamble = " ".join(
+        f"Reference note {i}: prior findings on segment {i} inform this session."
+        for i in range(700)
+    )
+    tools = tool_specs(default_allowlist())
+    assembled = assemble_context(
+        model="openrouter/anthropic/claude-haiku-4.5",
+        system_prompt=f"{GROUNDED_SYSTEM_PROMPT}\n\nSession context:\n{preamble}",
+        history=[],
+        question="Summarise the FY2024 results by segment.",
+        tools=tools,
+    )
+    base = list(assembled.messages)
+
+    async def _turn_usage(messages: list[ChatMessage]) -> TokenUsage:
+        usage: TokenUsage | None = None
+        async for ev in _live_gateway.stream_tools(
+            messages,
+            tools=tools,
+            model="openrouter/anthropic/claude-haiku-4.5",
+            tool_choice="none",
+            cache_key="lumen-session-cache-smoke",
+        ):
+            usage = ev.usage or usage
+        assert usage is not None, "live route reported no usage"
+        return usage
+
+    first = await _turn_usage(base)
+    grown = [
+        *base,
+        ChatMessage(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=(ToolCall(id="s1", name="search_text", arguments={"query": "segments"}),),
+        ),
+        ChatMessage(
+            role=Role.TOOL,
+            content="[1] annual-report.pdf (chunk a1, chars 0-600):\n" + ("segment revenue. " * 80),
+            tool_call_id="s1",
+            name="search_text",
+        ),
+    ]
+    second = await _turn_usage(grown)
+
+    assert first.prompt_tokens > 6000  # padded system clears the cacheable minimum
+    # AC-4: turn 2 READS the prefix turn 1 wrote — nonzero cached prompt tokens.
+    assert second.cached_prompt_tokens > 0
+
+
 # --- #94 regression: the gateway's client-close teardown is real ------------
 
 
