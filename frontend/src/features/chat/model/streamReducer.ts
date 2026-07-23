@@ -341,6 +341,16 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
     }
 
     case 'event': {
+      if (envelope.name === 'answer_retract') {
+        // Speculative-streaming retraction (#488): every answer `delta` for the
+        // CURRENTLY streaming turn was narration, not answer — discard the live
+        // answer text. The server re-emits the same text as event:narration
+        // right after (surfaced by the existing #414 narration affordance), so
+        // nothing is lost, only re-classified. The turn is still streaming, and
+        // the seq is consumed (return `base`, never identity) so a same-seq
+        // replay cannot re-clear later answer text.
+        return { ...base, text: '' };
+      }
       if (envelope.name === 'citation') {
         const citation = asCitation(envelope.data);
         if (!citation) return base;

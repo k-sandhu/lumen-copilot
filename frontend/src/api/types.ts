@@ -1764,6 +1764,14 @@ export interface ChatNarration {
   turn: number;
 }
 
+// `event:answer_retract` (ADR-0016 §6, #488) is an EventEnvelope with
+// name='answer_retract' and NO data. Meaning: every answer `delta` delivered so
+// far for the currently streaming assistant turn was NOT answer text — the
+// reducer discards the live answer text. The server normally re-emits the same
+// text as event:narration immediately after, so it is surfaced through the
+// transient narration affordance rather than vanishing. No payload interface is
+// needed (the event carries none); the reducer keys off the name.
+
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
   messageId: string;
