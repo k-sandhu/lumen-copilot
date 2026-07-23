@@ -52,7 +52,7 @@ from app.domain.tools import (
     RiskTier,
     ToolHandlerResult,
 )
-from app.realtime.backplane import InMemoryBackplane
+from app.realtime.backplane import _MAX_REPLAY, InMemoryBackplane
 from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
 from app.services.tools.types import ToolContext, ToolDefinition
@@ -303,7 +303,17 @@ def _runtime(
     retrieval_factory: object = None,
     mcp_tools_factory: object = None,
     sessionmaker: object = None,
+    text_coalesce_chars: int | None = None,
+    text_coalesce_seconds: float | None = None,
+    clock: object = None,
 ) -> ChatRuntime:
+    extra: dict[str, object] = {}
+    if text_coalesce_chars is not None:
+        extra["text_coalesce_chars"] = text_coalesce_chars
+    if text_coalesce_seconds is not None:
+        extra["text_coalesce_seconds"] = text_coalesce_seconds
+    if clock is not None:
+        extra["clock"] = clock
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -323,6 +333,7 @@ def _runtime(
         interactive=interactive,
         suggestions_enabled=suggestions_enabled,
         suggestions_timeout_seconds=2.0,
+        **extra,  # type: ignore[arg-type]
     )
 
 
@@ -4840,3 +4851,286 @@ async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
     assert envs[-1]["type"] == "done"
     # Both loop turns carried the SAME session-scoped key.
     assert gateway.cache_keys == [str(ctx.session_id)] * 2
+
+
+# --- #487: text coalescing at the envelope-construction seam ---------------
+#
+# The producer used to mint ONE `delta` envelope per provider chunk, so an
+# answer's envelope count tracked the provider's tokenisation and every one of
+# them paid a backplane round trip. Coalescing buffers adjacent chunks of the
+# SAME kind and flushes on whichever comes first — a character budget or an
+# elapsed-time deadline — and ALWAYS before any non-delta envelope is minted, so
+# `seq` stays monotonic on the wire and nothing is reordered behind a terminal.
+# The load-bearing invariant: coalescing changes envelope COUNT, never TEXT.
+
+
+def _texts_of(envs: list[dict[str, object]], kind: str) -> list[str]:
+    """The per-envelope text of every ``delta`` (kind="delta") / named event."""
+    if kind == "delta":
+        picked = [e for e in envs if e["type"] == "delta"]
+    else:
+        picked = [e for e in envs if e["type"] == "event" and e.get("name") == kind]
+    return [cast(str, cast("dict[str, object]", e["data"])["text"]) for e in picked]
+
+
+async def _run_coalesced(
+    ctx: _Ctx,
+    *,
+    gateway: object,
+    retrieval: object,
+    late_subscriber: bool = False,
+    **runtime_kwargs: Any,
+) -> list[dict[str, object]]:
+    """Run one answer and return the envelopes the subscriber saw.
+
+    ``late_subscriber`` subscribes only AFTER the producer finished — the
+    realistic 202-then-connect flow, served entirely from the bounded replay
+    (#153).
+    """
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer: asyncio.Task[list[dict[str, object]]] | None = None
+    if not late_subscriber:
+        consumer = asyncio.create_task(_drain(backplane, stream_id))
+        await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=retrieval,
+        backplane=backplane,
+        **runtime_kwargs,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    if consumer is None:
+        return await asyncio.wait_for(_drain(backplane, stream_id), timeout=5.0)
+    return await asyncio.wait_for(consumer, timeout=5.0)
+
+
+async def _stored_answer(ctx: _Ctx) -> str:
+    async with ctx.sessionmaker() as session:
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        return [m for m in rows if m.role.value == "assistant"][-1].content
+
+
+def _answer_chunks_turn(chunks: list[str]) -> list[StreamEvent]:
+    return [*(StreamEvent(text=c) for c in chunks), StreamEvent(finish_reason="stop")]
+
+
+async def test_answer_deltas_are_coalesced_without_changing_the_text(ctx: _Ctx) -> None:
+    """AC-2 (#487): envelope count drops materially; the TEXT is byte-identical.
+
+    200 provider chunks used to mean 200 ``delta`` envelopes (200 backplane
+    round-trips). Under the flush policy they coalesce into a handful — and the
+    concatenation of what streamed still equals the concatenation of what the
+    provider produced, and equals the persisted message (#148).
+    """
+    chunks = [f"word{i} " for i in range(200)]
+    envs = await _run_coalesced(
+        ctx, gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]), retrieval=_FakeRetrieval([])
+    )
+
+    assert envs[-1]["type"] == "done"
+    deltas = _texts_of(envs, "delta")
+    assert deltas, "the answer must still stream"
+    # Materially fewer envelopes than provider chunks (the AC-2 bar).
+    assert len(deltas) <= len(chunks) // 4
+    # ...and not one character changed.
+    assert "".join(deltas) == "".join(chunks)
+    assert await _stored_answer(ctx) == "".join(chunks).strip()
+
+
+async def test_a_pending_buffer_is_flushed_before_the_terminal(ctx: _Ctx) -> None:
+    """AC-4 (negative): the last text flush precedes ``done`` — always.
+
+    The budgets here are far larger than the answer, so the policy itself never
+    fires: the ONLY thing that can put the text on the wire is the unconditional
+    flush before a non-delta envelope is minted. Without it the buffer would be
+    dropped on the floor (a subscriber stops at the terminal).
+    """
+    chunks = ["Hello ", "world."]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=3_600.0,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "done" and types.count("done") == 1
+    delta_at = [i for i, t in enumerate(types) if t == "delta"]
+    assert delta_at, "a buffered answer must still reach the wire"
+    assert _texts_of(envs, "delta") == ["Hello world."]  # fully coalesced: ONE envelope
+    # Ordering: the flush lands before the first envelope minted after it (the
+    # ``finalize`` step) and therefore before the terminal.
+    finalize_at = min(
+        i
+        for i, e in enumerate(envs)
+        if e["type"] == "event"
+        and e.get("name") == "step"
+        and cast("dict[str, object]", e["data"])["key"] == "finalize"
+    )
+    assert max(delta_at) < finalize_at < types.index("done")
+    # seq is minted at publish time, so wire order and seq order must agree — a
+    # buffered delta must never carry a seq minted after the envelope that
+    # overtook it.
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_pending_narration_is_flushed_before_a_terminal_error(ctx: _Ctx) -> None:
+    """AC-4 (negative): a stream that FAULTS with text still buffered emits that
+    text before the terminal ``error``.
+
+    Budgets are oversized so only the unconditional pre-terminal flush can
+    deliver it.
+    """
+
+    class _NarrateThenFault(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="Looking that up... ")
+            yield StreamEvent(
+                tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),)
+            )
+            raise cast(Exception, _retryable())
+
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_NarrateThenFault(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=3_600.0,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1
+    assert _texts_of(envs, "narration") == ["Looking that up... "]
+    narration_at = max(
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "narration"
+    )
+    assert narration_at < len(envs) - 1  # strictly before the terminal
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_the_elapsed_deadline_flushes_before_the_character_budget(ctx: _Ctx) -> None:
+    """AC-2: the time half of "whichever comes first", deterministically.
+
+    An injected monotonic clock advances 50ms per read, so every chunk after the
+    first trips the 40ms deadline while the character budget (10k) never fires.
+    No test sleeps — the clock is the seam.
+    """
+    reads = iter(range(1, 10_000))
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(["a", "b", "c"])]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=0.04,
+        clock=lambda: next(reads) * 0.05,
+    )
+
+    assert envs[-1]["type"] == "done"
+    # "a" opens the buffer; "b" trips the deadline and flushes "ab"; "c" opens a
+    # new buffer that the pre-``finalize`` flush drains.
+    assert _texts_of(envs, "delta") == ["ab", "c"]
+
+
+async def test_coalescing_is_disabled_by_a_zero_character_budget(ctx: _Ctx) -> None:
+    """Negative / kill-switch: ``0`` restores the pre-#487 one-envelope-per-chunk
+    wire shape exactly, so a bad default is turned off by config, not a code change.
+    """
+    chunks = ["one ", "two ", "three"]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        text_coalesce_seconds=0.04,
+    )
+
+    assert _texts_of(envs, "delta") == chunks
+
+
+async def test_narration_is_coalesced_and_still_precedes_the_tool_events(ctx: _Ctx) -> None:
+    """AC-2 + the #414 ordering: narration coalesces too, and every narration
+    envelope still lands ahead of the turn's ``tool_call`` events.
+
+    Narration and answer text are different kinds and must never merge into one
+    envelope (that would leak narration into the answer — the #148 invariant).
+    """
+    narration_chunks = [f"step{i} " for i in range(60)]
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                *(StreamEvent(text=c) for c in narration_chunks),
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _answer_chunks_turn(["The ", "answer."]),
+        ]
+    )
+    envs = await _run_coalesced(ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]))
+
+    assert envs[-1]["type"] == "done"
+    narrations = _texts_of(envs, "narration")
+    assert narrations and len(narrations) <= len(narration_chunks) // 4
+    assert "".join(narrations) == "".join(narration_chunks)
+    narration_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "narration"
+    ]
+    tool_call_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "tool_call"
+    ]
+    assert tool_call_at and max(narration_at) < min(tool_call_at)
+    # The two kinds never merged: the answer's deltas carry ONLY the answer.
+    assert "".join(_texts_of(envs, "delta")) == "The answer."
+    assert cast("dict[str, object]", envs[narration_at[0]]["data"])["turn"] == 1
+
+
+async def test_a_long_answer_fits_the_bounded_replay_for_a_late_subscriber(ctx: _Ctx) -> None:
+    """AC-3 (negative): a long answer stays inside the bounded replay window.
+
+    The replay list is capped at ``_MAX_REPLAY`` envelopes, so pre-#487 an answer
+    of ~900 provider chunks pushed its own opening envelopes out of the window
+    and handed a late subscriber a TRUNCATED stream. Coalescing collapses the
+    same text into a small number of envelopes; this pins that a 900-chunk answer
+    fits, and that the late subscriber's text equals the persisted one.
+    """
+    chunks = [f"tok{i} " for i in range(900)]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        late_subscriber=True,
+    )
+
+    assert len(envs) < _MAX_REPLAY
+    assert envs[0]["type"] == "start" and envs[-1]["type"] == "done"
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert "".join(_texts_of(envs, "delta")) == "".join(chunks)
+    assert await _stored_answer(ctx) == "".join(chunks).strip()

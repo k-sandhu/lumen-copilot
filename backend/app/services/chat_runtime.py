@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -208,12 +209,91 @@ _SUGGESTIONS_QUESTION_HEAD_CHARS = 1000
 _SUGGESTIONS_MAX_TOKENS = 400
 _SUGGESTION_MAX_CHARS = 200
 
+# Streamed-text coalescing defaults (issue #487) — mirrored from
+# ``Settings.chat_text_coalesce_chars`` / ``_seconds``, which the API wires in.
+# Module constants so an un-wired caller (offline tests, the headless runtimes)
+# still coalesces exactly like production.
+_DEFAULT_TEXT_COALESCE_CHARS = 160
+_DEFAULT_TEXT_COALESCE_SECONDS = 0.04
+
+
+@dataclass(frozen=True, slots=True)
+class _TextKind:
+    """What a buffered run of streamed text will be published as.
+
+    Two runs coalesce only when their kind is equal, so answer text can never
+    merge into a narration envelope (or vice versa) and narration of different
+    turns stays separate — the #148/#414 separation is structural, not a
+    convention the flush policy has to remember.
+    """
+
+    envelope: str  # "delta" (answer text) | "narration" (transient turn status)
+    turn: int | None = None
+
+
+_ANSWER_TEXT = _TextKind("delta")
+
+
+@dataclass(slots=True)
+class _TextCoalescer:
+    """Flush policy for streamed text envelopes (issue #487).
+
+    Buffers adjacent chunks of one :class:`_TextKind` and hands back the
+    coalesced string when the policy fires — whichever comes FIRST, the
+    character budget or the elapsed-time deadline. The caller must also
+    :meth:`take` unconditionally before minting any other envelope, which is
+    what keeps ``seq`` monotonic on the wire (a buffered chunk must never be
+    published after an envelope minted later).
+
+    ``clock`` is a **monotonic** source (``time.monotonic`` in production),
+    injected so tests are deterministic without sleeping.
+    """
+
+    max_chars: int
+    max_delay_seconds: float
+    clock: Callable[[], float]
+    kind: _TextKind | None = None
+    _parts: list[str] = field(default_factory=list)
+    _chars: int = 0
+    _opened_at: float = 0.0
+
+    def add(self, kind: _TextKind, chunk: str) -> str | None:
+        """Buffer ``chunk``; return coalesced text when the policy says flush.
+
+        The caller must have drained a buffer of a different ``kind`` first
+        (see :meth:`take`) — mixing kinds in one envelope is not representable.
+        """
+        assert self.kind is None or self.kind == kind, "flush before switching kind"
+        now = self.clock()
+        if self.kind is None:
+            self.kind = kind
+            self._opened_at = now
+        self._parts.append(chunk)
+        self._chars += len(chunk)
+        if self._chars >= self.max_chars or (now - self._opened_at) >= self.max_delay_seconds:
+            return self.take()
+        return None
+
+    def take(self) -> str | None:
+        """Drain the buffer unconditionally (``None`` when empty)."""
+        if not self._parts:
+            self.kind = None
+            return None
+        text = "".join(self._parts)
+        self._parts.clear()
+        self._chars = 0
+        self.kind = None
+        return text
+
 
 @dataclass(slots=True)
 class _StreamState:
     """Mutable per-stream bookkeeping (seq counter + accumulated answer)."""
 
     stream_id: str
+    # The #487 text-coalescing buffer. Per stream because it holds unpublished
+    # wire content: whatever is in it MUST be flushed before the terminal.
+    buffer: _TextCoalescer
     seq: int = 0
     # Set once a terminal (``done``/``error``) has been published, so the
     # exactly-one-terminal contract holds even when two terminal paths race —
@@ -353,6 +433,9 @@ class ChatRuntime:
         suggestions_enabled: bool = _DEFAULT_SUGGESTIONS_ENABLED,
         suggestions_count: int = _DEFAULT_SUGGESTIONS_COUNT,
         suggestions_timeout_seconds: float = _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS,
+        text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
+        text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -429,6 +512,21 @@ class ChatRuntime:
         self._suggestions_enabled = suggestions_enabled
         self._suggestions_count = suggestions_count
         self._suggestions_timeout_seconds = suggestions_timeout_seconds
+        # Streamed-text coalescing knobs (#487): the character budget and the
+        # elapsed-time deadline, whichever fires first. ``clock`` is the
+        # MONOTONIC time source, injectable so tests are deterministic without
+        # sleeping (never a wall clock — a step backwards would stall a flush).
+        self._text_coalesce_chars = text_coalesce_chars
+        self._text_coalesce_seconds = text_coalesce_seconds
+        self._clock: Callable[[], float] = clock or time.monotonic
+
+    def _new_coalescer(self) -> _TextCoalescer:
+        """The per-stream text buffer, built from this runtime's flush policy."""
+        return _TextCoalescer(
+            max_chars=self._text_coalesce_chars,
+            max_delay_seconds=self._text_coalesce_seconds,
+            clock=self._clock,
+        )
 
     async def run(
         self,
@@ -477,13 +575,13 @@ class ChatRuntime:
         typed ``ok=False`` rather than launching a container. A test run therefore
         performs NO real side effect (the load-bearing property of the harness).
         """
-        state = _StreamState(stream_id=stream_id)
+        state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
         assistant_message_id = uuid.uuid4()
         await self._publish(
             state,
             envelopes.start(
                 stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 data={
                     "sessionId": str(session_id),
                     "messageId": str(assistant_message_id),
@@ -557,7 +655,7 @@ class ChatRuntime:
             state,
             envelopes.done(
                 stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 data={
                     "messageId": str(assistant_message_id),
                     "finishReason": result.finish_reason,
@@ -961,15 +1059,9 @@ class ChatRuntime:
                 # streamed live as transient status — NEVER a delta, never
                 # persisted (the #148 invariant is untouched). Runs in the
                 # answer coroutine, so seq mint + publish stay atomic.
-                await self._publish(
-                    state,
-                    envelopes.event(
-                        state.stream_id,
-                        state.next_seq(),
-                        name="narration",
-                        data={"text": text, "turn": _turn},
-                    ),
-                )
+                # Coalesced per turn (#487); the buffer is drained before the
+                # turn's `think/completed` step, hence before its tool events.
+                await self._stream_text(state, _TextKind("narration", _turn), text)
 
             turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
                 session=session,
@@ -1242,9 +1334,10 @@ class ChatRuntime:
             # retrieval found nothing). Fall back to an honest "couldn't find it"
             # rather than persisting an empty turn.
             answer_text = NO_SOURCES_FALLBACK
+            seq = await self._next_seq(state)
             await self._publish(
                 state,
-                envelopes.delta(state.stream_id, state.next_seq(), {"text": answer_text}),
+                envelopes.delta(state.stream_id, seq, {"text": answer_text}),
             )
 
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="started")
@@ -1310,7 +1403,7 @@ class ChatRuntime:
                     state,
                     envelopes.event(
                         state.stream_id,
-                        state.next_seq(),
+                        await self._next_seq(state),
                         name="suggestions",
                         data={
                             "messageId": str(assistant_message_id),
@@ -1391,6 +1484,12 @@ class ChatRuntime:
         ``ToolContext.sandbox`` stays ``None`` and a stray ``run_python`` invocation
         reports a typed ``ok=False`` instead of executing. The factory itself may
         also return ``None`` (no runner configured / disabled deploy) — same result.
+
+        The seam borrows the raw ``state.next_seq`` (it publishes straight to the
+        backplane, and a flush needs an ``await``). Safe because ``run_python``
+        executes strictly BETWEEN model turns, while the #487 text buffer can
+        only hold content published from the answer turn onwards — the buffer is
+        provably empty whenever the seam runs.
         """
         if self._sandbox_factory is None or RUN_PYTHON_TOOL_NAME not in allowed:
             return None
@@ -1756,17 +1855,20 @@ class ChatRuntime:
         return turn_tool_calls, finish_reason, text_chunks
 
     async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
-        """Publish answer text as ``delta`` envelopes, preserving chunk granularity.
+        """Publish answer text as ``delta`` envelopes, coalesced (#487).
 
         Called only for the answer turn's text — the tool-free turn or the forced
         synthesis — never for a tool-calling turn's pre-tool narration (issue
         #148), so the streamed answer equals the persisted one.
+
+        Adjacent chunks are merged under the flush policy instead of minting one
+        envelope per provider chunk. The CONCATENATION is byte-identical either
+        way; only the envelope count changes. Anything still buffered is drained
+        by the next :meth:`_next_seq` — i.e. before the ``finalize`` step, the
+        citations, and the terminal.
         """
         for chunk in chunks:
-            if chunk:
-                await self._publish(
-                    state, envelopes.delta(state.stream_id, state.next_seq(), {"text": chunk})
-                )
+            await self._stream_text(state, _ANSWER_TEXT, chunk)
 
     async def _run_tool_batch(
         self,
@@ -1911,7 +2013,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="tool_call",
                 data={"callId": call.id, "tool": call.name, "args": call.arguments},
             ),
@@ -1925,7 +2027,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="tool_result",
                 data={
                     "callId": call.id,
@@ -2075,7 +2177,7 @@ class ChatRuntime:
             data["turn"] = turn
         await self._publish(
             state,
-            envelopes.event(state.stream_id, state.next_seq(), name="step", data=data),
+            envelopes.event(state.stream_id, await self._next_seq(state), name="step", data=data),
         )
 
     async def _emit_ask_user(
@@ -2086,7 +2188,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="ask_user",
                 data={
                     "messageId": str(message_id),
@@ -2153,7 +2255,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="citation",
                 data={
                     "id": str(citation.id),
@@ -2180,7 +2282,62 @@ class ChatRuntime:
         problem: dict[str, object] = {"title": title, "status": status, "code": code}
         if detail:
             problem["detail"] = detail
-        await self._publish(state, envelopes.error(state.stream_id, state.next_seq(), problem))
+        seq = await self._next_seq(state)
+        await self._publish(state, envelopes.error(state.stream_id, seq, problem))
+
+    async def _next_seq(self, state: _StreamState) -> int:
+        """Flush any buffered streamed text, then mint the next ``seq`` (#487).
+
+        EVERY non-text envelope mints through here. Flushing *before* the mint is
+        the whole ordering guarantee: a buffered ``delta``/narration always gets a
+        lower ``seq`` **and** goes on the wire first, so coalescing can never
+        strand text behind a terminal (subscribers stop at the terminal) nor
+        publish an envelope whose ``seq`` was minted earlier than one already
+        sent. The seq allocator itself stays the plain non-atomic counter — safe
+        because every mint+publish pair runs in the answer coroutine.
+        """
+        await self._flush_text(state)
+        return state.next_seq()
+
+    async def _stream_text(self, state: _StreamState, kind: _TextKind, chunk: str) -> None:
+        """Buffer one chunk of streamed text, publishing when the policy fires.
+
+        Text of a different :class:`_TextKind` (answer vs narration, or a new
+        turn's narration) drains the buffer first, so two kinds never merge into
+        one envelope.
+        """
+        if not chunk:
+            return
+        if state.buffer.kind is not None and state.buffer.kind != kind:
+            await self._flush_text(state)
+        ready = state.buffer.add(kind, chunk)
+        if ready is not None:
+            await self._publish_text_envelope(state, kind, ready)
+
+    async def _flush_text(self, state: _StreamState) -> None:
+        """Publish whatever streamed text is buffered (no-op when empty)."""
+        kind = state.buffer.kind
+        text = state.buffer.take()
+        if kind is None or text is None:
+            return
+        await self._publish_text_envelope(state, kind, text)
+
+    async def _publish_text_envelope(self, state: _StreamState, kind: _TextKind, text: str) -> None:
+        """Mint + publish one coalesced text envelope for ``kind``.
+
+        Mints via ``state.next_seq()`` directly — going through
+        :meth:`_next_seq` would recurse into the flush that produced ``text``.
+        """
+        if kind.envelope == "narration":
+            envelope = envelopes.event(
+                state.stream_id,
+                state.next_seq(),
+                name="narration",
+                data={"text": text, "turn": kind.turn},
+            )
+        else:
+            envelope = envelopes.delta(state.stream_id, state.next_seq(), {"text": text})
+        await self._publish(state, envelope)
 
     async def _publish(self, state: _StreamState, envelope: dict[str, object]) -> None:
         await self._backplane.publish(state.stream_id, envelope)

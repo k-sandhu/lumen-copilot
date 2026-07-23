@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from app.api.deps import get_object_store
+from app.api.deps import aclose_backplane, get_object_store
 from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
 from app.core.config import Settings, get_settings
@@ -98,6 +98,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # on the serving loop by the first search — a no-op if never created (e.g.
     # offline tests) — so create/close stay on one event loop (#140 hygiene).
     await aclose_search_store()
+    # Same rule for the realtime backplane's pooled Redis client (issue #487):
+    # created lazily on the serving loop by the first publish, closed here.
+    # Ordered after the answer drain so a producer still finishing its terminal
+    # envelope is not publishing into a closed client.
+    await aclose_backplane()
     await dispose_engine()
     log.info("shutdown.complete")
 

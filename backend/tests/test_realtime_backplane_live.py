@@ -112,6 +112,10 @@ async def test_late_subscriber_gets_full_stream_when_producer_already_finished(
         assert [e["seq"] for e in received] == [0, 1]
         assert sum(1 for e in received if is_terminal(e)) == 1
     finally:
+        # Release the pooled publisher client too (#487): the backplane now holds
+        # one client for the whole instance, so a live test must close it or the
+        # connection outlives the test loop.
+        await backplane.aclose()
         await _delete_replay(_redis_url, stream_id)
 
 
@@ -141,4 +145,8 @@ async def test_subscriber_connected_before_publish_still_receives_live(
         assert [e["type"] for e in received] == ["start", "delta", "done"]
         assert [e["seq"] for e in received] == [0, 1, 2]
     finally:
+        # Release the pooled publisher client too (#487): the backplane now holds
+        # one client for the whole instance, so a live test must close it or the
+        # connection outlives the test loop.
+        await backplane.aclose()
         await _delete_replay(_redis_url, stream_id)

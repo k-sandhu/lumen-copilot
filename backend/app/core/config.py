@@ -504,6 +504,28 @@ class Settings(BaseSettings):
     # pre-#412 path — no batch, no extra sessions, per-call event order).
     chat_tool_concurrency: int = Field(default=4, gt=0, le=16, alias="CHAT_TOOL_CONCURRENCY")
 
+    # Streamed-text coalescing (issue #487). The runtime used to mint ONE
+    # envelope per provider chunk, so a long answer's envelope count tracked the
+    # provider's tokenisation — each one a backplane round-trip out and a React
+    # state commit in. The producer now buffers adjacent chunks of the same kind
+    # (answer ``delta`` / ``event:narration``) and flushes on whichever comes
+    # first: the character budget or the elapsed-time deadline. It ALWAYS flushes
+    # before any other envelope is minted, so ``seq`` stays monotonic on the wire
+    # and nothing is reordered behind a terminal. Coalescing changes envelope
+    # COUNT, never TEXT: the concatenation of the published deltas is identical
+    # to the concatenation of the provider chunks (#148), so the replay list and
+    # the live channel still carry byte-identical envelopes (#153).
+    #
+    # The time budget governs genuinely live streaming (chunks arriving tens of
+    # ms apart); the character budget governs a burst (today's answer turn is
+    # buffered until it is classified, then replayed at once). ``0`` characters
+    # is the kill switch — it restores the exact pre-#487 one-envelope-per-chunk
+    # wire shape without a code change.
+    chat_text_coalesce_chars: int = Field(default=160, ge=0, alias="CHAT_TEXT_COALESCE_CHARS")
+    chat_text_coalesce_seconds: float = Field(
+        default=0.04, ge=0, le=1.0, alias="CHAT_TEXT_COALESCE_SECONDS"
+    )
+
     @model_validator(mode="after")
     def _context_budget_leaves_room(self) -> Settings:
         """The fallback window must leave positive input room after headroom + margin.
