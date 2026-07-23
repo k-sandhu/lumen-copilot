@@ -857,6 +857,10 @@ def _schedule_answer(
         # stacking the 60s batch timeout per retry (the ~182s cliff → <=30s, AC-4).
         turn_timeout_seconds=settings.llm_interactive_timeout_seconds,
         interactive_max_attempts=settings.llm_interactive_max_attempts,
+        # Answer output ceiling (#488): bounds the streamed answer / forced
+        # synthesis so length — and the tail of the streaming wait — cannot run
+        # away; finish_reason="length" then rides the one length continuation.
+        answer_max_tokens=settings.chat_answer_max_tokens,
     )
     history = _to_chat_messages(result.history)
 

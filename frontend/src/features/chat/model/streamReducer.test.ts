@@ -532,3 +532,46 @@ describe('narration (ADR-0016 §6, #414)', () => {
     expect(s.narration).toBeNull();
   });
 });
+
+describe('answer_retract (speculative streaming, #488)', () => {
+  function answerRetract(seq: number): EventEnvelope {
+    return { type: 'event', streamId: SID, seq, name: 'answer_retract' };
+  }
+  function narration(seq: number, text: string, turn: number): EventEnvelope {
+    return { type: 'event', streamId: SID, seq, name: 'narration', data: { text, turn } };
+  }
+
+  it('discards the speculatively-streamed answer text — removed, not dangling (AC-4)', () => {
+    let s = reduceStream(initialStreamState, start(0));
+    s = reduceStream(s, delta(1, 'Let me look '));
+    s = reduceStream(s, delta(2, 'that up.'));
+    expect(s.text).toBe('Let me look that up.');
+    // The turn revealed itself as tool-calling → retraction clears the answer.
+    s = reduceStream(s, answerRetract(3));
+    expect(s.text).toBe('');
+    expect(s.phase).toBe('streaming'); // the turn is still live
+    // The retracted text is surfaced through the SAME narration affordance.
+    s = reduceStream(s, narration(4, 'Let me look that up.', 1));
+    expect(s.narration).toEqual({ turn: 1, text: 'Let me look that up.' });
+    // The real answer then streams fresh and is the only persisted-equivalent text.
+    s = reduceStream(s, delta(5, 'The answer is 42.'));
+    expect(s.text).toBe('The answer is 42.');
+  });
+
+  it('leaves other side-band state untouched (only clears the answer text)', () => {
+    let s = fold(initialStreamState, start(0), toolCall(1, 'c1'), delta(2, 'spec'));
+    s = reduceStream(s, answerRetract(3));
+    expect(s.text).toBe('');
+    expect(s.tools).toHaveLength(1); // tool activity is not a speculative delta
+    expect(s.phase).toBe('streaming');
+  });
+
+  it('consumes its seq (a same-seq replay cannot re-clear later text)', () => {
+    let s = fold(initialStreamState, start(0), delta(1, 'spec'), answerRetract(2));
+    expect(s.lastSeq).toBe(2);
+    s = reduceStream(s, delta(3, 'real'));
+    // A stale answer_retract replayed at seq 2 is ignored (seq <= lastSeq).
+    const replayed = reduceStream(s, answerRetract(2));
+    expect(replayed.text).toBe('real');
+  });
+});

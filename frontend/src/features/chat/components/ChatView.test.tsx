@@ -277,6 +277,85 @@ describe('ChatView (critical flow)', () => {
     expect(within(alert).getByRole('button', { name: /retry/i })).toBeInTheDocument();
   });
 
+  it('retracts speculatively-streamed text and re-surfaces it as narration (#488, AC-4)', async () => {
+    installFetch(() => EMPTY_MESSAGES);
+    const user = userEvent.setup();
+    renderView();
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    await user.type(screen.getByLabelText('Message'), 'q');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(liveSocket).not.toBeNull());
+
+    // The turn streams answer text speculatively (before it is proven tool-free).
+    act(() => {
+      liveSocket!.emit({
+        type: 'start',
+        streamId: 'stream-1',
+        seq: 0,
+        data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+      });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 1,
+        data: { text: 'Let me look that up.' },
+      });
+    });
+    expect(screen.getByText(/Let me look that up\./)).toBeInTheDocument();
+
+    // A tool call reveals the turn → the retraction REMOVES the speculative text
+    // (not left dangling), and it re-surfaces through the narration affordance.
+    act(() => {
+      liveSocket!.emit({ type: 'event', streamId: 'stream-1', seq: 2, name: 'answer_retract' });
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 3,
+        name: 'narration',
+        data: { text: 'Let me look that up.', turn: 1 },
+      });
+    });
+    // Gone from the answer body...
+    const bubble = screen.queryByRole('log');
+    if (bubble) expect(bubble).not.toHaveTextContent('Let me look that up.');
+    // ...and shown as transient status instead.
+    expect(screen.getByTestId('live-narration')).toHaveTextContent('Let me look that up.');
+
+    // The real answer then streams; narration yields to it and it settles.
+    act(() => {
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 4,
+        name: 'tool_call',
+        data: { callId: 't1', tool: 'search_text', args: {} },
+      });
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 5,
+        name: 'tool_result',
+        data: { callId: 't1', tool: 'search_text', hitCount: 1 },
+      });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 6,
+        data: { text: 'The answer is 42.' },
+      });
+    });
+    expect(screen.getByText(/The answer is 42\./)).toBeInTheDocument();
+    expect(screen.queryByTestId('live-narration')).toBeNull();
+    act(() => {
+      liveSocket!.emit({
+        type: 'done',
+        streamId: 'stream-1',
+        seq: 7,
+        data: { messageId: 'am-1', finishReason: 'stop', citationCount: 0 },
+      });
+    });
+  });
+
   it('keeps chat history reachable at narrow widths via the drawer (AC-4, #136)', async () => {
     installFetch(() => EMPTY_MESSAGES);
     const user = userEvent.setup();

@@ -479,6 +479,15 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # Output ceiling for the grounded answer / forced-synthesis turn (#488). Bounds
+    # answer length — and therefore the tail of the "streaming" wait — so a runaway
+    # generation cannot stall time-to-completion. ``finish_reason == "length"`` then
+    # becomes an ordinary terminal handled by the ONE length continuation (ADR-0016
+    # §4), which caps a single answer at ~2× this value. ``0`` ⇒ unbounded (the
+    # pre-#488 shape); the offline/headless runtime default is also unbounded so
+    # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
+    chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
+
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent

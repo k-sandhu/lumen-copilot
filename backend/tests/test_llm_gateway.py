@@ -284,6 +284,49 @@ async def test_stream_tools_api_key_and_base_override(monkeypatch: pytest.Monkey
     assert captured["api_base"] == "https://provider.example.com/v1"
 
 
+async def test_stream_tools_passes_max_tokens_when_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC-5 (#488): the chat runtime bounds the answer/synthesis turn; the ceiling
+    # must reach the litellm call.
+    from app.domain.llm import ToolSpec
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.update(kwargs)
+        return _FakeStream([None])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="hi")], tools=[spec], max_tokens=512
+        )
+    ]
+    assert captured["max_tokens"] == 512
+
+
+async def test_stream_tools_omits_max_tokens_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unset ⇒ unbounded, the exact pre-#488 wire (never a max_tokens key).
+    from app.domain.llm import ToolSpec
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.update(kwargs)
+        return _FakeStream([None])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+    _ = [
+        ev
+        async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="hi")], tools=[spec])
+    ]
+    assert "max_tokens" not in captured
+
+
 async def test_chat_usage_absent_yields_zeroed_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_acompletion(**kwargs: Any) -> _Response:
         return _Response("no usage", usage=None)

@@ -179,6 +179,11 @@ _DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
 # (``1 + len(_RETRY_BACKOFF_SECONDS)`` = 3 attempts). The chat API wires 2 (one
 # retry) so a live turn does not stack the ladder inside the interactive budget.
 _DEFAULT_INTERACTIVE_MAX_ATTEMPTS: int | None = None
+# Answer/synthesis output ceiling (#488). ``None`` (the module default, and every
+# offline/headless caller) = unbounded, the exact pre-#488 wire, so scripted turns
+# keep their shapes. The chat API wires ``Settings.chat_answer_max_tokens`` so a
+# live answer's length — and the tail of the streaming wait — is bounded.
+_DEFAULT_ANSWER_MAX_TOKENS: int | None = None
 
 
 @dataclass(slots=True)
@@ -317,6 +322,13 @@ class _StreamState:
     # e.g. an error already emitted and then a shutdown ``CancelledError`` tries
     # to emit its own (issue #156).
     terminal_sent: bool = False
+    # True once at least one answer ``delta`` has actually been FLUSHED to the
+    # wire for the current speculative turn (#488). Set in ``_publish_text_
+    # envelope`` (delta kind), cleared by ``_retract_answer``. It is what tells a
+    # retraction whether there is anything on the client to discard: buffered-but-
+    # never-flushed speculative text is dropped silently (no ``answer_retract``),
+    # while flushed text earns the retraction envelope.
+    answer_on_wire: bool = False
 
     def next_seq(self) -> int:
         s = self.seq
@@ -456,6 +468,7 @@ class ChatRuntime:
         clock: Callable[[], float] | None = None,
         turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
         interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
+        answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -553,6 +566,11 @@ class ChatRuntime:
         # constructors, so their behaviour is byte-identical to pre-#489.
         self._turn_timeout_seconds = turn_timeout_seconds
         self._interactive_max_attempts = interactive_max_attempts
+        # Answer/synthesis output ceiling (#488), threaded into every answer-turn
+        # ``stream_tools`` call. ``None`` ⇒ unbounded (the pre-#488 wire); the chat
+        # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
+        # as unbounded (the setting's documented kill switch).
+        self._answer_max_tokens = answer_max_tokens or None
 
     def _new_coalescer(self) -> _TextCoalescer:
         """The per-stream text buffer, built from this runtime's flush policy."""
@@ -1078,6 +1096,7 @@ class ChatRuntime:
                 await self._stream_text(state, _TextKind("narration", _turn), text)
 
             turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
+                state=state,
                 session=session,
                 route_state=route_state,
                 messages=messages,
@@ -1085,10 +1104,14 @@ class ChatRuntime:
                 tools=advertised,
                 refit=_refit,
                 narrate=_publish_narration,
+                max_tokens=self._answer_max_tokens,
             )
             if not turn_tool_calls:
-                # Tool-free turn → this is the answer. Only now is its text known
-                # to be answer content (not narration), so stream it now and stop.
+                # Tool-free turn → this is the answer. Its text ALREADY streamed
+                # live as answer deltas (#488, speculatively); no tool fragment
+                # ever appeared, so none of it was retracted — it stays the
+                # answer. Just close the think step (which flushes any tail of the
+                # coalesced answer) and stop.
                 await self._emit_step(
                     state,
                     key="think",
@@ -1096,7 +1119,6 @@ class ChatRuntime:
                     step_state="completed",
                     turn=turn_index + 1,
                 )
-                await self._publish_text(state, turn_text)
                 answer_chunks = turn_text
                 budget_exhausted = False
                 break
@@ -1218,6 +1240,7 @@ class ChatRuntime:
                 turn=max_tool_turns + 1,
             )
             _, finish_reason, turn_text = await self._stream_turn_resilient(
+                state=state,
                 session=session,
                 route_state=route_state,
                 messages=messages,
@@ -1225,6 +1248,7 @@ class ChatRuntime:
                 tools=advertised,
                 tool_choice="none",
                 refit=_refit,
+                max_tokens=self._answer_max_tokens,
             )
             await self._emit_step(
                 state,
@@ -1233,7 +1257,9 @@ class ChatRuntime:
                 step_state="completed",
                 turn=max_tool_turns + 1,
             )
-            await self._publish_text(state, turn_text)
+            # The forced synthesis is tool-IMPOSSIBLE (``tool_choice="none"``), so
+            # its text streamed live unconditionally (#488, AC-2); the think step
+            # above flushed any coalesced tail. Nothing to re-publish here.
             answer_chunks = turn_text
 
         if ask_question is not None:
@@ -1321,6 +1347,7 @@ class ChatRuntime:
             )
             try:
                 _, finish_reason, extra_chunks = await self._stream_turn_resilient(
+                    state=state,
                     session=session,
                     route_state=route_state,
                     messages=messages,
@@ -1334,6 +1361,13 @@ class ChatRuntime:
                     # single-model attribution surface (done.model, the
                     # message row, the audit).
                     allow_failover=False,
+                    # The continuation runs AFTER a finalised answer block, so it
+                    # must NOT stream live (#488): a whole-turn ``answer_retract``
+                    # here would discard the already-finalised partial too. Buffer
+                    # it and publish once it completes, the pre-#488 shape — which
+                    # keeps "at most one un-finalised speculative block" true.
+                    stream_answer=False,
+                    max_tokens=self._answer_max_tokens,
                 )
             except AppError as exc:
                 # Best-effort continuation: if it cannot run (retries
@@ -1636,6 +1670,7 @@ class ChatRuntime:
     async def _stream_turn_resilient(
         self,
         *,
+        state: _StreamState,
         session: AsyncSession,
         route_state: _RouteState,
         messages: list[ChatMessage],
@@ -1645,16 +1680,25 @@ class ChatRuntime:
         refit: Callable[[str], list[ChatMessage]] | None = None,
         allow_failover: bool = True,
         narrate: Callable[[str], Awaitable[None]] | None = None,
+        stream_answer: bool = True,
+        max_tokens: int | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
-        """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
+        """One turn with bounded retries + model failover (ADR-0016 §4, #413/#488).
 
-        Safe by construction: an UNCLASSIFIED turn publishes nothing (its text
-        is buffered; only the caller decides what streams) and tools run
-        between turns — so a retried or failed-over turn can neither duplicate
-        wire output nor re-execute a tool. A turn CLASSIFIED tool-calling
-        (ADR-0016 §6, #414) may publish narration through the ``narrate``
-        seam — and from that classification instant the window below is
-        closed: no retry, no failover. Policy, in order:
+        Safe by construction even though the answer now streams LIVE (#488):
+        speculative answer ``delta``s are wire output that can be UN-published, so
+        a retried or failed-over turn is preceded by an ``answer_retract`` that
+        undoes them — the retry window therefore stays open despite live streaming.
+        Tools run between turns, so a retry can never re-execute a tool. A turn
+        CLASSIFIED tool-calling (ADR-0016 §6, #414) publishes narration through the
+        ``narrate`` seam — narration cannot be un-published, so from that
+        classification instant the window is closed: no retry, no failover.
+
+        ``stream_answer`` gates live answer streaming: the tool-loop and forced-
+        synthesis turns stream (``True``); the length continuation buffers
+        (``False``) because it runs after a finalised answer block, where a
+        whole-turn retraction would wrongly discard the finalised partial too
+        (#488). ``max_tokens`` bounds the turn's generation. Policy, in order:
 
         * a gateway-classified RETRYABLE fault (timeout / connection / 429 /
           provider 5xx) retries on the SAME route, ≤ ``len(_RETRY_BACKOFF_
@@ -1684,7 +1728,25 @@ class ChatRuntime:
         become an opaque 500. ``None`` (batch/headless/offline) keeps the pre-#489
         behaviour: the gateway's request timeout is the only bound.
         """
-        emitted = {"narration": False}
+        # ``narration`` closes the retry window (§6); ``answer`` records that
+        # speculative answer text has been streamed live this attempt and is
+        # therefore RETRACTABLE before a retry/failover (#488).
+        emitted = {"narration": False, "answer": False}
+
+        async def _speak_answer(text: str) -> None:
+            # Speculative / tool-impossible answer text, streamed live as
+            # ``delta`` (#488). Recorded BEFORE the publish so a fault mid-publish
+            # still knows to retract on the way to a retry.
+            emitted["answer"] = True
+            await self._stream_text(state, _ANSWER_TEXT, text)
+
+        async def _retract_speculative_answer() -> None:
+            # Un-publish the current turn's speculative answer ``delta``s (#488):
+            # discards the still-buffered tail and — if any delta already reached
+            # the wire — emits ``answer_retract``. Resets the flag so the next
+            # attempt streams cleanly and a second retract is a no-op.
+            await self._retract_answer(state)
+            emitted["answer"] = False
 
         async def _narrate_and_close_window(text: str) -> None:
             # ADR-0016 §4/§6 (#414): the window closes at the CLASSIFICATION
@@ -1716,8 +1778,16 @@ class ChatRuntime:
                             usage=usage,
                             tools=tools,
                             tool_choice=tool_choice,
+                            max_tokens=max_tokens,
                             narrate=(
                                 _narrate_and_close_window if narrate is not None else None
+                            ),
+                            speak=(_speak_answer if stream_answer else None),
+                            # Retraction is only meaningful where a tool call can
+                            # still appear (narrate seam wired); a tool-impossible
+                            # turn never classifies, so it never retracts here.
+                            on_retract=(
+                                _retract_speculative_answer if narrate is not None else None
                             ),
                         )
                     except LlmProviderError as exc:
@@ -1726,6 +1796,13 @@ class ChatRuntime:
                             # (ADR-0016 §4: the retry window closed at first
                             # emission; a retry could duplicate wire output).
                             raise
+                        # Retryable and NOT classified tool-calling: any answer
+                        # text streamed speculatively this attempt is retractable
+                        # (#488). Un-publish it so the retry/failover re-streams
+                        # cleanly — this is what keeps the window open despite
+                        # live streaming.
+                        if emitted["answer"]:
+                            await _retract_speculative_answer()
                         last = exc
                         # Class-name-derived detail only — never vendor text (#36 AC-7).
                         log.warning(
@@ -1890,20 +1967,35 @@ class ChatRuntime:
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
+        max_tokens: int | None = None,
         narrate: Callable[[str], Awaitable[None]] | None = None,
+        speak: Callable[[str], Awaitable[None]] | None = None,
+        on_retract: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
-        Buffers the turn's text chunks and folds token ``usage`` into the running
-        total. ANSWER text is never published from here (only the caller knows a
-        tool-free turn's text is the answer — issue #148); a turn PROVEN
-        tool-calling (the first tool fragment, ADR-0016 §6 #414) flushes its
-        buffered text through the optional ``narrate`` callback and streams the
-        rest live as transient narration — the one publishing this method does,
-        and only via that caller-supplied seam. ``tools`` is the run's
-        allow-list rendered as ``ToolSpec``s (issue
-        #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
-        forces a tool-free turn — the final synthesis once the budget is spent.
+        Buffers the turn's text chunks (for persistence) and folds token ``usage``
+        into the running total. Publishing is entirely through caller-supplied
+        seams, so this method never decides what a chunk MEANS:
+
+        * ``speak`` — when set (#488), each text chunk is forwarded LIVE as answer
+          ``delta`` the instant it arrives, *before* the turn is proven tool-free.
+          The caller enables it only where that is safe: a tool-impossible turn
+          (``tool_choice="none"`` / empty tools) streams unconditionally, and a
+          tool-advertised turn streams SPECULATIVELY.
+        * ``narrate`` + ``on_retract`` — the classification seam (ADR-0016 §6,
+          #414). The FIRST tool-call fragment proves the turn tool-calling, hence
+          its text narration: ``on_retract`` un-publishes any speculative answer
+          ``delta`` (#488), the buffer flushes through ``narrate`` as
+          ``event:narration``, and the rest of the turn narrates live. ``narrate``
+          also CLOSES the turn's retry window (§4 — an emitting turn never retries).
+
+        Answer text is thus never published as answer once the turn is known
+        tool-calling: it is retracted and re-emitted as narration, so the
+        streamed-and-not-retracted answer still equals the persisted one (#148).
+        ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue #207 §2).
+        ``tool_choice="none"`` forces a tool-free turn — the final synthesis once
+        the budget is spent. ``max_tokens`` bounds the generation (#488).
 
         ``route`` carries the answer's resolved gateway route (PR 2a): the raw model
         id + (for a per-tenant provider) the api_key/base_url override. The SAME
@@ -1925,6 +2017,9 @@ class ChatRuntime:
             # OpenAI-style implicit caching lands consecutive answers of one
             # conversation on the same cache shard.
             cache_key=str(self._cache_key) if self._cache_key else None,
+            # Output ceiling (#488): only forwarded when set, so an unbounded
+            # (offline/headless) turn keeps its exact pre-#488 wire.
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         ):
             if (
                 (ev.tool_call_started or ev.tool_calls)
@@ -1933,10 +2028,14 @@ class ChatRuntime:
             ):
                 # The classification point (ADR-0016 §6, #414): the FIRST
                 # tool-call fragment proves this turn is tool-calling, hence
-                # its text is narration. Flush the buffer as narration and
-                # stream the rest live; the caller's callback also CLOSES the
-                # turn's retry window (§4 — an emitting turn never retries).
+                # its text is narration. First RETRACT any answer text already
+                # streamed speculatively (#488) — the client discards it —
+                # then flush the buffer as narration and stream the rest live;
+                # ``narrate`` also CLOSES the turn's retry window (§4 — an
+                # emitting turn never retries).
                 narrating = True
+                if on_retract is not None:
+                    await on_retract()
                 buffered = "".join(text_chunks)
                 # ALWAYS invoke — an empty buffer still closes the retry
                 # window (the amendment's letter: the window closes AT the
@@ -1946,6 +2045,10 @@ class ChatRuntime:
             if ev.text:
                 if narrating and narrate is not None:
                     await narrate(ev.text)
+                elif speak is not None:
+                    # Speculative / tool-impossible answer text, streamed live
+                    # as ``delta`` (#488). Only reached while NOT narrating.
+                    await speak(ev.text)
                 text_chunks.append(ev.text)
             if ev.tool_calls:
                 turn_tool_calls = list(ev.tool_calls)
@@ -1957,11 +2060,14 @@ class ChatRuntime:
         return turn_tool_calls, finish_reason, text_chunks
 
     async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
-        """Publish answer text as ``delta`` envelopes, coalesced (#487).
+        """Publish BUFFERED answer text as ``delta`` envelopes, coalesced (#487).
 
-        Called only for the answer turn's text — the tool-free turn or the forced
-        synthesis — never for a tool-calling turn's pre-tool narration (issue
-        #148), so the streamed answer equals the persisted one.
+        Since #488 the answer/synthesis turns stream their text LIVE (through the
+        ``speak`` seam), so this is now used ONLY by the length continuation — the
+        one answer turn that stays buffered, because it runs after a finalised
+        answer block where a whole-turn retraction could not apply (#488). Never
+        for a tool-calling turn's pre-tool narration (issue #148), so the
+        streamed-and-not-retracted answer equals the persisted one.
 
         Adjacent chunks are merged under the flush policy instead of minting one
         envelope per provider chunk. The CONCATENATION is byte-identical either
@@ -2491,8 +2597,38 @@ class ChatRuntime:
                 data={"text": text, "turn": kind.turn},
             )
         else:
+            # An answer ``delta`` is now on the wire — a later retraction (#488)
+            # has something to discard on the client.
+            state.answer_on_wire = True
             envelope = envelopes.delta(state.stream_id, state.next_seq(), {"text": text})
         await self._publish(state, envelope)
+
+    async def _retract_answer(self, state: _StreamState) -> None:
+        """Retract the current speculative turn's answer ``delta``s (#488).
+
+        First DISCARD any answer text still buffered in the coalescer — it is
+        being retracted, so publishing it now (then discarding it on the client)
+        would be pointless AND would race a stray ``delta`` onto the wire with a
+        HIGHER ``seq`` than the retraction (a buffered chunk flushed by the next
+        ``_next_seq`` would land after ``answer_retract`` and never be discarded).
+        Then, only if a ``delta`` actually reached the wire, publish
+        ``event:answer_retract`` — a whole-turn retraction (contract #488). A
+        turn whose speculative text only ever buffered (never flushed) is undone
+        by the discard alone, with no envelope. ``seq`` is minted directly (the
+        buffer is already drained, so ``_next_seq``'s flush would be a no-op).
+        """
+        # The buffer, if non-empty here, holds this turn's un-flushed answer text
+        # (kind == _ANSWER_TEXT). Discard it. Any other kind (impossible at a
+        # retraction point) is flushed rather than silently dropped.
+        if state.buffer.kind is None or state.buffer.kind == _ANSWER_TEXT:
+            state.buffer.take()
+        else:  # pragma: no cover — defensive; retraction only follows answer text
+            await self._flush_text(state)
+        if not state.answer_on_wire:
+            return
+        state.answer_on_wire = False
+        seq = state.next_seq()
+        await self._publish(state, envelopes.event(state.stream_id, seq, name="answer_retract"))
 
     async def _publish(self, state: _StreamState, envelope: dict[str, object]) -> None:
         await self._backplane.publish(state.stream_id, envelope)

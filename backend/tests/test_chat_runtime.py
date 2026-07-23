@@ -310,6 +310,8 @@ def _runtime(
     clock: object = None,
     turn_timeout_seconds: float | None = None,
     interactive_max_attempts: int | None = None,
+    retry_sleep: object = None,
+    answer_max_tokens: int | None = None,
 ) -> ChatRuntime:
     extra: dict[str, object] = {}
     if text_coalesce_chars is not None:
@@ -318,6 +320,10 @@ def _runtime(
         extra["text_coalesce_seconds"] = text_coalesce_seconds
     if clock is not None:
         extra["clock"] = clock
+    if retry_sleep is not None:
+        extra["retry_sleep"] = retry_sleep
+    if answer_max_tokens is not None:
+        extra["answer_max_tokens"] = answer_max_tokens
     if suggestions_model is not None:
         extra["suggestions_model"] = suggestions_model
     if model_route_resolver is not None:
@@ -5242,6 +5248,24 @@ def _texts_of(envs: list[dict[str, object]], kind: str) -> list[str]:
     return [cast(str, cast("dict[str, object]", e["data"])["text"]) for e in picked]
 
 
+def _effective_answer(envs: list[dict[str, object]]) -> str:
+    """The delivered-and-NOT-retracted answer text (#488).
+
+    Folds ``delta`` text in wire order, resetting to empty on every
+    ``event:answer_retract`` — exactly what an honouring client renders. This is
+    the retraction-aware form of the #148 invariant: the persisted assistant
+    message must equal THIS, not the raw concatenation of every ``delta`` (which
+    now also carries speculative text that was later retracted).
+    """
+    answer = ""
+    for e in envs:
+        if e["type"] == "delta":
+            answer += cast(str, cast("dict[str, object]", e["data"])["text"])
+        elif e["type"] == "event" and e.get("name") == "answer_retract":
+            answer = ""
+    return answer
+
+
 async def _run_coalesced(
     ctx: _Ctx,
     *,
@@ -5475,8 +5499,12 @@ async def test_narration_is_coalesced_and_still_precedes_the_tool_events(ctx: _C
         i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "tool_call"
     ]
     assert tool_call_at and max(narration_at) < min(tool_call_at)
-    # The two kinds never merged: the answer's deltas carry ONLY the answer.
-    assert "".join(_texts_of(envs, "delta")) == "The answer."
+    # The two kinds never merged: after honouring the speculative-streaming
+    # retraction (#488 — the 360-char narration prefix flushed as answer deltas
+    # before the tool fragment revealed the turn, then was retracted), the
+    # delivered-and-not-retracted answer carries ONLY the answer.
+    assert _effective_answer(envs) == "The answer."
+    assert _effective_answer(envs) == await _stored_answer(ctx)
     assert cast("dict[str, object]", envs[narration_at[0]]["data"])["turn"] == 1
 
 
@@ -5503,3 +5531,316 @@ async def test_a_long_answer_fits_the_bounded_replay_for_a_late_subscriber(ctx: 
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert "".join(_texts_of(envs, "delta")) == "".join(chunks)
     assert await _stored_answer(ctx) == "".join(chunks).strip()
+
+
+# --- #488: speculative live streaming of the answer + retraction --------------
+
+
+def _step_index(envs: list[dict[str, object]], key: str, state: str, *, turn: int | None) -> int:
+    """Wire index of the step event matching (key, state[, turn]); -1 if absent."""
+    for i, e in enumerate(envs):
+        if e["type"] != "event" or e.get("name") != "step":
+            continue
+        d = cast("dict[str, object]", e["data"])
+        if (
+            d.get("key") == key
+            and d.get("state") == state
+            and (turn is None or d.get("turn") == turn)
+        ):
+            return i
+    return -1
+
+
+async def test_answer_turn_streams_live_before_its_think_completed(ctx: _Ctx) -> None:
+    """AC-1 (#488): a tool-free answer turn's text reaches the wire as ``delta``
+    DURING the turn -- before the turn's ``think/completed`` step -- not buffered
+    and burst-replayed after it (the pre-#488 shape published after the step).
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                StreamEvent(text="The 2024 "),
+                StreamEvent(text="answer."),
+                StreamEvent(finish_reason="stop"),
+            ],
+        ]
+    )
+    # 0-char coalescing flushes each provider chunk immediately, so a live delta
+    # is observable the instant it is spoken (the streaming property under test).
+    envs = await _run_coalesced(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]), text_coalesce_chars=0
+    )
+
+    assert envs[-1]["type"] == "done"
+    delta_at = [i for i, e in enumerate(envs) if e["type"] == "delta"]
+    think_done_2 = _step_index(envs, "think", "completed", turn=2)
+    assert delta_at and think_done_2 >= 0
+    # Every answer delta is on the wire BEFORE the answer turn's think/completed.
+    assert max(delta_at) < think_done_2
+    assert _effective_answer(envs) == "The 2024 answer." == await _stored_answer(ctx)
+
+
+async def test_forced_synthesis_streams_live_before_its_think_completed(ctx: _Ctx) -> None:
+    """AC-2 (#488): the forced tool-free synthesis (``tool_choice="none"``)
+    streams live in all cases -- its deltas precede its own ``think/completed``.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [_tool_turn("narrating ", "c1")],  # the sole tool turn; budget = 1
+        synthesis=[
+            StreamEvent(text="Synthesised "),
+            StreamEvent(text="answer."),
+            StreamEvent(finish_reason="stop"),
+        ],
+    )
+    envs = await _run_coalesced(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        text_coalesce_chars=0,
+        default_max_tool_turns=1,
+    )
+
+    assert envs[-1]["type"] == "done"
+    assert gateway.synthesis_calls == 1
+    delta_at = [i for i, e in enumerate(envs) if e["type"] == "delta"]
+    # The synthesis turn is turn max_tool_turns + 1 = 2.
+    synth_done = _step_index(envs, "think", "completed", turn=2)
+    assert delta_at and synth_done >= 0
+    assert max(delta_at) < synth_done
+    assert _effective_answer(envs) == "Synthesised answer." == await _stored_answer(ctx)
+
+
+async def test_speculative_text_retracted_when_the_turn_calls_a_tool(ctx: _Ctx) -> None:
+    """AC-4 + the non-negotiable (#488/#148): a turn that streams text and THEN
+    emits a tool call retracts the speculative deltas with a defined
+    ``event:answer_retract``, re-emits them as ``event:narration``, and the
+    persisted message equals the delivered-and-not-retracted answer -- over a
+    turn that speculates, retracts, calls a tool, then answers.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Let me look that up. "),  # speculative -- flushed live
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="The answer is 42."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    envs = await _run_coalesced(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]), text_coalesce_chars=0
+    )
+
+    assert envs[-1]["type"] == "done"
+    retract_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "answer_retract"
+    ]
+    tool_call_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "tool_call"
+    ]
+    spec_delta_at = [
+        i
+        for i, e in enumerate(envs)
+        if e["type"] == "delta"
+        and "Let me look that up." in cast(str, cast("dict[str, object]", e["data"])["text"])
+    ]
+    # The speculative delta streamed, then exactly one retraction, ahead of the tools.
+    assert spec_delta_at and len(retract_at) == 1
+    assert spec_delta_at[0] < retract_at[0] < tool_call_at[0]
+    # The retracted text is re-surfaced as narration (the transient affordance).
+    assert "".join(_texts_of(envs, "narration")) == "Let me look that up. "
+    # The delivered-and-not-retracted answer == the persisted message (#148).
+    assert _effective_answer(envs) == "The answer is 42." == await _stored_answer(ctx)
+
+
+async def test_retraction_keeps_the_retry_window_open_across_live_streaming(ctx: _Ctx) -> None:
+    """The retry-window interaction (#488): live answer streaming does NOT close
+    the retry window. A turn that streams a speculative delta and then faults
+    retryably is RETRACTED and retried cleanly -- the client ends with one clean
+    answer, and the delivered-minus-retracted text equals the persisted one.
+    """
+
+    class _SpeakThenFaultThenAnswer(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                [[StreamEvent(text="Clean answer."), StreamEvent(finish_reason="stop")]]
+            )
+            self.calls_made = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls_made += 1
+            if self.calls_made == 1:
+                yield StreamEvent(text="Half-written spec ")  # flushed live (coalesce=0)
+                raise cast(Exception, _retryable())
+            async for ev in super().stream_tools(
+                messages, tools=tools, model=model, tool_choice=tool_choice
+            ):
+                yield ev
+
+    sleeps, recorder = _sleep_recorder()
+    gateway = _SpeakThenFaultThenAnswer()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=0,
+        retry_sleep=recorder,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1 and "error" not in types
+    assert sleeps == [0.5]  # the window stayed OPEN: one retry happened
+    assert gateway.calls_made == 2
+    # The speculative half streamed, was retracted, and the clean answer replaced it.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    assert "Half-written spec " in "".join(_texts_of(envs, "delta"))
+    assert _effective_answer(envs) == "Clean answer." == await _stored_answer(ctx)
+
+
+async def test_retraction_discards_the_pending_coalesce_buffer_without_racing(ctx: _Ctx) -> None:
+    """The #487 interaction (#488): a retraction must discard the pending
+    coalesce buffer, never race a buffered delta onto the wire AFTER the
+    ``answer_retract``. With real coalescing, a long chunk flushes but a short
+    trailing chunk is still buffered when the tool fragment lands -- the buffered
+    tail must be dropped, not published with a higher seq than the retraction.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    flushed = "A" * 200  # > 160-char budget -> flushes as a live delta
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text=flushed),
+                StreamEvent(text="TAIL"),  # buffered (< budget), never flushed
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="Final answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    # Default coalescing (160 chars) so the tail genuinely buffers.
+    envs = await _run_coalesced(ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]))
+
+    assert envs[-1]["type"] == "done"
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # The buffered tail was DISCARDED -- it never appears in any delta (which would
+    # be a stray delta racing the retraction out of order). It survives only as
+    # narration, and the persisted answer is the final turn alone.
+    assert "TAIL" not in "".join(_texts_of(envs, "delta"))
+    assert "TAIL" in "".join(_texts_of(envs, "narration"))
+    assert _effective_answer(envs) == "Final answer." == await _stored_answer(ctx)
+    # seq is still strictly monotonic and unique across the whole stream.
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+class _MaxTokensCapturingGateway(_ScriptedGateway):
+    """Records the ``max_tokens`` passed to each ``stream_tools`` call (#488)."""
+
+    def __init__(self, turns: list[list[StreamEvent]], **kw: object) -> None:
+        super().__init__(turns, **kw)  # type: ignore[arg-type]
+        self.max_tokens_seen: list[object] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+        max_tokens: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.max_tokens_seen.append(max_tokens)
+        async for ev in super().stream_tools(
+            messages, tools=tools, model=model, tool_choice=tool_choice
+        ):
+            yield ev
+
+
+async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> None:
+    """AC-5 (#488): the configured answer ceiling reaches ``stream_tools`` on the
+    answer turn; an unset ceiling (the offline default) is omitted (None)."""
+    gateway = _MaxTokensCapturingGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        answer_max_tokens=256,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    assert gateway.max_tokens_seen == [256]
+
+    # Unset (the offline / headless default) threads None -- the exact pre-#488 wire.
+    gateway2 = _MaxTokensCapturingGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane2 = InMemoryBackplane()
+    stream_id2 = uuid.uuid4().hex
+    consumer2 = asyncio.create_task(_drain(backplane2, stream_id2))
+    await asyncio.sleep(0)
+    runtime2 = _runtime(ctx, gateway=gateway2, retrieval=_FakeRetrieval([]), backplane=backplane2)
+    await runtime2.run(
+        stream_id=stream_id2,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer2, timeout=2.0)
+    assert gateway2.max_tokens_seen == [None]
