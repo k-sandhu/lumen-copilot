@@ -35,6 +35,12 @@ export type ClientFactory = (options: WsClientOptions) => StreamSocket;
 
 let defaultFactory: ClientFactory = (options) => new WsClient(options);
 const DEFAULT_IDLE_TIMEOUT_MS = 20_000;
+// Text deltas are accumulated at the hook INGRESS and flushed to reducer state
+// once per animation frame (#493): render frequency is then bounded by the
+// display refresh, not by provider chunk size (~800 deltas for a 2k-token
+// answer → ~800 commits before, ~one-per-frame after). Non-DOM/SSR runtimes
+// without requestAnimationFrame fall back to this timer cadence (~display rate).
+const DELTA_FLUSH_INTERVAL_MS = 40;
 // Fallback for how long the socket stays open AFTER a `done(pendingSuggestions=true)`
 // to receive the one post-terminal `event:suggestions` (#489). Used ONLY when the
 // server does not declare its own grace on the terminal (`done.suggestionsGraceMs`,
@@ -76,15 +82,21 @@ export interface UseChatStreamOptions {
 
 type Action =
   | { kind: 'reset' }
-  | { kind: 'envelope'; envelope: WsEnvelope }
+  | { kind: 'flush'; envelopes: WsEnvelope[] }
   | { kind: 'disconnect' };
 
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.kind) {
     case 'reset':
       return initialStreamState;
-    case 'envelope':
-      return reduceStream(state, action.envelope);
+    case 'flush':
+      // Fold one or more envelopes through the pure reducer in a SINGLE React
+      // commit (#493 delta batching). Buffered text deltas are collapsed here; a
+      // trailing non-text envelope is appended so it applies right after the text
+      // it follows, preserving exact order (AC-3). `reduceStream` keeps its own
+      // seq-dedupe / terminal / retract handling, so folding is byte-identical to
+      // dispatching each envelope separately — only the render count differs.
+      return action.envelopes.reduce(reduceStream, state);
     case 'disconnect':
       return terminateWithDisconnect(state);
   }
@@ -130,13 +142,65 @@ export function useChatStream({
     }
   }, []);
 
+  // --- Delta batching (#493) -------------------------------------------------
+  // Raw text `delta` envelopes accumulate here until a scheduled flush folds them
+  // through the reducer in ONE commit. A non-text envelope flushes this buffer
+  // FIRST (see onEnvelope) so ordering is exact.
+  const pendingRef = useRef<WsEnvelope[]>([]);
+  // The scheduled flush handle (rAF or timer) with its matching canceller.
+  const flushHandleRef = useRef<{ cancel: () => void } | null>(null);
+
+  const cancelScheduledFlush = useCallback(() => {
+    if (flushHandleRef.current !== null) {
+      flushHandleRef.current.cancel();
+      flushHandleRef.current = null;
+    }
+  }, []);
+
+  // Commit the buffered text deltas (if any) as a single reducer flush.
+  const flushPendingText = useCallback(() => {
+    cancelScheduledFlush();
+    const buffered = pendingRef.current;
+    if (buffered.length === 0) return;
+    pendingRef.current = [];
+    dispatch({ kind: 'flush', envelopes: buffered });
+  }, [cancelScheduledFlush]);
+
+  // Drop the buffer WITHOUT committing — teardown paths (unmount / streamId
+  // change / cancel) must not let a trailing frame fire after the socket is gone
+  // (AC-4: no state update on an unmounted component, no act warning).
+  const discardPendingText = useCallback(() => {
+    cancelScheduledFlush();
+    pendingRef.current = [];
+  }, [cancelScheduledFlush]);
+
+  // Schedule a single coalesced flush on the next animation frame (timer fallback
+  // where rAF is unavailable). Idempotent while one is already pending.
+  const scheduleFlush = useCallback(() => {
+    if (flushHandleRef.current !== null) return;
+    if (typeof requestAnimationFrame === 'function') {
+      const id = requestAnimationFrame(() => {
+        flushHandleRef.current = null;
+        flushPendingText();
+      });
+      flushHandleRef.current = { cancel: () => cancelAnimationFrame(id) };
+    } else {
+      const id = setTimeout(() => {
+        flushHandleRef.current = null;
+        flushPendingText();
+      }, DELTA_FLUSH_INTERVAL_MS);
+      flushHandleRef.current = { cancel: () => clearTimeout(id) };
+    }
+  }, [flushPendingText]);
+
   const cancel = useCallback(() => {
     terminalRef.current = true;
     clearWatchdog();
     clearGrace();
+    discardPendingText();
     clientRef.current?.close();
     clientRef.current = null;
-  }, [clearWatchdog, clearGrace]);
+  }, [clearWatchdog, clearGrace, discardPendingText]);
 
   useEffect(() => {
     if (!streamId) {
@@ -146,6 +210,7 @@ export function useChatStream({
     }
 
     dispatch({ kind: 'reset' });
+    discardPendingText();
     terminalRef.current = false;
 
     const armWatchdog = () => {
@@ -154,6 +219,9 @@ export function useChatStream({
         watchdogRef.current = null;
         if (terminalRef.current) return;
         terminalRef.current = true;
+        // Commit any buffered partial text before the synthetic terminal so the
+        // disconnect banner shows how far the answer got (AC-4 preserves text).
+        flushPendingText();
         dispatch({ kind: 'disconnect' });
         clientRef.current?.close();
       }, idleTimeoutMs);
@@ -189,9 +257,16 @@ export function useChatStream({
         if (next === 'closed') {
           if (terminalRef.current) {
             clearGrace();
+            // Already terminal (e.g. server ending the post-terminal grace): no
+            // buffered text can be pending, but drop any scheduled frame so it
+            // cannot fire after the socket is gone.
+            discardPendingText();
           } else {
             clearWatchdog();
             terminalRef.current = true;
+            // Flush the partial answer BEFORE the synthetic terminal so a
+            // mid-stream drop preserves the text streamed so far (AC-4).
+            flushPendingText();
             dispatch({ kind: 'disconnect' });
             clientRef.current?.close();
           }
@@ -201,7 +276,28 @@ export function useChatStream({
         // Only the matching stream's envelopes (defensive — one socket per id).
         if (envelope.streamId !== streamId) return;
         clearWatchdog();
-        dispatch({ kind: 'envelope', envelope });
+
+        // TEXT DELTAS (#493): accumulate and coalesce into one React commit per
+        // animation frame. The watchdog is re-armed on ARRIVAL below (not on
+        // flush) so a healthy, batched stream can never trip the idle watchdog.
+        if (envelope.type === 'delta') {
+          pendingRef.current.push(envelope);
+          scheduleFlush();
+          armWatchdog();
+          return;
+        }
+
+        // NON-TEXT envelope (start, every side-band event incl. answer_retract,
+        // and the terminal done/error): flush the buffered text FIRST, then apply
+        // this envelope — folded through the pure reducer in a SINGLE dispatch so
+        // ordering is exact (AC-3) and no extra render is introduced. A retract
+        // (#488) folds right after its buffered deltas, clearing them in the same
+        // commit, so speculative text never lands after the retraction.
+        const buffered = pendingRef.current;
+        pendingRef.current = [];
+        cancelScheduledFlush();
+        dispatch({ kind: 'flush', envelopes: [...buffered, envelope] });
+
         if (envelope.type === 'done') {
           terminalRef.current = true;
           onDoneRef.current?.();
@@ -242,11 +338,11 @@ export function useChatStream({
           }
           return;
         }
-        // Re-arm after EVERY non-terminal envelope (start / delta / event), not
-        // just delta: the lifecycle is start → (delta|event)* → done|error, so a
-        // `start` (or `event`) that is the last thing before the backend stalls
-        // would otherwise leave the watchdog cleared with no timer to synthesize
-        // a terminal `stream_disconnected` (#159).
+        // Re-arm after EVERY non-terminal envelope (start / event), matching the
+        // delta arm above: the lifecycle is start → (delta|event)* → done|error,
+        // so a `start` (or `event`) that is the last thing before the backend
+        // stalls would otherwise leave the watchdog cleared with no timer to
+        // synthesize a terminal `stream_disconnected` (#159).
         armWatchdog();
       },
     });
@@ -254,15 +350,29 @@ export function useChatStream({
     client.connect();
 
     return () => {
-      // Unmount / streamId change: stop the socket (cancels pending reconnect)
-      // and drop any pending post-terminal grace timer (#489).
+      // Unmount / streamId change: stop the socket (cancels pending reconnect),
+      // drop any pending post-terminal grace timer (#489), and discard any
+      // buffered-but-unflushed text so no trailing frame fires after teardown
+      // (#493 AC-4).
       terminalRef.current = true;
       clearWatchdog();
       clearGrace();
+      discardPendingText();
       client.close();
       clientRef.current = null;
     };
-  }, [streamId, makeClient, idleTimeoutMs, suggestionsGraceMs, clearWatchdog, clearGrace]);
+  }, [
+    streamId,
+    makeClient,
+    idleTimeoutMs,
+    suggestionsGraceMs,
+    clearWatchdog,
+    clearGrace,
+    scheduleFlush,
+    flushPendingText,
+    discardPendingText,
+    cancelScheduledFlush,
+  ]);
 
   return { ...state, connection, cancel };
 }

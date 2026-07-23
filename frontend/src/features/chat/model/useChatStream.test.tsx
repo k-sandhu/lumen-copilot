@@ -389,3 +389,219 @@ describe('useChatStream', () => {
     expect(result.current.problem).toBeNull();
   });
 });
+
+// --- #493: batch stream deltas before committing to React state --------------
+// Text deltas are accumulated at the hook ingress and flushed once per animation
+// frame (rAF is faked by vi.useFakeTimers, so flushes are driven deterministically
+// by advancing timers — never real waiting). Non-text envelopes flush the buffer
+// first; teardown cancels any pending flush.
+describe('useChatStream — delta batching (#493)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('coalesces N text deltas into a bounded number of commits (AC-1)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders++;
+      return useChatStream({ streamId: SID, makeClient: h.makeClient });
+    });
+    const baseline = renders;
+
+    // Each WS frame arrives in its OWN task (a separate `onmessage`), so React's
+    // automatic batching cannot coalesce them — model that by flushing React
+    // between emits (a fresh `act` per delta). Without ingress batching this is
+    // one commit PER delta; with it, the deltas buffer and commit once per frame.
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+    });
+    for (let i = 1; i <= 200; i++) {
+      act(() => {
+        h.get().emit({ type: 'delta', streamId: SID, seq: i, data: { text: 'x' } });
+      });
+    }
+
+    // The 200 separately-delivered deltas have committed only a handful of times
+    // (bounded by flush cadence, not by N) — they are buffered, not dispatched.
+    const committedByDeltas = renders - baseline;
+    expect(committedByDeltas).toBeLessThan(20);
+
+    // Drive the coalesced flush (one animation frame).
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(result.current.text).toBe('x'.repeat(200));
+    // Total commits stay an order of magnitude below the delta count.
+    expect(renders - baseline).toBeLessThan(20);
+  });
+
+  it('final text equals the concatenation of all deltas, in order (AC-2)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    const tokens = Array.from({ length: 60 }, (_, i) => `${i}.`);
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      tokens.forEach((text, i) => {
+        h.get().emit({ type: 'delta', streamId: SID, seq: i + 1, data: { text } });
+      });
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(result.current.text).toBe(tokens.join(''));
+  });
+
+  it('flushes the pending buffer before a terminal done arriving right after a delta (AC-3)', () => {
+    // Fake timers ensure the animation-frame flush does NOT fire on its own —
+    // the terminal `done` must flush the buffer itself.
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer ' } });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 2, data: { text: 'complete.' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 3,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0 },
+      });
+    });
+
+    expect(result.current.phase).toBe('done');
+    expect(result.current.text).toBe('Answer complete.');
+  });
+
+  it('flushes the pending buffer before a terminal error, preserving partial text (AC-3)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
+      h.get().emit({
+        type: 'error',
+        streamId: SID,
+        seq: 2,
+        problem: { title: 'boom', status: 500, code: 'x' },
+      });
+    });
+
+    expect(result.current.phase).toBe('error');
+    expect(result.current.text).toBe('partial');
+  });
+
+  it('flushes the pending buffer before a side-band event, preserving order (AC-3)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'before ' } });
+      // A citation event arrives before the frame fires: it must flush the
+      // buffered text first, so the text is already present alongside it.
+      h.get().emit({
+        type: 'event',
+        streamId: SID,
+        seq: 2,
+        name: 'citation',
+        data: {
+          id: 'c1',
+          documentId: 'd1',
+          documentName: 'f.pdf',
+          chunkId: 'k1',
+          snippet: 's',
+          charStart: 0,
+          charEnd: 5,
+        },
+      });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 3, data: { text: 'after' } });
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(result.current.text).toBe('before after');
+    expect(result.current.citations).toHaveLength(1);
+  });
+
+  it('cancels the pending flush on unmount so nothing fires after teardown (AC-4)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { unmount } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'buffered' } });
+    });
+    // A flush frame is pending (buffer not yet committed).
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    unmount();
+
+    // Cleanup cancelled the pending flush AND the watchdog — no timer may fire
+    // after teardown, so no state update lands on an unmounted component.
+    expect(vi.getTimerCount()).toBe(0);
+    // Advancing anyway is a no-op (nothing scheduled).
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels the pending flush when streamId changes mid-buffer (AC-4)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result, rerender } = renderHook(
+      (props: { streamId: string }) => useChatStream({ ...props, makeClient: h.makeClient }),
+      { initialProps: { streamId: SID } },
+    );
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'stale' } });
+    });
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    // Switching streams tears down the old socket; its buffered text must be
+    // discarded, not flushed into the new stream's fresh (reset) state.
+    act(() => {
+      rerender({ streamId: 'stream-other' });
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // The new stream started idle with empty text — the old buffered "stale"
+    // token never flushed into it.
+    expect(result.current.text).toBe('');
+  });
+
+  it('discards buffered speculative text on answer_retract (#488) so it does not survive', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'speculative ' } });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 2, data: { text: 'answer' } });
+      // Whole-turn retraction before the frame fires: the buffered speculative
+      // text must be cleared as part of the same commit, never landing after.
+      h.get().emit({ type: 'event', streamId: SID, seq: 3, name: 'answer_retract', data: {} });
+    });
+    expect(result.current.text).toBe('');
+
+    // The real answer then streams normally on top of the cleared text.
+    act(() => {
+      h.get().emit({ type: 'delta', streamId: SID, seq: 4, data: { text: 'real answer' } });
+      vi.advanceTimersByTime(50);
+    });
+    expect(result.current.text).toBe('real answer');
+  });
+});
