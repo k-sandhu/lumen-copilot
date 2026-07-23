@@ -223,6 +223,23 @@ async def test_owner_binding_and_lookup_share_the_pooled_client() -> None:
     await backplane.aclose()
 
 
+async def test_bind_owner_opens_no_new_connection_per_call() -> None:
+    """#492 AC-3: the ``202``'s ``bind_owner`` reuses the pooled client — repeated
+    binds on the serving loop (many concurrent sends) construct exactly ONE
+    client, never a connect/teardown per send. Pre-#487 each ``bind_owner`` built
+    and closed its own Redis client, sitting on the synchronous send path inside
+    the still-open Postgres transaction."""
+    backplane, server = _fake_backplane()
+
+    for _ in range(20):
+        owner = StreamOwner(owner_id=uuid.uuid4(), tenant_id=uuid.uuid4())
+        await backplane.bind_owner(uuid.uuid4().hex, owner)
+
+    assert server.created == 1  # O(1), not O(sends)
+    assert not server.clients[0].closed  # pooled: not torn down per call
+    await backplane.aclose()
+
+
 async def test_unknown_stream_owner_is_none() -> None:
     """Negative: an unbound/expired stream id reads back as ``None`` (deny)."""
     backplane, server = _fake_backplane()

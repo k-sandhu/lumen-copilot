@@ -2399,16 +2399,28 @@ class ChatSessionRepository(_TenantScopedRepository):
 
         Tenant-scoped (INV-1). A no-op for a foreign/missing id. Used by the send
         path so an active conversation surfaces first in the session list.
+
+        One statement (#492 AC-2): a single ORM-enabled ``UPDATE ... WHERE
+        tenant_id AND id`` — the tenant predicate rides the write itself (so a
+        foreign/missing id matches zero rows and closes the SELECT→UPDATE TOCTOU
+        window), replacing the prior read-modify-flush that redundantly reloaded a
+        row the send path already holds. ``synchronize_session="evaluate"`` patches
+        any already-loaded instance in the identity map so it is not left stale
+        under ``expire_on_commit=False``. The timestamp stays a Python
+        ``datetime.now(UTC)`` (NOT ``func.now()``, which is Postgres'
+        ``transaction_timestamp()`` — the transaction's start, not the current
+        instant), so the stamp is byte-identical to the prior behaviour.
         """
-        stmt = select(models.ChatSession).where(
-            models.ChatSession.tenant_id == self._tenant_id,
-            models.ChatSession.id == session_id,
+        stmt = (
+            update(models.ChatSession)
+            .where(
+                models.ChatSession.tenant_id == self._tenant_id,
+                models.ChatSession.id == session_id,
+            )
+            .values(updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session="evaluate")
         )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
-        if row is None:
-            return
-        row.updated_at = datetime.now(UTC)
-        await self._session.flush()
+        await self._session.execute(stmt)
 
     async def delete(self, session_id: UUID) -> bool:
         stmt = select(models.ChatSession).where(
