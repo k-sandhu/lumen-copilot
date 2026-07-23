@@ -584,6 +584,51 @@ async def test_summary_route_resolves_provider_sessions(
     assert ghost.api_key is None
 
 
+async def test_summary_route_uses_fast_default_not_the_frontier_session_model() -> None:
+    """#490 AC-2: an unpinned summarizer runs on the DEDICATED FAST default, not
+    the session's answer route. A background compaction task must never inherit a
+    frontier model just because the chat session is pinned to one — that is the
+    exact leak #490 closes for config (non-``provider:``) sessions."""
+    from app.tasks import summarize as task_module
+
+    settings = _summary_settings()  # chat_summary_model="" (unpinned)
+    fast_default = next(m.id for m in settings.chat_model_registry if m.is_default)
+    # A frontier config session model — the summarizer must NOT follow it.
+    route = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="openrouter/anthropic/claude-opus-4.8",
+    )
+    assert route.model == fast_default
+    assert route.api_key is None
+
+
+async def test_summary_route_honors_a_pinned_dedicated_model() -> None:
+    """#490 AC-2: a config-pinned ``CHAT_SUMMARY_MODEL`` is the requested id,
+    distinct from both the session's answer route and the registry default."""
+    from app.core.config import get_settings
+    from app.tasks import summarize as task_module
+
+    pinned = "openrouter/google/gemini-3.5-flash"
+    settings = get_settings().model_copy(
+        update={
+            "chat_summary_keep_messages": 4,
+            "chat_summary_min_batch": 4,
+            "chat_summary_model": pinned,
+        }
+    )
+    route = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="openrouter/anthropic/claude-opus-4.8",
+    )
+    assert route.model == pinned
+
+
 async def test_mention_map_holds_forty_entries(ctx: _Ctx) -> None:
     """#446 round-3 blocker-1 gate: the mention map stores and reads back up to
     40 entries — a 25-name summary keeps EVERY name redactable (the >20-name

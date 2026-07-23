@@ -55,7 +55,6 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
         label="Claude Opus 4.8",
         provider="anthropic",
         tier=ModelTier.FRONTIER,
-        is_default=True,
     ),
     ChatModelSetting(
         id="openrouter/openai/gpt-5.5",
@@ -69,11 +68,22 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
         provider="google",
         tier=ModelTier.FAST,
     ),
+    # The shipped chat default (#490 / #486). A FAST-tier model, deliberately not
+    # frontier: the answer is buffered whole before the user sees any of it, so
+    # token-generation time is the floor for perceived chat speed. Chosen over
+    # the sibling FAST entry (gemini-3.5-flash) on two merits — (1) it stays in
+    # the Anthropic family the prior frontier default and the grounded system
+    # prompt were tuned against, minimising answer-quality/instruction-following
+    # drift, and (2) only the anthropic/openai families earn prompt-cache
+    # directives (ADR-0016 §2; gateway._cache_family), so keeping the default on
+    # an anthropic route preserves the cache-first latency win that a google
+    # route would forfeit. Frontier stays selectable per session / per tenant.
     ChatModelSetting(
         id="openrouter/anthropic/claude-haiku-4.5",
         label="Claude Haiku 4.5",
         provider="anthropic",
         tier=ModelTier.FAST,
+        is_default=True,
     ),
     ChatModelSetting(
         id="openrouter/deepseek/deepseek-v3.2",
@@ -387,6 +397,14 @@ class Settings(BaseSettings):
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    # The gateway FALLBACK model for callers that pass ``model=None`` to
+    # ``LLMGateway`` (in practice only ``SearchService._direct_answer``, the
+    # optional cited direct answer on /search). This is NOT the chat default and
+    # tuning it does NOT speed up chat: the grounded chat answer resolves its
+    # model from the picker registry's ``is_default`` entry
+    # (``ChatService._default_model`` -> ``_DEFAULT_CHAT_MODEL_REGISTRY``, a
+    # FAST-tier model since #490), never from ``llm_model``. Kept a distinct
+    # value deliberately so the two do not silently conflate (#490 AC-5).
     llm_model: str = Field(default="openrouter/openai/gpt-4o-mini", alias="LLM_MODEL")
     # Embedding model id (issue #32). OpenRouter serves embeddings on an
     # OpenAI-compatible endpoint; LiteLLM's native ``openrouter/`` route for
@@ -450,14 +468,27 @@ class Settings(BaseSettings):
     chat_suggestions_timeout_seconds: float = Field(
         default=8.0, gt=0, le=60, alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS"
     )
+    # The model the suggestions completion runs on (#490). A DEDICATED FAST-tier
+    # id, not the answer's route: a <=400-token nicety on the critical path must
+    # not ride the session's (possibly frontier) model. Empty ⇒ inherit the
+    # answer route (the pre-#490 behaviour). Routed like any config id (default
+    # OpenRouter credentials); a per-tenant ``provider:`` id is resolved through
+    # the same seam chat uses.
+    chat_suggestions_model: str = Field(
+        default="openrouter/anthropic/claude-haiku-4.5", alias="CHAT_SUGGESTIONS_MODEL"
+    )
 
     # Rolling session summary (#416, ADR-0016 §3.2): the async post-answer
     # summarizer. ``keep_messages`` is the verbatim tail never summarized (the
     # last M turns stay word-for-word); ``min_batch`` is how many messages
     # beyond that tail must accumulate before a summarize call is worth its
     # cost (the task no-ops below it). ``summary_model`` pins the summarizer's
-    # model; empty ⇒ the registry default (tasks run headless with config
-    # credentials — per-tenant ``provider:`` ids are not routable there).
+    # model. Empty (the default) ⇒ the summarizer uses the DEDICATED FAST-tier
+    # default (the registry ``is_default`` id, now FAST — #490) for a config
+    # session, so a background compaction task never inherits a frontier answer
+    # route; a per-tenant ``provider:`` session still summarizes through its own
+    # provider (#446 finding 6). A non-empty value is an explicit override used
+    # with config credentials.
     chat_summary_enabled: bool = Field(default=True, alias="CHAT_SUMMARY_ENABLED")
     chat_summary_keep_messages: int = Field(
         default=8, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
