@@ -54,6 +54,18 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// Text deltas are batched to an animation frame at the hook ingress (#493). When
+// an act() block ends on a delta (with no trailing non-text envelope to flush the
+// buffer synchronously), let the coalesced flush fire inside act before asserting
+// the rendered text. Uses the real jsdom rAF — one frame, no arbitrary waiting.
+async function flushDeltaFrame(): Promise<void> {
+  await act(async () => {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
+}
+
 const MODELS = {
   items: [
     { id: 'frontier/opus', label: 'Opus', provider: 'anthropic', tier: 'frontier', is_default: true },
@@ -301,6 +313,7 @@ describe('ChatView (critical flow)', () => {
         data: { text: 'Let me look that up.' },
       });
     });
+    await flushDeltaFrame();
     expect(screen.getByText(/Let me look that up\./)).toBeInTheDocument();
 
     // A tool call reveals the turn → the retraction REMOVES the speculative text
@@ -344,6 +357,7 @@ describe('ChatView (critical flow)', () => {
         data: { text: 'The answer is 42.' },
       });
     });
+    await flushDeltaFrame();
     expect(screen.getByText(/The answer is 42\./)).toBeInTheDocument();
     expect(screen.queryByTestId('live-narration')).toBeNull();
     act(() => {

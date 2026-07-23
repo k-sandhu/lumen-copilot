@@ -159,6 +159,14 @@ export function ChatThread({
 
   // Follow new content only while stuck to the bottom. Guard scrollIntoView —
   // it is not implemented in jsdom (tests) and may be absent in older runtimes.
+  //
+  // This effect stays synchronous (its call cadence is asserted immediately after
+  // render in ChatThread.test.tsx). It no longer runs a layout pass PER DELTA:
+  // `useChatStream` batches incoming text deltas and commits once per animation
+  // frame (#493), so this component re-renders — and this autoscroll runs — at the
+  // flush cadence, not the provider chunk rate. The final flush (and the terminal
+  // commit) still change `live?.text` / `live?.phase`, so the view lands at the
+  // bottom when the stream ends (#493 AC-5).
   useLayoutEffect(() => {
     if (stickRef.current && typeof endRef.current?.scrollIntoView === 'function') {
       endRef.current.scrollIntoView({ block: 'end' });
