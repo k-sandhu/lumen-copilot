@@ -113,6 +113,19 @@ def get_backplane() -> Backplane:
     return RedisBackplane(get_settings().redis_url)
 
 
+async def aclose_backplane() -> None:
+    """Release the process-wide backplane's pooled Redis client (issue #487).
+
+    Called from the app lifespan's shutdown, alongside ``aclose_search_store`` /
+    ``dispose_engine``, so the client is closed on the same (serving) loop that
+    created it. Guarded by the concrete type: the offline in-memory backplane
+    owns no client, and the singleton is a Protocol to the rest of the app.
+    """
+    backplane = get_backplane()
+    if isinstance(backplane, RedisBackplane):
+        await backplane.aclose()
+
+
 def get_backplane_dep() -> Backplane:
     """Backplane dependency (delegates to the cached singleton)."""
     return get_backplane()

@@ -45,7 +45,7 @@
       "properties": {
         "type": { "const": "delta" },
         "data": {
-          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta)."
+          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta). Chunk boundaries are NOT semantic: the server may coalesce adjacent chunks into one delta (#487). Clients must concatenate in seq order and must not assume any relationship between delta count and provider tokens."
         }
       },
       "required": ["type", "streamId", "seq", "data"]
@@ -205,7 +205,7 @@
       "description": "`event.data` for name=narration (ADR-0016 §6, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
       "required": ["text", "turn"],
       "properties": {
-        "text": { "type": "string", "description": "One narration chunk; append-ordered within the turn by seq." },
+        "text": { "type": "string", "description": "One or more narration chunks; append-ordered within the turn by seq. Adjacent chunks of the same turn may be coalesced server-side into a single envelope (#487), so chunk boundaries are not semantic — concatenate in seq order." },
         "turn": { "type": "integer", "minimum": 1, "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)." }
       }
     },

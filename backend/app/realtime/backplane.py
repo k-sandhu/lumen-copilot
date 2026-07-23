@@ -27,6 +27,16 @@ Envelopes are JSON dicts (the ``contracts/websocket-envelopes.schema.json``
 shapes). A subscriber yields them until it sees a **terminal** envelope
 (``done`` / ``error``) — the exactly-one-terminal lifecycle — or the stream is
 explicitly closed.
+
+**Connection ownership (issue #487).** :class:`RedisBackplane` keeps ONE pooled
+client per event loop for the command path (``publish`` / ``bind_owner`` /
+``get_owner``) and gives :meth:`RedisBackplane.subscribe` its own dedicated
+pub/sub connection. The pooled client is released by
+:meth:`RedisBackplane.aclose`, wired into the app lifespan via
+:func:`app.api.deps.aclose_backplane`. Producer-side *batching* is not done here:
+coalescing lives at the envelope-construction seam in the chat runtime, so the
+replay list stores byte-identical envelopes to what the live channel delivers
+(the #153 replay/live equivalence).
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -73,6 +83,13 @@ _REPLAY_TTL_SECONDS = _OWNER_TTL_SECONDS
 # the handshake cannot slip past both paths. Bounded so a silent Redis can't hang.
 _SUBSCRIBE_CONFIRM_TYPES = frozenset({"subscribe", "psubscribe"})
 _SUBSCRIBE_CONFIRM_TIMEOUT_SECONDS = 5.0
+
+# How a Redis client is constructed (issue #487). ``redis.asyncio``'s client is
+# not usefully typed for the paths used here (``from_url`` is untyped and the
+# command returns are sync/async unions), so the client itself is held as ``Any``
+# at this one boundary — the module's public surface stays fully typed. Injecting
+# a factory is also what lets the lifecycle tests run without a live Redis.
+RedisClientFactory = Callable[[], Any]
 
 
 def _channel(stream_id: str) -> str:
@@ -154,10 +171,81 @@ class Backplane(Protocol):
 
 
 class RedisBackplane:
-    """Redis-backed pub/sub fan-out (the production backplane)."""
+    """Redis-backed pub/sub fan-out (the production backplane).
 
-    def __init__(self, redis_url: str) -> None:
+    **One pooled client per event loop** (issue #487). ``publish`` /
+    ``bind_owner`` / ``get_owner`` share a single lazily-created
+    ``redis.asyncio`` client instead of opening and tearing one down per call —
+    a streamed answer used to pay a TCP connect (plus any auth/TLS handshake)
+    and a close for *every* envelope, serialised into streaming throughput.
+    ``subscribe`` still takes its own dedicated connection: a pub/sub connection
+    cannot be shared with ordinary commands, and its lifetime is the
+    subscription's, not the process's.
+
+    The lazy client is keyed by the **running event loop**, so a client whose
+    connections were opened on a now-closed loop is never reused — the #140
+    engine-per-loop failure mode. That is what keeps the class Celery-safe: a
+    warm prefork worker runs each task on a fresh loop (``tasks/runner.run_task``)
+    and simply gets its own client for that run, exactly as ``search/store.py``
+    builds a per-run store. The API process has one serving loop, so it creates
+    one client, released by :meth:`aclose` from the app lifespan.
+
+    ``client_factory`` is the injectable construction seam: production leaves it
+    ``None`` (``redis.asyncio.from_url``); lifecycle/failure tests inject a fake
+    so they need no live Redis.
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        client_factory: RedisClientFactory | None = None,
+    ) -> None:
         self._redis_url = redis_url
+        self._client_factory: RedisClientFactory = client_factory or self._connect
+        # The pooled client and the loop it was built on (``None`` until first
+        # use — construction stays I/O-free and loop-free, so the process-wide
+        # singleton in ``api/deps.py`` can be built at import time).
+        self._pool: Any | None = None
+        self._pool_loop: asyncio.AbstractEventLoop | None = None
+
+    def _connect(self) -> Any:
+        """Open a new client for this backplane's URL (the default factory)."""
+        return aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+
+    def _client(self) -> Any:
+        """The pooled client for the RUNNING loop, created on first use.
+
+        Keyed on the running loop so a client built on another (by then dead)
+        loop is never handed out — reusing one is the "attached to a different
+        loop" failure the #140 engine-per-loop fix exists to prevent. A stale
+        client is dropped rather than closed: its sockets died with its loop, and
+        awaiting its close from *this* loop would touch a foreign one.
+        """
+        loop = asyncio.get_running_loop()
+        if self._pool is None or self._pool_loop is not loop:
+            self._pool = self._client_factory()
+            self._pool_loop = loop
+        return self._pool
+
+    async def aclose(self) -> None:
+        """Release the pooled client (app lifespan shutdown; idempotent).
+
+        A no-op when nothing was ever published (the offline tests, or a process
+        that only ever subscribed), so create *and* close stay on one event loop
+        — the same hygiene :func:`app.search.aclose_search_store` follows. The
+        backplane stays usable afterwards: the next call re-creates the client.
+        """
+        client, loop = self._pool, self._pool_loop
+        self._pool = None
+        self._pool_loop = None
+        if client is None:
+            return
+        if loop is not None and loop is not asyncio.get_running_loop():
+            # Built on another loop (a finished Celery task's): its connections
+            # went with it and closing from here would touch a foreign loop.
+            return
+        await client.aclose()
 
     async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
         """Publish one envelope — live fan-out **and** bounded replay.
@@ -174,38 +262,32 @@ class RedisBackplane:
         durable in the list no later than it is delivered live. Combined with the
         consumer's subscribe-then-replay order, every envelope arrives via the
         replay, the live channel, or both — never neither.
+
+        Runs on the **pooled** client (#487): the commands are the same, only the
+        connection is now reused across the answer instead of rebuilt per envelope.
         """
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        client = self._client()
         payload = json.dumps(envelope)
         replay_key = _replay_key(stream_id)
-        try:
-            async with client.pipeline(transaction=False) as pipe:
-                pipe.rpush(replay_key, payload)
-                pipe.ltrim(replay_key, -_MAX_REPLAY, -1)
-                pipe.expire(replay_key, _REPLAY_TTL_SECONDS)
-                pipe.publish(_channel(stream_id), payload)
-                await pipe.execute()
-        finally:
-            await client.aclose()
+        async with client.pipeline(transaction=False) as pipe:
+            pipe.rpush(replay_key, payload)
+            pipe.ltrim(replay_key, -_MAX_REPLAY, -1)
+            pipe.expire(replay_key, _REPLAY_TTL_SECONDS)
+            pipe.publish(_channel(stream_id), payload)
+            await pipe.execute()
 
     async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
-        """Persist ``stream_id``'s owner binding with a short TTL (``SETEX``)."""
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
-        try:
-            payload = json.dumps(
-                {"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)}
-            )
-            await client.set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
-        finally:
-            await client.aclose()
+        """Persist ``stream_id``'s owner binding with a short TTL (``SETEX``).
+
+        On the pooled client (#487 / #492 AC-3) — this runs inside the ``202``
+        request, so a per-call connect/teardown sat directly on the send path.
+        """
+        payload = json.dumps({"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)})
+        await self._client().set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:
         """Read ``stream_id``'s owner binding, or ``None`` if absent/expired."""
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
-        try:
-            raw = await client.get(_owner_key(stream_id))
-        finally:
-            await client.aclose()
+        raw = await self._client().get(_owner_key(stream_id))
         if raw is None:
             return None
         if isinstance(raw, bytes):
@@ -225,8 +307,14 @@ class RedisBackplane:
         connected — the exact case raw pub/sub dropped). The pub/sub connection is
         always closed in the ``finally`` (disconnect / cancellation / terminal), so
         no Redis connection leaks.
+
+        Deliberately **not** on the pooled publisher client (#487): a pub/sub
+        connection cannot carry ordinary commands, and this one's lifetime is the
+        subscription's — closing it here must never take the process-wide
+        publisher down with it. One connection serves the whole subscription, so
+        the consumer side was already O(1) and is unchanged.
         """
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        client = self._client_factory()
         pubsub = client.pubsub()
         channel = _channel(stream_id)
         try:

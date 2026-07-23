@@ -847,6 +847,9 @@ def _schedule_answer(
         suggestions_enabled=settings.chat_suggestions_enabled,
         suggestions_count=settings.chat_suggestions_count,
         suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
+        # Streamed-text coalescing knobs (issue #487).
+        text_coalesce_chars=settings.chat_text_coalesce_chars,
+        text_coalesce_seconds=settings.chat_text_coalesce_seconds,
     )
     history = _to_chat_messages(result.history)
 
