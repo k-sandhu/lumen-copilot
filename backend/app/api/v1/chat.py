@@ -823,6 +823,10 @@ def _schedule_answer(
             output_headroom_tokens=settings.context_output_headroom_tokens,
             compaction_digest_chars=settings.context_compaction_digest_chars,
             compaction_chunk_size=settings.context_compaction_chunk_size,
+            # #491: proactively shrink superseded, cited tool results so old
+            # evidence stops re-riding every turn at full size on a frontier
+            # window (the interactive chat answer path — #486's IN scope).
+            proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
         ),
         sandbox_factory=_build_sandbox_factory(
             principal=principal,

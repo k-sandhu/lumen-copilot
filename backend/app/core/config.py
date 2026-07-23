@@ -547,10 +547,21 @@ class Settings(BaseSettings):
     # provider (#446 finding 6). A non-empty value is an explicit override used
     # with config credentials.
     chat_summary_enabled: bool = Field(default=True, alias="CHAT_SUMMARY_ENABLED")
+    # #491: summarise EARLIER. The task first folds turns into the summary once
+    # ``keep + min_batch`` messages have accumulated. The old 8 + 4 meant the
+    # first compaction only fired at >=12 uncovered messages (~turn 7 of a 2-msg
+    # /turn session) — by then turn-5 input was already ~2.5x turn-1. Retuned to
+    # 4 + 2: the first compaction now fires at >=6 messages (~turn 3), while the
+    # verbatim tail still keeps the last 2 full turns (4 messages) word-for-word
+    # — the immediate context the model most needs — and older turns roll into
+    # the <300-word rolling summary + IDs-only evidence carry-forward. The
+    # summariser runs on the dedicated FAST model (#490), so the earlier/smaller
+    # batches cost little. Groundedness under this tail is guarded by the
+    # compression-regression eval (ADR-0016 §3.2, live).
     chat_summary_keep_messages: int = Field(
-        default=8, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
+        default=4, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
     )
-    chat_summary_min_batch: int = Field(default=4, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
+    chat_summary_min_batch: int = Field(default=2, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
     chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
 
     # Prompt caching (ADR-0016 §2, #411): provider cache directives on the
@@ -581,6 +592,20 @@ class Settings(BaseSettings):
     )
     context_compaction_chunk_size: int = Field(
         default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
+    )
+    # PROACTIVE tool-result compaction (ADR-0016 §3.1 amendment, issue #491). The
+    # reactive compaction above only fires when the transcript is over budget,
+    # which a frontier-sized window never reaches — so on the default routes a
+    # superseded search result rides every later turn at full size (the re-sent
+    # -evidence tax #491 measured). With this ON, ``fit_transcript`` shrinks a
+    # tool result to a bounded head digest (capped at CONTEXT_COMPACTION_DIGEST
+    # _CHARS) once it is BOTH superseded by a later tool group AND represented in
+    # citations — the newest tool group (the evidence a pending call is about to
+    # reference) is always preserved, and cited evidence stays durable in the
+    # citation records. Default ON for the chat answer path; a kill-switch, not a
+    # tuning knob (the retained-head SIZE is the tuning knob above).
+    context_proactive_compaction_enabled: bool = Field(
+        default=True, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
     )
     # How many of one turn's read-only tool calls execute at once (#412,
     # ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB

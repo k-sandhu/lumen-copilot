@@ -75,7 +75,14 @@ from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
-from app.llm.context import ContextConfig, assemble_context, fit_transcript
+from app.llm.context import (
+    ContextConfig,
+    TokenCounter,
+    assemble_context,
+    fit_transcript,
+    litellm_token_counter,
+    memoizing_token_counter,
+)
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
@@ -504,6 +511,16 @@ class ChatRuntime:
         # API wires ``Settings``; defaults (module constants) keep offline tests
         # and any un-wired caller building prompts exactly as before.
         self._context_config = context_config or ContextConfig()
+        # Per-answer, per-model memoizing token counters (#491, AC-3). The answer
+        # loop refits the grown transcript before every model turn; without
+        # memoisation each refit re-tokenises the WHOLE transcript, so an answer
+        # is O(turns x transcript) tokeniser work on the event loop. One memoiser
+        # per model (keyed on the wire text) makes each refit O(new messages) —
+        # the system prompt, tools block, question, and prior turns are cache
+        # hits. Per-model because a failover refit deliberately re-counts under
+        # the fallback model's tokeniser. The runtime is constructed per answer,
+        # so the cache is bounded by (and lives only for) one answer.
+        self._token_counters: dict[str, TokenCounter] = {}
         # The retrieval service is built per-answer over the runtime's own
         # session. Injectable so the offline tests supply a fake whose
         # ``search_text`` does not need pgvector; defaults to the real adapter.
@@ -571,6 +588,21 @@ class ChatRuntime:
         # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
         # as unbounded (the setting's documented kill switch).
         self._answer_max_tokens = answer_max_tokens or None
+
+    def _token_counter_for(self, model: str) -> TokenCounter:
+        """The memoizing token counter for ``model`` (#491) — one per answer/model.
+
+        Threaded into every ``assemble_context`` / ``fit_transcript`` call so the
+        expensive tokeniser fires only for the messages each turn appends, not the
+        whole grown transcript every turn. Cached per model id: the primary route
+        accumulates hits across its turns, and a failover route gets its own
+        memoiser (its tokeniser and window differ, so its counts must be fresh).
+        """
+        memo = self._token_counters.get(model)
+        if memo is None:
+            memo = memoizing_token_counter(litellm_token_counter(model))
+            self._token_counters[model] = memo
+        return memo
 
     def _new_coalescer(self) -> _TextCoalescer:
         """The per-stream text buffer, built from this runtime's flush policy."""
@@ -963,6 +995,7 @@ class ChatRuntime:
             question=question_for_model,
             tools=advertised,
             config=self._context_config,
+            counter=self._token_counter_for(route_state.route.model),
             summary=summary,
             evidence_lines=tuple(evidence_lines),
         )
@@ -1061,6 +1094,7 @@ class ChatRuntime:
                 model=model_id,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(model_id),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
 
@@ -1079,6 +1113,7 @@ class ChatRuntime:
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             await self._emit_step(
@@ -1229,6 +1264,7 @@ class ChatRuntime:
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             await self._emit_step(
@@ -1343,6 +1379,7 @@ class ChatRuntime:
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             try:
