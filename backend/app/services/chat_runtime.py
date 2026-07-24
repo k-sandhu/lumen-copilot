@@ -213,6 +213,7 @@ class _RouteState:
     # that actually incurred it, never re-labelled under the winner.
     spent: list[tuple[str, _Usage]] = field(default_factory=list)
 
+
 # The per-search passage budget now comes from the context assembler
 # (``ContextBudget.retrieval_k``, ADR-0016 §1 / #410): the historical default of
 # 6 when the window is roomy, fewer when it is tight — so the knob is derived
@@ -429,9 +430,7 @@ def _log_cache_kpi(result: _RunResult) -> None:
         cached_prompt_tokens=result.cached_prompt_tokens,
         prompt_tokens=result.prompt_tokens,
         cache_hit_ratio=(
-            round(result.cached_prompt_tokens / result.prompt_tokens, 3)
-            if reported
-            else None
+            round(result.cached_prompt_tokens / result.prompt_tokens, 3) if reported else None
         ),
         cache_write_tokens=result.cache_write_tokens,
         usage_reported=reported,
@@ -801,9 +800,7 @@ class ChatRuntime:
         # enforces the allow-list + approval seam, bounds each call, records a
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
-        allowed = (
-            assistant_config.allowed if assistant_config is not None else default_allowlist()
-        )
+        allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
         # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
         # (never a global registration — they are tenant-scoped and dynamic, so a
         # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
@@ -876,9 +873,7 @@ class ChatRuntime:
         # data): strings only, non-empty, minus the primary itself.
         tenant_row = await TenantRepository(session).get(tenant_id)
         override = tenant_row.max_tool_turns if tenant_row is not None else None
-        max_tool_turns = max(
-            1, override if override is not None else self._default_max_tool_turns
-        )
+        max_tool_turns = max(1, override if override is not None else self._default_max_tool_turns)
         stored = tenant_row.fallback_models or [] if tenant_row else []
         structural: list[str] = []
         for m in stored:
@@ -947,9 +942,7 @@ class ChatRuntime:
             # survive — a corrupt digest cannot inject arbitrary ids.
             all_chunks = [c for chunks in by_doc.values() for c in chunks]
             chunk_owner = (
-                await retrieval.valid_chunk_pairs(
-                    principal=self._principal, chunk_ids=all_chunks
-                )
+                await retrieval.valid_chunk_pairs(principal=self._principal, chunk_ids=all_chunks)
                 if all_chunks
                 else {}
             )
@@ -967,9 +960,7 @@ class ChatRuntime:
             if summary:
                 for doc_id, name in mentioned_documents:
                     if doc_id not in permitted and name and name in summary:
-                        summary = summary.replace(
-                            name, "[document no longer accessible]"
-                        )
+                        summary = summary.replace(name, "[document no longer accessible]")
             # INV-6: rehydration is an audited read-side event — how many ids
             # were requested vs still permitted (never the content).
             await audit.emit(
@@ -1119,9 +1110,8 @@ class ChatRuntime:
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
             )
-            async def _publish_narration(
-                text: str, *, _turn: int = turn_index + 1
-            ) -> None:
+
+            async def _publish_narration(text: str, *, _turn: int = turn_index + 1) -> None:
                 # ADR-0016 §6 (#414): a tool-calling turn's visible narration,
                 # streamed live as transient status — NEVER a delta, never
                 # persisted (the #148 invariant is untouched). Runs in the
@@ -1371,9 +1361,7 @@ class ChatRuntime:
                 # A zero-visible-text length turn (budget burned on non-text
                 # content) skips the append — an empty assistant turn helps no
                 # provider — but STILL gets its continuation (#440 finding 6).
-                messages.append(
-                    ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks))
-                )
+                messages.append(ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks)))
             messages = fit_transcript(
                 messages,
                 model=route_state.route.model,
@@ -1468,9 +1456,7 @@ class ChatRuntime:
             retrieved_hits=total_hits,
             # Distinct cited documents, first-appearance order — the provenance
             # the Audit "Answers cited" KPI reads (#249).
-            cited_document_ids=list(
-                dict.fromkeys(str(c.document_id) for c in stored_citations)
-            ),
+            cited_document_ids=list(dict.fromkeys(str(c.document_id) for c in stored_citations)),
         )
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="completed")
 
@@ -1816,9 +1802,7 @@ class ChatRuntime:
                             tools=tools,
                             tool_choice=tool_choice,
                             max_tokens=max_tokens,
-                            narrate=(
-                                _narrate_and_close_window if narrate is not None else None
-                            ),
+                            narrate=(_narrate_and_close_window if narrate is not None else None),
                             speak=(_speak_answer if stream_answer else None),
                             # Retraction is only meaningful where a tool call can
                             # still appear (narrate seam wired); a tool-impossible
@@ -1900,9 +1884,7 @@ class ChatRuntime:
             attempts = min(attempts, self._interactive_max_attempts)
         return attempts
 
-    async def _advance_to_fallback(
-        self, session: AsyncSession, route_state: _RouteState
-    ) -> bool:
+    async def _advance_to_fallback(self, session: AsyncSession, route_state: _RouteState) -> bool:
         """Advance to the next resolvable fallback route; False when exhausted (#413).
 
         Candidates were validated at the admin write, but resolution can still
@@ -1917,9 +1899,7 @@ class ChatRuntime:
             try:
                 route = await self._resolve_model_route(session, candidate)
             except AppError as exc:
-                log.warning(
-                    "llm.fallback_unresolvable", model=candidate, code=exc.code
-                )
+                log.warning("llm.fallback_unresolvable", model=candidate, code=exc.code)
                 continue
             if is_provider_model_id(candidate) and route.model == candidate:
                 # UNRESOLVED passthrough: a resolved ``provider:`` route always
@@ -1934,9 +1914,7 @@ class ChatRuntime:
                     "llm.fallback_unresolvable", model=candidate, code="provider_unresolved"
                 )
                 continue
-            log.warning(
-                "llm.failover", from_model=route_state.model, to_model=candidate
-            )
+            log.warning("llm.failover", from_model=route_state.model, to_model=candidate)
             route_state.model = candidate
             route_state.route = route
             return True
@@ -2058,11 +2036,7 @@ class ChatRuntime:
             # (offline/headless) turn keeps its exact pre-#488 wire.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         ):
-            if (
-                (ev.tool_call_started or ev.tool_calls)
-                and not narrating
-                and narrate is not None
-            ):
+            if (ev.tool_call_started or ev.tool_calls) and not narrating and narrate is not None:
                 # The classification point (ADR-0016 §6, #414): the FIRST
                 # tool-call fragment proves this turn is tool-calling, hence
                 # its text is narration. First RETRACT any answer text already
@@ -2871,9 +2845,7 @@ def _is_retrieval_call(call: ToolCall) -> bool:
 # The retrieval tools' names, read once from their impl module (the single source
 # of truth for what a "retrieval tool" is) so the retrieval-specific audit stays
 # correct as tools are added elsewhere.
-_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
-    defn.name for defn in _retrieval_impl.TOOLS
-)
+_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(defn.name for defn in _retrieval_impl.TOOLS)
 
 
 __all__ = [

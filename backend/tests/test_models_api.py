@@ -182,9 +182,7 @@ def enabled_provider_id(sessionmaker: async_sessionmaker[AsyncSession]) -> uuid.
 
 
 async def _login(client: AsyncClient, email: str = _DEV_EMAIL) -> str:
-    resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": _DEV_PASSWORD}
-    )
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": _DEV_PASSWORD})
     assert resp.status_code == 200
     return str(resp.json()["access_token"])
 
