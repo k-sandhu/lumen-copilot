@@ -53,9 +53,7 @@ export default defineConfig(({ mode }) => {
   // git-ignored). `vite build` never runs in 'test' mode, so this never relaxes
   // the production default; the OFF build is proven by `dist-no-dev-pages.test.ts`.
   const devPagesEnabled =
-    mode === 'test' && rawDevPagesFlag === undefined
-      ? true
-      : parseDevPagesFlag(rawDevPagesFlag);
+    mode === 'test' && rawDevPagesFlag === undefined ? true : parseDevPagesFlag(rawDevPagesFlag);
 
   return {
     plugins: [react()],
@@ -76,6 +74,17 @@ export default defineConfig(({ mode }) => {
           // co-locating them cannot introduce an app-level circular chunk.
           // (The chat route itself is lazy; see features/chat/route.tsx.)
           manualChunks(id: string) {
+            // FE-9: the React runtime gets its OWN group, and it must be tested
+            // BEFORE the markdown group. A manual chunk acts as a Rollup entry
+            // point, so a module every entry shares (react, react/jsx-runtime)
+            // was being absorbed INTO the `markdown` chunk — which then forced
+            // the app entry chunk to import `markdown-*.js` statically just to
+            // get React, dragging the whole pipeline back onto first paint. Its
+            // own group keeps the shared runtime out of any feature chunk.
+            // `buildguards/chat-pipeline-not-in-entry.test.ts` asserts the result.
+            if (/[\\/]node_modules[\\/](?:\.pnpm[\\/])?(react|react-dom|scheduler)[\\/]/.test(id)) {
+              return 'react-vendor';
+            }
             if (
               /[\\/]node_modules[\\/](?:\.pnpm[\\/])?(react-markdown|remark[-\w]*|rehype[-\w]*|micromark[-\w]*|mdast[-\w]*|hast[-\w]*|unist[-\w]*|unified|vfile[-\w]*|property-information|hastscript|space-separated-tokens|comma-separated-tokens|character-entities[-\w]*|decode-named-character-reference|stringify-entities|parse-entities|trim-lines|longest-streak|zwitch|markdown-table|html-url-attributes|html-void-elements|web-namespaces|devlop|ccount|highlight\.js)[\\/]/.test(
                 id,

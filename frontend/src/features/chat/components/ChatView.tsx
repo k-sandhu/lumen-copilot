@@ -16,11 +16,12 @@ import type { ChatModelInfo, KnowledgeMode, Message, SendMessageRequest } from '
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
+import { useModels } from '@/features/models';
 import { useChatStore, type SessionScope } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
 import type { UiCitation } from '../model/citation';
 import '../chat.css';
-import { useMessages, useModels, useSendMessage, useUpdateSession } from '../model/queries';
+import { useMessages, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';

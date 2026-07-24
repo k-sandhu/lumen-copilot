@@ -1,6 +1,13 @@
 /**
- * App entry — mounts the React Query provider + router. Side-effect CSS imports
- * (Tailwind layer + highlight.js theme) live here so they load once, globally.
+ * App entry — mounts the React Query provider + router. The global side-effect
+ * CSS (Tailwind layer + design tokens) lives here so it loads once, app-wide.
+ *
+ * The highlight.js THEME is deliberately NOT imported here (FE-9): its id matches
+ * the `markdown` manualChunks group, so importing it from the entry made the
+ * entry chunk statically import `markdown-*.js` and pulled the whole
+ * react-markdown/highlight pipeline back onto first paint — the exact thing #494
+ * AC-5 removed. It now travels with `lib/markdown.tsx`, loading with the pipeline
+ * that needs it.
  */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -12,8 +19,6 @@ import './styles/index.css';
 // kit's derived colors) — imported globally so tokens resolve on every screen,
 // including pre-auth login, regardless of which feature renders first (#130).
 import './styles/tokens.css';
-// highlight.js theme for fenced code blocks rendered by lib/markdown.tsx.
-import 'highlight.js/styles/github-dark.css';
 
 import { queryClient } from './queryClient';
 import { router } from './routes/router';

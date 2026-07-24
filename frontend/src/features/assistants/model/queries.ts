@@ -35,7 +35,6 @@ import {
   listAssistants,
   listCollections,
   listMembers,
-  listModels,
   listSources,
   publishAssistant,
   rollbackAssistant,
@@ -57,7 +56,6 @@ import type {
   AssistantVersionList,
   CollectionList,
   MemberList,
-  ModelList,
   SourceList,
 } from '@/api';
 
@@ -205,14 +203,13 @@ export function useDeleteAssistant() {
 
 // --- Reference lists the editor + library compose against -------------------
 
-/** The model-picker registry (GET /models). Stable; cache generously. */
-export function useModels(): UseQueryResult<ModelList> {
-  return useQuery<ModelList>({
-    queryKey: ['models'],
-    queryFn: ({ signal }) => listModels(signal),
-    staleTime: 5 * 60_000,
-  });
-}
+/**
+ * The model-picker registry (GET /models) — re-exported from the shared slice so
+ * this feature keeps its single-import surface while the query (and its cache
+ * key) has exactly ONE definition (FE-9). It used to be a byte-identical copy of
+ * chat's, which is how the same key ended up declared in three places.
+ */
+export { useModels } from '@/features/models';
 
 /** The caller's collections (knowledge-scope picker). */
 export function useCollections(): UseQueryResult<CollectionList> {

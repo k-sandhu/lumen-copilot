@@ -1,7 +1,12 @@
 /**
  * Server-state hooks for chat — TanStack Query (NOT a store; frontend/AGENTS.md:
- * server data never mirrored into Zustand). Sessions, messages, and the model
- * registry are server data; mutations (new/rename/delete/send) invalidate them.
+ * server data never mirrored into Zustand). Sessions, messages, and usage are
+ * server data; mutations (new/rename/delete/send) invalidate them.
+ *
+ * The shared model registry (GET /models) lives in `@/features/models`, not here:
+ * preferences and assistants read it too, and routing them through the chat
+ * barrel is what pulled the markdown pipeline onto the first-paint path (FE-9,
+ * see `buildguards/chat-pipeline-not-in-entry.test.ts`).
  *
  * All reads can 404 when the resource is in another tenant or not permitted
  * (spec 0004 INV-1/INV-2); that surfaces as an ApiError the components branch on.
@@ -13,7 +18,6 @@ import {
   getSessionUsage,
   listChatSessions,
   listMessages,
-  listModels,
   sendMessage,
   updateChatSession,
 } from '@/api';
@@ -24,7 +28,6 @@ import type {
   ChatSessionList,
   ChatSessionUpdate,
   MessageList,
-  ModelList,
   SendMessageRequest,
   SendMessageResponse,
   SessionUsage,
@@ -37,7 +40,6 @@ export const chatKeys = {
   messages: (sessionId: string) => [...chatKeys.all, 'messages', sessionId] as const,
   usage: (sessionId: string) => [...chatKeys.all, 'usage', sessionId] as const,
   mentionSuggest: (q: string) => [...chatKeys.all, 'mention-suggest', q] as const,
-  models: () => ['models'] as const,
 };
 
 /**
@@ -85,15 +87,6 @@ export function useMessages(sessionId: string | null) {
     queryKey: chatKeys.messages(sessionId ?? '∅'),
     queryFn: ({ signal }) => listMessages(sessionId as string, undefined, signal),
     enabled: sessionId !== null,
-  });
-}
-
-/** The model-picker registry (AC-3). Stable for the session; cache generously. */
-export function useModels() {
-  return useQuery<ModelList>({
-    queryKey: chatKeys.models(),
-    queryFn: ({ signal }) => listModels(signal),
-    staleTime: 5 * 60_000,
   });
 }
 

@@ -25,6 +25,13 @@ import remarkGfm from 'remark-gfm';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeHighlight from 'rehype-highlight';
 import type { Options as SanitizeSchema } from 'rehype-sanitize';
+// The highlight.js theme for the code blocks rehype-highlight marks up. It lives
+// HERE, not in `main.tsx` (FE-9): the entry importing it made the entry chunk
+// statically import the `markdown` chunk — the theme's id matches that
+// manualChunks group — which put the whole pipeline back on the first-paint path
+// (#494 AC-5). Co-located with the renderer, it loads with the pipeline that
+// needs it, exactly once (module singleton).
+import 'highlight.js/styles/github-dark.css';
 import { cn } from './cn';
 import { blockKey, splitStreamingBlocks } from './markdownBlocks';
 
