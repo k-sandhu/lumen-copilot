@@ -65,6 +65,16 @@ export function ChatView() {
   const models = useModels();
   const queryClient = useQueryClient();
 
+  // Stable identity so nothing downstream of `ActiveSession` churns when this
+  // component re-renders (#495 — the same rule the callbacks inside
+  // `ActiveSession` follow). `queryClient` is stable for the provider's lifetime.
+  const onDoneReload = useCallback(() => {
+    if (!activeSessionId) return;
+    void queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
+    // A settled answer moved the token accounting (spec 0007 AC-1).
+    void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+  }, [activeSessionId, queryClient]);
+
   // At narrow widths the subrail is an off-canvas drawer (see chat.css); this
   // drives it. Selecting/creating a session closes the drawer so the narrow-width
   // flow lands back on the conversation.
@@ -131,15 +141,7 @@ export function ChatView() {
               startStream={startStream}
               endStream={endStream}
               openViewer={openViewer}
-              onDoneReload={() => {
-                void queryClient.invalidateQueries({
-                  queryKey: chatKeys.messages(activeSessionId),
-                });
-                // A settled answer moved the token accounting (spec 0007 AC-1).
-                void queryClient.invalidateQueries({
-                  queryKey: chatKeys.usage(activeSessionId),
-                });
-              }}
+              onDoneReload={onDoneReload}
             />
           </ErrorBoundary>
         ) : (
@@ -313,6 +315,19 @@ function ActiveSession({
   const prefs = usePreferences();
   const setDefaultPref = useUpdatePreferences();
 
+  // #495 INVARIANT — every callback that reaches the persisted render path must
+  // depend on the STABLE `mutate` function, never on the `useMutation` RESULT.
+  // TanStack returns `{ ...result, mutate, mutateAsync }`: a brand-new wrapper
+  // object on EVERY render, while `mutate`/`mutateAsync` keep their identity for
+  // the observer's lifetime. Closing over the result object makes `doSend` — and
+  // therefore `onSend`, which every `MessageBubble` receives as `onChooseOption`
+  // — change on every streamed delta, which silently defeats `PersistedMessages`'
+  // memo and re-renders the whole thread per token. Pinned by
+  // `ChatViewRenderHygiene.test.tsx`, which drives deltas through this wiring.
+  const sendMutate = send.mutate;
+  const updateSessionMutate = updateSession.mutate;
+  const setDefaultPrefMutate = setDefaultPref.mutate;
+
   // The selected model: default until the user changes it (AC-3). The session
   // model is persisted via PATCH when changed.
   const [model, setModel] = useState<string>('');
@@ -340,8 +355,8 @@ function ActiveSession({
 
   // Persist the currently-selected model as the caller's default for new chats.
   const onSetDefaultModel = useCallback(() => {
-    if (model) setDefaultPref.mutate({ default_model_id: model });
-  }, [model, setDefaultPref]);
+    if (model) setDefaultPrefMutate({ default_model_id: model });
+  }, [model, setDefaultPrefMutate]);
 
   // The assistant messageId we're waiting for the server reload to surface. The
   // live answer stays rendered until the persisted message arrives, so the turn
@@ -443,11 +458,11 @@ function ActiveSession({
       lastSendRef.current = req;
       // A new question supersedes the previous turn's follow-ups (spec 0006).
       setFollowUps([]);
-      send.mutate(req, {
+      sendMutate(req, {
         onSuccess: (res) => startStream(res.stream_id),
       });
     },
-    [send, startStream],
+    [sendMutate, startStream],
   );
 
   const onSend = useCallback(
@@ -502,9 +517,9 @@ function ActiveSession({
     (next: string) => {
       setModel(next);
       // Persist as the session default (best-effort; per-turn override still set).
-      updateSession.mutate({ sessionId, body: { model: next } });
+      updateSessionMutate({ sessionId, body: { model: next } });
     },
-    [sessionId, updateSession],
+    [sessionId, updateSessionMutate],
   );
 
   const streaming = live?.phase === 'streaming';

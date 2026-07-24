@@ -17,6 +17,13 @@
  * `toolActivityFromInvocations` is wrapped so its call count is observable. Both
  * are persisted-only signals (the live turn maps `fromWsCitation` + `live.tools`
  * directly), so filtering the persisted content prefix isolates the list.
+ *
+ * SCOPE — this is the ChatThread HALF of AC-1. It hands ChatThread a deliberately
+ * stable `onSendText`, so it cannot see the other half: `ActiveSession` handing
+ * ChatThread a callback whose identity churns per delta (e.g. a `useCallback`
+ * closing over a TanStack mutation RESULT object). `ChatViewRenderHygiene.test.tsx`
+ * covers that by driving deltas through the real ChatView/ActiveSession wiring;
+ * keep both — this one localises the failure, that one proves the whole path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
