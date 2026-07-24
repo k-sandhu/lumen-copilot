@@ -868,3 +868,168 @@ describe('useChatStream — post-terminal envelopes (FE-5)', () => {
     expect(result.current.problem).toBeNull();
   });
 });
+
+// --- FE2-3: the post-terminal suggestions window has an explicit lifetime -----
+// Round 1 (FE-4/FE-5) gave each effect run a liveness token and stopped late
+// deltas re-arming timers, but two holes stayed open: `cancel()` never
+// invalidated that token, and ANY terminal state still accepted an
+// `event:suggestions`. So a suggestion arriving after a cancel — or after the
+// grace timer had already closed the socket — still dispatched into settled
+// state. The fix is ONE generation token (invalidated by cancel, cleanup AND
+// every deliberate close) plus an explicit `awaitingSuggestions` flag that is
+// true ONLY while the post-terminal grace is actually armed; the suggestions
+// branch accepts an envelope only while that flag is true.
+describe('useChatStream — suggestions window lifetime (FE2-3)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SUGGESTIONS_ENVELOPE: WsEnvelope = {
+    type: 'event',
+    streamId: SID,
+    seq: 9,
+    name: 'suggestions',
+    data: { messageId: 'm', suggestions: ['Late and unwanted?'] },
+  };
+
+  /** start → delta → done(pendingSuggestions): the grace is now armed. */
+  function streamToPendingDone(socket: FakeSocket): void {
+    socket.emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+    socket.emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer.' } });
+    socket.emit({
+      type: 'done',
+      streamId: SID,
+      seq: 2,
+      data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+    });
+  }
+
+  it('ignores a suggestions event arriving after cancel()', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders++;
+      return useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 });
+    });
+
+    act(() => streamToPendingDone(h.get()));
+    expect(result.current.phase).toBe('done');
+    expect(result.current.awaitingSuggestions).toBe(true);
+
+    // The user stops the turn (or navigates): the awaited window is over.
+    act(() => result.current.cancel());
+    expect(result.current.awaitingSuggestions).toBe(false);
+    expect(h.get().closed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+
+    const settled = renders;
+    // A suggestion generated before the cancel still lands on the wire. It must
+    // be dropped — not folded into the cancelled turn's state.
+    act(() => h.get().emit(SUGGESTIONS_ENVELOPE));
+    expect(result.current.suggestions).toBeNull();
+    expect(result.current.phase).toBe('done');
+    expect(renders).toBe(settled); // no dispatch ⇒ no commit
+  });
+
+  it('ignores a suggestions event arriving after the grace closed the socket', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders++;
+      return useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 });
+    });
+
+    act(() => streamToPendingDone(h.get()));
+    expect(result.current.awaitingSuggestions).toBe(true);
+
+    // Grace expires with nothing delivered: the window closes and the socket goes.
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(result.current.awaitingSuggestions).toBe(false);
+    expect(h.get().closed).toBe(true);
+
+    const settled = renders;
+    act(() => h.get().emit(SUGGESTIONS_ENVELOPE));
+    expect(result.current.suggestions).toBeNull();
+    expect(result.current.phase).toBe('done');
+    expect(renders).toBe(settled);
+  });
+
+  it('cancel() invalidates the run token, so the socket deferred close updates nothing', () => {
+    vi.useFakeTimers();
+    /** close() reports `closed` on a LATER tick, exactly like a real WebSocket. */
+    class AsyncCloseSocket implements StreamSocket {
+      opts: WsClientOptions;
+      closed = false;
+      constructor(opts: WsClientOptions) {
+        this.opts = opts;
+      }
+      connect(): void {
+        this.opts.onStateChange?.('open');
+      }
+      close(): void {
+        if (this.closed) return;
+        this.closed = true;
+        setTimeout(() => this.opts.onStateChange?.('closed'), 0);
+      }
+      getState() {
+        return this.closed ? ('closed' as const) : ('open' as const);
+      }
+      emit(envelope: WsEnvelope): void {
+        this.opts.onEnvelope?.(envelope);
+      }
+    }
+    let socket: AsyncCloseSocket | null = null;
+    const makeClient: ClientFactory = (opts) => {
+      socket = new AsyncCloseSocket(opts);
+      return socket;
+    };
+    const live = () => socket!;
+
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders++;
+      return useChatStream({ streamId: SID, makeClient, idleTimeoutMs: 50_000 });
+    });
+    act(() => {
+      live().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      live().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
+    });
+    act(() => result.current.cancel());
+    expect(live().closed).toBe(true);
+
+    const settled = renders;
+    // The socket's own `closed` event lands a tick later. cancel() already
+    // invalidated this run's token, so the callback must be inert — no
+    // setConnection, therefore no commit, on a stream the user already stopped.
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(renders).toBe(settled);
+  });
+
+  it('delivers the one suggestion on the normal pending-suggestions flow', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 }),
+    );
+
+    act(() => streamToPendingDone(h.get()));
+    expect(result.current.awaitingSuggestions).toBe(true);
+    expect(h.get().closed).toBe(false);
+
+    act(() => h.get().emit(SUGGESTIONS_ENVELOPE));
+    expect(result.current.suggestions).toEqual({
+      messageId: 'm',
+      suggestions: ['Late and unwanted?'],
+    });
+    // Window closed by delivery: flag down, socket closed, terminal untouched.
+    expect(result.current.awaitingSuggestions).toBe(false);
+    expect(h.get().closed).toBe(true);
+    expect(result.current.phase).toBe('done');
+    expect(result.current.problem).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

@@ -106,6 +106,15 @@ export interface UseChatStreamResult extends StreamState {
   connection: WsConnectionState;
   /** Cancel the in-flight stream (stop button / navigation). */
   cancel: () => void;
+  /**
+   * True ONLY while the post-terminal suggestions grace is actually armed
+   * (#489/FE2-3): from a `done(pendingSuggestions=true)` until the suggestions
+   * land, the grace elapses, the stream is cancelled, or the hook tears down.
+   * It is the gate on accepting a post-terminal `event:suggestions`, and it
+   * tells the caller the socket must OUTLIVE the persisted-history reload
+   * (BE2-7) — retiring the live bubble must not tear the subscription down.
+   */
+  awaitingSuggestions: boolean;
 }
 
 export function useChatStream({
@@ -125,6 +134,19 @@ export function useChatStream({
   const graceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track terminal-ness across the socket's onclose without re-subscribing.
   const terminalRef = useRef(false);
+  // FE2-3: ONE generation token for the whole hook, bumped by every event that
+  // ends a subscription's authority — a new effect run, effect cleanup,
+  // `cancel()`, and every deliberate close. A socket callback captures the
+  // generation it was created under and no-ops the moment it no longer matches,
+  // so nothing a dead socket says can reach reducer state, a timer, or React.
+  // A ref (not an effect-local `let`) is what lets `cancel()` — declared outside
+  // the effect — invalidate the run that is currently live.
+  const generationRef = useRef(0);
+  // FE2-3: is the post-terminal suggestions grace armed RIGHT NOW? Mirrored in
+  // a ref for the socket callbacks (which must decide synchronously) and in
+  // state for the caller (BE2-7 keeps the subscription mounted while it is up).
+  const awaitingRef = useRef(false);
+  const [awaitingSuggestions, setAwaitingSuggestions] = useState(false);
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
 
@@ -193,18 +215,38 @@ export function useChatStream({
     }
   }, [flushPendingText]);
 
-  const cancel = useCallback(() => {
-    terminalRef.current = true;
+  // FE2-3: the ONE way this hook closes a socket while mounted (cancel, terminal
+  // done/error, watchdog, mid-stream drop, grace expiry, suggestions delivered).
+  // It invalidates the generation token FIRST, so this socket's own — possibly
+  // asynchronous — `closed` callback and anything still queued behind it are
+  // already stale and cannot dispatch, re-arm a timer, or set state. Everything
+  // that callback used to do is therefore done here, explicitly: drop every
+  // timer, discard unflushed text, close the suggestions window, and report the
+  // connection as closed (which is now the truth, not a prediction).
+  const closeStream = useCallback(() => {
+    generationRef.current += 1;
     clearWatchdog();
     clearGrace();
     discardPendingText();
-    clientRef.current?.close();
+    awaitingRef.current = false;
+    setAwaitingSuggestions(false);
+    const client = clientRef.current;
     clientRef.current = null;
+    client?.close();
+    setConnection('closed');
   }, [clearWatchdog, clearGrace, discardPendingText]);
+
+  const cancel = useCallback(() => {
+    terminalRef.current = true;
+    closeStream();
+  }, [closeStream]);
 
   useEffect(() => {
     if (!streamId) {
       clearWatchdog();
+      clearGrace();
+      awaitingRef.current = false;
+      setAwaitingSuggestions(false);
       setConnection('closed');
       return;
     }
@@ -212,29 +254,33 @@ export function useChatStream({
     dispatch({ kind: 'reset' });
     discardPendingText();
     terminalRef.current = false;
+    awaitingRef.current = false;
+    setAwaitingSuggestions(false);
 
-    // FE-4: a per-run liveness token. A real WebSocket reports `closed`
-    // ASYNCHRONOUSLY, so THIS socket's onStateChange/onEnvelope can still fire
-    // AFTER this effect run is torn down — on unmount, or on a streamId change
-    // that has already reset the shared refs (terminalRef/clientRef/buffer) for
-    // the NEXT stream. Every socket callback checks `active` and no-ops once
-    // stale, so a late callback from the old socket can neither setConnection on
-    // an unmounted hook nor bleed into the new stream (flush its buffer, dispatch
-    // a disconnect, or close its client). Invalidated in cleanup BEFORE
-    // client.close() so even a synchronous close is inert here.
-    let active = true;
+    // FE-4/FE2-3: this run's slice of the hook-wide generation token. A real
+    // WebSocket reports `closed` ASYNCHRONOUSLY, so THIS socket's
+    // onStateChange/onEnvelope can still fire AFTER its authority ended — on
+    // unmount, on a streamId change that has already reset the shared refs
+    // (terminalRef/clientRef/buffer) for the NEXT stream, after `cancel()`, or
+    // after any deliberate close. Every socket callback checks `isCurrent()` and
+    // no-ops once stale, so a late callback can neither setConnection on an
+    // unmounted hook nor bleed into settled/next-stream state (flush its buffer,
+    // dispatch a disconnect, accept a suggestion, or close another client).
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    const isCurrent = () => generationRef.current === generation;
 
     const armWatchdog = () => {
       clearWatchdog();
       watchdogRef.current = setTimeout(() => {
         watchdogRef.current = null;
-        if (terminalRef.current) return;
+        if (!isCurrent() || terminalRef.current) return;
         terminalRef.current = true;
         // Commit any buffered partial text before the synthetic terminal so the
         // disconnect banner shows how far the answer got (AC-4 preserves text).
         flushPendingText();
         dispatch({ kind: 'disconnect' });
-        clientRef.current?.close();
+        closeStream();
       }, idleTimeoutMs);
     };
 
@@ -243,17 +289,22 @@ export function useChatStream({
       // open a bounded while for the one post-terminal `event:suggestions` (#489).
       // If it never comes, close the socket — the terminal stands. `graceMs` is the
       // server's declared grace when present (#489/BE-5), else the client default.
+      // FE2-3: this — and ONLY this — opens the suggestions window; closing the
+      // stream (delivery, expiry, cancel, teardown) is what shuts it again.
       clearGrace();
+      awaitingRef.current = true;
+      setAwaitingSuggestions(true);
       graceRef.current = setTimeout(() => {
         graceRef.current = null;
-        clientRef.current?.close();
+        if (!isCurrent()) return;
+        closeStream();
       }, graceMs);
     };
 
     const client = makeClient({
       path: `/chat/${streamId}`,
       onStateChange: (next) => {
-        if (!active) return; // FE-4: stale callback from a torn-down run — no-op.
+        if (!isCurrent()) return; // FE-4/FE2-3: stale socket — no-op.
         setConnection(next);
         if (next === 'open') {
           armWatchdog();
@@ -269,16 +320,11 @@ export function useChatStream({
         if (next === 'closed') {
           if (terminalRef.current) {
             // FE-5: clear ALL timers on this terminal close path — the watchdog
-            // too, not just the grace. A healthy terminal already cleared the
-            // watchdog on the terminal envelope, but clearing here unconditionally
-            // means no close path can ever leave a watchdog alive after the socket
-            // is gone.
-            clearWatchdog();
-            clearGrace();
-            // Already terminal (e.g. server ending the post-terminal grace): no
-            // buffered text can be pending, but drop any scheduled frame so it
-            // cannot fire after the socket is gone.
-            discardPendingText();
+            // too, not just the grace — and (FE2-3) shut the suggestions window,
+            // since the server ending the post-terminal grace means nothing more
+            // is coming. `closeStream` does all of it and invalidates this run,
+            // so no further callback from this dead socket can be honoured.
+            closeStream();
           } else {
             clearWatchdog();
             terminalRef.current = true;
@@ -286,32 +332,35 @@ export function useChatStream({
             // mid-stream drop preserves the text streamed so far (AC-4).
             flushPendingText();
             dispatch({ kind: 'disconnect' });
-            clientRef.current?.close();
+            closeStream();
           }
         }
       },
       onEnvelope: (envelope) => {
-        if (!active) return; // FE-4: stale callback from a torn-down run — no-op.
+        if (!isCurrent()) return; // FE-4/FE2-3: stale socket — no-op.
         // Only the matching stream's envelopes (defensive — one socket per id).
         if (envelope.streamId !== streamId) return;
 
         // FE-5: once the stream is terminal (done/error/cancel/disconnect) it has
         // settled. The ONLY envelope still honoured is the single post-terminal
-        // `event:suggestions` we hold the socket open for (#489). Every other
-        // late/queued/stray envelope — a straggler delta, a duplicate terminal, a
-        // late side-band — is ignored here BEFORE it can buffer text, schedule a
-        // flush, or re-arm the idle watchdog (which would leave a timer alive past
-        // close). Handled first so the delta/non-text paths below only ever run
-        // pre-terminal.
+        // `event:suggestions` we hold the socket open for (#489) — and (FE2-3)
+        // only while that window is ACTUALLY open: `awaitingRef` is true just
+        // between a `done(pendingSuggestions=true)` and the grace closing, so a
+        // suggestion after a cancel, after the grace expired, or after any other
+        // terminal (error/disconnect/plain done) is dropped like every other
+        // straggler. Every other late/queued/stray envelope — a straggler delta,
+        // a duplicate terminal, a late side-band — is ignored here BEFORE it can
+        // buffer text, schedule a flush, or re-arm the idle watchdog (which would
+        // leave a timer alive past close). Handled first so the delta/non-text
+        // paths below only ever run pre-terminal.
         if (terminalRef.current) {
-          if (envelope.type === 'event' && envelope.name === 'suggestions') {
+          if (awaitingRef.current && envelope.type === 'event' && envelope.name === 'suggestions') {
             // The awaited post-terminal suggestions arrived within the grace: the
             // reducer attaches it without un-settling the terminal (phase stays
-            // 'done'); we got what we waited for, so drop the grace and close.
+            // 'done'); we got what we waited for, so shut the window and close.
             // No text can be buffered here — post-terminal deltas were ignored.
             dispatch({ kind: 'flush', envelopes: [envelope] });
-            clearGrace();
-            clientRef.current?.close();
+            closeStream();
           }
           return;
         }
@@ -358,14 +407,13 @@ export function useChatStream({
                 : suggestionsGraceMs;
             armSuggestionsGrace(graceMs);
           } else {
-            clientRef.current?.close();
+            closeStream();
           }
           return;
         }
         if (envelope.type === 'error') {
           terminalRef.current = true;
-          clearGrace();
-          clientRef.current?.close();
+          closeStream();
           return;
         }
         // Re-arm after EVERY non-terminal envelope (start / event), matching the
@@ -380,14 +428,17 @@ export function useChatStream({
     client.connect();
 
     return () => {
-      // Unmount / streamId change: invalidate this run's liveness token FIRST
-      // (FE-4) so the socket's asynchronous `closed`/late-envelope callbacks
-      // no-op instead of touching the next stream's shared refs. Then stop the
-      // socket (cancels pending reconnect), drop any pending post-terminal grace
-      // timer (#489), and discard any buffered-but-unflushed text so no trailing
-      // frame fires after teardown (#493 AC-4).
-      active = false;
+      // Unmount / streamId change: invalidate the generation token FIRST (FE-4)
+      // so the socket's asynchronous `closed`/late-envelope callbacks no-op
+      // instead of touching the next stream's shared refs. Then stop the socket
+      // (cancels pending reconnect), drop any pending post-terminal grace timer
+      // (#489), close the suggestions window, and discard any
+      // buffered-but-unflushed text so no trailing frame fires after teardown
+      // (#493 AC-4). Deliberately NOT `closeStream()`: this path can run on
+      // unmount, where a setState would be pointless work on a dead tree.
+      generationRef.current += 1;
       terminalRef.current = true;
+      awaitingRef.current = false;
       clearWatchdog();
       clearGrace();
       discardPendingText();
@@ -401,11 +452,12 @@ export function useChatStream({
     suggestionsGraceMs,
     clearWatchdog,
     clearGrace,
+    closeStream,
     scheduleFlush,
     flushPendingText,
     discardPendingText,
     cancelScheduledFlush,
   ]);
 
-  return { ...state, connection, cancel };
+  return { ...state, connection, cancel, awaitingSuggestions };
 }
