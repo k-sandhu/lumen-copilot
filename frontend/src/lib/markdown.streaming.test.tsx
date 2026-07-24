@@ -106,6 +106,19 @@ describe('splitStreamingBlocks (the block splitter — #494)', () => {
     expect(trailing).toBe('Outside.');
   });
 
+  it('does NOT split an indented code block on its internal blank lines (would make two <pre>s)', () => {
+    // A CommonMark indented code block (≥4 spaces) absorbs the blank line between
+    // its lines — one-shot renders ONE <pre>, so the split must keep it whole.
+    const src = 'Intro.\n\n    code line 1\n\n    code line 2\n\nAfter.';
+    const { settled, trailing } = splitStreamingBlocks(src);
+    expect(settled).toEqual(['Intro.', '    code line 1\n\n    code line 2']);
+    expect(trailing).toBe('After.');
+    // A non-indented line after the blank still ends the code block.
+    const ended = splitStreamingBlocks('    only code\n\nplain paragraph');
+    expect(ended.settled).toEqual(['    only code']);
+    expect(ended.trailing).toBe('plain paragraph');
+  });
+
   it('does not split a document containing footnote/reference definitions (safety valve)', () => {
     const src = 'See the note.[^1]\n\nAnother para.\n\n[^1]: the note body.';
     expect(splitStreamingBlocks(src)).toEqual({ settled: [], trailing: src });
@@ -184,6 +197,8 @@ const NASTY: Record<string, string> = {
   nestedList: '- top level\n  - nested one\n  - nested two\n- second top\n\nDone.',
   looseList: '1. first item\n\n2. second item\n\n3. third item\n\nEnd of list.',
   blockquote: '> quoted line one\n> quoted line two\n\nOutside the quote.',
+  indentedCode:
+    'Intro paragraph.\n\n    code line 1\n\n    code line 2\n\nAfter the code block.',
   setextHeadings: 'Big Title\n=========\n\nA paragraph.\n\nSub Heading\n---\n\nBody text here.',
   mixed:
     '# Title\n\nIntro paragraph.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```py\nprint("hi")\n```\n\nClosing words.',
