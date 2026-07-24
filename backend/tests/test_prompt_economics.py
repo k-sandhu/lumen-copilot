@@ -28,7 +28,10 @@ from app.services.prompts.grounded_answer import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.impls.retrieval import rendered_snippet
 from app.services.tools.registry import default_allowlist, tool_specs
 
-_MODEL = "openrouter/anthropic/claude-opus-4.8"  # the registry default (FRONTIER)
+# A FRONTIER model, pinned deliberately to exercise its tokeniser for the
+# token-budget arithmetic below. NOT the registry default — since #490 the default
+# is a FAST-tier model (claude-haiku-4.5); this constant is independent of it.
+_MODEL = "openrouter/anthropic/claude-opus-4.8"
 
 # A 3-tool answer's tools block: the real default read-only allow-list schemas
 # (search_text / search_documents / list_documents / get_document …) — the same
