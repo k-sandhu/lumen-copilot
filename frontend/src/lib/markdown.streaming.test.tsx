@@ -43,13 +43,17 @@ import { MarkdownView } from './markdown';
 import { splitStreamingBlocks } from './markdownBlocks';
 
 function proseHtml(container: HTMLElement): string {
-  const el = container.querySelector('.prose-md');
-  // Ignore insignificant inter-block whitespace (one-shot keeps the source
-  // newlines between block elements; the split path renders each block through
-  // its own parser, so those newlines are absent). This normalisation only
-  // collapses whitespace BETWEEN tags — a real structural artifact (a split
-  // table, a duplicated block) changes tags and is still caught.
-  return (el?.innerHTML ?? '').replace(/>\s+</g, '><').trim();
+  // AC-3 is a BYTE-identity claim, so we compare the UNMODIFIED `.prose-md`
+  // innerHTML — no whitespace normalisation (FE-8). The earlier version stripped
+  // inter-tag whitespace (`>\s+<` → `><`), which made `</p>\n<h2>` and `</p><h2>`
+  // compare equal and so silently masked any artifact that surfaced only as
+  // changed whitespace between blocks. Exact separators are now reproduced on the
+  // split path itself: a one-shot parse joins top-level blocks with a single `\n`
+  // text node, and `StreamingMarkdownBody` re-inserts exactly that `\n` between
+  // adjacent blocks — so the two DOMs are genuinely, byte-for-byte identical and a
+  // premature settle / split / duplicated block (which changes tags OR the
+  // whitespace between them) now fails this comparison.
+  return container.querySelector('.prose-md')?.innerHTML ?? '';
 }
 
 beforeEach(() => {

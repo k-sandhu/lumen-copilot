@@ -9,6 +9,7 @@
  * streamed assistant responses.
  */
 import {
+  Fragment,
   isValidElement,
   memo,
   useCallback,
@@ -195,6 +196,14 @@ const MarkdownPipeline = memo(function MarkdownPipeline({
  * across flushes even if boundaries shift, so its (memoised) parse is reused. Every
  * block flows through the SAME `MarkdownPipeline`, so sanitisation, the link
  * override, and citation text are identical to the whole-document path (AC-4/AC-6).
+ *
+ * A single whole-document parse joins its top-level block elements with a `\n` text
+ * node (`</p>\n<h2>`); parsing each block standalone drops those inter-block
+ * separators. To keep the streamed DOM BYTE-identical to one-shot (AC-3, tested via
+ * raw `innerHTML`), we re-insert exactly one `\n` text node BETWEEN adjacent blocks
+ * (never before the first / after the last, matching the one-shot join). The
+ * separator rides inside the following block's keyed Fragment, so content-keyed
+ * blocks still reuse their memoised parse across flushes.
  */
 function StreamingMarkdownBody({
   source,
@@ -206,27 +215,21 @@ function StreamingMarkdownBody({
   const { settled, trailing } = splitStreamingBlocks(source);
   // Disambiguate identical settled blocks (e.g. two `---`) so keys stay unique.
   const seen = new Map<string, number>();
+  const blocks = settled.map((block) => {
+    const h = blockKey(block);
+    const n = seen.get(h) ?? 0;
+    seen.set(h, n + 1);
+    return { key: n === 0 ? h : `${h}#${n}`, source: block };
+  });
+  if (trailing !== '') blocks.push({ key: '__trailing__', source: trailing });
   return (
     <>
-      {settled.map((block) => {
-        const h = blockKey(block);
-        const n = seen.get(h) ?? 0;
-        seen.set(h, n + 1);
-        return (
-          <MarkdownPipeline
-            key={n === 0 ? h : `${h}#${n}`}
-            source={block}
-            resolveInternalLink={resolveInternalLink}
-          />
-        );
-      })}
-      {trailing !== '' && (
-        <MarkdownPipeline
-          key="__trailing__"
-          source={trailing}
-          resolveInternalLink={resolveInternalLink}
-        />
-      )}
+      {blocks.map((block, i) => (
+        <Fragment key={block.key}>
+          {i > 0 && '\n'}
+          <MarkdownPipeline source={block.source} resolveInternalLink={resolveInternalLink} />
+        </Fragment>
+      ))}
     </>
   );
 }
