@@ -21,6 +21,13 @@ const CROSS_BLOCK_REFERENCE = /(^ {0,3}\[[^\]]+\]:\s)|(\[\^)/m;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 /** An indented (list/quote continuation) line — 1+ leading spaces then content. */
 const INDENTED = /^[ \t]+\S/;
+/**
+ * An indented **code-block** line (CommonMark: ≥4 leading spaces, or a tab). Unlike
+ * a lazy continuation, an indented code block absorbs its INTERNAL blank lines — a
+ * blank between two indented lines is part of the code, not a block separator — so
+ * it must not be split on those blanks (would render as two <pre>s ≠ one-shot).
+ */
+const INDENTED_CODE = /^(?: {4,}|\t)/;
 /** A fenced code delimiter (``` or ~~~, 3+), with ≤3 leading spaces. */
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
@@ -57,6 +64,7 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
   const settled: string[] = [];
   let current: string[] = []; // lines of the in-progress block
   let currentIsList = false; // the current block is (or extends) a list
+  let currentIsIndentedCode = false; // the current block is an indented code block
   let pendingBlanks = 0; // blank lines seen after content, not yet assigned
   let inFence = false;
   let fenceMarker = '';
@@ -66,6 +74,7 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
       settled.push(current.join('\n'));
       current = [];
       currentIsList = false;
+      currentIsIndentedCode = false;
     }
   };
 
@@ -89,8 +98,11 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
     const openMarker = line.match(FENCE)?.[1];
     if (pendingBlanks > 0) {
       const continuesList = currentIsList && (LIST_ITEM.test(line) || INDENTED.test(line));
-      if (continuesList) {
-        // Preserve the blank line(s) so list looseness is unchanged.
+      // An indented code block keeps going across a blank line iff a later
+      // indented-code line follows; the blank is code content, not a separator.
+      const continuesIndentedCode = currentIsIndentedCode && INDENTED_CODE.test(line);
+      if (continuesList || continuesIndentedCode) {
+        // Preserve the blank line(s) so list looseness / code content is unchanged.
         for (let b = 0; b < pendingBlanks; b++) current.push('');
       } else {
         // A blank gap + a fresh block proves the current block is complete.
@@ -98,7 +110,12 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
       }
       pendingBlanks = 0;
     }
-    if (current.length === 0) currentIsList = LIST_ITEM.test(line);
+    if (current.length === 0) {
+      currentIsList = LIST_ITEM.test(line);
+      // An indented code block only starts outside a list (a list marker with
+      // deep indent is still a list item, handled above).
+      currentIsIndentedCode = !currentIsList && INDENTED_CODE.test(line);
+    }
     current.push(line);
     if (openMarker !== undefined) {
       inFence = true;
