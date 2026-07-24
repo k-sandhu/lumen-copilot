@@ -1390,6 +1390,12 @@ class ChatRuntime:
             # terminal (nothing misleading was published yet), never a success
             # ``done``/``ask_user`` event over a rolled-back question.
             await session.commit()
+            # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): a
+            # post-commit publish failure while emitting ``ask_user``/``done`` reaches
+            # ``run``'s error arms, and an armed salvage would there re-record this
+            # already-committed usage as a duplicate message-less row (#409 — every
+            # billed token recorded exactly once).
+            self._salvage = None
             # The clarifying question IS the terminal (spec 0006): no suggestions
             # follow it, so the ``ask_user`` event + ``done`` stop the stream at once
             # (no pending window). Both ride AFTER the commit.
@@ -1564,6 +1570,15 @@ class ChatRuntime:
         # over a rolled-back answer. A commit failure raises here (before any
         # terminal) into ``run``'s error arms and becomes a typed ``error`` terminal.
         await session.commit()
+        # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): from here
+        # the answer + its base usage row are committed, so a post-commit cancellation
+        # or a publish failure (the terminal ``done``, or the post-terminal suggestions
+        # event) that reaches ``run``'s error arms must NOT re-record this same usage as
+        # a duplicate message-less row (#409 — every billed token recorded exactly
+        # once). Cleared the instant the spend is durably accounted. (The independent
+        # suggestions transaction below then runs with salvage already disarmed, so its
+        # own commit carries no salvage risk either.)
+        self._salvage = None
 
         # Publish the terminal ``done`` now that the answer is durable (#489 AC-1) —
         # the UI settles the instant the answer is complete, and only the (optional,

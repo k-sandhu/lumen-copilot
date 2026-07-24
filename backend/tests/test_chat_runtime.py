@@ -4187,6 +4187,108 @@ async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
         assert totals.total_tokens == 12  # but the spend is not lost
 
 
+class _FailTerminalBackplane(InMemoryBackplane):
+    """Fails the publish of the FIRST ``done`` terminal (only).
+
+    Exercises the post-commit failure/cancellation arms of ``run`` (#489/BE-1): the
+    answer + its base usage row commit BEFORE ``done`` is published, so a ``done``
+    that fails to publish drives control back into ``run``'s error/cancel handlers
+    with the answer already durable. ``record_first`` chooses whether the ``done``
+    reached the replay buffer before the raise (a partial success / ack-lost write)
+    or not (a pre-write failure)."""
+
+    def __init__(self, *, exc: BaseException, record_first: bool = False) -> None:
+        super().__init__()
+        self._exc = exc
+        self._record_first = record_first
+        self.failed = False
+
+    async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
+        if not self.failed and envelope.get("type") == "done":
+            self.failed = True
+            if self._record_first:
+                await super().publish(stream_id, envelope)
+            raise self._exc
+        await super().publish(stream_id, envelope)
+
+
+async def _usage_rows(ctx: _Ctx) -> list[Any]:
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        return await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+
+
+def _spending_answer_gateway() -> _ScriptedGateway:
+    """One tool-free answer turn that reports real token usage (so salvage, if
+    armed, would have non-empty scopes to duplicate)."""
+    return _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ]
+    )
+
+
+async def test_salvage_disarmed_after_commit_no_dup_on_terminal_publish_failure(
+    ctx: _Ctx,
+) -> None:
+    """R2-1 (#489/BE-1): the answer + base usage row COMMIT before the terminal, then
+    publishing ``done`` FAILS. ``run``'s error arm must NOT re-record the committed
+    usage as a duplicate message-less salvage row — the salvage is disarmed the
+    instant the commit lands (#409: every billed token recorded exactly once)."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("backplane down"))
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False  # the terminal publish failed
+    rows = await _usage_rows(ctx)
+    # EXACTLY the committed answer row — no duplicate message-less salvage row.
+    assert len(rows) == 1
+    assert rows[0].message_id is not None
+    assert rows[0].total_tokens == 15  # NOT 30 (doubled had salvage fired post-commit)
+
+
+async def test_salvage_disarmed_after_commit_no_dup_on_post_commit_cancellation(
+    ctx: _Ctx,
+) -> None:
+    """R2-1 (#489/BE-1 + #156): a cancellation landing AFTER the answer commit (here,
+    mid terminal publish) is a BaseException caught by ``run``'s cancel arm. The
+    disarmed salvage must not duplicate the committed usage before re-raising."""
+    backplane = _FailTerminalBackplane(exc=asyncio.CancelledError())
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    rows = await _usage_rows(ctx)
+    assert len(rows) == 1
+    assert rows[0].message_id is not None
+    assert rows[0].total_tokens == 15
+
+
 async def test_anonymous_provider_fallback_is_not_skipped(ctx: _Ctx) -> None:
     """#440 round-2 NEW-3: a RESOLVED anonymous provider fallback (api_base
     set, no key — a legitimate config) fails over fine; an UNRESOLVED
