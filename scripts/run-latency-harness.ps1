@@ -15,12 +15,17 @@
     * AC-7 — routes an answer at a black-hole api_base and asserts a typed terminal
       error arrives within the interactive budget (<= 30s), not after ~182s.
 
-  It measures over the REAL Redis backplane when Redis is reachable (so the #487
-  pooled-publish path is on the clock), else the in-memory fan-out (the printed
-  report names which). Timing is client-perspective: the harness subscribes before
-  generation and stamps `time.perf_counter()` at the instant it drains each
-  envelope, so TTFAT / total include the publish, the WS relay, and the fan-out a
-  browser pays (the server `ts` is kept only as a generation-vs-transport diagnostic).
+  It drives the REAL client path: an authenticated `POST .../messages` (202 +
+  stream id) schedules the answer, then an authenticated WebSocket client consumes
+  the app's real `chat_ws` relay over the process's REAL Redis backplane. Redis is
+  REQUIRED — there is no in-memory fallback; a run with Redis unreachable SKIPS
+  loudly. Timing is client-perspective: the WS client stamps `time.perf_counter()`
+  the instant it drains each envelope, so TTFAT / total include the HTTP schedule,
+  the Redis publish + pub/sub, and the WS relay a browser pays. Before any AC-1
+  number counts, each sample must prove it took the single-tool grounded path
+  (exactly one retrieval call returning passages + at least one streamed citation).
+  It does NOT include a browser's network RTT/TLS (the client is in-process) or
+  React render; see the harness docstring for the full does/does-not list.
 
   The harness is opt-in: it spends real tokens, so it runs only when RUN_LIVE=1 is
   set (plus a reachable key / Postgres / OpenSearch) and otherwise SKIPS cleanly
@@ -75,7 +80,10 @@ if ($MeasureOnly) { $env:LATENCY_ASSERT = '0' }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $repoRoot 'backend'
 
-Write-Host "Running chat-latency harness from $backend (DATABASE_URL=$DatabaseUrl, samples=$Samples)" -ForegroundColor Cyan
+# Never echo the raw DATABASE_URL: it can embed a password (no-secret-output
+# rule). Strip any `user:pass@` userinfo so only scheme/host/port/database show.
+$SafeDbUrl = $DatabaseUrl -replace '://[^/@]*@', '://'
+Write-Host "Running chat-latency harness from $backend (DATABASE_URL=$SafeDbUrl, samples=$Samples)" -ForegroundColor Cyan
 Push-Location $backend
 try {
   # -s so the harness's printed TTFT / error-budget report reaches the console.
