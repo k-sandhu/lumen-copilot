@@ -60,7 +60,22 @@
         },
         "data": {}
       },
-      "required": ["type", "streamId", "seq", "name"]
+      "required": ["type", "streamId", "seq", "name"],
+      "if": {
+        "required": ["name"],
+        "properties": { "name": { "const": "answer_retract" } }
+      },
+      "then": {
+        "$comment": "answer_retract carries NO data (#488/BE-6): a whole-turn retraction is fully specified by its name, so an exact shape (base envelope fields + name, nothing else) is enforced — a `data` payload or any unexpected top-level property is rejected rather than silently accepted. Scoped to answer_retract; every other event name is unaffected and may carry `data`.",
+        "properties": {
+          "type": true,
+          "streamId": true,
+          "seq": true,
+          "ts": true,
+          "name": true
+        },
+        "additionalProperties": false
+      }
     },
     "Done": {
       "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
