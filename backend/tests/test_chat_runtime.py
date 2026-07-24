@@ -546,6 +546,63 @@ async def test_empty_model_answer_falls_back_to_honest_message(ctx: _Ctx) -> Non
     assert assistant.content.strip() != ""
 
 
+async def test_fallback_text_retracted_when_persistence_fails(ctx: _Ctx) -> None:
+    """R2-4 (#148/#488): the no-source fallback is streamed through the TRACKED seam,
+    so when persistence then fails the fallback delta is RETRACTED before the typed
+    ``error`` terminal — never stranded on the client under an error. The old raw
+    ``_publish`` left ``answer_on_wire`` false, so the fallback could not be retracted
+    and a failed answer would leave honest-looking text on the wire."""
+    from app.core.errors import AppError
+    from app.services.prompts.grounded_answer import NO_SOURCES_FALLBACK
+
+    gateway = _ScriptedGateway([[StreamEvent(finish_reason="stop")]])  # no text → fallback
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=0,  # flush the fallback delta live, so it earns a retract
+    )
+
+    async def _boom(**_kwargs: object) -> object:
+        raise AppError(
+            "persist down",
+            title="Service Unavailable",
+            code="dependency_unavailable",
+            status=503,
+        )
+
+    runtime._persist = _boom  # type: ignore[assignment,method-assign]
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert ok is False
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    # The typed error is the raised AppError's (not a generic 500).
+    assert cast("dict[str, object]", envs[-1]["problem"])["code"] == "dependency_unavailable"
+    # The fallback streamed as a delta, then was retracted ahead of the error.
+    assert _texts_of(envs, "delta") == [NO_SOURCES_FALLBACK]
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # #148: no dangling answer text remains on the wire, and nothing persisted.
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
 def _tool_turn(narration: str, call_id: str) -> list[StreamEvent]:
     """A turn that emits a little narration then requests a search (never answers)."""
     return [
@@ -5782,9 +5839,14 @@ async def test_answer_deltas_are_coalesced_without_changing_the_text(ctx: _Ctx) 
     assert deltas, "the answer must still stream"
     # Materially fewer envelopes than provider chunks (the AC-2 bar).
     assert len(deltas) <= len(chunks) // 4
-    # ...and not one character changed.
-    assert "".join(deltas) == "".join(chunks)
-    assert await _stored_answer(ctx) == "".join(chunks).strip()
+    # ...and not one character changed. The provider chunks each end in a space, so
+    # the concatenation ends in a trailing space — which MUST survive into the
+    # persisted message (R2-4 / #148): stored == delivered, byte-for-byte, with NO
+    # normalisation (a ``.strip()`` here would hide exactly the mismatch #148 forbids).
+    delivered = "".join(deltas)
+    assert delivered == "".join(chunks)
+    assert delivered.endswith(" ")  # the trailing space is real, not incidental
+    assert await _stored_answer(ctx) == delivered
 
 
 async def test_a_pending_buffer_is_flushed_before_the_terminal(ctx: _Ctx) -> None:
@@ -6071,8 +6133,11 @@ async def test_a_long_answer_fits_the_bounded_replay_for_a_late_subscriber(ctx: 
     assert envs[0]["type"] == "start" and envs[-1]["type"] == "done"
     seqs = [cast(int, e["seq"]) for e in envs]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
-    assert "".join(_texts_of(envs, "delta")) == "".join(chunks)
-    assert await _stored_answer(ctx) == "".join(chunks).strip()
+    # The late subscriber's delivered text equals the persisted one byte-for-byte —
+    # trailing space and all (R2-4 / #148); no normalisation.
+    delivered = "".join(_texts_of(envs, "delta"))
+    assert delivered == "".join(chunks)
+    assert await _stored_answer(ctx) == delivered
 
 
 # --- #488: speculative live streaming of the answer + retraction --------------

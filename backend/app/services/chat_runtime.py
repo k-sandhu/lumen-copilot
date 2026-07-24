@@ -1484,20 +1484,29 @@ class ChatRuntime:
                 await self._publish_text(state, extra_chunks)
             answer_chunks = [*answer_chunks, *extra_chunks]
 
-        answer_text = "".join(answer_chunks).strip()
+        # Persist the EXACT concatenation of the delivered answer deltas (#148):
+        # stored == streamed must hold BYTE-for-byte, so NEVER strip the persisted
+        # value — a strip here makes the stored message differ from what streamed.
+        # Stripping is used ONLY to detect emptiness below (whether to fall back).
+        answer_text = "".join(answer_chunks)
 
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
-        if not answer_text:
-            # Still no answer text — even a forced synthesis said nothing (e.g.
+        if not answer_text.strip():
+            # No VISIBLE answer text — even a forced synthesis said nothing (e.g.
             # retrieval found nothing). Fall back to an honest "couldn't find it"
-            # rather than persisting an empty turn.
+            # rather than persisting an empty (or whitespace-only) turn. Any
+            # whitespace-only speculative text already on the wire is retracted first
+            # so the fallback is exactly what's delivered (#148).
+            if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
+                await self._retract_answer(state)
             answer_text = NO_SOURCES_FALLBACK
-            seq = await self._next_seq(state)
-            await self._publish(
-                state,
-                envelopes.delta(state.stream_id, seq, {"text": answer_text}),
-            )
+            # Emit the fallback through the TRACKED ``_stream_text`` seam (#488), not a
+            # raw ``_publish``: that sets ``answer_on_wire``, so a later persistence /
+            # commit failure RETRACTS the fallback like any other answer delta instead
+            # of stranding it on the client under an ``error`` terminal. ``answer_text``
+            # is now EXACTLY the fallback string, so stored == delivered still holds.
+            await self._stream_text(state, _ANSWER_TEXT, answer_text)
 
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="started")
         stored_citations = await self._persist(
