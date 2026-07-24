@@ -21,16 +21,21 @@
  *   restores the draft immediately. Editing a recalled entry ends navigation
  *   (the edit becomes the new draft, as in a shell).
  */
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from 'react';
 import type { ChatModelInfo, KnowledgeMode } from '@/api';
 import { Icon } from '@/ui';
 import { useMentionSuggestions } from '../model/queries';
 import { mentionQueryOf, type PinnedDocument } from '../model/composerHelpers';
 import { ModelPicker } from './ModelPicker';
-import {
-  KnowledgeModeControl,
-  type ModeAvailability,
-} from './KnowledgeModeControl';
+import { KnowledgeModeControl, type ModeAvailability } from './KnowledgeModeControl';
 
 export type { PinnedDocument } from '../model/composerHelpers';
 
@@ -78,7 +83,7 @@ export interface ComposerProps {
   onUnpinDocument?: (id: string) => void;
 }
 
-export function Composer({
+function ComposerComponent({
   models,
   model,
   onModelChange,
@@ -255,7 +260,8 @@ export function Composer({
       // taller draft, ArrowUp stays ordinary caret movement.
       const onFirstLine = !el.value.slice(0, el.selectionStart).includes('\n');
       if (!onFirstLine) return;
-      const next = historyIndex === null ? 0 : Math.min(historyIndex + 1, historyEntries.length - 1);
+      const next =
+        historyIndex === null ? 0 : Math.min(historyIndex + 1, historyEntries.length - 1);
       if (historyIndex === null) stashRef.current = draft;
       if (next === historyIndex) return; // already at the oldest entry
       e.preventDefault();
@@ -436,10 +442,7 @@ export function Composer({
           />
           {model && onSetDefaultModel ? (
             model === defaultModelId ? (
-              <span
-                className="lc-default-tag"
-                title="This is your default model for new chats"
-              >
+              <span className="lc-default-tag" title="This is your default model for new chats">
                 <Icon name="check" />
                 Default
               </span>
@@ -457,7 +460,12 @@ export function Composer({
           ) : null}
           <div className="lc-composer__bar-spacer" />
           {streaming ? (
-            <button type="button" onClick={onStop} aria-label="Stop generating" className="lc-stop-btn">
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop generating"
+              className="lc-stop-btn"
+            >
               <span className="lc-stop-glyph" aria-hidden="true" />
               Stop
             </button>
@@ -480,3 +488,9 @@ export function Composer({
     </form>
   );
 }
+
+// Memoised (#495): the composer owns its own draft state, so a streaming answer
+// (which re-renders ActiveSession on every delta) must not re-render it. Its
+// props are stabilised at the call site (useCallback handlers, a shared empty
+// models array) so the shallow compare holds while an answer streams.
+export const Composer = memo(ComposerComponent);
