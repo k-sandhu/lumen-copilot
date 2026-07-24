@@ -18,16 +18,24 @@
  *      `[…]` NOT immediately followed by `(` (the `(?!\()` excludes self-contained
  *      inline links/images `[text](url)` / `![alt](url)`, whose target is inline).
  * Why the USE (shape 3) matters, not just the definition: a shortcut/reference use
- * can appear and let earlier blocks SETTLE, and then the matching DEFINITION lands
- * in a LATER delta — which would (a) un-settle & remount every earlier block and
- * (b) retroactively turn the use into a link, so the settled standalone render (a
- * literal `[label]`) would no longer equal the one-shot render (a link). Tripping
- * on the USE keeps the whole source in the trailing region from the moment the use
- * appears — BEFORE anything settles — so the settled set stays append-only and the
- * final DOM still matches one-shot. Correctness over granularity: err toward
- * trailing. (Cost: an answer carrying `[n]` citation markers streams as one
- * re-parsed block rather than settling incrementally — acceptable, and rare vs. the
- * bracket-free common case.)
+ * can appear and let its block SETTLE, and then the matching DEFINITION lands in a
+ * LATER delta — which would retroactively turn the use into a link, so the settled
+ * standalone render (a literal `[label]`) would no longer equal the one-shot render
+ * (a link).
+ *
+ * This is matched PER BLOCK, and it gates only the SUFFIX (see
+ * `splitStreamingBlocks`): a block with no reference construct settles even when a
+ * LATER block has one. Matching it against the WHOLE source instead (the earlier
+ * shape of this valve) was both over-broad and unsound:
+ *   - over-broad, because nearly every grounded chat answer carries `[n]` CITATION
+ *     markers, which read as shortcut uses — so incremental parsing was off in the
+ *     common case;
+ *   - unsound, because with `First.\n\nSecond [x]` the arriving `]` tripped the
+ *     global valve and RETRACTED the already-settled `First.` (a key change ⇒ a
+ *     remount and reparse of content the user is already reading).
+ * Gating the suffix keeps the settled set APPEND-ONLY: the trip index is the first
+ * MATCHING SETTLED block, and settled blocks never change once settled, so the
+ * index can only stay put or move later as deltas land.
  */
 const CROSS_BLOCK_REFERENCE = /(^ {0,3}\[[^\]]+\]:\s)|(\[\^)|(\[[^\]]*\](?!\())/m;
 /**
@@ -106,16 +114,19 @@ export interface StreamingBlocks {
  *     for an HTML block whose end condition is a terminator string (HTML_BLOCK).
  *   - A list is not split across its blank lines (a loose list must stay one
  *     <ul>/<ol>); indented continuations stay attached to their list item.
+ *   - A cross-block reference construct gates the SUFFIX from its own block on
+ *     (CROSS_BLOCK_REFERENCE), never the blocks that already settled before it.
  *   - When in doubt, MERGE into the trailing region — over-merging renders the
  *     same as one-shot; only a premature SPLIT can corrupt the DOM.
  */
 export function splitStreamingBlocks(source: string): StreamingBlocks {
   if (source === '') return { settled: [], trailing: '' };
-  if (CROSS_BLOCK_REFERENCE.test(source)) return { settled: [], trailing: source };
 
   const lines = source.split('\n');
   const settled: string[] = [];
+  const settledStart: number[] = []; // source line index each settled block starts at
   let current: string[] = []; // lines of the in-progress block
+  let currentStart = 0; // source line index of current[0]
   let currentIsList = false; // the current block is (or extends) a list
   let currentIsIndentedCode = false; // the current block is an indented code block
   let pendingBlanks = 0; // blank lines seen after content, not yet assigned
@@ -126,13 +137,14 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
   const flushSettled = () => {
     if (current.length > 0) {
       settled.push(current.join('\n'));
+      settledStart.push(currentStart);
       current = [];
       currentIsList = false;
       currentIsIndentedCode = false;
     }
   };
 
-  for (const line of lines) {
+  for (const [i, line] of lines.entries()) {
     if (inFence) {
       current.push(line);
       if (closesFence(line, fenceMarker)) {
@@ -171,6 +183,7 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
       pendingBlanks = 0;
     }
     if (current.length === 0) {
+      currentStart = i;
       currentIsList = LIST_ITEM.test(line);
       // An indented code block only starts outside a list (a list marker with
       // deep indent is still a list item, handled above).
@@ -190,7 +203,21 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
   }
 
   // The final region is always in-progress: more text could still extend it.
-  return { settled, trailing: current.join('\n') };
+  let trailing = current.join('\n');
+
+  // The cross-block-reference valve, applied SURGICALLY: everything from the first
+  // settled block that carries a reference definition/use stays trailing (it may
+  // still be rewritten by a definition in a later block), while the settled prefix
+  // before it is already safe and stays settled. Rebuilding the trailing region from
+  // the ORIGINAL lines preserves the exact blank-line separators between the merged
+  // blocks, so the re-parsed region renders identically to one-shot.
+  const trip = settled.findIndex((block) => CROSS_BLOCK_REFERENCE.test(block));
+  const tripLine = trip === -1 ? undefined : settledStart[trip];
+  if (tripLine !== undefined) {
+    trailing = lines.slice(tripLine).join('\n');
+    settled.length = trip;
+  }
+  return { settled, trailing };
 }
 
 /** Small, stable content hash (djb2) for a settled block's React key (#494). */

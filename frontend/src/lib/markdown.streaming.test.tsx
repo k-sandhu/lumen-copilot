@@ -189,6 +189,31 @@ describe('splitStreamingBlocks (the block splitter — #494)', () => {
       trailing: 'After.',
     });
   });
+
+  it('keeps only the SUFFIX from the first cross-block reference trailing — FE2-2', () => {
+    // A citation marker (`[1]`) reads as a shortcut reference USE, so the round-1
+    // valve kept the WHOLE answer trailing — incremental parsing was effectively
+    // off for every grounded answer. The valve is now surgical: the already-safe
+    // settled PREFIX is preserved and only the suffix from the first offending
+    // block stays trailing.
+    expect(
+      splitStreamingBlocks('Para one.\n\nPara two [1] with a citation.\n\nPara three.'),
+    ).toEqual({
+      settled: ['Para one.'],
+      trailing: 'Para two [1] with a citation.\n\nPara three.',
+    });
+    // A block with no reference use settles even though a LATER block has one.
+    expect(splitStreamingBlocks('Alpha.\n\nBeta.\n\nGamma [x].\n\nDelta.')).toEqual({
+      settled: ['Alpha.', 'Beta.'],
+      trailing: 'Gamma [x].\n\nDelta.',
+    });
+    // A reference/footnote DEFINITION trips too (a use in a LATER block must be
+    // parsed together with it, or the settled render would show literal `[x]`).
+    expect(splitStreamingBlocks('Alpha.\n\nBeta.\n\n[x]: https://e.com')).toEqual({
+      settled: ['Alpha.', 'Beta.'],
+      trailing: '[x]: https://e.com',
+    });
+  });
 });
 
 describe('AC-2 — a settled block is not re-parsed when later blocks/deltas arrive', () => {
@@ -264,6 +289,64 @@ describe('FE-7 — a late reference definition never un-settles an earlier block
     // genuinely cross-block, so settling `Uses a ref [x].` alone would have been
     // WRONG — it would have rendered a literal `[x]`).
     expect(stream.container.querySelector('a[href="https://e.com"]')).not.toBeNull();
+  });
+});
+
+describe('FE2-2 — the cross-block-reference valve is surgical and append-only', () => {
+  const CITATION = 'Para one.\n\nPara two [1] with a citation.\n\nPara three.';
+  const REF_LINK = 'Uses [a][1].\n\nMiddle.\n\n[1]: https://e.com';
+  const RETRACTION = 'First.\n\nSecond [x]';
+
+  function streamTo(doc: string) {
+    const stream = render(<MarkdownView streaming>{doc.slice(0, 1)}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    for (let k = 2; k <= doc.length; k++) {
+      stream.rerender(<MarkdownView streaming>{doc.slice(0, k)}</MarkdownView>);
+    }
+    return stream;
+  }
+
+  it('(a) still parses an answer carrying [n] citation markers INCREMENTALLY', () => {
+    // Round 1 collapsed this to one giant trailing block (every grounded answer
+    // carries `[n]` markers), which disabled incremental parsing in the common case.
+    const { settled, trailing } = splitStreamingBlocks(CITATION);
+    expect(settled).toEqual(['Para one.']);
+    expect(trailing).toBe('Para two [1] with a citation.\n\nPara three.');
+
+    const oneShot = render(<MarkdownView>{CITATION}</MarkdownView>, { wrapper: MemoryRouter });
+    const expected = proseHtml(oneShot.container);
+    oneShot.unmount();
+    expect(proseHtml(streamTo(CITATION).container)).toBe(expected);
+  });
+
+  it('(b) still renders a genuine reference link resolved by its later definition', () => {
+    const oneShot = render(<MarkdownView>{REF_LINK}</MarkdownView>, { wrapper: MemoryRouter });
+    const expected = proseHtml(oneShot.container);
+    oneShot.unmount();
+
+    const stream = streamTo(REF_LINK);
+    expect(proseHtml(stream.container)).toBe(expected);
+    // The definition really did resolve the use into a link — so settling
+    // `Uses [a][1].` alone would have rendered literal text instead.
+    expect(stream.container.querySelector('a[href="https://e.com"]')).not.toBeNull();
+  });
+
+  it('(c) never un-settles a block that already settled at an earlier delta', () => {
+    // `First.` settles, then the arriving `]` completed a shortcut reference and the
+    // round-1 GLOBAL valve retracted the settled set from one block to zero — a key
+    // change ⇒ a remount + reparse of already-rendered content.
+    for (const doc of [CITATION, REF_LINK, RETRACTION]) {
+      let prev: string[] = [];
+      for (let k = 1; k <= doc.length; k++) {
+        const { settled } = splitStreamingBlocks(doc.slice(0, k));
+        expect(settled.slice(0, prev.length), `delta ${k} of ${JSON.stringify(doc)}`).toEqual(prev);
+        prev = settled;
+      }
+    }
+    // …and the concrete retraction from the finding: `First.` stays settled.
+    expect(splitStreamingBlocks('First.\n\nSecond [x').settled).toEqual(['First.']);
+    expect(splitStreamingBlocks(RETRACTION).settled).toEqual(['First.']);
   });
 });
 
