@@ -237,9 +237,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             # cursor in the (created_at, id-hex) total order, so the batch's
             # boundary is always one the CAS will accept.
             cursor = (row.covers_through_created_at, row.covers_through_message_id.hex)
-            uncovered = [
-                m for m in fetched if (m.created_at, m.id.hex) > cursor
-            ]
+            uncovered = [m for m in fetched if (m.created_at, m.id.hex) > cursor]
         else:
             # First-ever pass: the SAME ordered, limited query via a sentinel
             # cursor — a rowid-ordered initial batch would strand same-second
@@ -300,9 +298,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # cited documents — MERGED with the previous row's map (r2 blocker 1b:
         # the previous summary text rolls forward, so every name it may still
         # carry must stay redactable), newest-batch entries first.
-        batch_names, batch_snippets = await _covered_citations(
-            session, tenant_id, to_cover
-        )
+        batch_names, batch_snippets = await _covered_citations(session, tenant_id, to_cover)
         mentioned = dict(batch_names)
         if row is not None:
             for doc_id, name in row.mentioned_documents:
@@ -359,9 +355,7 @@ def enqueue_summarize(tenant_id: UUID, session_id: UUID) -> None:
     directly. Synchronous + blocking (call via ``asyncio.to_thread``); raises
     on broker failure — the caller decides that it is a nicety.
     """
-    celery_app.send_task(
-        "summarize_session", args=[str(tenant_id), str(session_id)]
-    )
+    celery_app.send_task("summarize_session", args=[str(tenant_id), str(session_id)])
 
 
 @celery_app.task(  # type: ignore[misc]  # celery's task decorator is untyped

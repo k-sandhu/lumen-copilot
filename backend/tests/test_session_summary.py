@@ -150,9 +150,7 @@ async def test_summary_upserts_are_forward_only(ctx: _Ctx) -> None:
             .values(created_at=datetime(2000, 1, 1))
         )
         await session.commit()
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         by_id = {m.id: m for m in rows}
         accepted, first = await repo.upsert_summary(
             ctx.session_id,
@@ -240,9 +238,7 @@ def _summary_settings(**overrides: object) -> object:
     )
 
 
-async def test_task_skips_below_batch_threshold(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_task_skips_below_batch_threshold(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
@@ -254,9 +250,7 @@ async def test_task_skips_below_batch_threshold(
     assert outcome == "skipped_below_batch"
     async with ctx.sessionmaker() as session:
         assert (
-            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-                ctx.session_id
-            )
+            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
             is None
         )
 
@@ -267,16 +261,12 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
     outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
     assert outcome == "summarized"
     # Covered = the 10 oldest (14 - keep 4); the boundary is message index 9.
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None
         assert row.summary == "SUMMARY: goals and answers so far."
         assert row.covers_through_message_id == ctx.message_ids[9]
@@ -295,9 +285,7 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
         assert usage_rows and usage_rows[-1].total_tokens == 70
 
 
-async def test_task_second_pass_rolls_forward(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_task_second_pass_rolls_forward(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import datetime as _dt
 
     from sqlalchemy import update as _upd
@@ -306,9 +294,7 @@ async def test_task_second_pass_rolls_forward(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
     # Deterministic eras: the seeded 14 turns land minutes in the past so the
     # second pass's boundary is STRICTLY newer (the same-second tie-break is a
     # stable-but-arbitrary id order — correct for racing tasks, coin-floppy
@@ -334,9 +320,7 @@ async def test_task_second_pass_rolls_forward(
         await session.commit()
     assert await task_module._summarize(ctx.tenant_id, ctx.session_id) == "summarized"  # noqa: SLF001
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None and row.version == 2
         # The PREVIOUS summary was fed forward into the second pass's prompt.
         assert _FakeGateway.last_user_block is not None
@@ -351,16 +335,12 @@ async def test_dead_gateway_leaves_summary_state_untouched(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _BoomGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
     with pytest.raises(RuntimeError):
         await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
     async with ctx.sessionmaker() as session:
         assert (
-            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-                ctx.session_id
-            )
+            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
             is None
         )
 
@@ -399,9 +379,7 @@ async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
 
     async def write_summary() -> None:
         async with ctx.sessionmaker() as session:
-            rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-                ctx.session_id
-            )
+            rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
             await SessionSummaryRepository(session, ctx.tenant_id).upsert_summary(
                 ctx.session_id,
                 summary="racing summary",
@@ -412,9 +390,7 @@ async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
 
     await _asyncio.gather(write_evidence(), write_summary())
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
     assert row is not None
     assert row.evidence == ((doc, chunk),)
     assert row.summary == "racing summary"
@@ -447,9 +423,7 @@ async def test_same_second_ties_advance_only_in_id_order(ctx: _Ctx) -> None:
         stamp = _dt(2022, 6, 1, 12, 0, 0)
         for m in pair:
             await session.execute(
-                _upd(_models.Message)
-                .where(_models.Message.id == m.id)
-                .values(created_at=stamp)
+                _upd(_models.Message).where(_models.Message.id == m.id).values(created_at=stamp)
             )
         await session.commit()
         rows = await messages_repo.list_for_session(ctx.session_id)
@@ -513,9 +487,7 @@ async def test_evidence_and_summary_caps_hold_at_write(ctx: _Ctx) -> None:
         many = [(uuid.uuid4(), uuid.uuid4()) for _ in range(50)]
         row = await repo.upsert_evidence(ctx.session_id, evidence=many)
         assert row is not None and len(row.evidence) == 20
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         _, srow = await repo.upsert_summary(
             ctx.session_id,
             summary="x" * 20_000,
@@ -556,9 +528,7 @@ async def test_summary_route_resolves_provider_sessions(
     def fake_builder(**_kwargs: object) -> object:
         async def resolver(_session: object, model_id: str) -> ModelRoute:
             if model_id == "provider:abc:their/model":
-                return ModelRoute(
-                    model="their/model", api_key="tenant-key", api_base="http://p"
-                )
+                return ModelRoute(model="their/model", api_key="tenant-key", api_base="http://p")
             return ModelRoute(model=model_id)  # unresolved passthrough
 
         return resolver
@@ -635,9 +605,7 @@ async def test_mention_map_holds_forty_entries(ctx: _Ctx) -> None:
     revocation gap is closed at both write and defensive read)."""
     async with ctx.sessionmaker() as session:
         repo = SessionSummaryRepository(session, ctx.tenant_id)
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         mentioned = {uuid.uuid4(): f"doc-{i}.pdf" for i in range(25)}
         accepted, srow = await repo.upsert_summary(
             ctx.session_id,
@@ -664,9 +632,7 @@ async def test_same_second_backlog_converges_across_passes(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
     # 100 messages in ONE second (the fixture's 14 + 86 more).
     async with ctx.sessionmaker() as session:
         messages = MessageRepository(session, ctx.tenant_id)
@@ -784,18 +750,14 @@ async def test_six_message_session_summarises_under_retuned_defaults(
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
 
     # Old thresholds on the SAME 6-message session: below batch → no summary.
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=8, min_batch=4)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=8, min_batch=4))
     old_outcome = await task_module._summarize(  # noqa: SLF001
         six_message_ctx.tenant_id, six_message_ctx.session_id
     )
     assert old_outcome == "skipped_below_batch"
 
     # Retuned defaults: 6 - keep 4 = 2 uncovered >= min_batch 2 → summarises.
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
     new_outcome = await task_module._summarize(  # noqa: SLF001
         six_message_ctx.tenant_id, six_message_ctx.session_id
     )

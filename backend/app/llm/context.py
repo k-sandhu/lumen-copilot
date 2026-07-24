@@ -343,9 +343,7 @@ def assemble_context(
                 "fetch by id with get_document / search for details.]\n"
                 + "\n".join(f"- {line}" for line in evidence_lines)
             )
-        segments.summary.append(
-            ChatMessage(role=Role.USER, content="\n\n".join(parts))
-        )
+        segments.summary.append(ChatMessage(role=Role.USER, content="\n\n".join(parts)))
 
     max_input = resolve(model) or cfg.fallback_max_input_tokens
     # A degenerate window (tiny model / oversized headroom) still yields a
@@ -765,9 +763,7 @@ def _compact_superseded_tool_results(
     return total, compacted
 
 
-def _context_digest(
-    content: str, digest_chars: int, cited_snippets: tuple[str, ...] = ()
-) -> str:
+def _context_digest(content: str, digest_chars: int, cited_snippets: tuple[str, ...] = ()) -> str:
     """A bounded, content-bearing digest of a tool result's content (ADR-0016 §3.1).
 
     Keeps the first ``digest_chars`` of the ACTUAL content — for a rendered

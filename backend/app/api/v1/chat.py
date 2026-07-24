@@ -119,6 +119,7 @@ class SandboxSessionResponse(BaseModel):
     last_used_at: datetime | None = None
     closed_at: datetime | None = None
 
+
 class ChatSessionResponse(BaseModel):
     """``#/components/schemas/ChatSession``."""
 
@@ -444,9 +445,7 @@ def _build_sandbox_service(
     )
 
 
-def _sandbox_response(
-    value: SandboxSession | None, *, enabled: bool
-) -> SandboxSessionResponse:
+def _sandbox_response(value: SandboxSession | None, *, enabled: bool) -> SandboxSessionResponse:
     if value is None:
         return SandboxSessionResponse(status="not_created", enabled=enabled)
     return SandboxSessionResponse(
@@ -672,9 +671,7 @@ async def reset_sandbox_session(
     return _sandbox_response(value, enabled=True)
 
 
-@router.delete(
-    "/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT)
 async def close_sandbox_session(
     session_id: UUID,
     response: Response,
@@ -894,13 +891,9 @@ def _schedule_answer(
             # summary. The enqueue helper is owned by ``tasks/`` (api/ never
             # speaks to the broker directly).
             try:
-                await asyncio.to_thread(
-                    enqueue_summarize, principal.tenant_id, session_id
-                )
+                await asyncio.to_thread(enqueue_summarize, principal.tenant_id, session_id)
             except Exception as exc:  # noqa: BLE001 — nicety, never the answer
-                log.warning(
-                    "chat.summarize_enqueue_failed", error_type=type(exc).__name__
-                )
+                log.warning("chat.summarize_enqueue_failed", error_type=type(exc).__name__)
 
     tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
     task = asyncio.create_task(_produce())

@@ -50,6 +50,7 @@ def _fresh_embed_cache() -> Any:
     yield
     clear_embed_cache()
 
+
 # --- Test settings ---------------------------------------------------------
 
 _BASE_ENV = {
@@ -435,9 +436,7 @@ async def test_chat_usage_cached_zero_falls_back_to_anthropic_read(
     Anthropic-style ``cache_read_input_tokens`` rather than masking it."""
 
     async def fake_acompletion(**kwargs: Any) -> _Response:
-        return _Response(
-            "x", usage=_CacheUsage(100, 5, 105, cached_details=0, cache_read=77)
-        )
+        return _Response("x", usage=_CacheUsage(100, 5, 105, cached_details=0, cache_read=77))
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     gw = LLMGateway(_settings())
@@ -1085,9 +1084,7 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
                 content="",
                 tool_calls=(ToolCall(id=call_id, name="lookup", arguments={"key": "n"}),),
             ),
-            ChatMessage(
-                role=Role.TOOL, content=result, tool_call_id=call_id, name="lookup"
-            ),
+            ChatMessage(role=Role.TOOL, content=result, tool_call_id=call_id, name="lookup"),
         ]
 
     async def _turn_usage(messages: list[ChatMessage]) -> TokenUsage:
