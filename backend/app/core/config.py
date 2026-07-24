@@ -100,6 +100,22 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
 )
 
 
+# Interactive-answer worst-case bound (#489 AC-4, BE-7). A live chat answer must
+# surface a typed terminal error within this ceiling when the provider is
+# unreachable. The interactive per-turn deadline is the load-bearing part of that
+# budget, but publishing the terminal (and settling) costs a little MORE on top —
+# so the accepted per-turn deadline must reserve a margin, or a deadline set right
+# at the ceiling would overshoot once the terminal publish is added. The maximum
+# accepted ``LLM_INTERACTIVE_TIMEOUT_SECONDS`` is therefore the ceiling minus that
+# margin, making ``deadline + margin <= ceiling`` an enforced invariant rather
+# than a hopeful comment.
+_INTERACTIVE_WORST_CASE_CEILING_SECONDS = 30.0
+_INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS = 3.0
+_MAX_INTERACTIVE_TIMEOUT_SECONDS = (
+    _INTERACTIVE_WORST_CASE_CEILING_SECONDS - _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
+)
+
+
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration, sourced from the environment.
 
@@ -439,9 +455,16 @@ class Settings(BaseSettings):
     # runtime as an asyncio deadline around the whole resilient turn, so it also
     # catches a provider that connects then stalls mid-stream (which the LiteLLM
     # request timeout does not). Worst case to a typed terminal on an unreachable
-    # provider is this budget + a small margin, which must stay <= 30s (#489 AC-4).
+    # provider is this budget + the terminal-publish margin, which must stay <= 30s
+    # (#489 AC-4). Enforced (BE-7): the accepted maximum is the 30s ceiling MINUS
+    # that margin (``_MAX_INTERACTIVE_TIMEOUT_SECONDS`` = 27s), so a deadline set at
+    # the boundary still lands the typed terminal under 30s — a value that would
+    # overshoot is rejected at boot, not silently over budget.
     llm_interactive_timeout_seconds: float = Field(
-        default=25.0, gt=0, le=30, alias="LLM_INTERACTIVE_TIMEOUT_SECONDS"
+        default=25.0,
+        gt=0,
+        le=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+        alias="LLM_INTERACTIVE_TIMEOUT_SECONDS",
     )
     # How many attempts a single interactive turn makes before failing over /
     # terminating (#489): 2 = one retry. The batch/headless path keeps the fuller

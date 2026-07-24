@@ -311,6 +311,7 @@ def _runtime(
     flush_sleep: object = None,
     turn_timeout_seconds: float | None = None,
     interactive_max_attempts: int | None = None,
+    interactive_deadline_at: object = None,
     retry_sleep: object = None,
     answer_max_tokens: int | None = None,
 ) -> ChatRuntime:
@@ -335,6 +336,8 @@ def _runtime(
         extra["turn_timeout_seconds"] = turn_timeout_seconds
     if interactive_max_attempts is not None:
         extra["interactive_max_attempts"] = interactive_max_attempts
+    if interactive_deadline_at is not None:
+        extra["interactive_deadline_at"] = interactive_deadline_at
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -4726,6 +4729,64 @@ def test_interactive_budget_default_meets_the_30s_bound() -> None:
     # The retry ladder is shortened for the interactive path (3 -> 2 attempts),
     # and it lives INSIDE the single budget, so it cannot stack past it.
     assert settings.llm_interactive_max_attempts == 2
+
+
+async def test_interactive_timeout_bounds_a_hung_provider_at_the_max_override(ctx: _Ctx) -> None:
+    """BE-7 (#489 AC-4): even at the MAXIMUM accepted interactive budget, an
+    unreachable provider yields ONE typed 503 terminal within the <=30s worst case
+    — not a stacked retry cliff. Driven with the injectable deadline seam (a
+    deadline already in the past) so the max budget fires instantly: NO real wait,
+    yet the value under test IS the largest override config will accept."""
+    import asyncio
+
+    from app.core.config import _MAX_INTERACTIVE_TIMEOUT_SECONDS
+
+    gateway = _HangingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # Warm the lazy LiteLLM tokenizer import before timing (unrelated to the budget).
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        # The largest value Settings will accept (30s ceiling minus the
+        # terminal-publish margin) — the worst-case interactive budget.
+        turn_timeout_seconds=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+        interactive_max_attempts=2,
+        # Force the deadline to already be in the past: the interactive timeout
+        # fires on the first await of the hung turn, so the 27s budget costs no
+        # real time here.
+        interactive_deadline_at=lambda _budget: asyncio.get_running_loop().time(),
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is False
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "error"
+    problem = cast("dict[str, object]", terminals[0]["problem"])
+    assert problem["status"] == 503
+    assert problem["code"] == "dependency_unavailable"
+    # The typed terminal arrived essentially instantly (deadline already elapsed),
+    # comfortably within the <=30s worst-case budget and with no real 27s wait.
+    assert elapsed < 2.0
 
 
 async def test_interactive_max_attempts_caps_the_retry_ladder(ctx: _Ctx) -> None:

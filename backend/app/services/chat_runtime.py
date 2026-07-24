@@ -494,6 +494,7 @@ class ChatRuntime:
         flush_sleep: Callable[[float], Awaitable[None]] | None = None,
         turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
         interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
+        interactive_deadline_at: Callable[[float], float] | None = None,
         answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -609,6 +610,13 @@ class ChatRuntime:
         # constructors, so their behaviour is byte-identical to pre-#489.
         self._turn_timeout_seconds = turn_timeout_seconds
         self._interactive_max_attempts = interactive_max_attempts
+        # BE-7 test seam: mints the absolute monotonic deadline for one interactive
+        # resilient turn. ``None`` (production, every non-test caller) ⇒
+        # ``loop.time() + budget``, byte-identical to ``asyncio.timeout(budget)``.
+        # A test injects one returning an already-elapsed instant so the deadline
+        # fires immediately even at the MAXIMUM configured budget — proving the
+        # <=30s worst-case bound without a real wall-clock wait.
+        self._interactive_deadline_factory = interactive_deadline_at
         # Answer/synthesis output ceiling (#488), threaded into every answer-turn
         # ``stream_tools`` call. ``None`` ⇒ unbounded (the pre-#488 wire); the chat
         # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
@@ -1919,8 +1927,13 @@ class ChatRuntime:
         budget = self._turn_timeout_seconds
         if budget is None:
             return await _run_attempts()
+        # Bound the WHOLE resilient turn by one absolute monotonic deadline (BE-7):
+        # in production ``loop.time() + budget`` — byte-identical to
+        # ``asyncio.timeout(budget)`` — but minted through an injectable seam so a
+        # test can force an already-elapsed deadline and fire this instantly at the
+        # MAXIMUM configured budget with no real wait.
         try:
-            async with asyncio.timeout(budget) as cm:
+            async with asyncio.timeout_at(self._interactive_deadline_at(budget)) as cm:
                 return await _run_attempts()
         except TimeoutError:
             if cm.expired():
@@ -1933,6 +1946,19 @@ class ChatRuntime:
                     "The model did not respond within the interactive time budget."
                 ) from None
             raise
+
+    def _interactive_deadline_at(self, budget: float) -> float:
+        """Absolute monotonic deadline for one interactive resilient turn (BE-7).
+
+        Production returns ``loop.time() + budget`` — byte-identical to what
+        ``asyncio.timeout(budget)`` computes internally. Injectable via the
+        ``interactive_deadline_at`` constructor seam so a test can return a
+        deadline already in the past, firing the interactive timeout instantly at
+        the MAXIMUM configured budget with no real wall-clock wait (#489 AC-4).
+        """
+        if self._interactive_deadline_factory is not None:
+            return self._interactive_deadline_factory(budget)
+        return asyncio.get_running_loop().time() + budget
 
     def _turn_attempt_count(self) -> int:
         """Same-route attempts for one turn — capped for the interactive path (#489).

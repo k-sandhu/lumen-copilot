@@ -1149,6 +1149,44 @@ def test_chat_shutdown_grace_default_is_positive() -> None:
     assert s.chat_shutdown_grace_seconds > 0
 
 
+def test_interactive_timeout_rejects_a_value_that_blows_the_30s_bound() -> None:
+    """BE-7 (#489 AC-4): LLM_INTERACTIVE_TIMEOUT_SECONDS must reserve a margin for
+    terminal publication under the 30s worst-case-to-terminal ceiling. A 30s
+    override (previously accepted at ``le=30``) would overshoot once the terminal
+    publish is added, so Settings now refuses to construct it."""
+    from app.core.config import (
+        _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        _INTERACTIVE_WORST_CASE_CEILING_SECONDS,
+        _MAX_INTERACTIVE_TIMEOUT_SECONDS,
+    )
+
+    # The accepted maximum plus the terminal-publish margin stays within 30s — so
+    # a deadline set at the boundary still lands the typed terminal under budget.
+    assert (
+        _MAX_INTERACTIVE_TIMEOUT_SECONDS + _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
+        <= _INTERACTIVE_WORST_CASE_CEILING_SECONDS
+    )
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_SETTINGS_BASE,
+            LLM_INTERACTIVE_TIMEOUT_SECONDS=_INTERACTIVE_WORST_CASE_CEILING_SECONDS,
+        )
+
+
+def test_interactive_timeout_accepts_the_reserved_maximum() -> None:
+    """BE-7: the largest SAFE override — the 30s ceiling minus the terminal-publish
+    margin — still constructs, so the enforcement caps at the boundary, not below."""
+    from app.core.config import _MAX_INTERACTIVE_TIMEOUT_SECONDS
+
+    s = Settings(
+        _env_file=None,
+        **_SETTINGS_BASE,
+        LLM_INTERACTIVE_TIMEOUT_SECONDS=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+    )
+    assert s.llm_interactive_timeout_seconds == _MAX_INTERACTIVE_TIMEOUT_SECONDS
+
+
 # --- Spec 0007 (#432): session usage endpoint --------------------------------
 
 
