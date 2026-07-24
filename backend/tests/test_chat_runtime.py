@@ -300,6 +300,7 @@ def _runtime(
     context_config: object = None,
     interactive: bool = True,
     suggestions_enabled: bool = False,
+    suggestions_grace_seconds: float | None = None,
     suggestions_model: str | None = None,
     model_route_resolver: object = None,
     retrieval_factory: object = None,
@@ -328,6 +329,8 @@ def _runtime(
         extra["retry_sleep"] = retry_sleep
     if answer_max_tokens is not None:
         extra["answer_max_tokens"] = answer_max_tokens
+    if suggestions_grace_seconds is not None:
+        extra["suggestions_grace_seconds"] = suggestions_grace_seconds
     if suggestions_model is not None:
         extra["suggestions_model"] = suggestions_model
     if model_route_resolver is not None:
@@ -4043,6 +4046,88 @@ async def test_pending_done_and_post_terminal_suggestions_validate_the_contract(
         sugg["data"],
         {"$ref": "#/$defs/ChatSuggestions", "$defs": defs},  # type: ignore[index]
     )
+
+
+async def test_done_carries_the_server_suggestions_grace(ctx: _Ctx) -> None:
+    """BE-5 (#489): a ``done`` that declares ``pendingSuggestions`` also carries the
+    server's post-terminal grace as ``suggestionsGraceMs`` (milliseconds), so the WS
+    consumer holds the socket open for exactly the server's relay window rather than
+    a hard-coded client default. The field validates against the canonical contract
+    (schema drift fails here) and equals the configured grace in ms."""
+    import jsonschema
+
+    grace_seconds = 12.5
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_grace_seconds=grace_seconds,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    done = next(e for e in envs if e["type"] == "done")
+    data = cast("dict[str, object]", done["data"])
+    assert data["pendingSuggestions"] is True
+    # The server grace rides the terminal, in milliseconds — one source of truth.
+    assert data["suggestionsGraceMs"] == round(grace_seconds * 1000)
+    schema = _ws_schema()
+    jsonschema.validate(
+        data,
+        {"$ref": "#/$defs/ChatDoneData", "$defs": schema["$defs"]},  # type: ignore[index]
+    )
+
+
+async def test_plain_done_omits_the_suggestions_grace(ctx: _Ctx) -> None:
+    """BE-5: a terminal WITHOUT pending suggestions (suggestions disabled) carries
+    neither ``pendingSuggestions`` nor ``suggestionsGraceMs`` — the grace is only
+    declared when a post-terminal suggestion may actually follow."""
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=False,
+        suggestions_grace_seconds=12.5,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    done = next(e for e in envs if e["type"] == "done")
+    data = cast("dict[str, object]", done["data"])
+    assert "pendingSuggestions" not in data
+    assert "suggestionsGraceMs" not in data
 
 
 async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:

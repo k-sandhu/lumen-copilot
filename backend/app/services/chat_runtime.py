@@ -229,6 +229,12 @@ class _RouteState:
 _DEFAULT_SUGGESTIONS_ENABLED = False
 _DEFAULT_SUGGESTIONS_COUNT = 3
 _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS = 8.0
+# Post-terminal grace the consumer holds the socket open for the one trailing
+# ``event:suggestions`` (#489/BE-5). Declared on the ``done`` terminal so the
+# client and server share ONE source of truth. Mirrors
+# ``Settings.chat_suggestions_grace_seconds`` (the chat API wires it in); the
+# module default is only used by callers that never enable suggestions.
+_DEFAULT_SUGGESTIONS_GRACE_SECONDS = 10.0
 # The dedicated suggestions model (#490). Empty ⇒ inherit the answer route (the
 # pre-#490 behaviour and the default for headless / offline callers that never
 # configure one). The chat API wires ``Settings.chat_suggestions_model`` (a
@@ -487,6 +493,7 @@ class ChatRuntime:
         suggestions_enabled: bool = _DEFAULT_SUGGESTIONS_ENABLED,
         suggestions_count: int = _DEFAULT_SUGGESTIONS_COUNT,
         suggestions_timeout_seconds: float = _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS,
+        suggestions_grace_seconds: float = _DEFAULT_SUGGESTIONS_GRACE_SECONDS,
         suggestions_model: str = _DEFAULT_SUGGESTIONS_MODEL,
         text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
         text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
@@ -582,6 +589,11 @@ class ChatRuntime:
         self._suggestions_enabled = suggestions_enabled
         self._suggestions_count = suggestions_count
         self._suggestions_timeout_seconds = suggestions_timeout_seconds
+        # The server-side post-terminal grace (#489/BE-5), declared on the ``done``
+        # terminal (``suggestionsGraceMs``) so the WS consumer holds the socket open
+        # for EXACTLY the window the server will keep relaying — one source of truth
+        # rather than a hard-coded client guess that a larger server grace overruns.
+        self._suggestions_grace_seconds = suggestions_grace_seconds
         # The dedicated suggestions model (#490): resolved to its own route so
         # the nicety runs on a FAST model, not the answer's (possibly frontier)
         # route. Empty ⇒ inherit the answer route (pre-#490 behaviour).
@@ -2731,9 +2743,11 @@ class ChatRuntime:
         ANSWER's summed usage (the suggestions call had not run yet); its cost is
         still recorded on the DB usage row afterwards (#409). ``pending_suggestions``
         declares that one post-terminal ``event:suggestions`` may still follow within
-        the consumer's grace window; absent/false keeps the classic stop-at-terminal
-        behaviour. The ``terminal_sent`` guard preserves exactly-one-terminal across
-        the shutdown race (issue #156) exactly as ``run`` did before.
+        the consumer's grace window, and (BE-5) carries the server's own grace as
+        ``suggestionsGraceMs`` so the consumer waits exactly the server's window
+        rather than a hard-coded default; absent/false keeps the classic
+        stop-at-terminal behaviour. The ``terminal_sent`` guard preserves
+        exactly-one-terminal across the shutdown race (issue #156) as ``run`` did.
 
         The payload is byte-identical to the pre-#489 ``done`` (built in ``run``)
         except for the additive ``pendingSuggestions`` flag: the ACTUAL post-failover
@@ -2765,6 +2779,11 @@ class ChatRuntime:
             # One post-terminal ``event:suggestions`` may still follow (#489); the
             # subscriber holds a bounded grace open for it.
             data["pendingSuggestions"] = True
+            # BE-5: carry the server's grace on the terminal so the consumer waits
+            # EXACTLY the window the server will relay — not a hard-coded client
+            # default a larger server grace would silently overrun (dropping a
+            # slow-but-arriving suggestion). Milliseconds for the JS timer.
+            data["suggestionsGraceMs"] = round(self._suggestions_grace_seconds * 1000)
         await self._publish(
             state, envelopes.done(state.stream_id, await self._next_seq(state), data=data)
         )

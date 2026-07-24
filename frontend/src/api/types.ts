@@ -1791,6 +1791,15 @@ export interface ChatDoneData {
    * here (a refusal / ask_user answer, or suggestions disabled). Additive.
    */
   pendingSuggestions?: boolean;
+  /**
+   * The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present
+   * only alongside `pendingSuggestions=true`: the single source of truth for how
+   * long the subscriber should hold the socket open for the one trailing
+   * `event:suggestions`. The consumer honours this instead of a hard-coded default
+   * (which a larger server grace would overrun, dropping a slow suggestion); absent
+   * ⇒ fall back to a sane client default. Additive.
+   */
+  suggestionsGraceMs?: number;
   citationCount: number;
   usage?: {
     promptTokens?: number;

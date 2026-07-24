@@ -180,6 +180,11 @@
           "type": "boolean",
           "description": "When true (#489), the server will attempt follow-up suggestions AFTER this terminal and MAY deliver exactly one post-terminal `event:suggestions` within a bounded grace window; a subscriber must hold the subscription open for it and accept that one event without un-settling this terminal. Absent/false ⇒ the stream stops at this terminal (the default, and the case for a refusal/ask_user answer or when suggestions are disabled). Optimistic: `done.usage` covers the ANSWER only, and a suggestions attempt that fails/times out simply produces no event. Additive; older clients ignore it and close at the terminal as before."
         },
+        "suggestionsGraceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present only alongside `pendingSuggestions=true`, it is the single source of truth for how long the subscriber should hold the socket open for the one trailing `event:suggestions`: the server relays for exactly this window (its own subscription grace, derived from the suggestions timeout + a margin), so the consumer must wait at least this long rather than guess with a hard-coded default that a larger server grace would overrun (silently dropping a slow-but-arriving suggestion). Absent ⇒ the consumer falls back to its own sane default. Additive; older clients ignore it."
+        },
         "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",

@@ -35,12 +35,13 @@ export type ClientFactory = (options: WsClientOptions) => StreamSocket;
 
 let defaultFactory: ClientFactory = (options) => new WsClient(options);
 const DEFAULT_IDLE_TIMEOUT_MS = 20_000;
-// How long the socket stays open AFTER a `done(pendingSuggestions=true)` to
-// receive the one post-terminal `event:suggestions` (#489). A client-side backstop
-// only: the server drops the subscription (and thus the socket) at its own grace,
-// so this just bounds the wait if that close never arrives. Comfortably outlasts
-// the server grace (suggestions timeout + margin) so a slow-but-arriving
-// suggestion is never cut off by the client.
+// Fallback for how long the socket stays open AFTER a `done(pendingSuggestions=true)`
+// to receive the one post-terminal `event:suggestions` (#489). Used ONLY when the
+// server does not declare its own grace on the terminal (`done.suggestionsGraceMs`,
+// #489/BE-5) — the server value is the source of truth, since a server grace larger
+// than this default would otherwise cut off a slow-but-arriving suggestion. A
+// client-side backstop regardless: the server drops the subscription (and thus the
+// socket) at its own grace, so this just bounds the wait if that close never arrives.
 const DEFAULT_SUGGESTIONS_GRACE_MS = 15_000;
 
 /**
@@ -158,15 +159,16 @@ export function useChatStream({
       }, idleTimeoutMs);
     };
 
-    const armSuggestionsGrace = () => {
+    const armSuggestionsGrace = (graceMs: number) => {
       // The stream is already terminal (UI settled on `done`); hold the socket
       // open a bounded while for the one post-terminal `event:suggestions` (#489).
-      // If it never comes, close the socket — the terminal stands.
+      // If it never comes, close the socket — the terminal stands. `graceMs` is the
+      // server's declared grace when present (#489/BE-5), else the client default.
       clearGrace();
       graceRef.current = setTimeout(() => {
         graceRef.current = null;
         clientRef.current?.close();
-      }, suggestionsGraceMs);
+      }, graceMs);
     };
 
     const client = makeClient({
@@ -206,9 +208,19 @@ export function useChatStream({
           // #489: a `done` that declares `pendingSuggestions` keeps the socket
           // open for the one trailing `event:suggestions` (the UI already settled
           // as terminal via the dispatch above). Otherwise close now, as before.
-          const pending = (envelope.data as ChatDoneData | undefined)?.pendingSuggestions === true;
+          const doneData = envelope.data as ChatDoneData | undefined;
+          const pending = doneData?.pendingSuggestions === true;
           if (pending) {
-            armSuggestionsGrace();
+            // #489/BE-5: honour the server's declared grace when present so the
+            // wait matches the server's own relay window (one source of truth);
+            // a server grace larger than the client default must not be cut off.
+            // Fall back to the client default only when the server omits it.
+            const serverGraceMs = doneData?.suggestionsGraceMs;
+            const graceMs =
+              typeof serverGraceMs === 'number' && serverGraceMs >= 0
+                ? serverGraceMs
+                : suggestionsGraceMs;
+            armSuggestionsGrace(graceMs);
           } else {
             clientRef.current?.close();
           }
