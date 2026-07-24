@@ -737,22 +737,33 @@ def _compact_superseded_tool_results(
     that are BOTH superseded (before the newest tool-call group — never the group
     a pending call is about to reference, AC-6) AND represented in citations
     (``tool_call_id`` in ``cited_snippets`` — evidence durably recorded at
-    retrieval time, so its bulky transcript copy is redundant). The digest is the
-    bounded content-bearing head + the truncation marker (the leading passage id
-    labels survive, so the model retains references it can re-fetch by id) — NOT a
-    re-embed of every cited snippet, because a superseded result's evidence
-    already lives in the citation records. Every mutation is applied only when it
-    STRICTLY reduces the counted wire cost, so a result already at/under the cap
-    is left verbatim (idempotent across turns → the cache prefix stays stable).
-    Mutates ``working``/``costs`` in place; returns ``(new_total, compacted)``.
+    retrieval time). The digest keeps the bounded content-bearing head + the
+    truncation marker, and — because every result here is cited — re-embeds each
+    cited snippet **verbatim** (:func:`_context_digest` with the call's snippets),
+    so a cited passage that sits BEYOND ``digest_chars`` is preserved in the
+    model-visible prompt rather than truncated away (INV-3: a citation must resolve
+    to evidence the model actually saw, not merely to a record kept elsewhere).
+    Every mutation is applied only when it STRICTLY reduces the counted wire cost,
+    so a result whose cited snippet cannot be kept while shrinking is left VERBATIM
+    (also the idempotence rule → a result already at/under the cap is untouched
+    across turns, so the cache prefix stays stable). Mutates ``working``/``costs``
+    in place; returns ``(new_total, compacted)``.
     """
     protected_from = _last_tool_group_start(working, tail_start)
     compacted = 0
     for i in range(tail_start, protected_from):
         message = working[i]
-        if message.role is not Role.TOOL or message.tool_call_id not in cited_snippets:
+        call_id = message.tool_call_id
+        if message.role is not Role.TOOL or call_id is None or call_id not in cited_snippets:
             continue
-        digested = replace(message, content=_context_digest(message.content, digest_chars))
+        # BE-2 (INV-3): every result reached here is cited, so re-embed its cited
+        # snippets in the digest. A blind head truncation would drop a cited passage
+        # that sits BEYOND ``digest_chars`` from the model-visible prompt — the
+        # strict cost guard below then leaves the message VERBATIM whenever keeping
+        # the snippet cannot shrink it, so evidence is never sacrificed for a shrink.
+        snippets = cited_snippets[call_id]
+        candidate = _context_digest(message.content, digest_chars, snippets)
+        digested = replace(message, content=candidate)
         new_cost = count(_message_wire_text(digested)) + _MESSAGE_FRAMING_TOKENS
         if new_cost >= costs[i]:
             continue

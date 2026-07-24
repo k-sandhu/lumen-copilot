@@ -103,6 +103,59 @@ def test_proactive_digests_superseded_cited_results_and_spares_the_newest() -> N
     assert by_id["c3"].content == "C" * 3600
 
 
+def test_proactive_preserves_cited_snippet_beyond_digest_chars() -> None:
+    """INV-3 (BE-2): a cited snippet that sits BEYOND ``digest_chars`` must survive
+    the proactive digest verbatim. A superseded, cited result IS digested (its body
+    is far larger than head + snippet), but the cited passage the answer pointed at
+    is re-embedded, so the evidence the citation resolves to stays in the
+    model-visible prompt — a blind head truncation would have dropped it."""
+    cited = "CITED-ALPHA-" + "x" * 400  # a distinctive passage well past the 100-char head
+    body = "A" * 3600 + "\n" + cited  # the cited passage lives at the tail, beyond digest_chars
+    messages = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "question"),
+        _tool_call("c1"),
+        _tool_result("c1", body),  # superseded + cited
+        _tool_call("c2"),
+        _tool_result("c2", "B" * 3600),  # newest → protected
+    ]
+    fitted = _fit_proactive(
+        messages, cited_snippets={"c1": (cited,), "c2": ("b",)}, digest_chars=100
+    )
+    by_id = {m.tool_call_id: m for m in fitted if m.role is Role.TOOL}
+    # The cited evidence beyond the head survives byte-for-byte (INV-3) …
+    assert cited in by_id["c1"].content
+    # … while the result still shrank, so proactive compaction really did fire.
+    assert "truncated to fit" in by_id["c1"].content
+    assert len(by_id["c1"].content) < len(body)
+    # AC-6: the newest result is untouched.
+    assert by_id["c2"].content == "B" * 3600
+
+
+def test_proactive_leaves_cited_result_verbatim_when_snippet_dominates() -> None:
+    """INV-3 (BE-2) idempotence corollary: when re-embedding the cited snippet
+    cannot reduce the wire cost — here the snippet IS essentially the whole body —
+    the message is left VERBATIM rather than blindly truncated, so a superseded
+    result is never compacted at the price of dropping its cited evidence."""
+    body = "CITED-WHOLE-" + "y" * 3600  # the entire body is the cited passage, beyond 100 chars
+    messages = [
+        _msg(Role.SYSTEM, "SYS"),
+        _msg(Role.USER, "question"),
+        _tool_call("c1"),
+        _tool_result("c1", body),  # superseded + cited, snippet == body
+        _tool_call("c2"),
+        _tool_result("c2", "B" * 3600),  # newest → protected
+    ]
+    fitted = _fit_proactive(
+        messages, cited_snippets={"c1": (body,), "c2": ("b",)}, digest_chars=100
+    )
+    by_id = {m.tool_call_id: m for m in fitted if m.role is Role.TOOL}
+    # Re-embedding the full snippet can't beat the original cost → left verbatim
+    # (the cited evidence is never dropped just to force a shrink).
+    assert by_id["c1"].content == body
+    assert by_id["c2"].content == "B" * 3600
+
+
 def test_proactive_is_off_by_default_in_the_assembler() -> None:
     """The pure assembler default is conservative: proactive compaction is opt-in
     (the runtime turns it on via Settings), so an under-budget fit is the identity
