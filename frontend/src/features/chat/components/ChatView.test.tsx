@@ -18,10 +18,7 @@ import { setAccessToken, clearAccessToken } from '@/api';
 import type { WsClientOptions, WsEnvelope } from '@/api';
 import { ChatView } from './ChatView';
 import { useChatStore } from '../model/chatStore';
-import {
-  setDefaultStreamClientFactory,
-  type StreamSocket,
-} from '../model/useChatStream';
+import { setDefaultStreamClientFactory, type StreamSocket } from '../model/useChatStream';
 
 // --- a controllable fake WS socket (captures the latest instance) ---
 let liveSocket: FakeSocket | null = null;
@@ -68,7 +65,13 @@ async function flushDeltaFrame(): Promise<void> {
 
 const MODELS = {
   items: [
-    { id: 'frontier/opus', label: 'Opus', provider: 'anthropic', tier: 'frontier', is_default: true },
+    {
+      id: 'frontier/opus',
+      label: 'Opus',
+      provider: 'anthropic',
+      tier: 'frontier',
+      is_default: true,
+    },
     { id: 'fast/haiku', label: 'Haiku', provider: 'anthropic', tier: 'fast', is_default: false },
   ],
 };
@@ -125,17 +128,20 @@ const RELOADED_MESSAGES = {
   next_cursor: null,
 };
 
-/** Route a mocked fetch by URL + method. `messages` flips after the stream done. */
-function installFetch(getMessages: () => unknown) {
+/**
+ * Route a mocked fetch by URL + method. `messages` flips after the stream done;
+ * `usage` flips as the backend records token spend (the context meter reads it).
+ */
+function installFetch(getMessages: () => unknown, getUsage: () => unknown = () => ({})) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
-    const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+    const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
     if (url.includes('/models')) return Promise.resolve(json(MODELS));
     if (url.endsWith('/chat/sessions') && method === 'GET') return Promise.resolve(json(SESSIONS));
     if (url.includes('/messages') && method === 'POST')
       return Promise.resolve(json(sendResponse, 202));
-    if (url.includes('/messages') && method === 'GET')
-      return Promise.resolve(json(getMessages()));
+    if (url.includes('/messages') && method === 'GET') return Promise.resolve(json(getMessages()));
+    if (url.includes('/usage') && method === 'GET') return Promise.resolve(json(getUsage()));
     if (url.includes('/chat/sessions/') && method === 'PATCH')
       return Promise.resolve(json({ ...SESSIONS.items[0] }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
@@ -221,7 +227,12 @@ describe('ChatView (critical flow)', () => {
         data: { callId: 't1', tool: 'search_text', hitCount: 2 },
       });
       liveSocket!.emit({ type: 'delta', streamId: 'stream-1', seq: 3, data: { text: 'Revenue ' } });
-      liveSocket!.emit({ type: 'delta', streamId: 'stream-1', seq: 4, data: { text: 'was up 12%.' } });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 4,
+        data: { text: 'was up 12%.' },
+      });
       liveSocket!.emit({
         type: 'event',
         streamId: 'stream-1',
@@ -513,6 +524,121 @@ describe('ChatView (critical flow)', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(link).toHaveAttribute('target', '_blank');
     expect(screen.getByText(/web sources were used/i)).toBeInTheDocument();
+  });
+});
+
+// --- BE2-7: the stream must outlive the persisted-history reload -------------
+// On `done` ChatView reloads history, and the reload retiring the live bubble
+// used to call `endStream()` — which unmounted `useChatStream` and closed the
+// socket. When the terminal declared `pendingSuggestions`, that reload almost
+// always beat the suggestion, so the chips were lost and the usage query cached
+// the PRE-suggestion total. Persisted-bubble retirement and socket lifetime are
+// now separate concerns: the live turn is retired the moment the server copy
+// lands, but the subscription is held until the suggestions window settles.
+describe('BE2-7: post-terminal suggestions survive the history reload', () => {
+  const usageAt = (totalTokens: number) => ({
+    model: 'frontier/opus',
+    totals: {
+      answers: 1,
+      prompt_tokens: 800,
+      completion_tokens: totalTokens - 800,
+      total_tokens: totalTokens,
+      cached_prompt_tokens: 0,
+      cache_write_tokens: 0,
+    },
+    last: {
+      prompt_tokens: 800,
+      completion_tokens: totalTokens - 800,
+      total_tokens: totalTokens,
+      cached_prompt_tokens: 0,
+      cache_write_tokens: 0,
+      context_prompt_tokens: 800,
+    },
+    input_budget_tokens: 8_000,
+    window_known: true,
+  });
+  const meterTitle = () =>
+    screen.getByRole('status', { name: /^Context usage:/ }).getAttribute('title') ?? '';
+
+  it('renders the trailing suggestion chips after the reload and refreshes usage to the post-suggestion total', async () => {
+    let messagesState: unknown = EMPTY_MESSAGES;
+    // The answer itself cost 1.0k tokens; generating the suggestion costs more.
+    let usageState: unknown = usageAt(1_000);
+    installFetch(
+      () => messagesState,
+      () => usageState,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    await user.type(screen.getByLabelText('Message'), 'What was Q4 revenue?');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(liveSocket).not.toBeNull());
+
+    act(() => {
+      liveSocket!.emit({
+        type: 'start',
+        streamId: 'stream-1',
+        seq: 0,
+        data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+      });
+      liveSocket!.emit({
+        type: 'delta',
+        streamId: 'stream-1',
+        seq: 1,
+        data: { text: 'Revenue was up 12%.' },
+      });
+    });
+
+    // The answer is persisted server-side, and the terminal declares that a
+    // follow-up suggestion is still being generated (#489).
+    messagesState = RELOADED_MESSAGES;
+    act(() => {
+      liveSocket!.emit({
+        type: 'done',
+        streamId: 'stream-1',
+        seq: 2,
+        data: {
+          messageId: 'am-1',
+          finishReason: 'stop',
+          citationCount: 1,
+          pendingSuggestions: true,
+        },
+      });
+    });
+
+    // The reload lands and the persisted turn takes over the live bubble — only
+    // the server copy carries the citation chip, so this proves the swap.
+    await screen.findByRole('button', { name: /citation 1: Q4 report\.pdf/i });
+    await waitFor(() => expect(meterTitle()).toContain('1.0k tokens total'));
+    // …and the SOCKET is still open. This is the fix: retiring the live bubble
+    // must not tear down the subscription while a suggestion is outstanding.
+    expect(liveSocket!.closed).toBe(false);
+    expect(useChatStore.getState().activeStreamId).toBe('stream-1');
+
+    // The suggestion (and its token spend) finally arrives, post-terminal and
+    // post-reload.
+    usageState = usageAt(1_300);
+    act(() => {
+      liveSocket!.emit({
+        type: 'event',
+        streamId: 'stream-1',
+        seq: 3,
+        name: 'suggestions',
+        data: { messageId: 'am-1', suggestions: ['How did Q3 compare?'] },
+      });
+    });
+
+    const chips = await screen.findByRole('group', { name: 'Suggested follow-up questions' });
+    expect(
+      within(chips).getByRole('button', { name: 'Suggested follow-up: How did Q3 compare?' }),
+    ).toBeInTheDocument();
+    // Suggestion accounting settled → the meter refreshes to the POST total.
+    await waitFor(() => expect(meterTitle()).toContain('1.3k tokens total'));
+    // Only now is the subscription retired — the socket closed, stream cleared.
+    await waitFor(() => expect(useChatStore.getState().activeStreamId).toBeNull());
+    expect(liveSocket!.closed).toBe(true);
   });
 });
 

@@ -76,6 +76,15 @@ export function ChatView() {
     void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
   }, [activeSessionId, queryClient]);
 
+  // BE2-7: the follow-up suggestion is generated AFTER the terminal, so its
+  // token spend lands after the `done` refresh above — the meter would otherwise
+  // keep showing the pre-suggestion total until something else invalidated it.
+  // Re-read usage once the suggestions window has settled (delivered or expired).
+  const onSuggestionsSettled = useCallback(() => {
+    if (!activeSessionId) return;
+    void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+  }, [activeSessionId, queryClient]);
+
   // At narrow widths the subrail is an off-canvas drawer (see chat.css); this
   // drives it. Selecting/creating a session closes the drawer so the narrow-width
   // flow lands back on the conversation.
@@ -143,6 +152,7 @@ export function ChatView() {
               endStream={endStream}
               openViewer={openViewer}
               onDoneReload={onDoneReload}
+              onSuggestionsSettled={onSuggestionsSettled}
             />
           </ErrorBoundary>
         ) : (
@@ -297,6 +307,8 @@ interface ActiveSessionProps {
     url?: string;
   }) => void;
   onDoneReload: () => void;
+  /** Called once the post-terminal suggestions window settles (BE2-7). */
+  onSuggestionsSettled: () => void;
 }
 
 function ActiveSession({
@@ -309,6 +321,7 @@ function ActiveSession({
   endStream,
   openViewer,
   onDoneReload,
+  onSuggestionsSettled,
 }: ActiveSessionProps) {
   const messages = useMessages(sessionId);
   const send = useSendMessage(sessionId);
@@ -408,23 +421,59 @@ function ActiveSession({
     if (stream.phase === 'done' && stream.done) setPendingDoneId(stream.done.messageId);
   }, [stream.phase, stream.done]);
 
+  // BE2-7 — persisted-bubble retirement and SOCKET lifetime are separate. The
+  // live bubble is retired the moment the authoritative server copy arrives (as
+  // before), but that must not end the subscription: a `done(pendingSuggestions)`
+  // keeps the socket open for the trailing `event:suggestions` (#489), and the
+  // reload reliably beats it. Calling `endStream()` here — as this effect used
+  // to — unmounted `useChatStream` and closed the socket, so the suggestion was
+  // dropped and the usage query cached the pre-suggestion total. This holds the
+  // stream id (hence the hook) until the window settles; `retiredStreamId` is
+  // compared against the ACTIVE id, so a new turn self-clears it.
+  const [retiredStreamId, setRetiredStreamId] = useState<string | null>(null);
+  const liveRetired = retiredStreamId !== null && retiredStreamId === activeStreamId;
+
   // When the server reload includes the persisted assistant message, retire the
-  // live stream — the authoritative server copy now renders it.
+  // live turn — the authoritative server copy now renders it.
   const reloadedIds = messages.data?.items;
   useEffect(() => {
     if (!pendingDoneId || !reloadedIds) return;
     if (reloadedIds.some((m) => m.id === pendingDoneId)) {
       setPendingDoneId(null);
-      endStream();
+      setRetiredStreamId(activeStreamId);
     }
-  }, [pendingDoneId, reloadedIds, endStream]);
+  }, [pendingDoneId, reloadedIds, activeStreamId]);
+
+  // Retire the SUBSCRIPTION only once the retired turn has nothing outstanding:
+  // `awaitingSuggestions` is true exactly while the hook holds the socket open
+  // for the post-terminal suggestion, and false again the instant it is
+  // delivered, the grace elapses, or the stream is cancelled.
+  const awaitingSuggestions = stream.awaitingSuggestions;
+  useEffect(() => {
+    if (!liveRetired || awaitingSuggestions) return;
+    endStream();
+  }, [liveRetired, awaitingSuggestions, endStream]);
+
+  // The suggestion's own token spend is recorded after the terminal, so refresh
+  // usage when the window closes (BE2-7) — the `done` refresh saw the pre-
+  // suggestion total. Only fires for turns that actually awaited a suggestion.
+  const awaitedSuggestionsRef = useRef(false);
+  useEffect(() => {
+    if (awaitingSuggestions) {
+      awaitedSuggestionsRef.current = true;
+      return;
+    }
+    if (!awaitedSuggestionsRef.current) return;
+    awaitedSuggestionsRef.current = false;
+    onSuggestionsSettled();
+  }, [awaitingSuggestions, onSuggestionsSettled]);
 
   // Memoised so its identity only changes when a stream field actually changes
   // (#495). A stable `live` lets ChatThread's memoised subtrees skip re-rendering
   // when ActiveSession re-renders for a reason unrelated to the stream.
   const live: LiveAnswer | null = useMemo(
     () =>
-      activeStreamId
+      activeStreamId && !liveRetired
         ? {
             phase: stream.phase,
             text: stream.text,
@@ -440,6 +489,7 @@ function ActiveSession({
         : null,
     [
       activeStreamId,
+      liveRetired,
       stream.phase,
       stream.text,
       stream.citations,
