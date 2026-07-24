@@ -11,10 +11,14 @@
 
 ## What it measures
 
-The harness (`backend/tests/eval/test_chat_latency_live.py`) drives the **real**
-`ChatRuntime` over the **real** `realtime/` backplane — the exact envelope stream
-the WS relay forwards to a browser — and reduces it to client-perspective numbers
-with the pure helpers in `backend/tests/eval/latency.py`:
+The harness (`backend/tests/eval/test_chat_latency_live.py`) drives the **real
+client path** end to end — an authenticated `POST .../messages` (202 + stream id)
+schedules the answer, then an authenticated WebSocket client consumes the app's
+real `chat_ws` relay over the process's **real Redis** backplane — and reduces the
+received envelope stream to client-perspective numbers with the pure helpers in
+`backend/tests/eval/latency.py`. So HTTP scheduling, stream owner binding,
+authentication, and the WS relay are all on the clock (they were not in the earlier
+direct-subscribe revision — R2-6):
 
 - **AC-1 — time-to-first-answer-token.** For a single-tool grounded answer on the
   FAST-tier default model (`Claude Haiku 4.5`, #490), the wall-clock from the
@@ -26,31 +30,53 @@ with the pure helpers in `backend/tests/eval/latency.py`:
   budget (**≤ 30s**), not after the old ~182s retry cliff.
 
 **Timing source — client-perspective, not server send time.** AC-1 is the
-wall-clock a *browser* waits, so the harness subscribes through the real backplane
-**before** generation and stamps `time.perf_counter()` the instant it drains each
-envelope off the wire. TTFAT is `first-answer-delta receipt − start receipt` and
-total is `terminal receipt − start receipt`, both from the consumer's side — so
-the number **includes** the Redis publish, the WS relay, and the fan-out to the
-client (exactly what the old server-`ts` measurement excluded). The envelope's
-server `ts` is retained only as a diagnostic (`measure_stream`) to attribute how
-much of the observed latency is generation vs. transport; it is not what the AC
-asserts.
+wall-clock a *browser* waits, so the authenticated WS client stamps
+`time.perf_counter()` the instant it drains each envelope off the socket. TTFAT is
+`first-answer-delta receipt − start receipt` and total is
+`terminal receipt − start receipt`, both from the consumer's side — so the number
+**includes** the HTTP schedule, the Redis publish + pub/sub, and the WS relay to
+the client. The envelope's server `ts` is retained only as a diagnostic
+(`measure_stream`) to attribute how much of the observed latency is generation vs.
+transport; it is not what the AC asserts.
 
-**Backplane.** When a real Redis is reachable the harness measures over
-`RedisBackplane` (so the #487 pooled-publish path is on the clock). Otherwise it
-falls back to `InMemoryBackplane` and the printed report names which was used —
-so a number that excludes the Redis pub/sub tax is never mistaken for one that
-includes it.
+**Grounding gate (R2-6).** A direct model answer can look fast while citing
+nothing, so before any AC-1 number is allowed to count, each sample must prove it
+took the single-tool grounded path: a wrapping retrieval proxy asserts **exactly
+one** `search_text` call that returned **at least one** passage, and the captured
+stream must carry **at least one** `event:citation`. An ungrounded sample fails
+rather than contributing a misleadingly-fast TTFT.
+
+**Backplane — real Redis is REQUIRED.** The harness measures over the app's own
+`RedisBackplane` (so the #487 pooled-publish path is on the clock). There is **no**
+`InMemoryBackplane` fallback: a run with Redis unreachable **skips loudly** rather
+than quietly reporting a number that excludes the Redis pub/sub tax.
+
+**What the number does and does NOT include (no overclaiming).** It **does**
+include the authenticated `POST` → 202 scheduling, the stream owner binding, the
+answer producer, the Redis publish + pub/sub, the `chat_ws` relay, and WS frame
+delivery to an authenticated client. It **does not** include a real browser's
+network RTT / TLS (the ASGI WebSocket client is in-process) nor React render. One
+transport caveat: the client — like a browser — connects the WS **after** the 202,
+so envelopes already buffered at connect time are drained from the #153 replay in a
+burst; for a fast answer the inter-token *pacing* therefore reflects replay drain,
+not live per-token arrival. TTFAT stays meaningful because a grounded answer spends
+seconds in retrieval + generation *after* the socket attaches, so the first answer
+`delta` is delivered live; only its `start` anchor is the connect-time replay of
+the already-published `start`, which if anything slightly *under*-counts TTFAT
+(a later anchor), never inflates it.
 
 ## Prerequisites
 
 Same as the live eval (`scripts/run-live-eval.ps1`): the stack up (ADR-0005), an
-OpenRouter key, and reachable Postgres + OpenSearch. Redis is optional (see
-above). Because the harness spends real tokens it is **opt-in** — it runs only
-when `RUN_LIVE=1` is set (issue #94 parity, mirroring the live backplane/eval
-tests) **and** the key / datastores are reachable, and otherwise **skips cleanly**
-(no socket probed, nothing spent), so there is nothing to clean up on a machine
-without the stack. The `run-latency-harness.ps1` wrapper sets `RUN_LIVE=1` for you.
+OpenRouter key, and reachable Postgres + OpenSearch **and Redis** (Redis is now
+required — the harness drives the real backplane and never falls back to in-memory,
+see above). Because the harness spends real tokens it is **opt-in** — it runs only
+when `RUN_LIVE` is **exactly `1`** (issue #94 parity, mirroring the live
+backplane/eval tests; any other value — `true`, `2`, `0`, `no`, empty, or unset —
+leaves it off, R2-5) **and** the key / datastores are reachable, and otherwise
+**skips cleanly** (no socket probed, nothing spent), so there is nothing to clean
+up on a machine without the stack. The `run-latency-harness.ps1` wrapper sets
+`RUN_LIVE=1` for you.
 
 ```powershell
 docker compose up -d           # ADR-0005 — brings up Postgres, OpenSearch, Redis
@@ -110,8 +136,8 @@ chat-latency AC-7 (typed terminal error, unreachable provider)
 - **TTFT p50** is the headline AC-1 number. `PASS`/`FAIL` is printed inline; the
   test also *fails* when p50 ≥ budget (unless `LATENCY_ASSERT=0`), so a sub-issue
   cannot close on "looks faster".
-- **backplane** tells you whether the Redis pub/sub tax is included. Prefer a run
-  with Redis up for the number of record.
+- **backplane** is always the real `RedisBackplane` (Redis is required — the run
+  skips loudly otherwise), so the Redis pub/sub tax is always included.
 - **total answer p50** is the whole answer's settle time (`start` → `done`);
   follow-up suggestions are POST-terminal (#489) and deliberately excluded from
   the answer time (suggestions are disabled in the harness runtime).
@@ -122,9 +148,14 @@ chat-latency AC-7 (typed terminal error, unreachable provider)
 
 ## What this harness does and does not cover
 
-**Live-verified here:** AC-1 (TTFT p50), AC-7 (typed error within budget), and —
-as a by-product of AC-1 — that the streamed answer is non-empty and **not**
-retracted on the single-tool path (so TTFT is unambiguously answer-token time).
+**Live-verified here:** AC-1 (TTFT p50) and AC-7 (typed error within budget),
+**driven over the real authenticated HTTP send → `chat_ws` WS relay → Redis path**
+(not a direct backplane subscribe); and — as a by-product of AC-1 — that each
+sample took the single-tool grounded path (exactly one retrieval call returning
+passages + at least one streamed `event:citation`) and that the streamed answer is
+non-empty and **not** retracted (so TTFT is unambiguously grounded-answer-token
+time). See the harness docstring for the precise does/does-not-include list (no
+real browser RTT/TLS or React render; the post-202 replay-drain caveat).
 
 **Pinned offline (not this harness):**
 - AC-2 (O(1) Redis connections per answer) — `backend/tests/test_realtime_backplane_pool.py`.
@@ -140,6 +171,8 @@ The measurement math itself — both the client-perspective reduction
 diagnostic (`measure_stream`), plus retract folding and percentiles — is
 unit-tested offline in `backend/tests/eval/test_eval_latency.py`, so the harness's
 own correctness is proven, not assumed. The **opt-in gate** (no import-time socket,
-`RUN_LIVE` required, the `live` marker present) is pinned offline in
-`backend/tests/eval/test_chat_latency_gating.py`, so a regression that spends
-tokens on an ordinary `pytest` run would fail there.
+`RUN_LIVE` required and **strict** — only the exact string `1` opens it, R2-5, so
+`true`/`2`/`no`/empty/unset all stay off — and the `live` marker present) is pinned
+offline in `backend/tests/eval/test_chat_latency_gating.py`, so a regression that
+spends tokens on an ordinary `pytest` run — or that loosens the gate to a truthy
+parse — would fail there.
