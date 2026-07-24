@@ -5771,6 +5771,110 @@ async def test_retraction_discards_the_pending_coalesce_buffer_without_racing(ct
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
+async def _assistant_message_count(ctx: _Ctx) -> int:
+    async with ctx.sessionmaker() as session:
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        return len([m for m in rows if m.role.value == "assistant"])
+
+
+async def test_speculative_answer_retracted_on_terminal_fault(ctx: _Ctx) -> None:
+    """BE-3 (#148): a turn that streams speculative answer text and THEN raises a
+    TERMINAL (non-retryable) provider fault must UN-publish that text before the
+    ``error`` terminal — never flush a pre-tool / unpersisted fragment as answer.
+    The client sees an ``answer_retract`` then the ``error``; the delivered-and-not-
+    retracted answer is empty, and nothing persisted."""
+
+    class _SpeakThenTerminalFault(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])  # unused
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="Partial unpersisted answer. ")  # speculative, flushed live
+            raise cast(Exception, _terminal())
+
+    sleeps, recorder = _sleep_recorder()
+    # 0-char coalescing flushes the speculative chunk live, so a delta genuinely
+    # reaches the wire (and must therefore earn an ``answer_retract``).
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_SpeakThenTerminalFault(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        retry_sleep=recorder,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == []  # a terminal fault is not retried
+    # The speculative delta streamed, then was retracted ahead of the error.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # #148: no dangling answer text remains on the wire, and nothing persisted.
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_speculative_answer_retracted_on_interactive_timeout(ctx: _Ctx) -> None:
+    """BE-3 (#148 + #489): when speculative streaming is active and the interactive
+    per-turn deadline fires (a provider that streams one chunk then stalls), the
+    buffered/streamed answer text is retracted before the typed 503 terminal — no
+    un-persisted fragment is left on the wire as answer."""
+
+    class _SpeakThenHang:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls += 1
+            yield StreamEvent(text="Half-streamed answer ")  # speculative, flushed live
+            await asyncio.Event().wait()  # never returns -> the deadline must bound it
+            yield StreamEvent(finish_reason="stop")  # pragma: no cover — unreachable
+
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_SpeakThenHang(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        turn_timeout_seconds=0.2,
+        interactive_max_attempts=2,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    problem = cast("dict[str, object]", envs[-1]["problem"])
+    assert problem["status"] == 503
+    # The speculative half was retracted; nothing dangling, nothing persisted.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+
+
 class _MaxTokensCapturingGateway(_ScriptedGateway):
     """Records the ``max_tokens`` passed to each ``stream_tools`` call (#488)."""
 

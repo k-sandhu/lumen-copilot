@@ -2620,6 +2620,18 @@ class ChatRuntime:
             # (exactly-one-terminal contract). Guards the case where an error and a
             # shutdown ``CancelledError`` both reach a terminal path (issue #156).
             return
+        # #148/BE-3: an error terminal persists NO answer, so any SPECULATIVE answer
+        # text still live on the wire (or buffered) must be UN-published before the
+        # error — never flushed as a delta ahead of it, which would leave a
+        # pre-tool / unpersisted fragment on the client as answer text. This is the
+        # single backstop for EVERY fault exit that ends here: a terminal provider
+        # fault, the interactive deadline, cancellation, or a commit failure.
+        # ``_retract_answer`` discards the pending answer buffer and, if a delta
+        # already reached the client, emits ``answer_retract``. Buffered NARRATION
+        # (transient, never an answer) is left for the ``_next_seq`` flush below,
+        # exactly as before — narration may legitimately precede an error.
+        if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
+            await self._retract_answer(state)
         state.terminal_sent = True
         problem: dict[str, object] = {"title": title, "status": status, "code": code}
         if detail:
