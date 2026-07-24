@@ -30,6 +30,31 @@
  * bracket-free common case.)
  */
 const CROSS_BLOCK_REFERENCE = /(^ {0,3}\[[^\]]+\]:\s)|(\[\^)|(\[[^\]]*\](?!\())/m;
+/**
+ * CommonMark HTML blocks whose END condition is a TERMINATOR STRING rather than a
+ * blank line — start conditions 1–5 (§4.6). Such a block legally CONTAINS blank
+ * lines, so the blank-line boundary below must not settle inside one: a one-shot
+ * parse keeps `<!-- a\n\nb -->` whole (the pipeline drops raw HTML, so nothing of it
+ * renders), while a split settles `<!-- a` and then renders `b -->` as a visible
+ * paragraph — a DOM divergence AND a leak of hidden source text into the answer.
+ * Note the end condition may already be satisfied on the START line
+ * (`<!-- one line -->`), in which case the block never spans lines at all.
+ * Conditions 6 (`<div>`, `<table>`, … ) and 7 (a bare complete tag) END at a blank
+ * line, so the existing boundary already matches one-shot for them — they are
+ * deliberately absent here.
+ */
+const HTML_BLOCK: ReadonlyArray<{ start: RegExp; end: RegExp }> = [
+  // 1. <script | <pre | <style | <textarea  →  the matching close tag.
+  {
+    start: /^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)/i,
+    end: /<\/(?:script|pre|style|textarea)>/i,
+  },
+  // 2. comment, 3. processing instruction, 4. declaration, 5. CDATA.
+  { start: /^ {0,3}<!--/, end: /-->/ },
+  { start: /^ {0,3}<\?/, end: /\?>/ },
+  { start: /^ {0,3}<![A-Za-z]/, end: />/ },
+  { start: /^ {0,3}<!\[CDATA\[/, end: /\]\]>/ },
+];
 /** A CommonMark list-item marker (bullet or ordered) with ≤3 leading spaces. */
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 /** An indented (list/quote continuation) line — 1+ leading spaces then content. */
@@ -77,7 +102,8 @@ export interface StreamingBlocks {
  *   - A block is settled ONLY when a following blank line AND a non-continuation
  *     block prove it cannot still be extended. The final region is always trailing.
  *   - Fenced code blocks are never split on their internal blank lines, and an
- *     OPEN fence keeps everything after it in the trailing block.
+ *     OPEN fence keeps everything after it in the trailing block. The same holds
+ *     for an HTML block whose end condition is a terminator string (HTML_BLOCK).
  *   - A list is not split across its blank lines (a loose list must stay one
  *     <ul>/<ol>); indented continuations stay attached to their list item.
  *   - When in doubt, MERGE into the trailing region — over-merging renders the
@@ -95,6 +121,7 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
   let pendingBlanks = 0; // blank lines seen after content, not yet assigned
   let inFence = false;
   let fenceMarker = '';
+  let htmlEnd: RegExp | null = null; // terminator of the open HTML block, if any
 
   const flushSettled = () => {
     if (current.length > 0) {
@@ -112,6 +139,13 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
         inFence = false;
         fenceMarker = '';
       }
+      continue;
+    }
+    // An open HTML block (conditions 1–5) runs to its terminator — blank lines are
+    // CONTENT, not a block boundary, so they must never settle it.
+    if (htmlEnd !== null) {
+      current.push(line);
+      if (htmlEnd.test(line)) htmlEnd = null;
       continue;
     }
 
@@ -146,6 +180,12 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
     if (openMarker !== undefined) {
       inFence = true;
       fenceMarker = openMarker;
+    } else {
+      // A multiline-capable HTML block may open on ANY content line (conditions
+      // 1–6 can even interrupt a paragraph), so this is checked per line, not only
+      // at a block start.
+      const html = HTML_BLOCK.find((h) => h.start.test(line));
+      if (html !== undefined && !html.end.test(line)) htmlEnd = html.end;
     }
   }
 

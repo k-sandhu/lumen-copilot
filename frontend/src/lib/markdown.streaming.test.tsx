@@ -150,6 +150,45 @@ describe('splitStreamingBlocks (the block splitter — #494)', () => {
     const linkRef = 'Text with [a ref][1].\n\nMore text.\n\n[1]: https://example.com';
     expect(splitStreamingBlocks(linkRef)).toEqual({ settled: [], trailing: linkRef });
   });
+
+  it('never settles inside a multiline HTML block (CommonMark conditions 1–5) — FE2-1', () => {
+    // CommonMark HTML block start conditions 1–5 END on a TERMINATOR STRING, not a
+    // blank line, so such a block legally CONTAINS blank lines. Splitting on one
+    // tears the block: one-shot keeps `<!-- a\n\nb -->` whole (raw ⇒ dropped),
+    // while the split exposes `b -->` as a visible paragraph — a DOM divergence
+    // AND a leak of hidden source text into the rendered answer.
+    expect(splitStreamingBlocks('Intro.\n\n<!-- a\n\nb -->\n\nAfter.')).toEqual({
+      settled: ['Intro.', '<!-- a\n\nb -->'],
+      trailing: 'After.',
+    });
+    // While the block is still OPEN nothing after it can settle, ever.
+    expect(splitStreamingBlocks('Intro.\n\n<!-- a\n\nb\n\nc')).toEqual({
+      settled: ['Intro.'],
+      trailing: '<!-- a\n\nb\n\nc',
+    });
+    // Condition 1: <script>/<style>/<pre>/<textarea> end only at their close tag.
+    expect(splitStreamingBlocks('<script>\nx\n\ny\n</script>\n\nAfter.')).toEqual({
+      settled: ['<script>\nx\n\ny\n</script>'],
+      trailing: 'After.',
+    });
+    // Condition 3: a processing instruction ends at `?>`.
+    expect(splitStreamingBlocks('<?php\n$a = 1;\n\n$b = 2;\n?>\n\nAfter.')).toEqual({
+      settled: ['<?php\n$a = 1;\n\n$b = 2;\n?>'],
+      trailing: 'After.',
+    });
+    // The end condition may already be met on the START line — a one-line comment
+    // is complete there, so the following blank settles it as usual.
+    expect(splitStreamingBlocks('<!-- one line -->\n\nAfter.')).toEqual({
+      settled: ['<!-- one line -->'],
+      trailing: 'After.',
+    });
+    // Conditions 6/7 (`<div>`, `<table>`, a bare complete tag) DO end at a blank
+    // line — one-shot splits there too, so the existing boundary stays.
+    expect(splitStreamingBlocks('<div>\n\ntext\n\n</div>\n\nAfter.')).toEqual({
+      settled: ['<div>', 'text', '</div>'],
+      trailing: 'After.',
+    });
+  });
 });
 
 describe('AC-2 — a settled block is not re-parsed when later blocks/deltas arrive', () => {
@@ -267,8 +306,7 @@ const NASTY: Record<string, string> = {
   nestedList: '- top level\n  - nested one\n  - nested two\n- second top\n\nDone.',
   looseList: '1. first item\n\n2. second item\n\n3. third item\n\nEnd of list.',
   blockquote: '> quoted line one\n> quoted line two\n\nOutside the quote.',
-  indentedCode:
-    'Intro paragraph.\n\n    code line 1\n\n    code line 2\n\nAfter the code block.',
+  indentedCode: 'Intro paragraph.\n\n    code line 1\n\n    code line 2\n\nAfter the code block.',
   setextHeadings: 'Big Title\n=========\n\nA paragraph.\n\nSub Heading\n---\n\nBody text here.',
   mixed:
     '# Title\n\nIntro paragraph.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```py\nprint("hi")\n```\n\nClosing words.',
@@ -282,6 +320,21 @@ const NASTY: Record<string, string> = {
   // premature code block and render `After.` as a stray paragraph — a different DOM.
   // (The FE-7 cross-block-reference DOM is covered by its own describe block below.)
   fenceFalseCloseUnclosed: '```js\ncode\n```not-a-close\nmore code\n\nAfter.',
+  // FE2-1: CommonMark HTML blocks whose END condition is a terminator string
+  // (start conditions 1–5) may CONTAIN blank lines. One-shot keeps each whole (raw
+  // HTML is dropped by the pipeline, so nothing of it is rendered); a splitter that
+  // settles on the internal blank line exposes the block's tail as a paragraph.
+  htmlCommentBlankLine:
+    'Before the note.\n\n<!-- hidden note line one\n\nhidden note line two -->\n\nAfter the note.',
+  htmlScriptBlankLine: 'Intro.\n\n<script>\nvar a = 1;\n\nvar b = 2;\n</script>\n\nOutro.',
+  htmlPreBlankLine: 'Intro.\n\n<pre>\nline one\n\nline two\n</pre>\n\nOutro.',
+  htmlStyleBlankLine:
+    'Intro.\n\n<style>\n.a { color: red; }\n\n.b { color: blue; }\n</style>\n\nOutro.',
+  // …while conditions 6/7 (`<div>`, `<table>`) DO end at a blank line, so one-shot
+  // splits there too — the existing boundary must keep matching.
+  htmlDivBlankLine: 'Intro.\n\n<div class="wrap">\n\nSome *emphasis* inside.\n\n</div>\n\nOutro.',
+  htmlTableBlankLine:
+    'Intro.\n\n<table>\n<tr><td>a</td></tr>\n\n<tr><td>b</td></tr>\n</table>\n\nOutro.',
 };
 
 describe('AC-3 — final streamed DOM equals the one-shot DOM (adversarial split points)', () => {
@@ -310,6 +363,29 @@ describe('AC-4 / AC-6 (negative) — sanitisation + links identical on the block
       wrapper: MemoryRouter,
     });
     expect(container.querySelector('script')).toBeNull();
+  });
+
+  it('does not execute or leak a multiline <script> HTML block on the block path (FE2-1)', () => {
+    // The block spans a blank line. A splitter that settles there renders the tail
+    // (`window.pwned2 = 2;`) as a visible paragraph — hidden source leaking into the
+    // answer. Whole or split, the sanitizer must still leave no <script> behind.
+    const src = 'Intro.\n\n<script>\nwindow.pwned = 1;\n\nwindow.pwned2 = 2;\n</script>\n\nTail.';
+    const { container } = render(<MarkdownView streaming>{src}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.textContent).not.toContain('window.pwned');
+  });
+
+  it('never exposes the tail of a multiline HTML comment as a paragraph (FE2-1)', () => {
+    const src =
+      'Visible intro.\n\n<!-- hidden reasoning line one\n\nhidden reasoning line two -->\n\nVisible outro.';
+    const { container } = render(<MarkdownView streaming>{src}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    expect(container.textContent).toContain('Visible intro.');
+    expect(container.textContent).toContain('Visible outro.');
+    expect(container.textContent).not.toContain('hidden reasoning');
   });
 
   it('does not render a javascript: link href on the streaming path', () => {
