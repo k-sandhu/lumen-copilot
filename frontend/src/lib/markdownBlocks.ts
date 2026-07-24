@@ -28,11 +28,25 @@ const INDENTED = /^[ \t]+\S/;
  * it must not be split on those blanks (would render as two <pre>s ≠ one-shot).
  */
 const INDENTED_CODE = /^(?: {4,}|\t)/;
-/** A fenced code delimiter (``` or ~~~, 3+), with ≤3 leading spaces. */
+/** A fenced code OPENER: ``` or ~~~ (3+), ≤3 leading spaces (an info string may follow). */
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/**
+ * A closing fence (CommonMark §119): ≤3 leading spaces, a run of the fence char,
+ * then ONLY spaces/tabs to end of line. Unlike the opener it may carry NO info
+ * string — so `\`\`\`not-a-close` is content INSIDE the block, never a close.
+ */
+const CLOSING_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
-/** A closing fence must use the same char and be at least as long as the opener. */
-function closesFence(marker: string, opener: string): boolean {
+/**
+ * Does `line` close a fence opened by `opener`? It must be a bare closing fence
+ * (whitespace-only after the run — see CLOSING_FENCE), use the SAME char, and be at
+ * least as long as the opener. Matching the opener FENCE regex is not enough: that
+ * accepts any fence-prefixed line, so `\`\`\`not-a-close` would wrongly settle the
+ * block and the following content would render as extra paragraphs / a second fence.
+ */
+function closesFence(line: string, opener: string): boolean {
+  const marker = line.match(CLOSING_FENCE)?.[1];
+  if (marker === undefined) return false;
   return marker[0] === opener[0] && marker.length >= opener.length;
 }
 
@@ -81,8 +95,7 @@ export function splitStreamingBlocks(source: string): StreamingBlocks {
   for (const line of lines) {
     if (inFence) {
       current.push(line);
-      const close = line.match(FENCE);
-      if (close?.[1] !== undefined && closesFence(close[1], fenceMarker)) {
+      if (closesFence(line, fenceMarker)) {
         inFence = false;
         fenceMarker = '';
       }

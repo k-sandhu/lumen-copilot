@@ -90,6 +90,27 @@ describe('splitStreamingBlocks (the block splitter — #494)', () => {
     expect(trailing).toBe('After.');
   });
 
+  it('does NOT treat a fence-prefixed line with trailing text as a close (FE-6)', () => {
+    // CommonMark: a closing fence carries NO info string — only spaces/tabs may
+    // follow the run. `\`\`\`not-a-close` is therefore CONTENT inside the block, not
+    // a close, so the block stays open until a bare `\`\`\`` arrives.
+    const stillOpen = splitStreamingBlocks('```js\ncode\n```not-a-close\nmore');
+    expect(stillOpen.settled).toEqual([]);
+    expect(stillOpen.trailing).toBe('```js\ncode\n```not-a-close\nmore');
+
+    // …and once the REAL bare close + a following block arrive, the ENTIRE fence
+    // (false close included) settles as a single code block — never split in two.
+    const src = '```js\nconst x = 1;\n```not-a-close\nstill code\n```\n\nAfter.';
+    const { settled, trailing } = splitStreamingBlocks(src);
+    expect(settled).toEqual(['```js\nconst x = 1;\n```not-a-close\nstill code\n```']);
+    expect(trailing).toBe('After.');
+
+    // A bare close with only trailing whitespace still closes (spaces/tabs are ok).
+    const wsClose = splitStreamingBlocks('```\ncode\n```  \t\n\nAfter.');
+    expect(wsClose.settled).toEqual(['```\ncode\n```  \t']);
+    expect(wsClose.trailing).toBe('After.');
+  });
+
   it('does NOT split a loose list across its blank lines (would change one <ul> into many)', () => {
     // A loose list whose items are blank-separated stays one block while trailing.
     expect(splitStreamingBlocks('- a\n\n- b')).toEqual({ settled: [], trailing: '- a\n\n- b' });
@@ -203,6 +224,15 @@ const NASTY: Record<string, string> = {
   mixed:
     '# Title\n\nIntro paragraph.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```py\nprint("hi")\n```\n\nClosing words.',
   footnote: 'A claim needing a source.[^ref]\n\nA middle paragraph.\n\n[^ref]: the citation body.',
+  // FE-6: a fence-prefixed line with trailing text (```not-a-close) is NOT a close;
+  // the whole fence (through the bare ```) must be ONE <pre>, matching one-shot.
+  fenceFalseClose: '```js\nconst x = 1;\n```not-a-close\nstill code\n```\n\nAfter the code.',
+  // FE-6 (DOM-visible at the FINAL frame): the fence has a false close and NO real
+  // close, so the unclosed fence absorbs the blank line and `After.` (one <pre>). A
+  // splitter that wrongly treats `\`\`\`not-a-close` as a close would settle a
+  // premature code block and render `After.` as a stray paragraph — a different DOM.
+  // (The FE-7 cross-block-reference DOM is covered by its own describe block below.)
+  fenceFalseCloseUnclosed: '```js\ncode\n```not-a-close\nmore code\n\nAfter.',
 };
 
 describe('AC-3 — final streamed DOM equals the one-shot DOM (adversarial split points)', () => {
