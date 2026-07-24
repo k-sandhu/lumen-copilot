@@ -313,6 +313,8 @@ def _runtime(
     turn_timeout_seconds: float | None = None,
     interactive_max_attempts: int | None = None,
     interactive_deadline_at: object = None,
+    terminal_publish_margin_seconds: float | None = None,
+    producer_deadline_at: object = None,
     retry_sleep: object = None,
     answer_max_tokens: int | None = None,
 ) -> ChatRuntime:
@@ -341,6 +343,10 @@ def _runtime(
         extra["interactive_max_attempts"] = interactive_max_attempts
     if interactive_deadline_at is not None:
         extra["interactive_deadline_at"] = interactive_deadline_at
+    if terminal_publish_margin_seconds is not None:
+        extra["terminal_publish_margin_seconds"] = terminal_publish_margin_seconds
+    if producer_deadline_at is not None:
+        extra["producer_deadline_at"] = producer_deadline_at
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -5228,6 +5234,142 @@ async def test_interactive_timeout_bounds_a_hung_provider_at_the_max_override(ct
     # The typed terminal arrived essentially instantly (deadline already elapsed),
     # comfortably within the <=30s worst-case budget and with no real 27s wait.
     assert elapsed < 2.0
+
+
+class _StallingTerminalBackplane(InMemoryBackplane):
+    """An in-memory backplane whose TERMINAL publish stalls (R2-8 test double).
+
+    Models ``RedisBackplane.publish`` awaiting a Redis pipeline that stalls while
+    publishing the terminal — the unbounded wait the round-1 max-bound test (an
+    instant in-memory backplane) never exercised. ``stall_seconds`` delays each
+    terminal publish before recording it; ``hang_first`` blocks the FIRST terminal
+    publish forever (until the producer's bound cancels it) and records every later
+    one — the transient stall the degrade re-attempt is meant to clear. Non-terminal
+    envelopes (``start``/``delta``/citation) publish normally.
+    """
+
+    def __init__(self, *, stall_seconds: float = 0.0, hang_first: bool = False) -> None:
+        super().__init__()
+        self._stall_seconds = stall_seconds
+        self._hang_first = hang_first
+        self.terminal_publishes = 0
+
+    async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
+        from app.realtime.backplane import is_terminal
+
+        if is_terminal(envelope):
+            self.terminal_publishes += 1
+            if self._hang_first and self.terminal_publishes == 1:
+                await asyncio.Event().wait()  # never returns — the caller's bound cancels it
+            elif self._stall_seconds:
+                await asyncio.sleep(self._stall_seconds)
+        await super().publish(stream_id, envelope)
+
+
+async def test_a_slow_terminal_publish_still_lands_within_the_budget(ctx: _Ctx) -> None:
+    """R2-8 (#489 AC-4): a slow-but-alive backplane that consumes most of the reserved
+    terminal-publish margin still lands the typed ``done`` — and the whole path is
+    BOUNDED by the producer→terminal budget, not the unbounded Redis pipeline. The
+    round-1 max-bound test used an instant in-memory backplane, so it proved nothing
+    about a slow terminal publish; this drives a deliberately slow backplane against
+    an injected producer deadline, so a bounded typed terminal arrives with no real
+    27s wait."""
+    import asyncio
+
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    # The TERMINAL publish stalls ~0.3s — well inside the injected ~1.0s budget below.
+    backplane = _StallingTerminalBackplane(stall_seconds=0.3)
+    stream_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=5.0,  # ample; the scripted turn never trips it
+        terminal_publish_margin_seconds=1.0,
+        # Mint the producer→terminal deadline a fixed ~1.0s out: the slow terminal
+        # publish (0.3s) fits, so ``done`` is delivered on the FIRST attempt.
+        producer_deadline_at=lambda _budget: asyncio.get_running_loop().time() + 1.0,
+    )
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is True
+    # Exactly one terminal, the TRUTHFUL ``done`` (the answer committed), delivered on
+    # the first attempt (no degrade needed) — and the whole path stayed inside the
+    # budget, nowhere near an unbounded stall.
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "done"
+    assert await _stored_answer(ctx) == "Answer."
+    assert backplane.terminal_publishes == 1
+    assert elapsed < 1.0
+
+
+async def test_a_stalled_terminal_publish_degrades_within_the_budget(ctx: _Ctx) -> None:
+    """R2-8 (#489 AC-4): when the backplane STALLS publishing the terminal past the
+    reserved slice, the producer does NOT hang on the unbounded pipeline — it bounds
+    the publish and re-attempts the SAME terminal (one seq) inside the reserved tail.
+    A transient stall that clears still lands ONE typed terminal, and the producer
+    returns bounded. Driven with a hang-first backplane + an injected short deadline,
+    so no real long wait is needed."""
+    import asyncio
+
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    # The FIRST terminal publish blocks until the bound cancels it; the degrade
+    # re-attempt (the second) records — the transient Redis stall clearing.
+    backplane = _StallingTerminalBackplane(hang_first=True)
+    stream_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=5.0,
+        terminal_publish_margin_seconds=0.5,
+        # A short producer→terminal budget: the first (hanging) publish is cut at the
+        # done slice, the degrade re-attempt runs in the reserved tail — all bounded.
+        producer_deadline_at=lambda _budget: asyncio.get_running_loop().time() + 0.5,
+    )
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is True
+    # The first publish hung and was cut at the reserved boundary; the degrade
+    # re-attempt (same seq) delivered the terminal — two publish attempts, ONE relayed
+    # terminal (the subscriber's monotonic-seq dedup would collapse them anyway).
+    assert backplane.terminal_publishes == 2
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "done"
+    assert await _stored_answer(ctx) == "Answer."
+    # Bounded — the producer returned well within the injected budget, never the
+    # unbounded pipeline hang the fix removes.
+    assert elapsed < 1.5
 
 
 async def test_interactive_max_attempts_caps_the_retry_ladder(ctx: _Ctx) -> None:

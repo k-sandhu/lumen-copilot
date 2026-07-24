@@ -100,15 +100,22 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
 )
 
 
-# Interactive-answer worst-case bound (#489 AC-4, BE-7). A live chat answer must
-# surface a typed terminal error within this ceiling when the provider is
+# Interactive-answer worst-case bound (#489 AC-4, BE-7 / R2-8). A live chat answer
+# must surface a typed terminal within this ceiling when the provider is
 # unreachable. The interactive per-turn deadline is the load-bearing part of that
 # budget, but publishing the terminal (and settling) costs a little MORE on top —
 # so the accepted per-turn deadline must reserve a margin, or a deadline set right
 # at the ceiling would overshoot once the terminal publish is added. The maximum
 # accepted ``LLM_INTERACTIVE_TIMEOUT_SECONDS`` is therefore the ceiling minus that
-# margin, making ``deadline + margin <= ceiling`` an enforced invariant rather
-# than a hopeful comment.
+# margin. Round-1 stopped there — but the margin was only a *reservation*: nothing
+# actually bounded terminal publication, which awaits a Redis pipeline that can
+# stall unbounded (``realtime/backplane.py``), so the true worst case was
+# unbounded (R2-8). The margin is now BOTH the reservation AND the runtime budget
+# the answer producer bounds the terminal publish by
+# (``ChatRuntime._publish_terminal``), and a cross-field validator keeps
+# ``interactive_deadline + margin <= ceiling`` an enforced invariant even when the
+# margin is overridden — so a config that could let the producer→terminal path
+# exceed the ceiling fails fast at boot instead of silently overshooting.
 _INTERACTIVE_WORST_CASE_CEILING_SECONDS = 30.0
 _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS = 3.0
 _MAX_INTERACTIVE_TIMEOUT_SECONDS = (
@@ -456,10 +463,11 @@ class Settings(BaseSettings):
     # catches a provider that connects then stalls mid-stream (which the LiteLLM
     # request timeout does not). Worst case to a typed terminal on an unreachable
     # provider is this budget + the terminal-publish margin, which must stay <= 30s
-    # (#489 AC-4). Enforced (BE-7): the accepted maximum is the 30s ceiling MINUS
-    # that margin (``_MAX_INTERACTIVE_TIMEOUT_SECONDS`` = 27s), so a deadline set at
-    # the boundary still lands the typed terminal under 30s — a value that would
-    # overshoot is rejected at boot, not silently over budget.
+    # (#489 AC-4). Enforced (BE-7 / R2-8): the accepted maximum is the 30s ceiling
+    # MINUS the margin (``_MAX_INTERACTIVE_TIMEOUT_SECONDS`` = 27s), so a deadline
+    # set at the boundary still lands the typed terminal under 30s; the runtime then
+    # bounds the terminal publish itself by that margin (R2-8), so a stalled Redis
+    # pipeline can no longer push the real worst case past the ceiling.
     llm_interactive_timeout_seconds: float = Field(
         default=25.0,
         gt=0,
@@ -473,6 +481,45 @@ class Settings(BaseSettings):
     llm_interactive_max_attempts: int = Field(
         default=2, ge=1, le=3, alias="LLM_INTERACTIVE_MAX_ATTEMPTS"
     )
+    # The wall-clock budget the answer producer bounds TERMINAL publication by on the
+    # interactive path (R2-8, #489 AC-4). Publishing the terminal awaits a Redis
+    # pipeline (``realtime/backplane.py``) that can stall unbounded; round-1 only
+    # RESERVED this margin on top of the per-turn deadline without bounding the
+    # publish, so the real worst case to a typed terminal was still unbounded. The
+    # runtime now bounds the terminal publish by the time actually left in the
+    # producer→terminal budget (``turn deadline + this margin``), degrading to a
+    # bounded best-effort re-attempt if it stalls — so the client still gets a typed
+    # terminal and the producer never hangs. Defaults to the module constant used
+    # for the interactive-deadline ceiling above; the validator below keeps
+    # ``interactive_deadline + margin <= 30s`` honest even if this is overridden.
+    llm_terminal_publish_margin_seconds: float = Field(
+        default=_INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        gt=0,
+        alias="LLM_TERMINAL_PUBLISH_MARGIN_SECONDS",
+    )
+
+    @model_validator(mode="after")
+    def _interactive_budget_within_worst_case_ceiling(self) -> Settings:
+        """Interactive turn budget + terminal-publish margin must fit the ceiling (R2-8).
+
+        The per-turn field bound above already caps the deadline at ``ceiling −
+        default margin`` (27s), but the margin is now its own (overridable) setting.
+        This cross-field check keeps the <=30s worst-case invariant real even when the
+        margin is raised: a config whose ``interactive_deadline + margin`` would let
+        the producer→terminal path exceed the 30s ceiling fails fast at boot rather
+        than silently overshooting the bound the whole feature promises (#489 AC-4).
+        """
+        if (
+            self.llm_interactive_timeout_seconds + self.llm_terminal_publish_margin_seconds
+            > _INTERACTIVE_WORST_CASE_CEILING_SECONDS
+        ):
+            raise ValueError(
+                "LLM_INTERACTIVE_TIMEOUT_SECONDS + LLM_TERMINAL_PUBLISH_MARGIN_SECONDS "
+                f"must be <= {_INTERACTIVE_WORST_CASE_CEILING_SECONDS:g}s (#489 AC-4 / "
+                "R2-8): the whole producer→terminal path must land a typed terminal "
+                "within the interactive worst-case ceiling."
+            )
+        return self
 
     # #395 — operational/cost controls for the search path (config-driven per
     # backend/AGENTS.md: limits are never hardcoded at call sites).

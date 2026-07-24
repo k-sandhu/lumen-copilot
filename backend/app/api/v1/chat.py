@@ -861,6 +861,11 @@ def _schedule_answer(
         # stacking the 60s batch timeout per retry (the ~182s cliff → <=30s, AC-4).
         turn_timeout_seconds=settings.llm_interactive_timeout_seconds,
         interactive_max_attempts=settings.llm_interactive_max_attempts,
+        # Terminal-publish budget (R2-8, #489 AC-4): the answer producer bounds
+        # publishing the terminal by the time left in ``turn deadline + this margin``
+        # so a stalled Redis pipeline can't push the real worst case past the 30s
+        # ceiling (config enforces ``interactive_deadline + margin <= 30s``).
+        terminal_publish_margin_seconds=settings.llm_terminal_publish_margin_seconds,
         # Answer output ceiling (#488): bounds the streamed answer / forced
         # synthesis so length — and the tail of the streaming wait — cannot run
         # away; finish_reason="length" then rides the one length continuation.

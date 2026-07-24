@@ -186,6 +186,23 @@ _DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
 # (``1 + len(_RETRY_BACKOFF_SECONDS)`` = 3 attempts). The chat API wires 2 (one
 # retry) so a live turn does not stack the ladder inside the interactive budget.
 _DEFAULT_INTERACTIVE_MAX_ATTEMPTS: int | None = None
+# Terminal-publish budget (R2-8, #489 AC-4). ``None`` (the module default, and
+# every batch/headless/offline caller) = the terminal publish is UNBOUNDED — the
+# exact pre-R2-8 behaviour, since only the interactive path carries a 30s SLA. When
+# the chat API wires ``Settings.llm_terminal_publish_margin_seconds`` alongside the
+# interactive per-turn deadline, the whole producer→terminal path is bounded: the
+# terminal publish is capped by the time actually left in ``turn deadline + margin``
+# so a stalled Redis pipeline (``realtime/backplane.py`` awaits an unbounded
+# pipeline) can never push the real worst case past the ceiling.
+_DEFAULT_TERMINAL_PUBLISH_MARGIN_SECONDS: float | None = None
+# The tail fraction of the terminal-publish budget reserved for ONE bounded degrade
+# re-attempt after a stalled first publish (R2-8): the ``done`` gets the leading
+# slice, and if the backplane stalls past it a single re-attempt of the SAME
+# terminal (same seq → the subscriber dedups) runs within this reserved tail — so a
+# transient stall that clears still lands the truthful terminal and the whole path
+# still fits inside the one producer→terminal deadline (never a second, unbounded
+# window). Small: the degrade is one cheap re-publish, not a fresh answer.
+_TERMINAL_DEGRADE_RESERVE_FRACTION = 0.2
 # Answer/synthesis output ceiling (#488). ``None`` (the module default, and every
 # offline/headless caller) = unbounded, the exact pre-#488 wire, so scripted turns
 # keep their shapes. The chat API wires ``Settings.chat_answer_max_tokens`` so a
@@ -516,6 +533,8 @@ class ChatRuntime:
         turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
         interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
         interactive_deadline_at: Callable[[float], float] | None = None,
+        terminal_publish_margin_seconds: float | None = _DEFAULT_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        producer_deadline_at: Callable[[float], float] | None = None,
         answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -643,6 +662,20 @@ class ChatRuntime:
         # fires immediately even at the MAXIMUM configured budget — proving the
         # <=30s worst-case bound without a real wall-clock wait.
         self._interactive_deadline_factory = interactive_deadline_at
+        # Terminal-publish budget (R2-8, #489 AC-4). ``terminal_publish_margin_seconds``
+        # is the wall-clock margin the interactive path reserves for publishing the
+        # terminal; combined with ``turn_timeout_seconds`` it is the WHOLE
+        # producer→terminal budget the terminal publish is bounded by, so a stalled
+        # backplane pipeline cannot run past the ceiling. ``None`` (batch/headless/
+        # offline) leaves the terminal publish unbounded, byte-identical to pre-R2-8.
+        # ``_producer_deadline`` is the absolute monotonic deadline for that budget,
+        # minted once per answer in ``run`` (the runtime is per-answer). The factory
+        # is the test seam mirroring ``interactive_deadline_at``: inject one returning
+        # an already-elapsed instant to fire the terminal-publish bound with no real
+        # wait, or a future instant to give a slow-but-alive backplane a fixed window.
+        self._terminal_publish_margin_seconds = terminal_publish_margin_seconds
+        self._producer_deadline_factory = producer_deadline_at
+        self._producer_deadline: float | None = None
         # Answer/synthesis output ceiling (#488), threaded into every answer-turn
         # ``stream_tools`` call. ``None`` ⇒ unbounded (the pre-#488 wire); the chat
         # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
@@ -720,6 +753,13 @@ class ChatRuntime:
         performs NO real side effect (the load-bearing property of the harness).
         """
         state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
+        # Mint the absolute producer→terminal deadline for the interactive path
+        # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
+        # leaving the reserved margin; this anchors the WHOLE path so the terminal
+        # publish is later bounded by the time actually left — never an unbounded
+        # Redis pipeline. Off (``None``) for batch/headless/offline or when no margin
+        # is wired: the terminal publish stays unbounded, exactly as before.
+        self._producer_deadline = self._resolve_producer_deadline()
         assistant_message_id = uuid.uuid4()
         await self._publish(
             state,
@@ -2016,6 +2056,36 @@ class ChatRuntime:
             return self._interactive_deadline_factory(budget)
         return asyncio.get_running_loop().time() + budget
 
+    def _resolve_producer_deadline(self) -> float | None:
+        """The absolute producer→terminal deadline for this answer (R2-8), or ``None``.
+
+        Set once per answer at the top of :meth:`run`. Enabled only on the
+        interactive path — both the per-turn deadline (``turn_timeout_seconds``) and
+        the terminal-publish margin (``terminal_publish_margin_seconds``) must be
+        wired, since only that path carries the <=30s worst-case SLA. The budget is
+        ``turn deadline + margin`` (which config guarantees is <= the ceiling); the
+        turn loop separately consumes at most the turn deadline, so at terminal time
+        at least the margin remains for publishing. ``None`` for batch/headless/
+        offline callers, leaving the terminal publish unbounded, exactly as before.
+        """
+        if self._turn_timeout_seconds is None or self._terminal_publish_margin_seconds is None:
+            return None
+        budget = self._turn_timeout_seconds + self._terminal_publish_margin_seconds
+        return self._producer_deadline_at(budget)
+
+    def _producer_deadline_at(self, budget: float) -> float:
+        """Absolute monotonic deadline for the whole producer→terminal budget (R2-8).
+
+        Production returns ``loop.time() + budget``. Injectable via the
+        ``producer_deadline_at`` constructor seam (mirroring
+        ``interactive_deadline_at``) so a test can force an already-elapsed instant —
+        firing the terminal-publish bound with no real wait — or a fixed future
+        instant that hands a slow-but-alive backplane an exact window.
+        """
+        if self._producer_deadline_factory is not None:
+            return self._producer_deadline_factory(budget)
+        return asyncio.get_running_loop().time() + budget
+
     def _turn_attempt_count(self) -> int:
         """Same-route attempts for one turn — capped for the interactive path (#489).
 
@@ -2841,12 +2911,75 @@ class ChatRuntime:
             # slow-but-arriving suggestion). Milliseconds for the JS timer.
             data["suggestionsGraceMs"] = round(self._suggestions_grace_seconds * 1000)
         # Mint the terminal seq ONCE (flushing any buffered text first) and cache it,
-        # so a fallback terminal can reuse it (R2-2 idempotency). Publish, then mark
-        # sent — only a CONFIRMED publish flips ``terminal_sent``.
+        # so a fallback / degrade terminal can reuse it (R2-2 idempotency).
         if state.terminal_seq is None:
             state.terminal_seq = await self._next_seq(state)
-        await self._publish(state, envelopes.done(state.stream_id, state.terminal_seq, data=data))
-        state.terminal_sent = True
+        done = envelopes.done(state.stream_id, state.terminal_seq, data=data)
+        deadline = self._producer_deadline
+        margin = self._terminal_publish_margin_seconds
+        if deadline is None or margin is None:
+            # Unbounded path (batch/headless/offline): publish exactly as before, and
+            # flip ``terminal_sent`` only after the confirmed publish returns (R2-2).
+            await self._publish(state, done)
+            state.terminal_sent = True
+            return
+        # Bound the terminal publish by the producer→terminal budget (R2-8): publishing
+        # the terminal awaits a Redis pipeline that can stall unbounded
+        # (``realtime/backplane.py``), so a hung backplane must not hold the producer
+        # past the <=30s worst-case ceiling. The ``done`` gets the leading slice; a
+        # small tail is reserved for one degrade re-attempt. Only a CONFIRMED publish
+        # flips ``terminal_sent`` (R2-2).
+        reserve = margin * _TERMINAL_DEGRADE_RESERVE_FRACTION
+        if await self._publish_terminal(state, done, deadline=deadline - reserve):
+            state.terminal_sent = True
+            return
+        # The backplane stalled publishing ``done`` over an ALREADY-COMMITTED answer
+        # (R2-8). Degrade with ONE bounded re-attempt of the SAME terminal (same seq →
+        # the subscriber's monotonic-seq dedup collapses a partial-write first attempt
+        # and this one to a single relayed terminal) within the reserved tail — a
+        # transient stall that clears still lands the TRUTHFUL ``done``, and the whole
+        # path still fits the one producer→terminal deadline (never a second, unbounded
+        # window). Re-emitting an ``error`` here would misreport a committed answer.
+        log.warning("llm.terminal_publish_retry", stream_id=state.stream_id)
+        if await self._publish_terminal(state, done, deadline=deadline):
+            state.terminal_sent = True
+            return
+        # Undeliverable within budget — a truly-unresponsive backplane. The answer is
+        # durably committed; the producer returns bounded rather than hanging on the
+        # pipeline. ``terminal_sent`` stays False, but ``_answer`` returns to ``run``'s
+        # SUCCESS arm (no exception), so no misleading error terminal follows — the
+        # honest limit against a dead backplane, now bounded instead of an infinite hang.
+        log.error("llm.terminal_undeliverable", stream_id=state.stream_id)
+
+    async def _publish_terminal(
+        self, state: _StreamState, envelope: dict[str, object], *, deadline: float | None
+    ) -> bool:
+        """Publish a terminal envelope, optionally bounded by an absolute deadline (R2-8).
+
+        Returns True iff the publish confirmed. On the interactive path ``deadline`` is
+        an instant within the producer→terminal budget: a backplane whose publish
+        stalls (``RedisBackplane.publish`` awaits an unbounded Redis pipeline) is cut
+        off at the deadline and this returns False instead of hanging the producer past
+        the <=30s worst-case ceiling — the caller degrades to a bounded best-effort
+        re-attempt. ``deadline=None`` (batch/headless/offline) publishes unbounded,
+        byte-identical to pre-R2-8. Only the deadline fires here; an EXTERNAL
+        cancellation (shutdown, #156) still raises ``CancelledError``, never swallowed
+        as a timeout.
+        """
+        if deadline is None:
+            await self._publish(state, envelope)
+            return True
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._publish(state, envelope)
+        except TimeoutError:
+            log.warning(
+                "llm.terminal_publish_timeout",
+                stream_id=state.stream_id,
+                kind=envelope.get("type"),
+            )
+            return False
+        return True
 
     async def _terminal_error(
         self, state: _StreamState, status: int, title: str, code: str, detail: str | None
@@ -2886,7 +3019,14 @@ class ChatRuntime:
         # terminal (the ordinary pre-commit fault), mint fresh — flushing buffered
         # narration first, exactly as before.
         seq = state.terminal_seq if state.terminal_seq is not None else await self._next_seq(state)
-        await self._publish(state, envelopes.error(state.stream_id, seq, problem))
+        # Bound the error terminal publish by the producer→terminal budget too (R2-8):
+        # a stalled backplane must not hang the producer on this path either (the
+        # interactive-deadline fault, a commit failure, cancellation). Best-effort — a
+        # failure to confirm within budget is logged inside ``_publish_terminal``; the
+        # answer transaction already rolled back, so there is nothing further to try.
+        await self._publish_terminal(
+            state, envelopes.error(state.stream_id, seq, problem), deadline=self._producer_deadline
+        )
 
     async def _next_seq(self, state: _StreamState) -> int:
         """Flush any buffered streamed text, then mint the next ``seq`` (#487).
