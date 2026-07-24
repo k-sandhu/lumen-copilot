@@ -119,6 +119,7 @@ class SandboxSessionResponse(BaseModel):
     last_used_at: datetime | None = None
     closed_at: datetime | None = None
 
+
 class ChatSessionResponse(BaseModel):
     """``#/components/schemas/ChatSession``."""
 
@@ -444,9 +445,7 @@ def _build_sandbox_service(
     )
 
 
-def _sandbox_response(
-    value: SandboxSession | None, *, enabled: bool
-) -> SandboxSessionResponse:
+def _sandbox_response(value: SandboxSession | None, *, enabled: bool) -> SandboxSessionResponse:
     if value is None:
         return SandboxSessionResponse(status="not_created", enabled=enabled)
     return SandboxSessionResponse(
@@ -672,9 +671,7 @@ async def reset_sandbox_session(
     return _sandbox_response(value, enabled=True)
 
 
-@router.delete(
-    "/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT)
 async def close_sandbox_session(
     session_id: UUID,
     response: Response,
@@ -823,6 +820,10 @@ def _schedule_answer(
             output_headroom_tokens=settings.context_output_headroom_tokens,
             compaction_digest_chars=settings.context_compaction_digest_chars,
             compaction_chunk_size=settings.context_compaction_chunk_size,
+            # #491: proactively shrink superseded, cited tool results so old
+            # evidence stops re-riding every turn at full size on a frontier
+            # window (the interactive chat answer path — #486's IN scope).
+            proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
         ),
         sandbox_factory=_build_sandbox_factory(
             principal=principal,
@@ -843,10 +844,32 @@ def _schedule_answer(
             request_id=request_id,
             source_ip=source_ip,
         ),
-        # Follow-up suggestions knobs (spec 0006 #429).
+        # Follow-up suggestions knobs (spec 0006 #429; dedicated model #490).
         suggestions_enabled=settings.chat_suggestions_enabled,
         suggestions_count=settings.chat_suggestions_count,
         suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
+        # BE-5 (#489): the server's post-terminal grace, declared on the terminal
+        # so the WS consumer waits exactly the window the relay will keep open.
+        suggestions_grace_seconds=settings.chat_suggestions_grace_seconds,
+        suggestions_model=settings.chat_suggestions_model,
+        # Streamed-text coalescing knobs (issue #487).
+        text_coalesce_chars=settings.chat_text_coalesce_chars,
+        text_coalesce_seconds=settings.chat_text_coalesce_seconds,
+        # Interactive timeout budget (#489): a live chat turn is capped at the
+        # interactive deadline (a human is waiting) with a shortened retry ladder,
+        # so a hung provider surfaces a typed 503 within the budget instead of
+        # stacking the 60s batch timeout per retry (the ~182s cliff → <=30s, AC-4).
+        turn_timeout_seconds=settings.llm_interactive_timeout_seconds,
+        interactive_max_attempts=settings.llm_interactive_max_attempts,
+        # Terminal-publish budget (R2-8, #489 AC-4): the answer producer bounds
+        # publishing the terminal by the time left in ``turn deadline + this margin``
+        # so a stalled Redis pipeline can't push the real worst case past the 30s
+        # ceiling (config enforces ``interactive_deadline + margin <= 30s``).
+        terminal_publish_margin_seconds=settings.llm_terminal_publish_margin_seconds,
+        # Answer output ceiling (#488): bounds the streamed answer / forced
+        # synthesis so length — and the tail of the streaming wait — cannot run
+        # away; finish_reason="length" then rides the one length continuation.
+        answer_max_tokens=settings.chat_answer_max_tokens,
     )
     history = _to_chat_messages(result.history)
 
@@ -876,13 +899,9 @@ def _schedule_answer(
             # summary. The enqueue helper is owned by ``tasks/`` (api/ never
             # speaks to the broker directly).
             try:
-                await asyncio.to_thread(
-                    enqueue_summarize, principal.tenant_id, session_id
-                )
+                await asyncio.to_thread(enqueue_summarize, principal.tenant_id, session_id)
             except Exception as exc:  # noqa: BLE001 — nicety, never the answer
-                log.warning(
-                    "chat.summarize_enqueue_failed", error_type=type(exc).__name__
-                )
+                log.warning("chat.summarize_enqueue_failed", error_type=type(exc).__name__)
 
     tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
     task = asyncio.create_task(_produce())

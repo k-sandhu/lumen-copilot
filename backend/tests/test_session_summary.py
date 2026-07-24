@@ -150,9 +150,7 @@ async def test_summary_upserts_are_forward_only(ctx: _Ctx) -> None:
             .values(created_at=datetime(2000, 1, 1))
         )
         await session.commit()
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         by_id = {m.id: m for m in rows}
         accepted, first = await repo.upsert_summary(
             ctx.session_id,
@@ -240,9 +238,7 @@ def _summary_settings(**overrides: object) -> object:
     )
 
 
-async def test_task_skips_below_batch_threshold(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_task_skips_below_batch_threshold(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
@@ -254,9 +250,7 @@ async def test_task_skips_below_batch_threshold(
     assert outcome == "skipped_below_batch"
     async with ctx.sessionmaker() as session:
         assert (
-            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-                ctx.session_id
-            )
+            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
             is None
         )
 
@@ -267,16 +261,12 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
     outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
     assert outcome == "summarized"
     # Covered = the 10 oldest (14 - keep 4); the boundary is message index 9.
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None
         assert row.summary == "SUMMARY: goals and answers so far."
         assert row.covers_through_message_id == ctx.message_ids[9]
@@ -295,9 +285,7 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
         assert usage_rows and usage_rows[-1].total_tokens == 70
 
 
-async def test_task_second_pass_rolls_forward(
-    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_task_second_pass_rolls_forward(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import datetime as _dt
 
     from sqlalchemy import update as _upd
@@ -306,9 +294,7 @@ async def test_task_second_pass_rolls_forward(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
     # Deterministic eras: the seeded 14 turns land minutes in the past so the
     # second pass's boundary is STRICTLY newer (the same-second tie-break is a
     # stable-but-arbitrary id order — correct for racing tasks, coin-floppy
@@ -334,9 +320,7 @@ async def test_task_second_pass_rolls_forward(
         await session.commit()
     assert await task_module._summarize(ctx.tenant_id, ctx.session_id) == "summarized"  # noqa: SLF001
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None and row.version == 2
         # The PREVIOUS summary was fed forward into the second pass's prompt.
         assert _FakeGateway.last_user_block is not None
@@ -351,16 +335,12 @@ async def test_dead_gateway_leaves_summary_state_untouched(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _BoomGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
     with pytest.raises(RuntimeError):
         await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
     async with ctx.sessionmaker() as session:
         assert (
-            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-                ctx.session_id
-            )
+            await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
             is None
         )
 
@@ -399,9 +379,7 @@ async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
 
     async def write_summary() -> None:
         async with ctx.sessionmaker() as session:
-            rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-                ctx.session_id
-            )
+            rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
             await SessionSummaryRepository(session, ctx.tenant_id).upsert_summary(
                 ctx.session_id,
                 summary="racing summary",
@@ -412,9 +390,7 @@ async def test_concurrent_upserts_converge_without_errors(ctx: _Ctx) -> None:
 
     await _asyncio.gather(write_evidence(), write_summary())
     async with ctx.sessionmaker() as session:
-        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
-            ctx.session_id
-        )
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
     assert row is not None
     assert row.evidence == ((doc, chunk),)
     assert row.summary == "racing summary"
@@ -447,9 +423,7 @@ async def test_same_second_ties_advance_only_in_id_order(ctx: _Ctx) -> None:
         stamp = _dt(2022, 6, 1, 12, 0, 0)
         for m in pair:
             await session.execute(
-                _upd(_models.Message)
-                .where(_models.Message.id == m.id)
-                .values(created_at=stamp)
+                _upd(_models.Message).where(_models.Message.id == m.id).values(created_at=stamp)
             )
         await session.commit()
         rows = await messages_repo.list_for_session(ctx.session_id)
@@ -513,9 +487,7 @@ async def test_evidence_and_summary_caps_hold_at_write(ctx: _Ctx) -> None:
         many = [(uuid.uuid4(), uuid.uuid4()) for _ in range(50)]
         row = await repo.upsert_evidence(ctx.session_id, evidence=many)
         assert row is not None and len(row.evidence) == 20
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         _, srow = await repo.upsert_summary(
             ctx.session_id,
             summary="x" * 20_000,
@@ -556,9 +528,7 @@ async def test_summary_route_resolves_provider_sessions(
     def fake_builder(**_kwargs: object) -> object:
         async def resolver(_session: object, model_id: str) -> ModelRoute:
             if model_id == "provider:abc:their/model":
-                return ModelRoute(
-                    model="their/model", api_key="tenant-key", api_base="http://p"
-                )
+                return ModelRoute(model="their/model", api_key="tenant-key", api_base="http://p")
             return ModelRoute(model=model_id)  # unresolved passthrough
 
         return resolver
@@ -584,15 +554,58 @@ async def test_summary_route_resolves_provider_sessions(
     assert ghost.api_key is None
 
 
+async def test_summary_route_uses_fast_default_not_the_frontier_session_model() -> None:
+    """#490 AC-2: an unpinned summarizer runs on the DEDICATED FAST default, not
+    the session's answer route. A background compaction task must never inherit a
+    frontier model just because the chat session is pinned to one — that is the
+    exact leak #490 closes for config (non-``provider:``) sessions."""
+    from app.tasks import summarize as task_module
+
+    settings = _summary_settings()  # chat_summary_model="" (unpinned)
+    fast_default = next(m.id for m in settings.chat_model_registry if m.is_default)
+    # A frontier config session model — the summarizer must NOT follow it.
+    route = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="openrouter/anthropic/claude-opus-4.8",
+    )
+    assert route.model == fast_default
+    assert route.api_key is None
+
+
+async def test_summary_route_honors_a_pinned_dedicated_model() -> None:
+    """#490 AC-2: a config-pinned ``CHAT_SUMMARY_MODEL`` is the requested id,
+    distinct from both the session's answer route and the registry default."""
+    from app.core.config import get_settings
+    from app.tasks import summarize as task_module
+
+    pinned = "openrouter/google/gemini-3.5-flash"
+    settings = get_settings().model_copy(
+        update={
+            "chat_summary_keep_messages": 4,
+            "chat_summary_min_batch": 4,
+            "chat_summary_model": pinned,
+        }
+    )
+    route = await task_module._resolve_summary_route(  # noqa: SLF001
+        object(),
+        settings,  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        owner_id=uuid.uuid4(),
+        session_model="openrouter/anthropic/claude-opus-4.8",
+    )
+    assert route.model == pinned
+
+
 async def test_mention_map_holds_forty_entries(ctx: _Ctx) -> None:
     """#446 round-3 blocker-1 gate: the mention map stores and reads back up to
     40 entries — a 25-name summary keeps EVERY name redactable (the >20-name
     revocation gap is closed at both write and defensive read)."""
     async with ctx.sessionmaker() as session:
         repo = SessionSummaryRepository(session, ctx.tenant_id)
-        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(
-            ctx.session_id
-        )
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         mentioned = {uuid.uuid4(): f"doc-{i}.pdf" for i in range(25)}
         accepted, srow = await repo.upsert_summary(
             ctx.session_id,
@@ -619,9 +632,7 @@ async def test_same_second_backlog_converges_across_passes(
     from app.tasks import summarize as task_module
 
     monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
-    monkeypatch.setattr(
-        task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2)
-    )
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
     # 100 messages in ONE second (the fixture's 14 + 86 more).
     async with ctx.sessionmaker() as session:
         messages = MessageRepository(session, ctx.tenant_id)
@@ -649,3 +660,113 @@ async def test_same_second_backlog_converges_across_passes(
     assert "skipped_stale_coverage" not in outcomes
     assert versions[:3] == [1, 2, 3]
     assert versions[-1] == 3
+
+
+# --- #491 AC-2: the retuned defaults reach first compaction earlier ----------
+
+
+def test_default_summary_thresholds_reach_first_compaction_before_turn_seven() -> None:
+    """AC-2: the retuned defaults make the FIRST summarisation fire earlier.
+
+    The first summarise fires once ``keep + min_batch`` messages have
+    accumulated. The old 8 + 4 = 12 needed ~6 turns (a 2-msg/turn session) —
+    "roughly turn 7" in #491. The retuned 4 + 2 = 6 fires at ~turn 3, well
+    before turn 7. Pinned on the FIELD defaults so ambient env cannot mask a
+    regression of the code default.
+    """
+    from app.core.config import Settings
+
+    keep = Settings.model_fields["chat_summary_keep_messages"].default
+    min_batch = Settings.model_fields["chat_summary_min_batch"].default
+    assert keep == 4
+    assert min_batch == 2
+    first_compaction_messages = keep + min_batch
+    assert first_compaction_messages == 6  # ~turn 3, a 2-msg/turn session
+    assert first_compaction_messages < 12  # strictly earlier than the old ~turn 7
+
+
+@pytest_asyncio.fixture
+async def six_message_ctx() -> AsyncIterator[_Ctx]:
+    """A 3-turn (6-message) session — the smallest the retuned defaults summarise."""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import update as _upd
+
+    from app.db import models as _models
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    prev_maker = db_session._sessionmaker  # noqa: SLF001
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        db_session._sessionmaker = factory  # noqa: SLF001
+        async with factory() as seed:
+            tenant = await TenantRepository(seed).create(name="Acme")
+            user = await UserRepository(seed, tenant.id).create(
+                email="bob@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            chat = await ChatSessionRepository(seed, tenant.id).create(
+                owner_id=user.id, model="m", title="t"
+            )
+            messages = MessageRepository(seed, tenant.id)
+            ids: list[uuid.UUID] = []
+            for i in range(6):
+                role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+                m = await messages.add(
+                    session_id=chat.id, role=role, content=f"turn {i}: the sky is {i}"
+                )
+                ids.append(m.id)
+            for i, mid in enumerate(ids):
+                await seed.execute(
+                    _upd(_models.Message)
+                    .where(_models.Message.id == mid)
+                    .values(created_at=_dt(2021, 1, 1, 0, i))
+                )
+            await seed.commit()
+            yield _Ctx(
+                sessionmaker=factory,
+                tenant_id=tenant.id,
+                session_id=chat.id,
+                message_ids=ids,
+            )
+    finally:
+        db_session._sessionmaker = prev_maker  # noqa: SLF001
+        await engine.dispose()
+
+
+async def test_six_message_session_summarises_under_retuned_defaults(
+    six_message_ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 behavioural: a 3-turn session summarises under the retuned defaults
+    (keep=4, min_batch=2) but would have SKIPPED under the old (keep=8, min_batch
+    =4) — the same 6 messages did not reach the old ~turn-7 threshold."""
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _FakeGateway)
+
+    # Old thresholds on the SAME 6-message session: below batch → no summary.
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=8, min_batch=4))
+    old_outcome = await task_module._summarize(  # noqa: SLF001
+        six_message_ctx.tenant_id, six_message_ctx.session_id
+    )
+    assert old_outcome == "skipped_below_batch"
+
+    # Retuned defaults: 6 - keep 4 = 2 uncovered >= min_batch 2 → summarises.
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=2))
+    new_outcome = await task_module._summarize(  # noqa: SLF001
+        six_message_ctx.tenant_id, six_message_ctx.session_id
+    )
+    assert new_outcome == "summarized"
+    async with six_message_ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, six_message_ctx.tenant_id).get_for_session(
+            six_message_ctx.session_id
+        )
+        assert row is not None and row.version == 1
+        # keep=4 preserves the last 2 turns (messages 2-5) verbatim; turns 0-1
+        # (messages 0-1) roll into the summary.
+        assert row.covers_through_message_id == six_message_ctx.message_ids[1]

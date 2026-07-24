@@ -104,6 +104,7 @@ class _ScriptedGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         # Turn shape is decided by whether the transcript already has a tool turn:
         # a real gateway streams; here we infer the turn from message count.
@@ -142,6 +143,7 @@ class _CapturingGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append({"model": model, "api_key": api_key, "api_base": api_base})
         yield StreamEvent(text="Routed answer.")
@@ -546,6 +548,45 @@ def test_ws_relays_published_envelopes(
     assert received[-1]["data"]["citationCount"] == 0
 
 
+def test_ws_relays_post_terminal_suggestions(
+    app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
+) -> None:
+    """#489 AC-2: a ``done(pendingSuggestions=true)`` does not close the relay —
+    the WS keeps relaying and delivers the one post-terminal ``event:suggestions``
+    before the socket closes."""
+    from app.realtime import envelopes
+
+    stream_id = "ws-test-pending"
+    _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    _fill_replay(
+        backplane,
+        [
+            envelopes.start(stream_id, 0, data={"model": "m"}),
+            envelopes.delta(stream_id, 1, {"text": "hi"}),
+            envelopes.done(
+                stream_id,
+                2,
+                data={"messageId": "m", "citationCount": 0, "pendingSuggestions": True},
+            ),
+            envelopes.event(
+                stream_id, 3, name="suggestions", data={"messageId": "m", "suggestions": ["Next?"]}
+            ),
+        ],
+    )
+
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": "alice@acme.test", "password": _PASSWORD}
+        ).json()["access_token"]
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            received = [ws.receive_json() for _ in range(4)]
+
+    assert [e["type"] for e in received] == ["start", "delta", "done", "event"]
+    assert received[2]["data"]["pendingSuggestions"] is True
+    assert received[-1]["name"] == "suggestions"
+    assert received[-1]["data"]["suggestions"] == ["Next?"]
+
+
 def test_ws_terminal_error_is_terminal(
     app: FastAPI, backplane: InMemoryBackplane, seeded: _Seeded
 ) -> None:
@@ -747,6 +788,7 @@ class _BlockingGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.entered.set()
         await asyncio.Event().wait()  # blocks forever unless cancelled
@@ -1105,6 +1147,44 @@ def test_chat_shutdown_grace_must_be_positive(bad: float) -> None:
 def test_chat_shutdown_grace_default_is_positive() -> None:
     s = Settings(_env_file=None, **_SETTINGS_BASE)
     assert s.chat_shutdown_grace_seconds > 0
+
+
+def test_interactive_timeout_rejects_a_value_that_blows_the_30s_bound() -> None:
+    """BE-7 (#489 AC-4): LLM_INTERACTIVE_TIMEOUT_SECONDS must reserve a margin for
+    terminal publication under the 30s worst-case-to-terminal ceiling. A 30s
+    override (previously accepted at ``le=30``) would overshoot once the terminal
+    publish is added, so Settings now refuses to construct it."""
+    from app.core.config import (
+        _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        _INTERACTIVE_WORST_CASE_CEILING_SECONDS,
+        _MAX_INTERACTIVE_TIMEOUT_SECONDS,
+    )
+
+    # The accepted maximum plus the terminal-publish margin stays within 30s — so
+    # a deadline set at the boundary still lands the typed terminal under budget.
+    assert (
+        _MAX_INTERACTIVE_TIMEOUT_SECONDS + _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
+        <= _INTERACTIVE_WORST_CASE_CEILING_SECONDS
+    )
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **_SETTINGS_BASE,
+            LLM_INTERACTIVE_TIMEOUT_SECONDS=_INTERACTIVE_WORST_CASE_CEILING_SECONDS,
+        )
+
+
+def test_interactive_timeout_accepts_the_reserved_maximum() -> None:
+    """BE-7: the largest SAFE override — the 30s ceiling minus the terminal-publish
+    margin — still constructs, so the enforcement caps at the boundary, not below."""
+    from app.core.config import _MAX_INTERACTIVE_TIMEOUT_SECONDS
+
+    s = Settings(
+        _env_file=None,
+        **_SETTINGS_BASE,
+        LLM_INTERACTIVE_TIMEOUT_SECONDS=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+    )
+    assert s.llm_interactive_timeout_seconds == _MAX_INTERACTIVE_TIMEOUT_SECONDS
 
 
 # --- Spec 0007 (#432): session usage endpoint --------------------------------

@@ -27,6 +27,16 @@ Envelopes are JSON dicts (the ``contracts/websocket-envelopes.schema.json``
 shapes). A subscriber yields them until it sees a **terminal** envelope
 (``done`` / ``error``) — the exactly-one-terminal lifecycle — or the stream is
 explicitly closed.
+
+**Connection ownership (issue #487).** :class:`RedisBackplane` keeps ONE pooled
+client per event loop for the command path (``publish`` / ``bind_owner`` /
+``get_owner``) and gives :meth:`RedisBackplane.subscribe` its own dedicated
+pub/sub connection. The pooled client is released by
+:meth:`RedisBackplane.aclose`, wired into the app lifespan via
+:func:`app.api.deps.aclose_backplane`. Producer-side *batching* is not done here:
+coalescing lives at the envelope-construction seam in the chat runtime, so the
+replay list stores byte-identical envelopes to what the live channel delivers
+(the #153 replay/live equivalence).
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -44,6 +54,17 @@ import redis.asyncio as aioredis
 # Terminal envelope kinds: a subscriber stops after relaying one of these
 # (exactly-one-terminal lifecycle, contracts/websocket-envelopes.schema.json).
 _TERMINAL_TYPES = frozenset({"done", "error"})
+
+# Post-terminal suggestions window (#489). A chat answer publishes its terminal
+# ``done`` BEFORE generating follow-up suggestions (they were on the critical
+# path). When ``done`` declares ``data.pendingSuggestions == True``, the terminal
+# still settles the stream, but the subscriber holds open for a BOUNDED grace to
+# relay one trailing ``event:suggestions`` — then stops at that event or at grace
+# expiry, whichever comes first. Absent/false ⇒ today's behaviour exactly (stop at
+# the terminal). This default is the offline/test fallback; the API constructs the
+# production backplane with ``Settings.chat_suggestions_grace_seconds`` (suggestions
+# timeout + margin), and it is always overridable per instance.
+_DEFAULT_POST_TERMINAL_GRACE_SECONDS = 10.0
 
 # Channel namespace so chat streams never collide with other realtime traffic.
 _CHANNEL_PREFIX = "chat:stream:"
@@ -74,6 +95,13 @@ _REPLAY_TTL_SECONDS = _OWNER_TTL_SECONDS
 _SUBSCRIBE_CONFIRM_TYPES = frozenset({"subscribe", "psubscribe"})
 _SUBSCRIBE_CONFIRM_TIMEOUT_SECONDS = 5.0
 
+# How a Redis client is constructed (issue #487). ``redis.asyncio``'s client is
+# not usefully typed for the paths used here (``from_url`` is untyped and the
+# command returns are sync/async unions), so the client itself is held as ``Any``
+# at this one boundary — the module's public surface stays fully typed. Injecting
+# a factory is also what lets the lifecycle tests run without a live Redis.
+RedisClientFactory = Callable[[], Any]
+
 
 def _channel(stream_id: str) -> str:
     return f"{_CHANNEL_PREFIX}{stream_id}"
@@ -98,6 +126,19 @@ def _loads(raw: Any) -> dict[str, Any]:
 def is_terminal(envelope: dict[str, Any]) -> bool:
     """True iff ``envelope`` is a terminal (``done``/``error``) envelope."""
     return envelope.get("type") in _TERMINAL_TYPES
+
+
+def _declares_pending_suggestions(envelope: dict[str, Any]) -> bool:
+    """True iff ``envelope`` is a ``done`` that opts into a post-terminal window (#489)."""
+    if envelope.get("type") != "done":
+        return False
+    data = envelope.get("data")
+    return isinstance(data, dict) and data.get("pendingSuggestions") is True
+
+
+def _is_suggestions(envelope: dict[str, Any]) -> bool:
+    """True iff ``envelope`` is the post-terminal ``event:suggestions`` (#489)."""
+    return envelope.get("type") == "event" and envelope.get("name") == "suggestions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,10 +195,85 @@ class Backplane(Protocol):
 
 
 class RedisBackplane:
-    """Redis-backed pub/sub fan-out (the production backplane)."""
+    """Redis-backed pub/sub fan-out (the production backplane).
 
-    def __init__(self, redis_url: str) -> None:
+    **One pooled client per event loop** (issue #487). ``publish`` /
+    ``bind_owner`` / ``get_owner`` share a single lazily-created
+    ``redis.asyncio`` client instead of opening and tearing one down per call —
+    a streamed answer used to pay a TCP connect (plus any auth/TLS handshake)
+    and a close for *every* envelope, serialised into streaming throughput.
+    ``subscribe`` still takes its own dedicated connection: a pub/sub connection
+    cannot be shared with ordinary commands, and its lifetime is the
+    subscription's, not the process's.
+
+    The lazy client is keyed by the **running event loop**, so a client whose
+    connections were opened on a now-closed loop is never reused — the #140
+    engine-per-loop failure mode. That is what keeps the class Celery-safe: a
+    warm prefork worker runs each task on a fresh loop (``tasks/runner.run_task``)
+    and simply gets its own client for that run, exactly as ``search/store.py``
+    builds a per-run store. The API process has one serving loop, so it creates
+    one client, released by :meth:`aclose` from the app lifespan.
+
+    ``client_factory`` is the injectable construction seam: production leaves it
+    ``None`` (``redis.asyncio.from_url``); lifecycle/failure tests inject a fake
+    so they need no live Redis.
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        client_factory: RedisClientFactory | None = None,
+        post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS,
+    ) -> None:
         self._redis_url = redis_url
+        self._client_factory: RedisClientFactory = client_factory or self._connect
+        # The pooled client and the loop it was built on (``None`` until first
+        # use — construction stays I/O-free and loop-free, so the process-wide
+        # singleton in ``api/deps.py`` can be built at import time).
+        self._pool: Any | None = None
+        self._pool_loop: asyncio.AbstractEventLoop | None = None
+        # How long ``subscribe`` holds open after a ``done`` that declared
+        # ``pendingSuggestions`` (#489), waiting for one trailing suggestions event.
+        self._post_terminal_grace_seconds = post_terminal_grace_seconds
+
+    def _connect(self) -> Any:
+        """Open a new client for this backplane's URL (the default factory)."""
+        return aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+
+    def _client(self) -> Any:
+        """The pooled client for the RUNNING loop, created on first use.
+
+        Keyed on the running loop so a client built on another (by then dead)
+        loop is never handed out — reusing one is the "attached to a different
+        loop" failure the #140 engine-per-loop fix exists to prevent. A stale
+        client is dropped rather than closed: its sockets died with its loop, and
+        awaiting its close from *this* loop would touch a foreign one.
+        """
+        loop = asyncio.get_running_loop()
+        if self._pool is None or self._pool_loop is not loop:
+            self._pool = self._client_factory()
+            self._pool_loop = loop
+        return self._pool
+
+    async def aclose(self) -> None:
+        """Release the pooled client (app lifespan shutdown; idempotent).
+
+        A no-op when nothing was ever published (the offline tests, or a process
+        that only ever subscribed), so create *and* close stay on one event loop
+        — the same hygiene :func:`app.search.aclose_search_store` follows. The
+        backplane stays usable afterwards: the next call re-creates the client.
+        """
+        client, loop = self._pool, self._pool_loop
+        self._pool = None
+        self._pool_loop = None
+        if client is None:
+            return
+        if loop is not None and loop is not asyncio.get_running_loop():
+            # Built on another loop (a finished Celery task's): its connections
+            # went with it and closing from here would touch a foreign loop.
+            return
+        await client.aclose()
 
     async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
         """Publish one envelope — live fan-out **and** bounded replay.
@@ -174,38 +290,32 @@ class RedisBackplane:
         durable in the list no later than it is delivered live. Combined with the
         consumer's subscribe-then-replay order, every envelope arrives via the
         replay, the live channel, or both — never neither.
+
+        Runs on the **pooled** client (#487): the commands are the same, only the
+        connection is now reused across the answer instead of rebuilt per envelope.
         """
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        client = self._client()
         payload = json.dumps(envelope)
         replay_key = _replay_key(stream_id)
-        try:
-            async with client.pipeline(transaction=False) as pipe:
-                pipe.rpush(replay_key, payload)
-                pipe.ltrim(replay_key, -_MAX_REPLAY, -1)
-                pipe.expire(replay_key, _REPLAY_TTL_SECONDS)
-                pipe.publish(_channel(stream_id), payload)
-                await pipe.execute()
-        finally:
-            await client.aclose()
+        async with client.pipeline(transaction=False) as pipe:
+            pipe.rpush(replay_key, payload)
+            pipe.ltrim(replay_key, -_MAX_REPLAY, -1)
+            pipe.expire(replay_key, _REPLAY_TTL_SECONDS)
+            pipe.publish(_channel(stream_id), payload)
+            await pipe.execute()
 
     async def bind_owner(self, stream_id: str, owner: StreamOwner) -> None:
-        """Persist ``stream_id``'s owner binding with a short TTL (``SETEX``)."""
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
-        try:
-            payload = json.dumps(
-                {"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)}
-            )
-            await client.set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
-        finally:
-            await client.aclose()
+        """Persist ``stream_id``'s owner binding with a short TTL (``SETEX``).
+
+        On the pooled client (#487 / #492 AC-3) — this runs inside the ``202``
+        request, so a per-call connect/teardown sat directly on the send path.
+        """
+        payload = json.dumps({"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)})
+        await self._client().set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:
         """Read ``stream_id``'s owner binding, or ``None`` if absent/expired."""
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
-        try:
-            raw = await client.get(_owner_key(stream_id))
-        finally:
-            await client.aclose()
+        raw = await self._client().get(_owner_key(stream_id))
         if raw is None:
             return None
         if isinstance(raw, bytes):
@@ -225,8 +335,24 @@ class RedisBackplane:
         connected — the exact case raw pub/sub dropped). The pub/sub connection is
         always closed in the ``finally`` (disconnect / cancellation / terminal), so
         no Redis connection leaks.
+
+        **Post-terminal suggestions window (#489).** When the terminal is a ``done``
+        that declares ``data.pendingSuggestions``, the subscription does NOT stop at
+        it: it keeps relaying for a bounded grace and stops at the first
+        ``event:suggestions`` OR at grace expiry. This holds whether the terminal was
+        found in the replay (the realistic 202→connect client whose replay already
+        buffered ``done``, so the replay loop must fall THROUGH rather than return) or
+        on the live channel (the concurrent subscriber). The trailing suggestions
+        event carries a ``seq`` strictly above the terminal's — it is the same
+        producer's monotonic counter — so the replay/live dedup below is unaffected.
+
+        Deliberately **not** on the pooled publisher client (#487): a pub/sub
+        connection cannot carry ordinary commands, and this one's lifetime is the
+        subscription's — closing it here must never take the process-wide
+        publisher down with it. One connection serves the whole subscription, so
+        the consumer side was already O(1) and is unchanged.
         """
-        client = aioredis.from_url(self._redis_url)  # type: ignore[no-untyped-call]
+        client = self._client_factory()
         pubsub = client.pubsub()
         channel = _channel(stream_id)
         try:
@@ -238,37 +364,90 @@ class RedisBackplane:
 
             # Replay the head the producer published before we connected (incl. a
             # terminal if it already finished). Track the high-water seq so the
-            # live loop relays each envelope exactly once.
+            # live loop relays each envelope exactly once. ``awaiting_suggestions``
+            # flips once a pending-suggestions terminal is relayed (#489).
             replayed_seq = -1
+            awaiting_suggestions = False
             for raw in await client.lrange(_replay_key(stream_id), 0, -1):
                 envelope = _loads(raw)
                 seq = envelope.get("seq")
                 if isinstance(seq, int):
                     replayed_seq = max(replayed_seq, seq)
                 yield envelope
-                if is_terminal(envelope):
-                    return
+                if awaiting_suggestions:
+                    # The pending terminal was already replayed; the suggestions
+                    # event may be the very next buffered entry.
+                    if _is_suggestions(envelope):
+                        return
+                elif is_terminal(envelope):
+                    if not _declares_pending_suggestions(envelope):
+                        return
+                    awaiting_suggestions = True
 
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                raw = message.get("data")
-                if raw is None:
-                    continue
-                envelope = _loads(raw)
-                seq = envelope.get("seq")
-                # Drop anything the replay already delivered (seq is monotonic per
-                # stream), so an envelope in both the list and the live channel is
-                # relayed once.
-                if isinstance(seq, int) and seq <= replayed_seq:
-                    continue
-                yield envelope
-                if is_terminal(envelope):
-                    return
+            # Live relay — only while no terminal has been seen yet. Once a
+            # pending-suggestions terminal is relayed (here or from the replay
+            # above), the UNBOUNDED ``listen()`` is skipped for the bounded
+            # ``_grace_relay`` so a producer that never publishes the trailing
+            # event cannot hang the consumer (#489).
+            if not awaiting_suggestions:
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    raw = message.get("data")
+                    if raw is None:
+                        continue
+                    envelope = _loads(raw)
+                    seq = envelope.get("seq")
+                    # Drop anything the replay already delivered (seq is monotonic
+                    # per stream), so an envelope in both the list and the live
+                    # channel is relayed once.
+                    if isinstance(seq, int) and seq <= replayed_seq:
+                        continue
+                    yield envelope
+                    if is_terminal(envelope):
+                        if not _declares_pending_suggestions(envelope):
+                            return
+                        awaiting_suggestions = True
+                        break
+
+            if awaiting_suggestions:
+                async for envelope in self._grace_relay(pubsub, replayed_seq):
+                    yield envelope
+                    if _is_suggestions(envelope):
+                        return
         finally:
             await pubsub.unsubscribe(channel)
             await pubsub.aclose()
             await client.aclose()
+
+    async def _grace_relay(
+        self, pubsub: Any, replayed_seq: int
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Relay live envelopes for the bounded post-terminal grace, then stop (#489).
+
+        Entered only after a ``done`` that declared ``pendingSuggestions``. Uses a
+        single wall-clock deadline (``get_message`` with the remaining budget) so a
+        producer that never publishes the trailing event cannot hold the consumer
+        open past the grace. The caller stops at the first ``event:suggestions``.
+        """
+        deadline = asyncio.get_running_loop().time() + self._post_terminal_grace_seconds
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            message = await pubsub.get_message(timeout=remaining)
+            if message is None:
+                return
+            if message.get("type") != "message":
+                continue
+            raw = message.get("data")
+            if raw is None:
+                continue
+            envelope = _loads(raw)
+            seq = envelope.get("seq")
+            if isinstance(seq, int) and seq <= replayed_seq:
+                continue
+            yield envelope
 
     @staticmethod
     async def _await_subscribe_confirmed(pubsub: Any) -> None:
@@ -306,10 +485,15 @@ class InMemoryBackplane:
     testable without Redis.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS
+    ) -> None:
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._replay: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._owners: dict[str, StreamOwner] = {}
+        # Mirrors the Redis path (#489): how long ``subscribe`` holds open after a
+        # ``done(pendingSuggestions=true)`` for the one trailing suggestions event.
+        self._post_terminal_grace_seconds = post_terminal_grace_seconds
 
     async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
         buf = self._replay[stream_id]
@@ -336,8 +520,27 @@ class InMemoryBackplane:
             while True:
                 envelope = await queue.get()
                 yield envelope
-                if is_terminal(envelope):
+                if not is_terminal(envelope):
+                    continue
+                # A non-pending terminal stops here (today's behaviour). A
+                # ``done(pendingSuggestions=true)`` holds open for the bounded
+                # grace and stops at the first ``event:suggestions`` OR at grace
+                # expiry — the same post-terminal window the Redis path relays (#489).
+                if not _declares_pending_suggestions(envelope):
                     return
+                deadline = asyncio.get_running_loop().time() + self._post_terminal_grace_seconds
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        return
+                    try:
+                        envelope = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    except TimeoutError:
+                        return
+                    yield envelope
+                    if _is_suggestions(envelope):
+                        return
+                # unreachable: both inner branches return
         finally:
             subs = self._subscribers.get(stream_id)
             if subs is not None:

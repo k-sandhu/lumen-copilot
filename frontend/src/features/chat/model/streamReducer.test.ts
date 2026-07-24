@@ -139,6 +139,24 @@ function errorEnv(seq: number): ErrorEnvelope {
     problem: { title: 'Upstream error', status: 502, detail: 'model unavailable', code: 'upstream' },
   };
 }
+/** A `done` that opts into the post-terminal suggestions window (#489). */
+function donePending(seq: number, citationCount: number): DoneEnvelope {
+  return {
+    type: 'done',
+    streamId: SID,
+    seq,
+    data: { messageId: 'm', finishReason: 'stop', citationCount, pendingSuggestions: true },
+  };
+}
+function suggestions(seq: number, items: string[]): EventEnvelope {
+  return {
+    type: 'event',
+    streamId: SID,
+    seq,
+    name: 'suggestions',
+    data: { messageId: 'm', suggestions: items },
+  };
+}
 
 function fold(state: StreamState, ...envs: Parameters<typeof reduceStream>[1][]): StreamState {
   return envs.reduce(reduceStream, state);
@@ -249,6 +267,47 @@ describe('reduceStream', () => {
     const after = fold(initialStreamState, start(0), done(1, 0), delta(2, 'late'));
     expect(after.phase).toBe('done');
     expect(after.text).toBe('');
+  });
+
+  // --- #489: post-terminal suggestions window --------------------------------
+
+  it('accepts one post-terminal suggestions event after a pendingSuggestions done (AC-2)', () => {
+    const s = fold(
+      initialStreamState,
+      start(0),
+      delta(1, 'Answer.'),
+      donePending(2, 0),
+      suggestions(3, ['What next?', 'Who owns it?']),
+    );
+    // The terminal stays settled...
+    expect(s.phase).toBe('done');
+    expect(s.text).toBe('Answer.');
+    // ...and the follow-ups were attached AFTER it.
+    expect(s.suggestions).toEqual({ messageId: 'm', suggestions: ['What next?', 'Who owns it?'] });
+  });
+
+  it('does not accept post-terminal suggestions when done did NOT declare pending', () => {
+    const settled = fold(initialStreamState, start(0), done(1, 0));
+    const after = reduceStream(settled, suggestions(2, ['nope']));
+    // Plain done: post-terminal stragglers are ignored by identity (no re-render).
+    expect(after).toBe(settled);
+    expect(after.suggestions).toBeNull();
+  });
+
+  it('ignores anything other than suggestions after a pendingSuggestions done', () => {
+    const settled = fold(initialStreamState, start(0), donePending(1, 0));
+    const afterDelta = reduceStream(settled, delta(2, 'late'));
+    expect(afterDelta).toBe(settled);
+    const afterCitation = reduceStream(settled, citation(2, 'c1'));
+    expect(afterCitation).toBe(settled);
+  });
+
+  it('accepts only ONE post-terminal suggestions event, ignoring a second', () => {
+    const one = fold(initialStreamState, start(0), donePending(1, 0), suggestions(2, ['first']));
+    const two = reduceStream(one, suggestions(3, ['second']));
+    // The second is ignored by identity — at most one suggestions per stream.
+    expect(two).toBe(one);
+    expect(two.suggestions).toEqual({ messageId: 'm', suggestions: ['first'] });
   });
 
   it('terminateWithDisconnect marks a dropped stream as error (AC-5)', () => {
@@ -471,5 +530,48 @@ describe('narration (ADR-0016 §6, #414)', () => {
     let s = initialStreamState;
     s = reduceStream(s, narration(1, 42, undefined));
     expect(s.narration).toBeNull();
+  });
+});
+
+describe('answer_retract (speculative streaming, #488)', () => {
+  function answerRetract(seq: number): EventEnvelope {
+    return { type: 'event', streamId: SID, seq, name: 'answer_retract' };
+  }
+  function narration(seq: number, text: string, turn: number): EventEnvelope {
+    return { type: 'event', streamId: SID, seq, name: 'narration', data: { text, turn } };
+  }
+
+  it('discards the speculatively-streamed answer text — removed, not dangling (AC-4)', () => {
+    let s = reduceStream(initialStreamState, start(0));
+    s = reduceStream(s, delta(1, 'Let me look '));
+    s = reduceStream(s, delta(2, 'that up.'));
+    expect(s.text).toBe('Let me look that up.');
+    // The turn revealed itself as tool-calling → retraction clears the answer.
+    s = reduceStream(s, answerRetract(3));
+    expect(s.text).toBe('');
+    expect(s.phase).toBe('streaming'); // the turn is still live
+    // The retracted text is surfaced through the SAME narration affordance.
+    s = reduceStream(s, narration(4, 'Let me look that up.', 1));
+    expect(s.narration).toEqual({ turn: 1, text: 'Let me look that up.' });
+    // The real answer then streams fresh and is the only persisted-equivalent text.
+    s = reduceStream(s, delta(5, 'The answer is 42.'));
+    expect(s.text).toBe('The answer is 42.');
+  });
+
+  it('leaves other side-band state untouched (only clears the answer text)', () => {
+    let s = fold(initialStreamState, start(0), toolCall(1, 'c1'), delta(2, 'spec'));
+    s = reduceStream(s, answerRetract(3));
+    expect(s.text).toBe('');
+    expect(s.tools).toHaveLength(1); // tool activity is not a speculative delta
+    expect(s.phase).toBe('streaming');
+  });
+
+  it('consumes its seq (a same-seq replay cannot re-clear later text)', () => {
+    let s = fold(initialStreamState, start(0), delta(1, 'spec'), answerRetract(2));
+    expect(s.lastSeq).toBe(2);
+    s = reduceStream(s, delta(3, 'real'));
+    // A stale answer_retract replayed at seq 2 is ignored (seq <= lastSeq).
+    const replayed = reduceStream(s, answerRetract(2));
+    expect(replayed.text).toBe('real');
   });
 });

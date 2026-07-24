@@ -114,6 +114,16 @@ class ContextConfig:
     #: many results are cleared per pass, amortizing cache invalidation).
     compaction_digest_chars: int = DEFAULT_COMPACTION_DIGEST_CHARS
     compaction_chunk_size: int = DEFAULT_COMPACTION_CHUNK_SIZE
+    #: PROACTIVE tool-result compaction (ADR-0016 §3.1 amendment #491): shrink a
+    #: tool result to a bounded head digest ONCE it is superseded by a later tool
+    #: group AND represented in citations — *independent of the budget check*,
+    #: which a frontier window never trips (so a superseded search result would
+    #: otherwise ride every later turn at full size — the re-sent-evidence tax).
+    #: OFF here so the pure assembler stays conservative (an under-budget fit is
+    #: the identity, and every existing budget-degrade test is unaffected); the
+    #: chat runtime opts in via ``Settings.context_proactive_compaction_enabled``.
+    #: The retained-head cap reuses ``compaction_digest_chars``.
+    proactive_compaction_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +190,38 @@ def litellm_token_counter(model: str) -> TokenCounter:
             return int(litellm.token_counter(model=model, text=text))  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — heuristic beats a crashed answer
             return _conservative_tokens(text)
+
+    return _count
+
+
+def memoizing_token_counter(base: TokenCounter) -> TokenCounter:
+    """Wrap a counter so a repeated fragment is tokenised once (#491, AC-3).
+
+    :func:`fit_transcript` re-costs every message on every turn, and the answer
+    loop refits before each of up to ``chat_max_tool_turns`` calls — so a
+    transcript that grows by one turn's messages pays an O(transcript)
+    re-tokenisation each turn (quadratic per answer). Memoising on the fragment
+    TEXT collapses that to O(new messages): the system prompt, the tools block,
+    the question, and every prior turn's (identical) wire text are cache hits, so
+    only the messages a turn actually appends reach the real tokeniser.
+
+    Keyed on the wire text, which is safe against compaction: a
+    :func:`dataclasses.replace`-d (digested) message serialises to a DIFFERENT
+    string, so it never returns a stale count for content that changed. The base
+    counter is model-specific (``litellm_token_counter(model)``), so one memoiser
+    per model keeps the (content, role, tool_calls, model) identity the recon
+    calls for — a failover refit under a different tokeniser gets its own cache.
+    Per-answer lifetime, so the cache is bounded by one answer's transcript.
+    """
+    cache: dict[str, int] = {}
+
+    def _count(text: str) -> int:
+        cached = cache.get(text)
+        if cached is not None:
+            return cached
+        value = base(text)
+        cache[text] = value
+        return value
 
     return _count
 
@@ -301,9 +343,7 @@ def assemble_context(
                 "fetch by id with get_document / search for details.]\n"
                 + "\n".join(f"- {line}" for line in evidence_lines)
             )
-        segments.summary.append(
-            ChatMessage(role=Role.USER, content="\n\n".join(parts))
-        )
+        segments.summary.append(ChatMessage(role=Role.USER, content="\n\n".join(parts)))
 
     max_input = resolve(model) or cfg.fallback_max_input_tokens
     # A degenerate window (tiny model / oversized headroom) still yields a
@@ -522,6 +562,33 @@ def fit_transcript(
     costs = [count(_message_wire_text(m)) + _MESSAGE_FRAMING_TOKENS for m in working]
     fixed_cost = count(_tools_wire_text(tools)) + _ARRAY_FRAMING_TOKENS
     total = fixed_cost + sum(costs)
+
+    # (0) PROACTIVE compaction (ADR-0016 §3.1 amendment / #491) — BUDGET-INDEPENDENT.
+    # On a frontier window the reactive branch below never fires, so a superseded
+    # search result rides every later turn at full size. Shrink a tool result to a
+    # bounded head digest once it is BOTH superseded (a later tool group exists —
+    # so it is NOT the newest evidence the next, pending, model turn will act on,
+    # AC-6) AND represented in citations (its evidence is durably recorded, INV-3,
+    # and re-fetchable by id, so dropping the bulky re-sent copy loses no
+    # grounding). Same strict cost-reduction guard as the reactive path, and the
+    # newest tool group is never touched. Opt-in (off in the pure assembler).
+    if cfg.proactive_compaction_enabled and cited_snippets:
+        total, proactively_compacted = _compact_superseded_tool_results(
+            working,
+            costs,
+            tail_start=_last_question_index(working),
+            total=total,
+            count=count,
+            digest_chars=cfg.compaction_digest_chars,
+            cited_snippets=cited_snippets,
+        )
+        if proactively_compacted:
+            log.info(
+                "context.tool_results_proactively_compacted",
+                compacted=proactively_compacted,
+                budget_tokens=budget,
+            )
+
     if total <= budget:
         return working
 
@@ -636,9 +703,78 @@ def _oldest_sheddable_span(
     return (start, start + 1)
 
 
-def _context_digest(
-    content: str, digest_chars: int, cited_snippets: tuple[str, ...] = ()
-) -> str:
+def _last_tool_group_start(messages: Sequence[ChatMessage], tail_start: int) -> int:
+    """Index where the NEWEST tool-call group begins — its results are protected.
+
+    The newest evidence (the last assistant ``tool_calls`` message and the
+    ``tool`` results that follow it) is what the next model turn is about to
+    reason over, so proactive compaction must never touch it (#491 AC-6: never
+    drop the evidence a pending tool call is about to reference). Returns the
+    index of the LAST assistant tool-call message in the live tail
+    ``[tail_start, len)``; everything from there on is protected. When the tail
+    holds no tool-call group, returns ``len`` — nothing is superseded, so nothing
+    is eligible.
+    """
+    for i in range(len(messages) - 1, tail_start - 1, -1):
+        if messages[i].role is Role.ASSISTANT and messages[i].tool_calls:
+            return i
+    return len(messages)
+
+
+def _compact_superseded_tool_results(
+    working: list[ChatMessage],
+    costs: list[int],
+    *,
+    tail_start: int,
+    total: int,
+    count: TokenCounter,
+    digest_chars: int,
+    cited_snippets: Mapping[str, tuple[str, ...]],
+) -> tuple[int, int]:
+    """Proactively digest SUPERSEDED, citation-backed tool results (#491).
+
+    Budget-independent (see the caller): shrinks the live tail's tool results
+    that are BOTH superseded (before the newest tool-call group — never the group
+    a pending call is about to reference, AC-6) AND represented in citations
+    (``tool_call_id`` in ``cited_snippets`` — evidence durably recorded at
+    retrieval time). The digest keeps the bounded content-bearing head + the
+    truncation marker, and — because every result here is cited — re-embeds each
+    cited snippet **verbatim** (:func:`_context_digest` with the call's snippets),
+    so a cited passage that sits BEYOND ``digest_chars`` is preserved in the
+    model-visible prompt rather than truncated away (INV-3: a citation must resolve
+    to evidence the model actually saw, not merely to a record kept elsewhere).
+    Every mutation is applied only when it STRICTLY reduces the counted wire cost,
+    so a result whose cited snippet cannot be kept while shrinking is left VERBATIM
+    (also the idempotence rule → a result already at/under the cap is untouched
+    across turns, so the cache prefix stays stable). Mutates ``working``/``costs``
+    in place; returns ``(new_total, compacted)``.
+    """
+    protected_from = _last_tool_group_start(working, tail_start)
+    compacted = 0
+    for i in range(tail_start, protected_from):
+        message = working[i]
+        call_id = message.tool_call_id
+        if message.role is not Role.TOOL or call_id is None or call_id not in cited_snippets:
+            continue
+        # BE-2 (INV-3): every result reached here is cited, so re-embed its cited
+        # snippets in the digest. A blind head truncation would drop a cited passage
+        # that sits BEYOND ``digest_chars`` from the model-visible prompt — the
+        # strict cost guard below then leaves the message VERBATIM whenever keeping
+        # the snippet cannot shrink it, so evidence is never sacrificed for a shrink.
+        snippets = cited_snippets[call_id]
+        candidate = _context_digest(message.content, digest_chars, snippets)
+        digested = replace(message, content=candidate)
+        new_cost = count(_message_wire_text(digested)) + _MESSAGE_FRAMING_TOKENS
+        if new_cost >= costs[i]:
+            continue
+        total += new_cost - costs[i]
+        working[i] = digested
+        costs[i] = new_cost
+        compacted += 1
+    return total, compacted
+
+
+def _context_digest(content: str, digest_chars: int, cited_snippets: tuple[str, ...] = ()) -> str:
     """A bounded, content-bearing digest of a tool result's content (ADR-0016 §3.1).
 
     Keeps the first ``digest_chars`` of the ACTUAL content — for a rendered
@@ -787,4 +923,5 @@ __all__ = [
     "fit_transcript",
     "litellm_max_input_tokens",
     "litellm_token_counter",
+    "memoizing_token_counter",
 ]

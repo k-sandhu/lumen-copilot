@@ -55,7 +55,6 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
         label="Claude Opus 4.8",
         provider="anthropic",
         tier=ModelTier.FRONTIER,
-        is_default=True,
     ),
     ChatModelSetting(
         id="openrouter/openai/gpt-5.5",
@@ -69,11 +68,22 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
         provider="google",
         tier=ModelTier.FAST,
     ),
+    # The shipped chat default (#490 / #486). A FAST-tier model, deliberately not
+    # frontier: the answer is buffered whole before the user sees any of it, so
+    # token-generation time is the floor for perceived chat speed. Chosen over
+    # the sibling FAST entry (gemini-3.5-flash) on two merits — (1) it stays in
+    # the Anthropic family the prior frontier default and the grounded system
+    # prompt were tuned against, minimising answer-quality/instruction-following
+    # drift, and (2) only the anthropic/openai families earn prompt-cache
+    # directives (ADR-0016 §2; gateway._cache_family), so keeping the default on
+    # an anthropic route preserves the cache-first latency win that a google
+    # route would forfeit. Frontier stays selectable per session / per tenant.
     ChatModelSetting(
         id="openrouter/anthropic/claude-haiku-4.5",
         label="Claude Haiku 4.5",
         provider="anthropic",
         tier=ModelTier.FAST,
+        is_default=True,
     ),
     ChatModelSetting(
         id="openrouter/deepseek/deepseek-v3.2",
@@ -87,6 +97,29 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
         provider="qwen",
         tier=ModelTier.OSS,
     ),
+)
+
+
+# Interactive-answer worst-case bound (#489 AC-4, BE-7 / R2-8). A live chat answer
+# must surface a typed terminal within this ceiling when the provider is
+# unreachable. The interactive per-turn deadline is the load-bearing part of that
+# budget, but publishing the terminal (and settling) costs a little MORE on top —
+# so the accepted per-turn deadline must reserve a margin, or a deadline set right
+# at the ceiling would overshoot once the terminal publish is added. The maximum
+# accepted ``LLM_INTERACTIVE_TIMEOUT_SECONDS`` is therefore the ceiling minus that
+# margin. Round-1 stopped there — but the margin was only a *reservation*: nothing
+# actually bounded terminal publication, which awaits a Redis pipeline that can
+# stall unbounded (``realtime/backplane.py``), so the true worst case was
+# unbounded (R2-8). The margin is now BOTH the reservation AND the runtime budget
+# the answer producer bounds the terminal publish by
+# (``ChatRuntime._publish_terminal``), and a cross-field validator keeps
+# ``interactive_deadline + margin <= ceiling`` an enforced invariant even when the
+# margin is overridden — so a config that could let the producer→terminal path
+# exceed the ceiling fails fast at boot instead of silently overshooting.
+_INTERACTIVE_WORST_CASE_CEILING_SECONDS = 30.0
+_INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS = 3.0
+_MAX_INTERACTIVE_TIMEOUT_SECONDS = (
+    _INTERACTIVE_WORST_CASE_CEILING_SECONDS - _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
 )
 
 
@@ -387,6 +420,14 @@ class Settings(BaseSettings):
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    # The gateway FALLBACK model for callers that pass ``model=None`` to
+    # ``LLMGateway`` (in practice only ``SearchService._direct_answer``, the
+    # optional cited direct answer on /search). This is NOT the chat default and
+    # tuning it does NOT speed up chat: the grounded chat answer resolves its
+    # model from the picker registry's ``is_default`` entry
+    # (``ChatService._default_model`` -> ``_DEFAULT_CHAT_MODEL_REGISTRY``, a
+    # FAST-tier model since #490), never from ``llm_model``. Kept a distinct
+    # value deliberately so the two do not silently conflate (#490 AC-5).
     llm_model: str = Field(default="openrouter/openai/gpt-4o-mini", alias="LLM_MODEL")
     # Embedding model id (issue #32). OpenRouter serves embeddings on an
     # OpenAI-compatible endpoint; LiteLLM's native ``openrouter/`` route for
@@ -410,7 +451,75 @@ class Settings(BaseSettings):
     llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
+    # This is the BATCH budget — ingestion, summarisation, headless runs — where a
+    # human is not waiting; 60s tolerates a slow-but-alive provider.
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
+    # The INTERACTIVE per-turn deadline for a live chat answer (#489). A human is
+    # waiting, so a single model turn (one streamed completion, including its
+    # bounded same-route retries and backoffs) is capped here — a hung/unreachable
+    # provider surfaces a typed 503 within this budget instead of stacking the
+    # 60s batch timeout across every retry (the ~182s cliff). Enforced at the
+    # runtime as an asyncio deadline around the whole resilient turn, so it also
+    # catches a provider that connects then stalls mid-stream (which the LiteLLM
+    # request timeout does not). Worst case to a typed terminal on an unreachable
+    # provider is this budget + the terminal-publish margin, which must stay <= 30s
+    # (#489 AC-4). Enforced (BE-7 / R2-8): the accepted maximum is the 30s ceiling
+    # MINUS the margin (``_MAX_INTERACTIVE_TIMEOUT_SECONDS`` = 27s), so a deadline
+    # set at the boundary still lands the typed terminal under 30s; the runtime then
+    # bounds the terminal publish itself by that margin (R2-8), so a stalled Redis
+    # pipeline can no longer push the real worst case past the ceiling.
+    llm_interactive_timeout_seconds: float = Field(
+        default=25.0,
+        gt=0,
+        le=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+        alias="LLM_INTERACTIVE_TIMEOUT_SECONDS",
+    )
+    # How many attempts a single interactive turn makes before failing over /
+    # terminating (#489): 2 = one retry. The batch/headless path keeps the fuller
+    # ladder (3 attempts). Bounded [1, 3]: 1 disables the same-route retry, >3
+    # risks stacking beyond the interactive budget.
+    llm_interactive_max_attempts: int = Field(
+        default=2, ge=1, le=3, alias="LLM_INTERACTIVE_MAX_ATTEMPTS"
+    )
+    # The wall-clock budget the answer producer bounds TERMINAL publication by on the
+    # interactive path (R2-8, #489 AC-4). Publishing the terminal awaits a Redis
+    # pipeline (``realtime/backplane.py``) that can stall unbounded; round-1 only
+    # RESERVED this margin on top of the per-turn deadline without bounding the
+    # publish, so the real worst case to a typed terminal was still unbounded. The
+    # runtime now bounds the terminal publish by the time actually left in the
+    # producer→terminal budget (``turn deadline + this margin``), degrading to a
+    # bounded best-effort re-attempt if it stalls — so the client still gets a typed
+    # terminal and the producer never hangs. Defaults to the module constant used
+    # for the interactive-deadline ceiling above; the validator below keeps
+    # ``interactive_deadline + margin <= 30s`` honest even if this is overridden.
+    llm_terminal_publish_margin_seconds: float = Field(
+        default=_INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        gt=0,
+        alias="LLM_TERMINAL_PUBLISH_MARGIN_SECONDS",
+    )
+
+    @model_validator(mode="after")
+    def _interactive_budget_within_worst_case_ceiling(self) -> Settings:
+        """Interactive turn budget + terminal-publish margin must fit the ceiling (R2-8).
+
+        The per-turn field bound above already caps the deadline at ``ceiling −
+        default margin`` (27s), but the margin is now its own (overridable) setting.
+        This cross-field check keeps the <=30s worst-case invariant real even when the
+        margin is raised: a config whose ``interactive_deadline + margin`` would let
+        the producer→terminal path exceed the 30s ceiling fails fast at boot rather
+        than silently overshooting the bound the whole feature promises (#489 AC-4).
+        """
+        if (
+            self.llm_interactive_timeout_seconds + self.llm_terminal_publish_margin_seconds
+            > _INTERACTIVE_WORST_CASE_CEILING_SECONDS
+        ):
+            raise ValueError(
+                "LLM_INTERACTIVE_TIMEOUT_SECONDS + LLM_TERMINAL_PUBLISH_MARGIN_SECONDS "
+                f"must be <= {_INTERACTIVE_WORST_CASE_CEILING_SECONDS:g}s (#489 AC-4 / "
+                "R2-8): the whole producer→terminal path must land a typed terminal "
+                "within the interactive worst-case ceiling."
+            )
+        return self
 
     # #395 — operational/cost controls for the search path (config-driven per
     # backend/AGENTS.md: limits are never hardcoded at call sites).
@@ -440,6 +549,15 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
+    # Output ceiling for the grounded answer / forced-synthesis turn (#488). Bounds
+    # answer length — and therefore the tail of the "streaming" wait — so a runaway
+    # generation cannot stall time-to-completion. ``finish_reason == "length"`` then
+    # becomes an ordinary terminal handled by the ONE length continuation (ADR-0016
+    # §4), which caps a single answer at ~2× this value. ``0`` ⇒ unbounded (the
+    # pre-#488 shape); the offline/headless runtime default is also unbounded so
+    # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
+    chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
+
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent
@@ -450,19 +568,70 @@ class Settings(BaseSettings):
     chat_suggestions_timeout_seconds: float = Field(
         default=8.0, gt=0, le=60, alias="CHAT_SUGGESTIONS_TIMEOUT_SECONDS"
     )
+    # The model the suggestions completion runs on (#490). A DEDICATED FAST-tier
+    # id, not the answer's route: a <=400-token nicety on the critical path must
+    # not ride the session's (possibly frontier) model. Empty ⇒ inherit the
+    # answer route (the pre-#490 behaviour). Routed like any config id (default
+    # OpenRouter credentials); a per-tenant ``provider:`` id is resolved through
+    # the same seam chat uses.
+    chat_suggestions_model: str = Field(
+        default="openrouter/anthropic/claude-haiku-4.5", alias="CHAT_SUGGESTIONS_MODEL"
+    )
+    # Post-terminal grace window the WS consumer holds a subscription open for a
+    # `done(pendingSuggestions=true)` (#489): suggestions are generated AFTER the
+    # terminal, so the backplane/relay keep relaying for this bounded window and
+    # stop at the first `event:suggestions` OR at grace expiry, whichever comes
+    # first. Derived from the suggestions timeout plus a small margin (the extra
+    # covers scheduling + the one publish after the completion returns) — it must
+    # comfortably outlast a suggestions attempt that runs to its full timeout, or
+    # a slow-but-succeeding suggestion would be cut off. Validated below.
+    chat_suggestions_grace_seconds: float = Field(
+        default=10.0, gt=0, le=90, alias="CHAT_SUGGESTIONS_GRACE_SECONDS"
+    )
+
+    @model_validator(mode="after")
+    def _suggestions_grace_outlasts_timeout(self) -> Settings:
+        """The post-terminal grace must exceed the suggestions timeout (#489).
+
+        A grace shorter than the generation timeout could close the subscription
+        before a slow-but-successful suggestion is published — silently dropping
+        it. Fail fast at boot rather than lose suggestions intermittently.
+        """
+        if self.chat_suggestions_grace_seconds <= self.chat_suggestions_timeout_seconds:
+            raise ValueError(
+                "CHAT_SUGGESTIONS_GRACE_SECONDS must exceed "
+                "CHAT_SUGGESTIONS_TIMEOUT_SECONDS (#489): the post-terminal window "
+                "has to outlast a suggestions attempt that runs to its full timeout."
+            )
+        return self
 
     # Rolling session summary (#416, ADR-0016 §3.2): the async post-answer
     # summarizer. ``keep_messages`` is the verbatim tail never summarized (the
     # last M turns stay word-for-word); ``min_batch`` is how many messages
     # beyond that tail must accumulate before a summarize call is worth its
     # cost (the task no-ops below it). ``summary_model`` pins the summarizer's
-    # model; empty ⇒ the registry default (tasks run headless with config
-    # credentials — per-tenant ``provider:`` ids are not routable there).
+    # model. Empty (the default) ⇒ the summarizer uses the DEDICATED FAST-tier
+    # default (the registry ``is_default`` id, now FAST — #490) for a config
+    # session, so a background compaction task never inherits a frontier answer
+    # route; a per-tenant ``provider:`` session still summarizes through its own
+    # provider (#446 finding 6). A non-empty value is an explicit override used
+    # with config credentials.
     chat_summary_enabled: bool = Field(default=True, alias="CHAT_SUMMARY_ENABLED")
+    # #491: summarise EARLIER. The task first folds turns into the summary once
+    # ``keep + min_batch`` messages have accumulated. The old 8 + 4 meant the
+    # first compaction only fired at >=12 uncovered messages (~turn 7 of a 2-msg
+    # /turn session) — by then turn-5 input was already ~2.5x turn-1. Retuned to
+    # 4 + 2: the first compaction now fires at >=6 messages (~turn 3), while the
+    # verbatim tail still keeps the last 2 full turns (4 messages) word-for-word
+    # — the immediate context the model most needs — and older turns roll into
+    # the <300-word rolling summary + IDs-only evidence carry-forward. The
+    # summariser runs on the dedicated FAST model (#490), so the earlier/smaller
+    # batches cost little. Groundedness under this tail is guarded by the
+    # compression-regression eval (ADR-0016 §3.2, live).
     chat_summary_keep_messages: int = Field(
-        default=8, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
+        default=4, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
     )
-    chat_summary_min_batch: int = Field(default=4, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
+    chat_summary_min_batch: int = Field(default=2, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
     chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
 
     # Prompt caching (ADR-0016 §2, #411): provider cache directives on the
@@ -494,6 +663,25 @@ class Settings(BaseSettings):
     context_compaction_chunk_size: int = Field(
         default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
     )
+    # PROACTIVE tool-result compaction (ADR-0016 §3.1 amendment, issue #491). The
+    # reactive compaction above only fires when the transcript is over budget,
+    # which a frontier-sized window never reaches — so on the default routes a
+    # superseded search result rides every later turn at full size (the re-sent
+    # -evidence tax #491 measured). With this ON, ``fit_transcript`` digests a tool
+    # result once it is BOTH superseded by a later tool group AND represented in
+    # citations — the newest tool group (the evidence a pending call is about to
+    # reference) is always preserved. The digest is the SAME ``_context_digest`` the
+    # reactive path builds: the bounded content-bearing head (capped at
+    # CONTEXT_COMPACTION_DIGEST_CHARS) PLUS every cited snippet re-embedded VERBATIM
+    # (BE-2 / R2-9, INV-3 — a citation must resolve to evidence the model actually
+    # saw in the prompt, not merely to a record kept elsewhere; a cited passage
+    # beyond the head would otherwise be truncated away). The strict cost-reduction
+    # guard still gates each result, so one whose verbatim snippet cannot be kept
+    # while shrinking is left VERBATIM. Default ON for the chat answer path; a
+    # kill-switch, not a tuning knob (the retained-HEAD size is the tuning knob above).
+    context_proactive_compaction_enabled: bool = Field(
+        default=True, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
+    )
     # How many of one turn's read-only tool calls execute at once (#412,
     # ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB
     # session (released before it queues to persist), so this bounds the
@@ -503,6 +691,28 @@ class Settings(BaseSettings):
     # exhaust the pool; 1 disables fan-out entirely (the genuinely serial
     # pre-#412 path — no batch, no extra sessions, per-call event order).
     chat_tool_concurrency: int = Field(default=4, gt=0, le=16, alias="CHAT_TOOL_CONCURRENCY")
+
+    # Streamed-text coalescing (issue #487). The runtime used to mint ONE
+    # envelope per provider chunk, so a long answer's envelope count tracked the
+    # provider's tokenisation — each one a backplane round-trip out and a React
+    # state commit in. The producer now buffers adjacent chunks of the same kind
+    # (answer ``delta`` / ``event:narration``) and flushes on whichever comes
+    # first: the character budget or the elapsed-time deadline. It ALWAYS flushes
+    # before any other envelope is minted, so ``seq`` stays monotonic on the wire
+    # and nothing is reordered behind a terminal. Coalescing changes envelope
+    # COUNT, never TEXT: the concatenation of the published deltas is identical
+    # to the concatenation of the provider chunks (#148), so the replay list and
+    # the live channel still carry byte-identical envelopes (#153).
+    #
+    # The time budget governs genuinely live streaming (chunks arriving tens of
+    # ms apart); the character budget governs a burst (today's answer turn is
+    # buffered until it is classified, then replayed at once). ``0`` characters
+    # is the kill switch — it restores the exact pre-#487 one-envelope-per-chunk
+    # wire shape without a code change.
+    chat_text_coalesce_chars: int = Field(default=160, ge=0, alias="CHAT_TEXT_COALESCE_CHARS")
+    chat_text_coalesce_seconds: float = Field(
+        default=0.04, ge=0, le=1.0, alias="CHAT_TEXT_COALESCE_SECONDS"
+    )
 
     @model_validator(mode="after")
     def _context_budget_leaves_room(self) -> Settings:

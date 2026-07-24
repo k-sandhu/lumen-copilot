@@ -74,12 +74,27 @@ its composer — that together turn a static Q&A into a guided conversation:
   because a nicety failed). Skipped entirely when the turn ended in `ask_user`
   (the options *are* the suggestions). Config-gated
   (`CHAT_SUGGESTIONS_ENABLED`, default on; count + timeout also config). The
-  call's token usage folds into the answer's single `llm_usage` row (#409) — the
-  cost is real, so it is accounted. Also skipped for the honest "couldn't find
+  call's token usage is recorded on its **own** `llm_usage` row attributed to the
+  **actual** model that produced it (ADR-0016 §2.6 actual-model attribution) —
+  because a dedicated suggestions model (#490) is a *different* model from the
+  answer's, its spend must land on that model's row, not the answer model's — while
+  staying linked to the same session/answer so it is accounted (#409) and
+  queryable. The spend is recorded whether or not the output parses (the tokens
+  were billed regardless). Also skipped for the honest "couldn't find
   it" fallback answer (suppress suggestions on refusal/low-confidence answers —
   HAX guideline 10), and the client promotes chips/ghost only after a successful
-  terminal `done` (a `suggestions` event followed by a terminal `error` renders
-  nothing).
+  terminal `done`.
+  - **Off the critical path (#489).** Suggestions no longer sit *before* `done` on
+    the answer's latency path. The terminal `done` is published FIRST — declaring
+    `pendingSuggestions=true` when the nicety will be attempted — so the UI settles
+    the instant the answer is complete; the suggestions are then generated and
+    delivered as a **post-terminal** `event:suggestions` within a bounded server
+    grace window (`CHAT_SUGGESTIONS_GRACE_SECONDS`, the suggestions timeout + a
+    margin). `done.usage` reports the ANSWER only, while the suggestions cost is
+    accounted on its own `llm_usage` row (attributed to the actual suggestions model,
+    #490/ADR-0016 §2.6; #409). A failure/timeout produces no event
+    and cannot touch the already-published terminal; there is still exactly one
+    terminal, and it is still `done`.
 - **Prefill is a ghost, never a write.** The top suggestion renders as ghost text
   in the *empty* composer with an explicit accept affordance (Tab or click);
   typing anything dismisses it. The composer's draft is never overwritten —
@@ -101,7 +116,24 @@ New `event.name` values riding the existing chat stream:
 |---|---|---|
 | `event:step` | `ChatStep { key, label, state: started\|completed, detail?, turn? }` | many; phases in run order; a re-`started` key restarts that row (e.g. `think` per turn) |
 | `event:ask_user` | `ChatAskUser { messageId, question, options[{label, description?}], allowFreeText }` | ≤ 1 per stream; if present the stream has no suggestions and ends `done(finishReason="ask_user")` |
-| `event:suggestions` | `ChatSuggestions { messageId, suggestions: string[1..N] }` | ≤ 1 per stream; after the final `delta`/`citation`, before `done` |
+| `event:suggestions` | `ChatSuggestions { messageId, suggestions: string[1..N] }` | ≤ 1 per stream; POST-terminal (#489) — after `done(pendingSuggestions=true)`, within a bounded grace window |
+| `event:answer_retract` | *(no data)* | speculative-streaming retraction (#488); discards every answer `delta` streamed so far for the currently-streaming turn — targets at most one un-finalised speculative block, never appears after the answer is finalised nor after a terminal |
+
+The answer surface now streams **speculatively** (#488, ADR-0016 §6): the answer
+turn's text streams live as `delta` *before* the turn is proven tool-free. If the
+turn then reveals a tool call, one `event:answer_retract` discards those
+speculative deltas — the same text is re-emitted as `event:narration` (the #414
+transient affordance), so no content is lost, only its classification
+(answer→narration) is corrected. Clients clear the live answer text on
+`answer_retract` and ignore it once the answer has settled.
+
+The full lifecycle (authoritative in `contracts/websocket-envelopes.schema.json`
+`x-chatStream.lifecycle`): `start → ( delta | event:answer_retract | event:step |
+event:narration | event:tool_call | event:tool_result | event:citation |
+event:code_output | event:code_result | event:ask_user )* → done | error → [
+event:suggestions ]?` — exactly one terminal (`done`/`error`), with the single
+narrow post-terminal exception being one `event:suggestions` after a
+`done(pendingSuggestions=true)`.
 
 Step keys fixed by this spec: `prepare` (context assembly), `think` (one model
 turn; `turn` ordinal, `detail` set on completion), `finalize` (persist +
@@ -216,7 +248,8 @@ question; no new INV-2 surface.
 - **Backend:** `ruff` + `mypy --strict` + `pytest` green incl.: step order;
   ask_user happy/malformed/mixed-batch; question persisted + zero citations +
   `finishReason=ask_user`; suggestions emitted/disabled/timeout/parse-fail/skip
-  after ask_user; usage row includes the suggestion call; migration up/down.
+  after ask_user; the suggestion spend is recorded on its own actual-model
+  `llm_usage` row (accounted even on a parse miss, idempotent); migration up/down.
 - **Frontend:** Vitest state coverage (streaming/done/error/replay) for reducer +
   stepper + options + chips + composer (ghost accept/dismiss; ArrowUp/Down incl.
   draft stash/restore, multiline guards); `tsc`/ESLint clean.

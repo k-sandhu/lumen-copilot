@@ -50,6 +50,7 @@ def _fresh_embed_cache() -> Any:
     yield
     clear_embed_cache()
 
+
 # --- Test settings ---------------------------------------------------------
 
 _BASE_ENV = {
@@ -284,6 +285,49 @@ async def test_stream_tools_api_key_and_base_override(monkeypatch: pytest.Monkey
     assert captured["api_base"] == "https://provider.example.com/v1"
 
 
+async def test_stream_tools_passes_max_tokens_when_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC-5 (#488): the chat runtime bounds the answer/synthesis turn; the ceiling
+    # must reach the litellm call.
+    from app.domain.llm import ToolSpec
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.update(kwargs)
+        return _FakeStream([None])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="hi")], tools=[spec], max_tokens=512
+        )
+    ]
+    assert captured["max_tokens"] == 512
+
+
+async def test_stream_tools_omits_max_tokens_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unset ⇒ unbounded, the exact pre-#488 wire (never a max_tokens key).
+    from app.domain.llm import ToolSpec
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        captured.update(kwargs)
+        return _FakeStream([None])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+    _ = [
+        ev
+        async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="hi")], tools=[spec])
+    ]
+    assert "max_tokens" not in captured
+
+
 async def test_chat_usage_absent_yields_zeroed_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_acompletion(**kwargs: Any) -> _Response:
         return _Response("no usage", usage=None)
@@ -392,9 +436,7 @@ async def test_chat_usage_cached_zero_falls_back_to_anthropic_read(
     Anthropic-style ``cache_read_input_tokens`` rather than masking it."""
 
     async def fake_acompletion(**kwargs: Any) -> _Response:
-        return _Response(
-            "x", usage=_CacheUsage(100, 5, 105, cached_details=0, cache_read=77)
-        )
+        return _Response("x", usage=_CacheUsage(100, 5, 105, cached_details=0, cache_read=77))
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     gw = LLMGateway(_settings())
@@ -1042,9 +1084,7 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
                 content="",
                 tool_calls=(ToolCall(id=call_id, name="lookup", arguments={"key": "n"}),),
             ),
-            ChatMessage(
-                role=Role.TOOL, content=result, tool_call_id=call_id, name="lookup"
-            ),
+            ChatMessage(role=Role.TOOL, content=result, tool_call_id=call_id, name="lookup"),
         ]
 
     async def _turn_usage(messages: list[ChatMessage]) -> TokenUsage:
@@ -1072,6 +1112,78 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
     # the moving mark was dropped somewhere in the stack).
     assert second.cached_prompt_tokens > 0
     assert third.cached_prompt_tokens > second.cached_prompt_tokens
+
+
+@live
+@pytest.mark.live
+async def test_live_prompt_cache_session_shaped_reads_on_turn_two(
+    _live_gateway: LLMGateway,
+) -> None:
+    """#491 AC-4: turn-2 cache reads on an Anthropic route for a SESSION-shaped
+    prompt — the REAL grounded system prompt + the REAL default tool schemas,
+    assembled through ``assemble_context`` exactly as the chat runtime builds
+    the first call, then grown by one tool exchange (the append-only loop shape).
+
+    The grounded prompt alone (~350 tokens) is below the provider's minimum
+    cacheable prefix, so the system message is padded with a realistic reference
+    preamble to clear it with a wide margin — this keeps the assertion about the
+    cache MECHANICS (the message-0 breakpoint writes a prefix on turn 1 that turn
+    2 reads back), independent of the open question of whether the tools block
+    itself rides inside the cached prefix (documented in
+    docs/runbooks/prompt-cache-kpi.md).
+    """
+    from app.domain.llm import ChatMessage, Role, ToolCall
+    from app.llm.context import assemble_context
+    from app.services.prompts.grounded_answer import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
+
+    preamble = " ".join(
+        f"Reference note {i}: prior findings on segment {i} inform this session."
+        for i in range(700)
+    )
+    tools = tool_specs(default_allowlist())
+    assembled = assemble_context(
+        model="openrouter/anthropic/claude-haiku-4.5",
+        system_prompt=f"{GROUNDED_SYSTEM_PROMPT}\n\nSession context:\n{preamble}",
+        history=[],
+        question="Summarise the FY2024 results by segment.",
+        tools=tools,
+    )
+    base = list(assembled.messages)
+
+    async def _turn_usage(messages: list[ChatMessage]) -> TokenUsage:
+        usage: TokenUsage | None = None
+        async for ev in _live_gateway.stream_tools(
+            messages,
+            tools=tools,
+            model="openrouter/anthropic/claude-haiku-4.5",
+            tool_choice="none",
+            cache_key="lumen-session-cache-smoke",
+        ):
+            usage = ev.usage or usage
+        assert usage is not None, "live route reported no usage"
+        return usage
+
+    first = await _turn_usage(base)
+    grown = [
+        *base,
+        ChatMessage(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=(ToolCall(id="s1", name="search_text", arguments={"query": "segments"}),),
+        ),
+        ChatMessage(
+            role=Role.TOOL,
+            content="[1] annual-report.pdf (chunk a1, chars 0-600):\n" + ("segment revenue. " * 80),
+            tool_call_id="s1",
+            name="search_text",
+        ),
+    ]
+    second = await _turn_usage(grown)
+
+    assert first.prompt_tokens > 6000  # padded system clears the cacheable minimum
+    # AC-4: turn 2 READS the prefix turn 1 wrote — nonzero cached prompt tokens.
+    assert second.cached_prompt_tokens > 0
 
 
 # --- #94 regression: the gateway's client-close teardown is real ------------

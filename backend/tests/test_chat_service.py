@@ -10,8 +10,9 @@ citations.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -487,6 +488,155 @@ async def test_send_to_other_owner_session_is_none(
             )
             is None
         )
+
+
+# --- #492: request-phase round-trip trimming --------------------------------
+
+
+class _StatementLog:
+    """Records every SQL statement a session emits (via ``before_cursor_execute``).
+
+    Used to pin the round-trip count on the synchronous send path (#492 AC-1/AC-2)
+    — the offline SQLite engine issues one cursor execute per statement, so a
+    reintroduced read-before-write (touch) or an extra serial read is caught here.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def __call__(  # noqa: ANN001 — SQLAlchemy event signature
+        self, conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        self.statements.append(statement)
+
+    @property
+    def verbs(self) -> list[str]:
+        """The leading SQL keyword of each non-blank statement (SELECT/INSERT/…)."""
+        return [s.lstrip().split(None, 1)[0].upper() for s in self.statements if s.strip()]
+
+
+@contextmanager
+def _record_statements(session: AsyncSession) -> Iterator[_StatementLog]:
+    log = _StatementLog()
+    engine = session.get_bind()  # the sync Engine driving the async session
+    event.listen(engine, "before_cursor_execute", log)
+    try:
+        yield log
+    finally:
+        event.remove(engine, "before_cursor_execute", log)
+
+
+async def test_touch_is_a_single_statement(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """AC-2 (#492): ``touch`` bumps ``updated_at`` in ONE statement — an UPDATE.
+
+    Previously a SELECT-then-UPDATE: the SELECT redundantly reloaded the very row
+    the send path already holds for its ownership gate. Collapsed to a single
+    tenant-scoped ``UPDATE`` (the predicate now rides the write, closing the
+    SELECT→UPDATE TOCTOU window).
+    """
+    world, factory = world_and_factory
+    async with factory() as session:
+        created = await ChatSessionRepository(session, world.tenant_a).create(
+            owner_id=world.alice, model="anthropic/claude-opus-4.8"
+        )
+        await session.commit()
+        repo = ChatSessionRepository(session, world.tenant_a)
+        with _record_statements(session) as log:
+            await repo.touch(created.id)
+    assert log.verbs == ["UPDATE"], log.statements
+
+
+async def test_touch_is_a_noop_for_a_foreign_or_missing_id(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """AC-2 correctness: the single-UPDATE ``touch`` matches zero rows for a
+    foreign/missing id (INV-1) — no error, no cross-tenant write. A tenant-B
+    session id touched through a tenant-A repository leaves it untouched."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        b_session = await ChatSessionRepository(session, world.tenant_b).create(
+            owner_id=world.carol, model="anthropic/claude-opus-4.8"
+        )
+        await session.commit()
+        before = await ChatSessionRepository(session, world.tenant_b).get(b_session.id)
+        assert before is not None
+        a_repo = ChatSessionRepository(session, world.tenant_a)
+        await a_repo.touch(b_session.id)  # foreign id → no-op
+        await a_repo.touch(uuid.uuid4())  # unknown id → no-op
+        await session.commit()
+        after = await ChatSessionRepository(session, world.tenant_b).get(b_session.id)
+    assert after is not None
+    assert after.updated_at == before.updated_at
+
+
+async def test_send_bumps_updated_at_and_resorts_session_to_head(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """AC-2 correctness (previously untested): a send's ``touch`` raises
+    ``updated_at`` so the conversation re-sorts to the head of the session list
+    (``ORDER BY updated_at DESC``). Proves the single-UPDATE still has the
+    observable effect the SELECT-then-UPDATE had."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        older = await svc.create_session(title="older", model=None)
+        newer = await svc.create_session(title="newer", model=None)
+        # Fix distinct ``updated_at`` values so ordering is deterministic
+        # regardless of SQLite's second-resolution server clock (both were created
+        # in the same second above). ``newer`` is the most recent → the head.
+        base = datetime(2020, 1, 1, tzinfo=UTC)
+        for offset, sess in ((0, older), (1, newer)):
+            await session.execute(
+                sa_update(db_models.ChatSession)
+                .where(db_models.ChatSession.id == sess.session.id)
+                .values(updated_at=base + timedelta(minutes=offset))
+            )
+        await session.commit()
+        head_before = (await svc.list_sessions(cursor=None, limit=20)).items[0]
+        assert head_before.session.id == newer.session.id
+        # Sending to the OLDER session touches it (updated_at → now()) → it jumps
+        # ahead of ``newer``'s fixed 2020 timestamp to the head.
+        result = await svc.send_message(
+            older.session.id, content="hi", model=None, backplane=InMemoryBackplane()
+        )
+        await session.commit()
+        assert result is not None
+        head_after = (await svc.list_sessions(cursor=None, limit=20)).items[0]
+    assert head_after.session.id == older.session.id
+
+
+async def test_send_trims_request_phase_round_trips(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """AC-1 (#492): the synchronous send path executes fewer statements before
+    the 202. A plain ad-hoc send (built-in model, no pinned assistant, no rolling
+    summary) performs exactly: session SELECT, preferences SELECT, summary SELECT,
+    history SELECT, message INSERT, and ONE touch UPDATE — six statements, down
+    from seven (the prior touch SELECT+UPDATE re-read a row already loaded). The
+    RLS GUC bind is a no-op off Postgres, so it does not appear here.
+
+    Pinned so a reintroduced read-before-write, or an extra serial read hoisted
+    onto the request session, fails here.
+    """
+    world, factory = world_and_factory
+    backplane = InMemoryBackplane()
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        created = await svc.create_session(title="t", model=None)
+        await session.commit()
+        with _record_statements(session) as log:
+            result = await svc.send_message(
+                created.session.id, content="hi", model=None, backplane=backplane
+            )
+        await session.commit()
+    assert result is not None
+    # touch is a single write, and nothing re-reads the session row after the gate.
+    assert log.verbs.count("UPDATE") == 1, log.statements
+    assert log.verbs.count("INSERT") == 1, log.statements
+    # Total statements are strictly below the pre-#492 baseline of seven.
+    assert len(log.verbs) == 6, log.statements
 
 
 # --- history ----------------------------------------------------------------

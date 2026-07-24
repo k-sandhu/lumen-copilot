@@ -156,9 +156,7 @@ def _cache_family(model: str | None, api_base: str | None) -> str | None:
     return None
 
 
-def _apply_cache_directives(
-    wire: list[dict[str, Any]], family: str | None
-) -> list[dict[str, Any]]:
+def _apply_cache_directives(wire: list[dict[str, Any]], family: str | None) -> list[dict[str, Any]]:
     """Decorate serialized messages with Anthropic cache breakpoints (#411).
 
     Applied AFTER :meth:`_to_wire_messages` so the assembler's token-count
@@ -238,9 +236,7 @@ def _map_vendor_error(exc: Exception) -> AppError:
 
     # Transient provider weather — a bounded retry is sound (ADR-0016 §4).
     if isinstance(exc, le.RateLimitError):
-        return LlmProviderError(
-            detail, retryable=True, retry_after_seconds=_retry_after_hint(exc)
-        )
+        return LlmProviderError(detail, retryable=True, retry_after_seconds=_retry_after_hint(exc))
     if isinstance(exc, le.Timeout | le.APIConnectionError):
         return LlmProviderError(detail, retryable=True)
     if isinstance(exc, le.InternalServerError | le.ServiceUnavailableError):
@@ -279,9 +275,7 @@ def clear_embed_cache() -> None:
     _embed_cache.clear()
 
 
-def _embed_cache_get(
-    key: tuple[str, str, str, str], *, ttl_seconds: float
-) -> list[float] | None:
+def _embed_cache_get(key: tuple[str, str, str, str], *, ttl_seconds: float) -> list[float] | None:
     entry = _embed_cache.get(key)
     if entry is None:
         return None
@@ -494,6 +488,7 @@ class LLMGateway:
         api_key: str | None = None,
         api_base: str | None = None,
         cache_key: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -513,6 +508,11 @@ class LLMGateway:
         budget is spent (issue #148), so the model answers from the gathered tool
         context instead of calling yet another tool.
 
+        ``max_tokens`` bounds the generation length when set (#488): the chat
+        runtime caps the answer/synthesis turn so answer length — and the tail of
+        the streaming wait — stays bounded. ``None`` ⇒ unbounded (the exact
+        pre-#488 wire), so a caller that does not set it is unaffected.
+
         Like :meth:`stream`, this is a cancellable async generator: breaking out
         of the consumer closes the provider stream in the ``finally`` block.
         ``api_key`` / ``api_base`` OVERRIDE the process defaults when given (a
@@ -528,6 +528,11 @@ class LLMGateway:
         extra: dict[str, Any] = {}
         if tool_choice is not None:
             extra["tool_choice"] = tool_choice
+        # Output cap (#488): only sent when set, so the default (unbounded) turn
+        # keeps its exact pre-#488 wire. Distinct key from tool_choice/extra_body,
+        # so it never collides with the spreads below.
+        if max_tokens is not None:
+            extra["max_tokens"] = max_tokens
         # Prompt-cache directives (ADR-0016 §2, #411), keyed by the provider
         # family resolved HERE (no provider categories leak above llm/):
         # Anthropic-style breakpoints decorate the serialized messages below;
@@ -535,18 +540,14 @@ class LLMGateway:
         # session id) via extra_body passthrough. Unknown families — and a
         # disabled kill-switch — send the exact pre-#411 wire (AC-3).
         family = (
-            _cache_family(model_id, api_base)
-            if self._settings.chat_prompt_cache_enabled
-            else None
+            _cache_family(model_id, api_base) if self._settings.chat_prompt_cache_enabled else None
         )
         if family == "openai" and cache_key:
             extra["extra_body"] = {"prompt_cache_key": cache_key}
         try:
             response = await litellm.acompletion(
                 model=model_id,
-                messages=_apply_cache_directives(
-                    self._to_wire_messages(messages), family
-                ),
+                messages=_apply_cache_directives(self._to_wire_messages(messages), family),
                 tools=self._to_wire_tools(tools),
                 stream=True,
                 stream_options={"include_usage": True},

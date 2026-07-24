@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
   "title": "Lumen Copilot WebSocket envelope",
-  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
+  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The terminal is the last envelope that SETTLES the stream. One narrow exception (chat, #489): a terminal `done` MAY declare `data.pendingSuggestions=true`, in which case at most one `event:suggestions` envelope may still follow it within a bounded server-side grace window; the subscription holds open for that one post-terminal event and then closes. There is still exactly one terminal, it is still `done`, and nothing else may follow it. The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
   "$defs": {
     "BaseEnvelope": {
       "type": "object",
@@ -45,7 +45,7 @@
       "properties": {
         "type": { "const": "delta" },
         "data": {
-          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta)."
+          "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta). Chunk boundaries are NOT semantic: the server may coalesce adjacent chunks into one delta (#487). Clients must concatenate in seq order and must not assume any relationship between delta count and provider tokens."
         }
       },
       "required": ["type", "streamId", "seq", "data"]
@@ -56,11 +56,26 @@
         "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry reusable sandbox output/outcome, ADR-0020 #457), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414). Clients MUST ignore unknown names (forward compatibility)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry reusable sandbox output/outcome, ADR-0020 #457), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414), answer_retract (a speculative-streaming retraction — ADR-0016 §6 #488; carries no data). MEANING of answer_retract: every answer-text `delta` delivered so far for the CURRENTLY streaming assistant turn was NOT answer text — discard it and reset the live answer to empty. It is well-defined as a WHOLE-TURN retraction because at most one un-finalised speculative answer block can exist at any instant: a tool-free turn ends the answer, so once a turn's text is finalised as the answer no retraction can follow it, and the ONLY live answer deltas at any moment are those of the current speculative turn. After a retraction the same text is normally re-emitted as event:narration (the transient affordance clients already use for #414), so no content is lost — only its classification (answer→narration) is corrected. Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
-      "required": ["type", "streamId", "seq", "name"]
+      "required": ["type", "streamId", "seq", "name"],
+      "if": {
+        "required": ["name"],
+        "properties": { "name": { "const": "answer_retract" } }
+      },
+      "then": {
+        "$comment": "answer_retract carries NO data (#488/BE-6): a whole-turn retraction is fully specified by its name, so an exact shape (base envelope fields + name, nothing else) is enforced — a `data` payload or any unexpected top-level property is rejected rather than silently accepted. Scoped to answer_retract; every other event name is unaffected and may carry `data`.",
+        "properties": {
+          "type": true,
+          "streamId": true,
+          "seq": true,
+          "ts": true,
+          "name": true
+        },
+        "additionalProperties": false
+      }
     },
     "Done": {
       "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
@@ -68,7 +83,7 @@
         "type": { "const": "done" },
         "data": {
           "type": "object",
-          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData)."
+          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData). The terminal that settles the stream. Chat (#489) may set `data.pendingSuggestions=true` to signal that one post-terminal `event:suggestions` may still follow within a bounded grace window (see the root description); absent/false ⇒ the stream stops at this terminal."
         }
       },
       "required": ["type", "streamId", "seq"]
@@ -176,6 +191,15 @@
           "type": "string",
           "description": "The model that ACTUALLY produced this answer (#413, ADR-0016 §4): equals start.model unless a mid-answer failover switched to a tenant-configured fallback. Authoritative for attribution; additive (older servers omit it)."
         },
+        "pendingSuggestions": {
+          "type": "boolean",
+          "description": "When true (#489), the server will attempt follow-up suggestions AFTER this terminal and MAY deliver exactly one post-terminal `event:suggestions` within a bounded grace window; a subscriber must hold the subscription open for it and accept that one event without un-settling this terminal. Absent/false ⇒ the stream stops at this terminal (the default, and the case for a refusal/ask_user answer or when suggestions are disabled). Optimistic: `done.usage` covers the ANSWER only, and a suggestions attempt that fails/times out simply produces no event. Additive; older clients ignore it and close at the terminal as before."
+        },
+        "suggestionsGraceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present only alongside `pendingSuggestions=true`, it is the single source of truth for how long the subscriber should hold the socket open for the one trailing `event:suggestions`: the server relays for exactly this window (its own subscription grace, derived from the suggestions timeout + a margin), so the consumer must wait at least this long rather than guess with a hard-coded default that a larger server grace would overrun (silently dropping a slow-but-arriving suggestion). Absent ⇒ the consumer falls back to its own sane default. Additive; older clients ignore it."
+        },
         "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",
@@ -205,7 +229,7 @@
       "description": "`event.data` for name=narration (ADR-0016 §6, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
       "required": ["text", "turn"],
       "properties": {
-        "text": { "type": "string", "description": "One narration chunk; append-ordered within the turn by seq." },
+        "text": { "type": "string", "description": "One or more narration chunks; append-ordered within the turn by seq. Adjacent chunks of the same turn may be coalesced server-side into a single envelope (#487), so chunk boundaries are not semantic — concatenate in seq order." },
         "turn": { "type": "integer", "minimum": 1, "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)." }
       }
     },
@@ -252,7 +276,7 @@
     "ChatSuggestions": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream, emitted after the final delta/citation and before done; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
+      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream. Emitted OFF the answer's critical path (#489): the terminal `done` is published first (declaring `pendingSuggestions=true`), then this event arrives POST-terminal within a bounded grace window; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
       "required": ["messageId", "suggestions"],
       "properties": {
         "messageId": { "type": "string", "format": "uuid", "description": "The settled assistant message these follow-ups attach under." },
@@ -341,7 +365,7 @@
 
   "x-chatStream": {
     "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via run_python (ADR-0020 #457), sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) | event:suggestions(ChatSuggestions) )* -> done(ChatDoneData) | error(Problem). Constraints (spec 0006 #429): at most one ask_user per stream (then finishReason=ask_user and no suggestions); at most one suggestions per stream, after the final delta/citation.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:answer_retract | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) )* -> done(ChatDoneData) | error(Problem) -> [ event:suggestions(ChatSuggestions) ]?. Exactly one terminal (done|error). Constraints (spec 0006 #429 / #489): at most one ask_user per stream (then finishReason=ask_user, no suggestions); suggestions are OFF the critical path — the terminal done is published FIRST with data.pendingSuggestions=true, then at most one event:suggestions may follow POST-terminal within a bounded server grace window (derived from the suggestions timeout plus a small margin). The post-terminal event does not un-settle the terminal; nothing else may follow done, and a done without pendingSuggestions closes the stream immediately. Speculative streaming (#488): the answer turn's text streams live as `delta` before the turn is proven tool-free; if it then reveals a tool call, one event:answer_retract discards those speculative deltas (they are re-emitted as event:narration) and the turn narrates the rest live. answer_retract can only target the current speculative turn's deltas (there is at most one un-finalised speculative block), and it never appears after the answer is finalised nor after a terminal.",
     "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full run record (code, stdout/stderr, resource_usage, sandbox generation) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {

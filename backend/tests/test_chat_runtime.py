@@ -52,7 +52,7 @@ from app.domain.tools import (
     RiskTier,
     ToolHandlerResult,
 )
-from app.realtime.backplane import InMemoryBackplane
+from app.realtime.backplane import _MAX_REPLAY, InMemoryBackplane
 from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
 from app.services.tools.types import ToolContext, ToolDefinition
@@ -300,10 +300,53 @@ def _runtime(
     context_config: object = None,
     interactive: bool = True,
     suggestions_enabled: bool = False,
+    suggestions_grace_seconds: float | None = None,
+    suggestions_model: str | None = None,
+    model_route_resolver: object = None,
     retrieval_factory: object = None,
     mcp_tools_factory: object = None,
     sessionmaker: object = None,
+    text_coalesce_chars: int | None = None,
+    text_coalesce_seconds: float | None = None,
+    clock: object = None,
+    flush_sleep: object = None,
+    turn_timeout_seconds: float | None = None,
+    interactive_max_attempts: int | None = None,
+    interactive_deadline_at: object = None,
+    terminal_publish_margin_seconds: float | None = None,
+    producer_deadline_at: object = None,
+    retry_sleep: object = None,
+    answer_max_tokens: int | None = None,
 ) -> ChatRuntime:
+    extra: dict[str, object] = {}
+    if text_coalesce_chars is not None:
+        extra["text_coalesce_chars"] = text_coalesce_chars
+    if text_coalesce_seconds is not None:
+        extra["text_coalesce_seconds"] = text_coalesce_seconds
+    if clock is not None:
+        extra["clock"] = clock
+    if flush_sleep is not None:
+        extra["flush_sleep"] = flush_sleep
+    if retry_sleep is not None:
+        extra["retry_sleep"] = retry_sleep
+    if answer_max_tokens is not None:
+        extra["answer_max_tokens"] = answer_max_tokens
+    if suggestions_grace_seconds is not None:
+        extra["suggestions_grace_seconds"] = suggestions_grace_seconds
+    if suggestions_model is not None:
+        extra["suggestions_model"] = suggestions_model
+    if model_route_resolver is not None:
+        extra["model_route_resolver"] = model_route_resolver
+    if turn_timeout_seconds is not None:
+        extra["turn_timeout_seconds"] = turn_timeout_seconds
+    if interactive_max_attempts is not None:
+        extra["interactive_max_attempts"] = interactive_max_attempts
+    if interactive_deadline_at is not None:
+        extra["interactive_deadline_at"] = interactive_deadline_at
+    if terminal_publish_margin_seconds is not None:
+        extra["terminal_publish_margin_seconds"] = terminal_publish_margin_seconds
+    if producer_deadline_at is not None:
+        extra["producer_deadline_at"] = producer_deadline_at
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -323,6 +366,7 @@ def _runtime(
         interactive=interactive,
         suggestions_enabled=suggestions_enabled,
         suggestions_timeout_seconds=2.0,
+        **extra,  # type: ignore[arg-type]
     )
 
 
@@ -506,6 +550,63 @@ async def test_empty_model_answer_falls_back_to_honest_message(ctx: _Ctx) -> Non
         msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in msgs if m.role.value == "assistant"][0]
     assert assistant.content.strip() != ""
+
+
+async def test_fallback_text_retracted_when_persistence_fails(ctx: _Ctx) -> None:
+    """R2-4 (#148/#488): the no-source fallback is streamed through the TRACKED seam,
+    so when persistence then fails the fallback delta is RETRACTED before the typed
+    ``error`` terminal — never stranded on the client under an error. The old raw
+    ``_publish`` left ``answer_on_wire`` false, so the fallback could not be retracted
+    and a failed answer would leave honest-looking text on the wire."""
+    from app.core.errors import AppError
+    from app.services.prompts.grounded_answer import NO_SOURCES_FALLBACK
+
+    gateway = _ScriptedGateway([[StreamEvent(finish_reason="stop")]])  # no text → fallback
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=0,  # flush the fallback delta live, so it earns a retract
+    )
+
+    async def _boom(**_kwargs: object) -> object:
+        raise AppError(
+            "persist down",
+            title="Service Unavailable",
+            code="dependency_unavailable",
+            status=503,
+        )
+
+    runtime._persist = _boom  # type: ignore[assignment,method-assign]
+
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert ok is False
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    # The typed error is the raised AppError's (not a generic 500).
+    assert cast("dict[str, object]", envs[-1]["problem"])["code"] == "dependency_unavailable"
+    # The fallback streamed as a delta, then was retracted ahead of the error.
+    assert _texts_of(envs, "delta") == [NO_SOURCES_FALLBACK]
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # #148: no dangling answer text remains on the wire, and nothing persisted.
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
 def _tool_turn(narration: str, call_id: str) -> list[StreamEvent]:
@@ -1761,8 +1862,10 @@ async def test_ask_user_not_intercepted_when_non_interactive(ctx: _Ctx) -> None:
 
 
 async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
-    """AC-3: one suggestions event after the final delta, before done; its
-    usage folds into the answer's llm_usage row (#409)."""
+    """#489 AC-1/AC-2/AC-3: the terminal ``done`` is published BEFORE suggestions
+    are generated, declaring ``pendingSuggestions``; the one suggestions event
+    then arrives POST-terminal; ``done.usage`` is answer-only while the suggestions
+    cost is accounted on its OWN llm_usage row (R2-3 / #409)."""
     import asyncio
 
     gateway = _ScriptedGateway(
@@ -1810,34 +1913,302 @@ async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
         "What changed vs Q1?",
         "Who owns this?",
     ]
-    done = envs[-1]
-    assert done["type"] == "done"
+    # AC-1: exactly one terminal ``done``, and it is published BEFORE the
+    # suggestions were generated — its seq precedes the suggestions event's.
+    dones = [e for e in envs if e["type"] == "done"]
+    assert len(dones) == 1
+    done = dones[0]
+    assert done["data"]["pendingSuggestions"] is True  # type: ignore[index]
     assert sugg[0]["data"]["messageId"] == done["data"]["messageId"]  # type: ignore[index]
-    # Ordering: after the last delta, before the terminal.
-    last_delta = max(i for i, e in enumerate(envs) if e["type"] == "delta")
-    assert envs.index(sugg[0]) > last_delta
-    # suggest step bracketed the call.
-    assert ("suggest", "started") in _steps(envs)
-    assert ("suggest", "completed") in _steps(envs)
-    # The nicety's tokens are accounted in the done usage (and the llm_usage row).
-    assert done["data"]["usage"]["totalTokens"] == 27  # type: ignore[index]
+    # AC-2: the suggestions arrive POST-terminal (after done), by seq and by index.
+    assert done["seq"] < sugg[0]["seq"]  # type: ignore[operator]
+    assert envs.index(sugg[0]) > envs.index(done)
+    # The suggest phase is no longer a live step (it runs after the UI settled).
+    assert not any(k == "suggest" for k, _ in _steps(envs))
+    # AC-3: ``done.usage`` reports the ANSWER only (the nicety had not run yet)...
+    assert done["data"]["usage"]["totalTokens"] == 15  # type: ignore[index]
+    # ...while the suggestions cost is accounted on its OWN row (R2-3): the answer row
+    # stays 15, a separate suggestions row adds 12, and the session totals sum both
+    # (#409) — no fold onto the answer's row.
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        assert len(rows) == 2
+        answer_row = next(r for r in rows if r.message_id is not None)
+        sugg_row = next(r for r in rows if r.message_id is None)
+        assert answer_row.total_tokens == 15  # answer only — matches done.usage
+        assert sugg_row.total_tokens == 12  # suggestions on their own scope
+        assert sugg_row.answer_id == answer_row.message_id  # linked to this answer
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 1  # the suggestions row is not an extra "answer"
+        assert totals.total_tokens == 27  # 15 + 12 still accounted (#409)
+
+
+class _ModelCapturingGateway(_ScriptedGateway):
+    """Records the ``model`` each ``stream_tools`` (answer) and ``chat``
+    (suggestions) call was routed to — the #490 AC-2 observation seam."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.answer_models: list[object] = []
+        self.suggestion_models: list[object] = []
+
+    async def chat(
+        self,
+        messages: object,
+        *,
+        model: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        max_tokens: object = None,
+    ) -> Completion:
+        self.suggestion_models.append(model)
+        return await super().chat(
+            messages, model=model, api_key=api_key, api_base=api_base, max_tokens=max_tokens
+        )
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.answer_models.append(model)
+        async for ev in super().stream_tools(
+            messages,
+            tools=tools,
+            model=model,
+            tool_choice=tool_choice,
+            api_key=api_key,
+            api_base=api_base,
+            cache_key=cache_key,
+        ):
+            yield ev
+
+
+async def test_suggestions_use_dedicated_model_not_the_answer_route(ctx: _Ctx) -> None:
+    """#490 AC-2: follow-up suggestions run on their OWN configured model, not
+    the answer's route. A <=400-token nicety on the critical path must not ride
+    the answer's (possibly frontier) model. The answer turn still routes to the
+    session model; only the suggestions completion uses the dedicated FAST id."""
+    import asyncio
+
+    answer_model = "openrouter/anthropic/claude-opus-4.8"  # a frontier answer route
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"  # dedicated FAST id
+    gateway = _ModelCapturingGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=7, total_tokens=12),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # The answer turn used the session's model; the suggestions call did NOT.
+    assert gateway.answer_models == [answer_model]
+    assert gateway.suggestion_models == [suggestions_model]
+    # The suggestions still landed (distinct model, same behaviour).
+    sugg = [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
+    assert len(sugg) == 1
+
+
+async def test_suggestions_usage_attributed_to_the_dedicated_model(ctx: _Ctx) -> None:
+    """R2-3 / #490 / ADR-0016 §2.6: the suggestions spend is recorded on its OWN row
+    attributed to the DEDICATED suggestions model — never folded onto the answer
+    model's row. The answer row keeps the answer model + its tokens; the suggestions
+    row carries the suggestions model + its tokens."""
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(prompt_tokens=4, completion_tokens=6, total_tokens=10),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+
     from app.db.repositories import LlmUsageRepository
 
     async with ctx.sessionmaker() as session:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
-        assert len(rows) == 1
-        assert rows[0].total_tokens == 27
+    answer_row = next(r for r in rows if r.message_id is not None)
+    sugg_row = next(r for r in rows if r.message_id is None)
+    assert answer_row.model == answer_model  # the answer stays the answer model
+    assert answer_row.total_tokens == 15
+    assert sugg_row.model == suggestions_model  # actual-model attribution (#490)
+    assert sugg_row.total_tokens == 10
+
+
+async def test_suggestions_spend_recorded_on_parse_miss(ctx: _Ctx) -> None:
+    """R2-3 / #409: a suggestions completion that BILLED tokens but whose output does
+    not parse into suggestions STILL records its spend (on its own row). The old code
+    returned before recording, dropping genuinely-billed tokens — a #409 leak. No
+    suggestions event is published, but the ledger accounts the cost."""
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content="Sorry, no follow-ups to offer.",  # unparseable → zero suggestions
+            model="anthropic/claude-opus-4.8",
+            usage=TokenUsage(prompt_tokens=4, completion_tokens=6, total_tokens=10),
+        ),
+    )
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=0.05)
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # A parse miss publishes NO suggestions event...
+    assert not [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
+    # ...but the billed suggestion spend was still recorded on its own row (#409).
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+    assert len(rows) == 2
+    sugg_row = next(r for r in rows if r.message_id is None)
+    assert sugg_row.total_tokens == 10
+    assert sugg_row.answer_id is not None
+
+
+async def test_suggestions_default_to_the_answer_route_when_unconfigured(ctx: _Ctx) -> None:
+    """#490: with no dedicated suggestions model configured (the constructor
+    default / headless callers), suggestions fall back to the answer route —
+    the exact pre-#490 behaviour, so nothing regresses for callers that don't
+    opt in."""
+    import asyncio
+
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    gateway = _ModelCapturingGateway(
+        [[StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(content='["A?", "B?"]', model=answer_model),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    assert gateway.suggestion_models == [answer_model]
 
 
 async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:
-    """AC-N2: a failing suggestions call changes nothing -- no event, no error."""
+    """#489 AC-6: a failing suggestions call changes nothing about the ALREADY
+    published terminal -- no event, no error. ``done`` still declared
+    ``pendingSuggestions`` (the attempt was optimistic); the consumer's bounded
+    grace expires with no suggestions and the terminal stands."""
     import asyncio
 
     gateway = _ScriptedGateway(
         [[StreamEvent(text="The answer."), StreamEvent(finish_reason="stop")]],
         chat_completion=None,  # chat() raises -- the nicety must be swallowed
     )
-    backplane = InMemoryBackplane()
+    # Small grace so the consumer's post-terminal wait (a suggestions event that
+    # never comes) resolves fast instead of holding the default window.
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=0.05)
     stream_id = uuid.uuid4().hex
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -1861,9 +2232,13 @@ async def test_suggestions_failure_is_silent(ctx: _Ctx) -> None:
     assert gateway.chat_calls == 1
     names = [e.get("name") for e in envs if e["type"] == "event"]
     assert "suggestions" not in names
-    assert envs[-1]["type"] == "done"  # the answer was untouched by the failure
-    # The suggest step still closed -- no orphaned spinner.
-    assert ("suggest", "completed") in _steps(envs)
+    # Exactly one terminal, and it is the ``done`` -- the answer was untouched by
+    # the failure; no error terminal was published on the nicety's behalf.
+    assert envs[-1]["type"] == "done"
+    assert sum(1 for e in envs if e["type"] in ("done", "error")) == 1
+    assert envs[-1]["data"]["pendingSuggestions"] is True  # type: ignore[index]
+    # The suggest phase is no longer a live step (#489).
+    assert not any(k == "suggest" for k, _ in _steps(envs))
 
 
 async def test_ask_user_turn_skips_suggestions(ctx: _Ctx) -> None:
@@ -2279,8 +2654,9 @@ async def test_suggestions_skipped_for_no_sources_fallback(ctx: _Ctx) -> None:
 
 async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ctx) -> None:
     """#434 NEW-1: llm_usage.context_prompt_tokens is the FINAL answer-loop
-    turn's prompt size (window occupancy); prompt_tokens stays the billing sum
-    across turns + the suggestions call."""
+    turn's prompt size (window occupancy); the ANSWER row's prompt_tokens stays the
+    billing sum across its turns. Since R2-3 the suggestions spend sits on its own
+    row, so the answer row is the answer's turns only (10 + 30), never the nicety."""
     import asyncio
 
     from app.db.repositories import LlmUsageRepository
@@ -2305,8 +2681,8 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
                 ),
             ],
         ],
-        # The suggestions nicety bills 5 more prompt tokens but must NOT move
-        # the recorded window occupancy.
+        # The suggestions nicety bills 5 more prompt tokens on its OWN row (R2-3),
+        # so it must NOT move the answer row's window occupancy or billing sum.
         chat_completion=Completion(
             content='["Next?"]',
             model="m",
@@ -2333,14 +2709,23 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
         collection_ids=None,
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
-    assert envs[-1]["type"] == "done"
+    # #489: the terminal ``done`` precedes the post-terminal suggestions event.
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1
+    done_idx = types.index("done")
+    sugg_idx = next(
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "suggestions"
+    )
+    assert sugg_idx > done_idx
 
     async with ctx.sessionmaker() as session:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row.prompt_tokens == 45  # 10 + 30 + 5 — the billing sum
-        assert row.context_prompt_tokens == 30  # the final loop turn only
+        assert len(rows) == 2  # answer row + its own suggestions row (R2-3)
+        answer_row = next(r for r in rows if r.message_id is not None)
+        sugg_row = next(r for r in rows if r.message_id is None)
+        assert answer_row.prompt_tokens == 40  # 10 + 30 — the answer's billing sum
+        assert answer_row.context_prompt_tokens == 30  # the final loop turn only
+        assert sugg_row.prompt_tokens == 5  # the nicety, on its own scope
 
 
 # --- #412: concurrent tool execution within a turn ---------------------------
@@ -3793,6 +4178,146 @@ async def test_done_payload_validates_against_the_canonical_contract(ctx: _Ctx) 
     )
 
 
+async def test_pending_done_and_post_terminal_suggestions_validate_the_contract(
+    ctx: _Ctx,
+) -> None:
+    """#489: the runtime-emitted ``done`` carrying ``pendingSuggestions`` AND the
+    post-terminal ``event:suggestions`` both validate against the canonical
+    ``contracts/`` schema — the additive field + the post-terminal window are on
+    contract, not hand-rolled drift."""
+    import jsonschema
+
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    schema = _ws_schema()
+    defs = schema["$defs"]
+
+    done = next(e for e in envs if e["type"] == "done")
+    assert done["data"]["pendingSuggestions"] is True  # type: ignore[index]
+    # The whole terminal envelope validates against the transport oneOf...
+    jsonschema.validate(done, schema)
+    # ...and its data against ChatDoneData (the additive pendingSuggestions field).
+    jsonschema.validate(
+        done["data"],
+        {"$ref": "#/$defs/ChatDoneData", "$defs": defs},  # type: ignore[index]
+    )
+
+    sugg = next(e for e in envs if e["type"] == "event" and e.get("name") == "suggestions")
+    jsonschema.validate(sugg, schema)
+    jsonschema.validate(
+        sugg["data"],
+        {"$ref": "#/$defs/ChatSuggestions", "$defs": defs},  # type: ignore[index]
+    )
+
+
+async def test_done_carries_the_server_suggestions_grace(ctx: _Ctx) -> None:
+    """BE-5 (#489): a ``done`` that declares ``pendingSuggestions`` also carries the
+    server's post-terminal grace as ``suggestionsGraceMs`` (milliseconds), so the WS
+    consumer holds the socket open for exactly the server's relay window rather than
+    a hard-coded client default. The field validates against the canonical contract
+    (schema drift fails here) and equals the configured grace in ms."""
+    import jsonschema
+
+    grace_seconds = 12.5
+    gateway = _ScriptedGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]],
+        chat_completion=Completion(
+            content='["Next?"]',
+            model="m",
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_grace_seconds=grace_seconds,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    done = next(e for e in envs if e["type"] == "done")
+    data = cast("dict[str, object]", done["data"])
+    assert data["pendingSuggestions"] is True
+    # The server grace rides the terminal, in milliseconds — one source of truth.
+    assert data["suggestionsGraceMs"] == round(grace_seconds * 1000)
+    schema = _ws_schema()
+    jsonschema.validate(
+        data,
+        {"$ref": "#/$defs/ChatDoneData", "$defs": schema["$defs"]},  # type: ignore[index]
+    )
+
+
+async def test_plain_done_omits_the_suggestions_grace(ctx: _Ctx) -> None:
+    """BE-5: a terminal WITHOUT pending suggestions (suggestions disabled) carries
+    neither ``pendingSuggestions`` nor ``suggestionsGraceMs`` — the grace is only
+    declared when a post-terminal suggestion may actually follow."""
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=False,
+        suggestions_grace_seconds=12.5,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    done = next(e for e in envs if e["type"] == "done")
+    data = cast("dict[str, object]", done["data"])
+    assert "pendingSuggestions" not in data
+    assert "suggestionsGraceMs" not in data
+
+
 async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
     """#440 round-2 NEW-2: the primary SPENDS on a successful tool turn, then
     primary AND fallback exhaust — the answer errors, the answer transaction
@@ -3848,6 +4373,180 @@ async def test_spend_is_salvaged_when_all_routes_exhaust(ctx: _Ctx) -> None:
         totals = await repo.totals_for_session(ctx.session_id)
         assert totals.answers == 0  # nothing was produced
         assert totals.total_tokens == 12  # but the spend is not lost
+
+
+class _FailTerminalBackplane(InMemoryBackplane):
+    """Fails the publish of the FIRST ``done`` terminal (only).
+
+    Exercises the post-commit failure/cancellation arms of ``run`` (#489/BE-1): the
+    answer + its base usage row commit BEFORE ``done`` is published, so a ``done``
+    that fails to publish drives control back into ``run``'s error/cancel handlers
+    with the answer already durable. ``record_first`` chooses whether the ``done``
+    reached the replay buffer before the raise (a partial success / ack-lost write)
+    or not (a pre-write failure)."""
+
+    def __init__(self, *, exc: BaseException, record_first: bool = False) -> None:
+        super().__init__()
+        self._exc = exc
+        self._record_first = record_first
+        self.failed = False
+
+    async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
+        if not self.failed and envelope.get("type") == "done":
+            self.failed = True
+            if self._record_first:
+                await super().publish(stream_id, envelope)
+            raise self._exc
+        await super().publish(stream_id, envelope)
+
+
+async def _usage_rows(ctx: _Ctx) -> list[Any]:
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        return await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+
+
+def _spending_answer_gateway() -> _ScriptedGateway:
+    """One tool-free answer turn that reports real token usage (so salvage, if
+    armed, would have non-empty scopes to duplicate)."""
+    return _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ]
+    )
+
+
+async def test_salvage_disarmed_after_commit_no_dup_on_terminal_publish_failure(
+    ctx: _Ctx,
+) -> None:
+    """R2-1 (#489/BE-1): the answer + base usage row COMMIT before the terminal, then
+    publishing ``done`` FAILS. ``run``'s error arm must NOT re-record the committed
+    usage as a duplicate message-less salvage row — the salvage is disarmed the
+    instant the commit lands (#409: every billed token recorded exactly once)."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("backplane down"))
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False  # the terminal publish failed
+    rows = await _usage_rows(ctx)
+    # EXACTLY the committed answer row — no duplicate message-less salvage row.
+    assert len(rows) == 1
+    assert rows[0].message_id is not None
+    assert rows[0].total_tokens == 15  # NOT 30 (doubled had salvage fired post-commit)
+
+
+async def test_salvage_disarmed_after_commit_no_dup_on_post_commit_cancellation(
+    ctx: _Ctx,
+) -> None:
+    """R2-1 (#489/BE-1 + #156): a cancellation landing AFTER the answer commit (here,
+    mid terminal publish) is a BaseException caught by ``run``'s cancel arm. The
+    disarmed salvage must not duplicate the committed usage before re-raising."""
+    backplane = _FailTerminalBackplane(exc=asyncio.CancelledError())
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    rows = await _usage_rows(ctx)
+    assert len(rows) == 1
+    assert rows[0].message_id is not None
+    assert rows[0].total_tokens == 15
+
+
+async def test_terminal_publish_failure_before_write_still_emits_a_terminal(ctx: _Ctx) -> None:
+    """R2-2 (#489/BE-1): the answer commits, then the ``done`` publish fails BEFORE it
+    reaches the backplane. ``terminal_sent`` flips only after a CONFIRMED publish, so
+    the failure arm STILL emits a terminal — the committed answer is never left
+    terminal-less (no client hang). The durable answer is NOT retracted (wire ==
+    stored, #148), and the client sees exactly one terminal."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("down"), record_first=False)
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    published = list(backplane._replay[stream_id])  # noqa: SLF001 — publisher-side view
+    ptypes = [e["type"] for e in published]
+    # The ``done`` never reached the backplane; the fallback terminal WAS emitted.
+    assert ptypes.count("done") == 0
+    assert ptypes.count("error") == 1
+    # The durable answer is not retracted (answer_committed guard).
+    assert not any(e["type"] == "event" and e.get("name") == "answer_retract" for e in published)
+    # Client view: exactly one terminal (the error), and the answer still streamed.
+    client = await _drain(backplane, stream_id)
+    assert [e["type"] for e in client][-1] == "error"
+    assert _texts_of(client, "delta") == ["The answer."]
+    assert await _stored_answer(ctx) == "The answer."
+
+
+async def test_terminal_publish_failure_after_write_is_idempotent(ctx: _Ctx) -> None:
+    """R2-2 (#489/BE-1): a Redis partial success — the ``done`` reached the backplane
+    but its publish then raised (ack lost). The fallback error reuses the ``done``'s
+    seq, so the two terminals share ONE seq and the subscriber collapses them: the
+    CLIENT sees exactly one terminal (the ``done``), never two. The durable answer is
+    not retracted."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("down"), record_first=True)
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    published = list(backplane._replay[stream_id])  # noqa: SLF001 — publisher-side view
+    dones = [e for e in published if e["type"] == "done"]
+    errors = [e for e in published if e["type"] == "error"]
+    # Both terminals were published, but they carry ONE seq (idempotency): the
+    # subscriber's seq-high-water dedup can never relay both.
+    assert len(dones) == 1
+    assert len(errors) == 1
+    assert dones[0]["seq"] == errors[0]["seq"]
+    # Client view: exactly one terminal (the done); the error is never relayed.
+    client = await _drain(backplane, stream_id)
+    ctypes = [e["type"] for e in client]
+    assert ctypes.count("done") == 1
+    assert ctypes.count("error") == 0
+    assert ctypes[-1] == "done"
+    assert not any(e["type"] == "event" and e.get("name") == "answer_retract" for e in client)
+    assert await _stored_answer(ctx) == "The answer."
 
 
 async def test_anonymous_provider_fallback_is_not_skipped(ctx: _Ctx) -> None:
@@ -4384,6 +5083,332 @@ async def test_run_reports_answer_outcome_for_enqueue_gating(ctx: _Ctx) -> None:
     assert answered is False
 
 
+# --- #489: interactive per-turn timeout budget -------------------------------
+
+
+class _HangingGateway:
+    """A gateway whose ``stream_tools`` never yields — models an unreachable /
+    hung provider (a connection that establishes then stalls mid-stream, which a
+    LiteLLM request timeout does NOT catch). The runtime's per-turn asyncio
+    deadline (#489) is what must bound it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls += 1
+        await asyncio.Event().wait()  # never returns
+        yield StreamEvent(finish_reason="stop")  # pragma: no cover — unreachable
+
+
+async def test_interactive_timeout_bounds_a_hung_provider(ctx: _Ctx) -> None:
+    """#489 AC-4: with an unreachable provider that never responds, the client
+    gets ONE typed 503 terminal within the interactive budget — not the ~182s
+    retry cliff. Proven with a fast fake budget (0.2s) + a genuinely hanging
+    provider, so the test never waits the real 25s."""
+    import asyncio
+
+    gateway = _HangingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=0.2,
+        interactive_max_attempts=2,
+    )
+    # Pay LiteLLM's one-time lazy-import cost (the first token_counter call during
+    # context assembly) BEFORE timing, so the measured elapsed reflects the turn
+    # budget, not a cold import that has nothing to do with the deadline.
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    # The whole run is bounded by the per-turn budget; 5s is a generous ceiling
+    # that would only trip if the deadline were NOT enforced.
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is False
+    envs = await _drain(backplane, stream_id)
+    # Exactly one typed terminal, and it is a 503 dependency_unavailable error.
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "error"
+    problem = cast("dict[str, object]", terminals[0]["problem"])
+    assert problem["status"] == 503
+    assert problem["code"] == "dependency_unavailable"
+    # Bounded by the budget (worst case ~= budget + a little), nowhere near 25s.
+    assert elapsed < 2.0
+
+
+def test_interactive_budget_default_meets_the_30s_bound() -> None:
+    """#489 AC-4: the DEFAULT interactive budget keeps worst-case time to a typed
+    terminal on an unreachable provider under 30s. The per-turn asyncio deadline
+    caps the WHOLE resilient turn, so the worst case is the budget plus a small
+    settle margin — assert the configured default leaves headroom under 30s."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    assert settings.llm_interactive_timeout_seconds <= 27.0
+    # The retry ladder is shortened for the interactive path (3 -> 2 attempts),
+    # and it lives INSIDE the single budget, so it cannot stack past it.
+    assert settings.llm_interactive_max_attempts == 2
+
+
+async def test_interactive_timeout_bounds_a_hung_provider_at_the_max_override(ctx: _Ctx) -> None:
+    """BE-7 (#489 AC-4): even at the MAXIMUM accepted interactive budget, an
+    unreachable provider yields ONE typed 503 terminal within the <=30s worst case
+    — not a stacked retry cliff. Driven with the injectable deadline seam (a
+    deadline already in the past) so the max budget fires instantly: NO real wait,
+    yet the value under test IS the largest override config will accept."""
+    import asyncio
+
+    from app.core.config import _MAX_INTERACTIVE_TIMEOUT_SECONDS
+
+    gateway = _HangingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    # Warm the lazy LiteLLM tokenizer import before timing (unrelated to the budget).
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        # The largest value Settings will accept (30s ceiling minus the
+        # terminal-publish margin) — the worst-case interactive budget.
+        turn_timeout_seconds=_MAX_INTERACTIVE_TIMEOUT_SECONDS,
+        interactive_max_attempts=2,
+        # Force the deadline to already be in the past: the interactive timeout
+        # fires on the first await of the hung turn, so the 27s budget costs no
+        # real time here.
+        interactive_deadline_at=lambda _budget: asyncio.get_running_loop().time(),
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is False
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "error"
+    problem = cast("dict[str, object]", terminals[0]["problem"])
+    assert problem["status"] == 503
+    assert problem["code"] == "dependency_unavailable"
+    # The typed terminal arrived essentially instantly (deadline already elapsed),
+    # comfortably within the <=30s worst-case budget and with no real 27s wait.
+    assert elapsed < 2.0
+
+
+class _StallingTerminalBackplane(InMemoryBackplane):
+    """An in-memory backplane whose TERMINAL publish stalls (R2-8 test double).
+
+    Models ``RedisBackplane.publish`` awaiting a Redis pipeline that stalls while
+    publishing the terminal — the unbounded wait the round-1 max-bound test (an
+    instant in-memory backplane) never exercised. ``stall_seconds`` delays each
+    terminal publish before recording it; ``hang_first`` blocks the FIRST terminal
+    publish forever (until the producer's bound cancels it) and records every later
+    one — the transient stall the degrade re-attempt is meant to clear. Non-terminal
+    envelopes (``start``/``delta``/citation) publish normally.
+    """
+
+    def __init__(self, *, stall_seconds: float = 0.0, hang_first: bool = False) -> None:
+        super().__init__()
+        self._stall_seconds = stall_seconds
+        self._hang_first = hang_first
+        self.terminal_publishes = 0
+
+    async def publish(self, stream_id: str, envelope: dict[str, Any]) -> None:
+        from app.realtime.backplane import is_terminal
+
+        if is_terminal(envelope):
+            self.terminal_publishes += 1
+            if self._hang_first and self.terminal_publishes == 1:
+                await asyncio.Event().wait()  # never returns — the caller's bound cancels it
+            elif self._stall_seconds:
+                await asyncio.sleep(self._stall_seconds)
+        await super().publish(stream_id, envelope)
+
+
+async def test_a_slow_terminal_publish_still_lands_within_the_budget(ctx: _Ctx) -> None:
+    """R2-8 (#489 AC-4): a slow-but-alive backplane that consumes most of the reserved
+    terminal-publish margin still lands the typed ``done`` — and the whole path is
+    BOUNDED by the producer→terminal budget, not the unbounded Redis pipeline. The
+    round-1 max-bound test used an instant in-memory backplane, so it proved nothing
+    about a slow terminal publish; this drives a deliberately slow backplane against
+    an injected producer deadline, so a bounded typed terminal arrives with no real
+    27s wait."""
+    import asyncio
+
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    # The TERMINAL publish stalls ~0.3s — well inside the injected ~1.0s budget below.
+    backplane = _StallingTerminalBackplane(stall_seconds=0.3)
+    stream_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=5.0,  # ample; the scripted turn never trips it
+        terminal_publish_margin_seconds=1.0,
+        # Mint the producer→terminal deadline a fixed ~1.0s out: the slow terminal
+        # publish (0.3s) fits, so ``done`` is delivered on the FIRST attempt.
+        producer_deadline_at=lambda _budget: asyncio.get_running_loop().time() + 1.0,
+    )
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is True
+    # Exactly one terminal, the TRUTHFUL ``done`` (the answer committed), delivered on
+    # the first attempt (no degrade needed) — and the whole path stayed inside the
+    # budget, nowhere near an unbounded stall.
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "done"
+    assert await _stored_answer(ctx) == "Answer."
+    assert backplane.terminal_publishes == 1
+    assert elapsed < 1.0
+
+
+async def test_a_stalled_terminal_publish_degrades_within_the_budget(ctx: _Ctx) -> None:
+    """R2-8 (#489 AC-4): when the backplane STALLS publishing the terminal past the
+    reserved slice, the producer does NOT hang on the unbounded pipeline — it bounds
+    the publish and re-attempts the SAME terminal (one seq) inside the reserved tail.
+    A transient stall that clears still lands ONE typed terminal, and the producer
+    returns bounded. Driven with a hang-first backplane + an injected short deadline,
+    so no real long wait is needed."""
+    import asyncio
+
+    gateway = _ScriptedGateway([[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]])
+    # The FIRST terminal publish blocks until the bound cancels it; the degrade
+    # re-attempt (the second) records — the transient Redis stall clearing.
+    backplane = _StallingTerminalBackplane(hang_first=True)
+    stream_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        turn_timeout_seconds=5.0,
+        terminal_publish_margin_seconds=0.5,
+        # A short producer→terminal budget: the first (hanging) publish is cut at the
+        # done slice, the degrade re-attempt runs in the reserved tail — all bounded.
+        producer_deadline_at=lambda _budget: asyncio.get_running_loop().time() + 0.5,
+    )
+    started = loop.time()
+    ok = await asyncio.wait_for(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        ),
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started
+    assert ok is True
+    # The first publish hung and was cut at the reserved boundary; the degrade
+    # re-attempt (same seq) delivered the terminal — two publish attempts, ONE relayed
+    # terminal (the subscriber's monotonic-seq dedup would collapse them anyway).
+    assert backplane.terminal_publishes == 2
+    envs = await _drain(backplane, stream_id)
+    terminals = [e for e in envs if e["type"] in ("done", "error")]
+    assert len(terminals) == 1
+    assert terminals[0]["type"] == "done"
+    assert await _stored_answer(ctx) == "Answer."
+    # Bounded — the producer returned well within the injected budget, never the
+    # unbounded pipeline hang the fix removes.
+    assert elapsed < 1.5
+
+
+async def test_interactive_max_attempts_caps_the_retry_ladder(ctx: _Ctx) -> None:
+    """#489: the interactive path makes 2 attempts (one retry) on a retryable
+    fault, not the full 3 — one fewer round trip inside the budget."""
+    # Two retryable faults in a row: with a 2-attempt cap the second exhausts the
+    # ladder (no fallback configured) and the answer terminates.
+    gateway = _ModelRoutedGateway(
+        [[StreamEvent(text="unused"), StreamEvent(finish_reason="stop")]],
+        failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]},
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    _sleeps, recorder = _sleep_recorder()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        interactive_max_attempts=2,
+    )
+    # patch the retry sleeper so no real backoff elapses
+    runtime._retry_sleep = recorder  # type: ignore[assignment]
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    # Exactly 2 attempts on the one route (the cap), not the default 3.
+    assert gateway.models_called == [_PRIMARY, _PRIMARY]
+    assert len(_sleeps) == 1  # one backoff between the two attempts
+    envs = await _drain(backplane, stream_id)
+    assert envs[-1]["type"] == "error"
+
+
 # --- #414 (ADR-0016 §6): narration streaming ---------------------------------
 
 
@@ -4755,9 +5780,12 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
 async def test_cache_kpi_not_emitted_when_commit_fails(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-2 NEW-1: the answer streams fine but the transaction COMMIT
-    fails — the stream ends in the error terminal and the KPI must NOT have
-    been emitted (it fires only after commit + ``done`` publication)."""
+    """BE-1 (was round-2 NEW-1): the answer streams fine, but the transaction COMMIT
+    — which now PRECEDES the terminal (#489/BE-1) — fails. The client must see a
+    typed ``error`` terminal, NOT a success ``done`` over a rolled-back answer; the
+    cache KPI must NOT fire (it is strictly after a successful commit); ``run``
+    reports False so the caller never feeds the unpersisted answer into memory.
+    Exactly one terminal, and no ``done``."""
     log_rec = _patch_runtime_log(monkeypatch)
 
     def _failing_commit_sessionmaker() -> AsyncSession:
@@ -4796,7 +5824,12 @@ async def test_cache_kpi_not_emitted_when_commit_fails(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert ok is False
+    # BE-1: the commit now PRECEDES the terminal, so a commit failure raises before
+    # any terminal and surfaces as a typed ``error`` — never a success ``done`` over
+    # a rolled-back answer. Exactly one terminal (the error), no ``done``, and the
+    # KPI did not fire (it is strictly after a successful commit).
     assert envs[-1]["type"] == "error"
+    assert sum(1 for e in envs if e["type"] in ("done", "error")) == 1
     assert not any(e["type"] == "done" for e in envs)
     assert log_rec.kpis() == []
 
@@ -4840,3 +5873,827 @@ async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
     assert envs[-1]["type"] == "done"
     # Both loop turns carried the SAME session-scoped key.
     assert gateway.cache_keys == [str(ctx.session_id)] * 2
+
+
+# --- #487: text coalescing at the envelope-construction seam ---------------
+#
+# The producer used to mint ONE `delta` envelope per provider chunk, so an
+# answer's envelope count tracked the provider's tokenisation and every one of
+# them paid a backplane round trip. Coalescing buffers adjacent chunks of the
+# SAME kind and flushes on whichever comes first — a character budget or an
+# elapsed-time deadline — and ALWAYS before any non-delta envelope is minted, so
+# `seq` stays monotonic on the wire and nothing is reordered behind a terminal.
+# The load-bearing invariant: coalescing changes envelope COUNT, never TEXT.
+
+
+def _texts_of(envs: list[dict[str, object]], kind: str) -> list[str]:
+    """The per-envelope text of every ``delta`` (kind="delta") / named event."""
+    if kind == "delta":
+        picked = [e for e in envs if e["type"] == "delta"]
+    else:
+        picked = [e for e in envs if e["type"] == "event" and e.get("name") == kind]
+    return [cast(str, cast("dict[str, object]", e["data"])["text"]) for e in picked]
+
+
+def _effective_answer(envs: list[dict[str, object]]) -> str:
+    """The delivered-and-NOT-retracted answer text (#488).
+
+    Folds ``delta`` text in wire order, resetting to empty on every
+    ``event:answer_retract`` — exactly what an honouring client renders. This is
+    the retraction-aware form of the #148 invariant: the persisted assistant
+    message must equal THIS, not the raw concatenation of every ``delta`` (which
+    now also carries speculative text that was later retracted).
+    """
+    answer = ""
+    for e in envs:
+        if e["type"] == "delta":
+            answer += cast(str, cast("dict[str, object]", e["data"])["text"])
+        elif e["type"] == "event" and e.get("name") == "answer_retract":
+            answer = ""
+    return answer
+
+
+async def _run_coalesced(
+    ctx: _Ctx,
+    *,
+    gateway: object,
+    retrieval: object,
+    late_subscriber: bool = False,
+    **runtime_kwargs: Any,
+) -> list[dict[str, object]]:
+    """Run one answer and return the envelopes the subscriber saw.
+
+    ``late_subscriber`` subscribes only AFTER the producer finished — the
+    realistic 202-then-connect flow, served entirely from the bounded replay
+    (#153).
+    """
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer: asyncio.Task[list[dict[str, object]]] | None = None
+    if not late_subscriber:
+        consumer = asyncio.create_task(_drain(backplane, stream_id))
+        await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=retrieval,
+        backplane=backplane,
+        **runtime_kwargs,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    if consumer is None:
+        return await asyncio.wait_for(_drain(backplane, stream_id), timeout=5.0)
+    return await asyncio.wait_for(consumer, timeout=5.0)
+
+
+async def _stored_answer(ctx: _Ctx) -> str:
+    async with ctx.sessionmaker() as session:
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        return [m for m in rows if m.role.value == "assistant"][-1].content
+
+
+def _answer_chunks_turn(chunks: list[str]) -> list[StreamEvent]:
+    return [*(StreamEvent(text=c) for c in chunks), StreamEvent(finish_reason="stop")]
+
+
+async def test_answer_deltas_are_coalesced_without_changing_the_text(ctx: _Ctx) -> None:
+    """AC-2 (#487): envelope count drops materially; the TEXT is byte-identical.
+
+    200 provider chunks used to mean 200 ``delta`` envelopes (200 backplane
+    round-trips). Under the flush policy they coalesce into a handful — and the
+    concatenation of what streamed still equals the concatenation of what the
+    provider produced, and equals the persisted message (#148).
+    """
+    chunks = [f"word{i} " for i in range(200)]
+    envs = await _run_coalesced(
+        ctx, gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]), retrieval=_FakeRetrieval([])
+    )
+
+    assert envs[-1]["type"] == "done"
+    deltas = _texts_of(envs, "delta")
+    assert deltas, "the answer must still stream"
+    # Materially fewer envelopes than provider chunks (the AC-2 bar).
+    assert len(deltas) <= len(chunks) // 4
+    # ...and not one character changed. The provider chunks each end in a space, so
+    # the concatenation ends in a trailing space — which MUST survive into the
+    # persisted message (R2-4 / #148): stored == delivered, byte-for-byte, with NO
+    # normalisation (a ``.strip()`` here would hide exactly the mismatch #148 forbids).
+    delivered = "".join(deltas)
+    assert delivered == "".join(chunks)
+    assert delivered.endswith(" ")  # the trailing space is real, not incidental
+    assert await _stored_answer(ctx) == delivered
+
+
+async def test_a_pending_buffer_is_flushed_before_the_terminal(ctx: _Ctx) -> None:
+    """AC-4 (negative): the last text flush precedes ``done`` — always.
+
+    The budgets here are far larger than the answer, so the policy itself never
+    fires: the ONLY thing that can put the text on the wire is the unconditional
+    flush before a non-delta envelope is minted. Without it the buffer would be
+    dropped on the floor (a subscriber stops at the terminal).
+    """
+    chunks = ["Hello ", "world."]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=3_600.0,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "done" and types.count("done") == 1
+    delta_at = [i for i, t in enumerate(types) if t == "delta"]
+    assert delta_at, "a buffered answer must still reach the wire"
+    assert _texts_of(envs, "delta") == ["Hello world."]  # fully coalesced: ONE envelope
+    # Ordering: the flush lands before the first envelope minted after it (the
+    # ``finalize`` step) and therefore before the terminal.
+    finalize_at = min(
+        i
+        for i, e in enumerate(envs)
+        if e["type"] == "event"
+        and e.get("name") == "step"
+        and cast("dict[str, object]", e["data"])["key"] == "finalize"
+    )
+    assert max(delta_at) < finalize_at < types.index("done")
+    # seq is minted at publish time, so wire order and seq order must agree — a
+    # buffered delta must never carry a seq minted after the envelope that
+    # overtook it.
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_pending_narration_is_flushed_before_a_terminal_error(ctx: _Ctx) -> None:
+    """AC-4 (negative): a stream that FAULTS with text still buffered emits that
+    text before the terminal ``error``.
+
+    Budgets are oversized so only the unconditional pre-terminal flush can
+    deliver it.
+    """
+
+    class _NarrateThenFault(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="Looking that up... ")
+            yield StreamEvent(
+                tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),)
+            )
+            raise cast(Exception, _retryable())
+
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_NarrateThenFault(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=3_600.0,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1
+    assert _texts_of(envs, "narration") == ["Looking that up... "]
+    narration_at = max(
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "narration"
+    )
+    assert narration_at < len(envs) - 1  # strictly before the terminal
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_the_elapsed_deadline_flushes_before_the_character_budget(ctx: _Ctx) -> None:
+    """AC-2: the time half of "whichever comes first", deterministically.
+
+    An injected monotonic clock advances 50ms per read, so every chunk sits past the
+    40ms deadline while the character budget (10k) never fires. Since #487/BE-4 the
+    elapsed deadline is evaluated PROACTIVELY between chunks (not only when the next
+    ``add`` happens), so each chunk flushes on its own already-elapsed deadline
+    rather than waiting for a successor — the whole point of BE-4, so a lone chunk is
+    never stranded by a provider stall. The character budget never being the trigger
+    is what this asserts. No test sleeps — the clock is the seam.
+    """
+    reads = iter(range(1, 10_000))
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(["a", "b", "c"])]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=10_000,
+        text_coalesce_seconds=0.04,
+        clock=lambda: next(reads) * 0.05,
+    )
+
+    assert envs[-1]["type"] == "done"
+    # Each chunk's 40ms deadline has already elapsed (50ms/read) by the time the next
+    # event is awaited, so each flushes on its own deadline — never coalesced behind
+    # a char budget that never trips.
+    assert _texts_of(envs, "delta") == ["a", "b", "c"]
+
+
+async def test_lone_chunk_flushes_on_its_deadline_across_a_provider_stall(ctx: _Ctx) -> None:
+    """BE-4: a lone buffered chunk flushes on its elapsed TIME deadline even when the
+    provider then STALLS before the next chunk — driven by a real timer, not only by
+    the next ``add`` (which pre-BE-4 was the only thing that evaluated the deadline).
+
+    Fully deterministic, NO real sleeps: a constant injected clock means the add-time
+    check never time-flushes and the buffer's deadline is a fixed point in the future;
+    an injected flush timer that returns immediately models "that deadline elapsed";
+    and the SECOND chunk is withheld until the first's ``delta`` is observed on the
+    wire. Pre-BE-4 the first chunk would sit buffered until the second arrived — but
+    the second is gated on the first, so the run would deadlock; the timer is what
+    breaks the stall.
+    """
+    release_second = asyncio.Event()
+
+    class _StallBetweenChunks(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])  # unused
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="chunk1")
+            await release_second.wait()  # the provider stall — chunk2 withheld
+            yield StreamEvent(text="chunk2")
+            yield StreamEvent(finish_reason="stop")
+
+    async def _fire_immediately(_delay: float) -> None:
+        return  # the flush deadline "elapses" at once — no real sleep
+
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+
+    async def _consume() -> list[dict[str, object]]:
+        seen: list[dict[str, object]] = []
+        async for env in backplane.subscribe(stream_id):
+            seen.append(env)
+            data = cast("dict[str, object]", env["data"])
+            if env["type"] == "delta" and "chunk1" in cast(str, data["text"]):
+                release_second.set()
+        return seen
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=_StallBetweenChunks(),
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=10_000,  # only the TIME deadline can flush
+        text_coalesce_seconds=0.04,
+        clock=lambda: 100.0,  # constant: add-time never time-flushes; deadline is fixed
+        flush_sleep=_fire_immediately,
+    )
+    # ``run`` is launched as a background task (the production shape — off the 202
+    # send handler), never wrapped in ``wait_for``; the consumer's bounded wait is
+    # the hang guard. If the timed flush were missing, chunk1 would never surface,
+    # the consumer would never release chunk2, and the wait would time out.
+    run_task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    # chunk1 flushed as its OWN delta on its deadline BEFORE chunk2 was released; the
+    # two never coalesced into one, and the run did not deadlock waiting for chunk2.
+    assert _texts_of(envs, "delta") == ["chunk1", "chunk2"]
+    assert _effective_answer(envs) == "chunk1chunk2" == await _stored_answer(ctx)
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_coalescing_is_disabled_by_a_zero_character_budget(ctx: _Ctx) -> None:
+    """Negative / kill-switch: ``0`` restores the pre-#487 one-envelope-per-chunk
+    wire shape exactly, so a bad default is turned off by config, not a code change.
+    """
+    chunks = ["one ", "two ", "three"]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        text_coalesce_seconds=0.04,
+    )
+
+    assert _texts_of(envs, "delta") == chunks
+
+
+async def test_narration_is_coalesced_and_still_precedes_the_tool_events(ctx: _Ctx) -> None:
+    """AC-2 + the #414 ordering: narration coalesces too, and every narration
+    envelope still lands ahead of the turn's ``tool_call`` events.
+
+    Narration and answer text are different kinds and must never merge into one
+    envelope (that would leak narration into the answer — the #148 invariant).
+    """
+    narration_chunks = [f"step{i} " for i in range(60)]
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                *(StreamEvent(text=c) for c in narration_chunks),
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            _answer_chunks_turn(["The ", "answer."]),
+        ]
+    )
+    envs = await _run_coalesced(ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]))
+
+    assert envs[-1]["type"] == "done"
+    narrations = _texts_of(envs, "narration")
+    assert narrations and len(narrations) <= len(narration_chunks) // 4
+    assert "".join(narrations) == "".join(narration_chunks)
+    narration_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "narration"
+    ]
+    tool_call_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "tool_call"
+    ]
+    assert tool_call_at and max(narration_at) < min(tool_call_at)
+    # The two kinds never merged: after honouring the speculative-streaming
+    # retraction (#488 — the 360-char narration prefix flushed as answer deltas
+    # before the tool fragment revealed the turn, then was retracted), the
+    # delivered-and-not-retracted answer carries ONLY the answer.
+    assert _effective_answer(envs) == "The answer."
+    assert _effective_answer(envs) == await _stored_answer(ctx)
+    assert cast("dict[str, object]", envs[narration_at[0]]["data"])["turn"] == 1
+
+
+async def test_a_long_answer_fits_the_bounded_replay_for_a_late_subscriber(ctx: _Ctx) -> None:
+    """AC-3 (negative): a long answer stays inside the bounded replay window.
+
+    The replay list is capped at ``_MAX_REPLAY`` envelopes, so pre-#487 an answer
+    of ~900 provider chunks pushed its own opening envelopes out of the window
+    and handed a late subscriber a TRUNCATED stream. Coalescing collapses the
+    same text into a small number of envelopes; this pins that a 900-chunk answer
+    fits, and that the late subscriber's text equals the persisted one.
+    """
+    chunks = [f"tok{i} " for i in range(900)]
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_ScriptedGateway([_answer_chunks_turn(chunks)]),
+        retrieval=_FakeRetrieval([]),
+        late_subscriber=True,
+    )
+
+    assert len(envs) < _MAX_REPLAY
+    assert envs[0]["type"] == "start" and envs[-1]["type"] == "done"
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    # The late subscriber's delivered text equals the persisted one byte-for-byte —
+    # trailing space and all (R2-4 / #148); no normalisation.
+    delivered = "".join(_texts_of(envs, "delta"))
+    assert delivered == "".join(chunks)
+    assert await _stored_answer(ctx) == delivered
+
+
+# --- #488: speculative live streaming of the answer + retraction --------------
+
+
+def _step_index(envs: list[dict[str, object]], key: str, state: str, *, turn: int | None) -> int:
+    """Wire index of the step event matching (key, state[, turn]); -1 if absent."""
+    for i, e in enumerate(envs):
+        if e["type"] != "event" or e.get("name") != "step":
+            continue
+        d = cast("dict[str, object]", e["data"])
+        if (
+            d.get("key") == key
+            and d.get("state") == state
+            and (turn is None or d.get("turn") == turn)
+        ):
+            return i
+    return -1
+
+
+async def test_answer_turn_streams_live_before_its_think_completed(ctx: _Ctx) -> None:
+    """AC-1 (#488): a tool-free answer turn's text reaches the wire as ``delta``
+    DURING the turn -- before the turn's ``think/completed`` step -- not buffered
+    and burst-replayed after it (the pre-#488 shape published after the step).
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                StreamEvent(text="The 2024 "),
+                StreamEvent(text="answer."),
+                StreamEvent(finish_reason="stop"),
+            ],
+        ]
+    )
+    # 0-char coalescing flushes each provider chunk immediately, so a live delta
+    # is observable the instant it is spoken (the streaming property under test).
+    envs = await _run_coalesced(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]), text_coalesce_chars=0
+    )
+
+    assert envs[-1]["type"] == "done"
+    delta_at = [i for i, e in enumerate(envs) if e["type"] == "delta"]
+    think_done_2 = _step_index(envs, "think", "completed", turn=2)
+    assert delta_at and think_done_2 >= 0
+    # Every answer delta is on the wire BEFORE the answer turn's think/completed.
+    assert max(delta_at) < think_done_2
+    assert _effective_answer(envs) == "The 2024 answer." == await _stored_answer(ctx)
+
+
+async def test_forced_synthesis_streams_live_before_its_think_completed(ctx: _Ctx) -> None:
+    """AC-2 (#488): the forced tool-free synthesis (``tool_choice="none"``)
+    streams live in all cases -- its deltas precede its own ``think/completed``.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [_tool_turn("narrating ", "c1")],  # the sole tool turn; budget = 1
+        synthesis=[
+            StreamEvent(text="Synthesised "),
+            StreamEvent(text="answer."),
+            StreamEvent(finish_reason="stop"),
+        ],
+    )
+    envs = await _run_coalesced(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        text_coalesce_chars=0,
+        default_max_tool_turns=1,
+    )
+
+    assert envs[-1]["type"] == "done"
+    assert gateway.synthesis_calls == 1
+    delta_at = [i for i, e in enumerate(envs) if e["type"] == "delta"]
+    # The synthesis turn is turn max_tool_turns + 1 = 2.
+    synth_done = _step_index(envs, "think", "completed", turn=2)
+    assert delta_at and synth_done >= 0
+    assert max(delta_at) < synth_done
+    assert _effective_answer(envs) == "Synthesised answer." == await _stored_answer(ctx)
+
+
+async def test_speculative_text_retracted_when_the_turn_calls_a_tool(ctx: _Ctx) -> None:
+    """AC-4 + the non-negotiable (#488/#148): a turn that streams text and THEN
+    emits a tool call retracts the speculative deltas with a defined
+    ``event:answer_retract``, re-emits them as ``event:narration``, and the
+    persisted message equals the delivered-and-not-retracted answer -- over a
+    turn that speculates, retracts, calls a tool, then answers.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="Let me look that up. "),  # speculative -- flushed live
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="The answer is 42."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    envs = await _run_coalesced(
+        ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]), text_coalesce_chars=0
+    )
+
+    assert envs[-1]["type"] == "done"
+    retract_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "answer_retract"
+    ]
+    tool_call_at = [
+        i for i, e in enumerate(envs) if e["type"] == "event" and e.get("name") == "tool_call"
+    ]
+    spec_delta_at = [
+        i
+        for i, e in enumerate(envs)
+        if e["type"] == "delta"
+        and "Let me look that up." in cast(str, cast("dict[str, object]", e["data"])["text"])
+    ]
+    # The speculative delta streamed, then exactly one retraction, ahead of the tools.
+    assert spec_delta_at and len(retract_at) == 1
+    assert spec_delta_at[0] < retract_at[0] < tool_call_at[0]
+    # The retracted text is re-surfaced as narration (the transient affordance).
+    assert "".join(_texts_of(envs, "narration")) == "Let me look that up. "
+    # The delivered-and-not-retracted answer == the persisted message (#148).
+    assert _effective_answer(envs) == "The answer is 42." == await _stored_answer(ctx)
+
+
+async def test_retraction_keeps_the_retry_window_open_across_live_streaming(ctx: _Ctx) -> None:
+    """The retry-window interaction (#488): live answer streaming does NOT close
+    the retry window. A turn that streams a speculative delta and then faults
+    retryably is RETRACTED and retried cleanly -- the client ends with one clean
+    answer, and the delivered-minus-retracted text equals the persisted one.
+    """
+
+    class _SpeakThenFaultThenAnswer(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                [[StreamEvent(text="Clean answer."), StreamEvent(finish_reason="stop")]]
+            )
+            self.calls_made = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls_made += 1
+            if self.calls_made == 1:
+                yield StreamEvent(text="Half-written spec ")  # flushed live (coalesce=0)
+                raise cast(Exception, _retryable())
+            async for ev in super().stream_tools(
+                messages, tools=tools, model=model, tool_choice=tool_choice
+            ):
+                yield ev
+
+    sleeps, recorder = _sleep_recorder()
+    gateway = _SpeakThenFaultThenAnswer()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=0,
+        retry_sleep=recorder,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    types = [e["type"] for e in envs]
+    assert types.count("done") == 1 and "error" not in types
+    assert sleeps == [0.5]  # the window stayed OPEN: one retry happened
+    assert gateway.calls_made == 2
+    # The speculative half streamed, was retracted, and the clean answer replaced it.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    assert "Half-written spec " in "".join(_texts_of(envs, "delta"))
+    assert _effective_answer(envs) == "Clean answer." == await _stored_answer(ctx)
+
+
+async def test_retraction_discards_the_pending_coalesce_buffer_without_racing(ctx: _Ctx) -> None:
+    """The #487 interaction (#488): a retraction must discard the pending
+    coalesce buffer, never race a buffered delta onto the wire AFTER the
+    ``answer_retract``. With real coalescing, a long chunk flushes but a short
+    trailing chunk is still buffered when the tool fragment lands -- the buffered
+    tail must be dropped, not published with a higher seq than the retraction.
+    """
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    flushed = "A" * 200  # > 160-char budget -> flushes as a live delta
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text=flushed),
+                StreamEvent(text="TAIL"),  # buffered (< budget), never flushed
+                StreamEvent(
+                    tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "q"}),),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [StreamEvent(text="Final answer."), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    # Default coalescing (160 chars) so the tail genuinely buffers.
+    envs = await _run_coalesced(ctx, gateway=gateway, retrieval=_FakeRetrieval([passage]))
+
+    assert envs[-1]["type"] == "done"
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # The buffered tail was DISCARDED -- it never appears in any delta (which would
+    # be a stray delta racing the retraction out of order). It survives only as
+    # narration, and the persisted answer is the final turn alone.
+    assert "TAIL" not in "".join(_texts_of(envs, "delta"))
+    assert "TAIL" in "".join(_texts_of(envs, "narration"))
+    assert _effective_answer(envs) == "Final answer." == await _stored_answer(ctx)
+    # seq is still strictly monotonic and unique across the whole stream.
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def _assistant_message_count(ctx: _Ctx) -> int:
+    async with ctx.sessionmaker() as session:
+        rows = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        return len([m for m in rows if m.role.value == "assistant"])
+
+
+async def test_speculative_answer_retracted_on_terminal_fault(ctx: _Ctx) -> None:
+    """BE-3 (#148): a turn that streams speculative answer text and THEN raises a
+    TERMINAL (non-retryable) provider fault must UN-publish that text before the
+    ``error`` terminal — never flush a pre-tool / unpersisted fragment as answer.
+    The client sees an ``answer_retract`` then the ``error``; the delivered-and-not-
+    retracted answer is empty, and nothing persisted."""
+
+    class _SpeakThenTerminalFault(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])  # unused
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="Partial unpersisted answer. ")  # speculative, flushed live
+            raise cast(Exception, _terminal())
+
+    sleeps, recorder = _sleep_recorder()
+    # 0-char coalescing flushes the speculative chunk live, so a delta genuinely
+    # reaches the wire (and must therefore earn an ``answer_retract``).
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_SpeakThenTerminalFault(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        retry_sleep=recorder,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    assert sleeps == []  # a terminal fault is not retried
+    # The speculative delta streamed, then was retracted ahead of the error.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    # #148: no dangling answer text remains on the wire, and nothing persisted.
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+async def test_speculative_answer_retracted_on_interactive_timeout(ctx: _Ctx) -> None:
+    """BE-3 (#148 + #489): when speculative streaming is active and the interactive
+    per-turn deadline fires (a provider that streams one chunk then stalls), the
+    buffered/streamed answer text is retracted before the typed 503 terminal — no
+    un-persisted fragment is left on the wire as answer."""
+
+    class _SpeakThenHang:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            self.calls += 1
+            yield StreamEvent(text="Half-streamed answer ")  # speculative, flushed live
+            await asyncio.Event().wait()  # never returns -> the deadline must bound it
+            yield StreamEvent(finish_reason="stop")  # pragma: no cover — unreachable
+
+    from app.llm.context import litellm_token_counter
+
+    litellm_token_counter("anthropic/claude-opus-4.8")("warm up the tokenizer import")
+    envs = await _run_coalesced(
+        ctx,
+        gateway=_SpeakThenHang(),
+        retrieval=_FakeRetrieval([]),
+        text_coalesce_chars=0,
+        turn_timeout_seconds=0.2,
+        interactive_max_attempts=2,
+    )
+
+    types = [e["type"] for e in envs]
+    assert types[-1] == "error" and types.count("error") == 1 and types.count("done") == 0
+    problem = cast("dict[str, object]", envs[-1]["problem"])
+    assert problem["status"] == 503
+    # The speculative half was retracted; nothing dangling, nothing persisted.
+    assert any(e["type"] == "event" and e.get("name") == "answer_retract" for e in envs)
+    assert _effective_answer(envs) == ""
+    assert await _assistant_message_count(ctx) == 0
+
+
+class _MaxTokensCapturingGateway(_ScriptedGateway):
+    """Records the ``max_tokens`` passed to each ``stream_tools`` call (#488)."""
+
+    def __init__(self, turns: list[list[StreamEvent]], **kw: object) -> None:
+        super().__init__(turns, **kw)  # type: ignore[arg-type]
+        self.max_tokens_seen: list[object] = []
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        cache_key: object = None,
+        max_tokens: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.max_tokens_seen.append(max_tokens)
+        async for ev in super().stream_tools(
+            messages, tools=tools, model=model, tool_choice=tool_choice
+        ):
+            yield ev
+
+
+async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> None:
+    """AC-5 (#488): the configured answer ceiling reaches ``stream_tools`` on the
+    answer turn; an unset ceiling (the offline default) is omitted (None)."""
+    gateway = _MaxTokensCapturingGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        answer_max_tokens=256,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+    assert gateway.max_tokens_seen == [256]
+
+    # Unset (the offline / headless default) threads None -- the exact pre-#488 wire.
+    gateway2 = _MaxTokensCapturingGateway(
+        [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
+    )
+    backplane2 = InMemoryBackplane()
+    stream_id2 = uuid.uuid4().hex
+    consumer2 = asyncio.create_task(_drain(backplane2, stream_id2))
+    await asyncio.sleep(0)
+    runtime2 = _runtime(ctx, gateway=gateway2, retrieval=_FakeRetrieval([]), backplane=backplane2)
+    await runtime2.run(
+        stream_id=stream_id2,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer2, timeout=2.0)
+    assert gateway2.max_tokens_seen == [None]

@@ -89,16 +89,28 @@ async def _resolve_summary_route(
     owner_id: UUID,
     session_model: str,
 ) -> ModelRoute:
-    """The summarizer's gateway route (#446 finding 6).
+    """The summarizer's gateway route (#446 finding 6, #490).
 
-    A provider-only tenant must be able to summarize: the SESSION's model is
-    resolved through the SAME permissioned provider-route seam chat uses
-    (tenant-scoped, key decrypted inside services/). A config-pinned
-    ``CHAT_SUMMARY_MODEL`` overrides; an unresolvable session model degrades
-    to the config default with default credentials (the pre-#446 behavior).
+    The summarizer runs on a DEDICATED model, not the session's answer route: a
+    background compaction task must never inherit a frontier model just because
+    the chat session picked one (#490). Resolution order:
+
+    * A config-pinned ``CHAT_SUMMARY_MODEL`` always wins (explicit override,
+      config credentials).
+    * Otherwise a config (non-``provider:``) session uses the FAST-tier default
+      (``_config_summary_model`` -> the registry ``is_default`` id) — NOT the
+      session's model. This is the #490 fix: the leak was that an unpinned
+      summarizer resolved the session's (possibly frontier) config id.
+    * A provider-only session has no config route, so it still summarizes
+      through the SAME permissioned provider-route seam chat uses (#446 finding
+      6, tenant-scoped, key decrypted inside services/); an unresolvable
+      provider degrades to the config default.
     """
     if settings.chat_summary_model:
         return ModelRoute(model=settings.chat_summary_model)
+    if not is_provider_model_id(session_model):
+        # A config session: the dedicated FAST default, never the answer route.
+        return ModelRoute(model=_config_summary_model(settings))
     resolver = build_model_route_resolver(
         settings=settings,
         tenant_id=tenant_id,
@@ -225,9 +237,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             # cursor in the (created_at, id-hex) total order, so the batch's
             # boundary is always one the CAS will accept.
             cursor = (row.covers_through_created_at, row.covers_through_message_id.hex)
-            uncovered = [
-                m for m in fetched if (m.created_at, m.id.hex) > cursor
-            ]
+            uncovered = [m for m in fetched if (m.created_at, m.id.hex) > cursor]
         else:
             # First-ever pass: the SAME ordered, limited query via a sentinel
             # cursor — a rowid-ordered initial batch would strand same-second
@@ -288,9 +298,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # cited documents — MERGED with the previous row's map (r2 blocker 1b:
         # the previous summary text rolls forward, so every name it may still
         # carry must stay redactable), newest-batch entries first.
-        batch_names, batch_snippets = await _covered_citations(
-            session, tenant_id, to_cover
-        )
+        batch_names, batch_snippets = await _covered_citations(session, tenant_id, to_cover)
         mentioned = dict(batch_names)
         if row is not None:
             for doc_id, name in row.mentioned_documents:
@@ -347,9 +355,7 @@ def enqueue_summarize(tenant_id: UUID, session_id: UUID) -> None:
     directly. Synchronous + blocking (call via ``asyncio.to_thread``); raises
     on broker failure — the caller decides that it is a nicety.
     """
-    celery_app.send_task(
-        "summarize_session", args=[str(tenant_id), str(session_id)]
-    )
+    celery_app.send_task("summarize_session", args=[str(tenant_id), str(session_id)])
 
 
 @celery_app.task(  # type: ignore[misc]  # celery's task decorator is untyped

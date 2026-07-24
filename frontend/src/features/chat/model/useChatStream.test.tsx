@@ -53,7 +53,9 @@ describe('useChatStream', () => {
 
   it('is idle with no socket when streamId is null', () => {
     const h = harness();
-    const { result } = renderHook(() => useChatStream({ streamId: null, makeClient: h.makeClient }));
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: null, makeClient: h.makeClient }),
+    );
     expect(result.current.phase).toBe('idle');
   });
 
@@ -285,5 +287,105 @@ describe('useChatStream', () => {
     const h = harness();
     renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
     expect(h.get().opts.path).toBe(`/chat/${SID}`);
+  });
+
+  // --- #489: post-terminal suggestions window --------------------------------
+
+  it('holds the socket open on a pendingSuggestions done and accepts the trailing suggestions (AC-2)', async () => {
+    const h = harness();
+    const onDone = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, onDone, suggestionsGraceMs: 5_000 }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer.' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+      });
+    });
+    // Terminal settled + onDone fired, but the socket is STILL OPEN for the
+    // post-terminal suggestions (unlike a plain done, which closes at once).
+    expect(result.current.phase).toBe('done');
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(h.get().closed).toBe(false);
+
+    // The suggestions event arrives AFTER the stream closed to the reducer.
+    act(() => {
+      h.get().emit({
+        type: 'event',
+        streamId: SID,
+        seq: 3,
+        name: 'suggestions',
+        data: { messageId: 'm', suggestions: ['What next?', 'Who owns it?'] },
+      });
+    });
+    expect(result.current.phase).toBe('done'); // still settled — not un-terminaled
+    expect(result.current.suggestions).toEqual({
+      messageId: 'm',
+      suggestions: ['What next?', 'Who owns it?'],
+    });
+    // Got what we waited for → socket closed, no disconnect error synthesized.
+    expect(h.get().closed).toBe(true);
+    expect(result.current.problem).toBeNull();
+  });
+
+  it('closes the socket at grace expiry when no suggestions follow a pendingSuggestions done', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 1,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+      });
+    });
+    expect(h.get().closed).toBe(false); // held open during the grace
+    act(() => vi.advanceTimersByTime(5_000));
+    // Grace expired: socket closed, terminal stands, no disconnect error.
+    expect(h.get().closed).toBe(true);
+    expect(result.current.phase).toBe('done');
+    expect(result.current.problem).toBeNull();
+  });
+
+  it('honours a server suggestionsGraceMs larger than the client default (BE-5)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    // No explicit suggestionsGraceMs prop → the hook's own 15s default would apply
+    // if the server declared none. The server declares 25s (> 15s), which must win:
+    // a valid config where the server grace outlasts the old hard-coded client
+    // default would otherwise cut off the live suggestion at 15s.
+    const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 1,
+        data: {
+          messageId: 'm',
+          finishReason: 'stop',
+          citationCount: 0,
+          pendingSuggestions: true,
+          suggestionsGraceMs: 25_000,
+        },
+      });
+    });
+    // Past the OLD hard-coded 15s default: STILL open, because the server grace is 25s.
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(h.get().closed).toBe(false);
+    // Only at the server-declared grace (25s) does the client give up and close.
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(h.get().closed).toBe(true);
+    expect(result.current.phase).toBe('done');
+    expect(result.current.problem).toBeNull();
   });
 });

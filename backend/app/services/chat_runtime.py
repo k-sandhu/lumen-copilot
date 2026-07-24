@@ -47,16 +47,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.principal import Principal
-from app.core.errors import AppError
+from app.core.errors import AppError, DependencyError
 from app.core.logging import get_logger
 from app.db.repositories import (
     AuditEventRepository,
@@ -71,10 +72,17 @@ from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
-from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
+from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
-from app.llm.context import ContextConfig, assemble_context, fit_transcript
+from app.llm.context import (
+    ContextConfig,
+    TokenCounter,
+    assemble_context,
+    fit_transcript,
+    litellm_token_counter,
+    memoizing_token_counter,
+)
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
@@ -166,6 +174,40 @@ _DEFAULT_TOOL_CONCURRENCY = 4
 # must not stall the answer.
 _RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 2.0)
 _RETRY_AFTER_CAP_SECONDS = 10.0
+# Interactive per-turn deadline (#489). ``None`` (the module default, and every
+# non-interactive / offline caller) = no runtime-level turn deadline: the gateway's
+# ``llm_timeout_seconds`` request budget governs, unchanged. When the chat API wires
+# ``Settings.llm_interactive_timeout_seconds`` a live answer caps each resilient
+# turn (all same-route retries + backoffs + one failover attempt) at that budget
+# via an ``asyncio.timeout``, so a hung/unreachable provider surfaces one typed 503
+# within the budget instead of stacking the batch timeout per retry.
+_DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
+# Interactive attempt cap (#489). ``None`` = the full same-route retry ladder
+# (``1 + len(_RETRY_BACKOFF_SECONDS)`` = 3 attempts). The chat API wires 2 (one
+# retry) so a live turn does not stack the ladder inside the interactive budget.
+_DEFAULT_INTERACTIVE_MAX_ATTEMPTS: int | None = None
+# Terminal-publish budget (R2-8, #489 AC-4). ``None`` (the module default, and
+# every batch/headless/offline caller) = the terminal publish is UNBOUNDED — the
+# exact pre-R2-8 behaviour, since only the interactive path carries a 30s SLA. When
+# the chat API wires ``Settings.llm_terminal_publish_margin_seconds`` alongside the
+# interactive per-turn deadline, the whole producer→terminal path is bounded: the
+# terminal publish is capped by the time actually left in ``turn deadline + margin``
+# so a stalled Redis pipeline (``realtime/backplane.py`` awaits an unbounded
+# pipeline) can never push the real worst case past the ceiling.
+_DEFAULT_TERMINAL_PUBLISH_MARGIN_SECONDS: float | None = None
+# The tail fraction of the terminal-publish budget reserved for ONE bounded degrade
+# re-attempt after a stalled first publish (R2-8): the ``done`` gets the leading
+# slice, and if the backplane stalls past it a single re-attempt of the SAME
+# terminal (same seq → the subscriber dedups) runs within this reserved tail — so a
+# transient stall that clears still lands the truthful terminal and the whole path
+# still fits inside the one producer→terminal deadline (never a second, unbounded
+# window). Small: the degrade is one cheap re-publish, not a fresh answer.
+_TERMINAL_DEGRADE_RESERVE_FRACTION = 0.2
+# Answer/synthesis output ceiling (#488). ``None`` (the module default, and every
+# offline/headless caller) = unbounded, the exact pre-#488 wire, so scripted turns
+# keep their shapes. The chat API wires ``Settings.chat_answer_max_tokens`` so a
+# live answer's length — and the tail of the streaming wait — is bounded.
+_DEFAULT_ANSWER_MAX_TOKENS: int | None = None
 
 
 @dataclass(slots=True)
@@ -188,6 +230,7 @@ class _RouteState:
     # that actually incurred it, never re-labelled under the winner.
     spent: list[tuple[str, _Usage]] = field(default_factory=list)
 
+
 # The per-search passage budget now comes from the context assembler
 # (``ContextBudget.retrieval_k``, ADR-0016 §1 / #410): the historical default of
 # 6 when the window is roomy, fewer when it is tight — so the knob is derived
@@ -203,10 +246,116 @@ class _RouteState:
 _DEFAULT_SUGGESTIONS_ENABLED = False
 _DEFAULT_SUGGESTIONS_COUNT = 3
 _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS = 8.0
+# Post-terminal grace the consumer holds the socket open for the one trailing
+# ``event:suggestions`` (#489/BE-5). Declared on the ``done`` terminal so the
+# client and server share ONE source of truth. Mirrors
+# ``Settings.chat_suggestions_grace_seconds`` (the chat API wires it in); the
+# module default is only used by callers that never enable suggestions.
+_DEFAULT_SUGGESTIONS_GRACE_SECONDS = 10.0
+# The dedicated suggestions model (#490). Empty ⇒ inherit the answer route (the
+# pre-#490 behaviour and the default for headless / offline callers that never
+# configure one). The chat API wires ``Settings.chat_suggestions_model`` (a
+# FAST-tier id) so the nicety never rides the answer's frontier model.
+_DEFAULT_SUGGESTIONS_MODEL = ""
 _SUGGESTIONS_ANSWER_TAIL_CHARS = 4000
 _SUGGESTIONS_QUESTION_HEAD_CHARS = 1000
 _SUGGESTIONS_MAX_TOKENS = 400
 _SUGGESTION_MAX_CHARS = 200
+
+# Streamed-text coalescing defaults (issue #487) — mirrored from
+# ``Settings.chat_text_coalesce_chars`` / ``_seconds``, which the API wires in.
+# Module constants so an un-wired caller (offline tests, the headless runtimes)
+# still coalesces exactly like production.
+_DEFAULT_TEXT_COALESCE_CHARS = 160
+_DEFAULT_TEXT_COALESCE_SECONDS = 0.04
+
+
+@dataclass(frozen=True, slots=True)
+class _TextKind:
+    """What a buffered run of streamed text will be published as.
+
+    Two runs coalesce only when their kind is equal, so answer text can never
+    merge into a narration envelope (or vice versa) and narration of different
+    turns stays separate — the #148/#414 separation is structural, not a
+    convention the flush policy has to remember.
+    """
+
+    envelope: str  # "delta" (answer text) | "narration" (transient turn status)
+    turn: int | None = None
+
+
+_ANSWER_TEXT = _TextKind("delta")
+
+# The sentinel a stream-event task returns at generator exhaustion (#487/BE-4) — a
+# Task must not carry ``StopAsyncIteration`` across an ``await``, so the coalescer
+# timer wrapper turns exhaustion into this ordinary value.
+_STREAM_END = object()
+
+
+@dataclass(slots=True)
+class _TextCoalescer:
+    """Flush policy for streamed text envelopes (issue #487).
+
+    Buffers adjacent chunks of one :class:`_TextKind` and hands back the
+    coalesced string when the policy fires — whichever comes FIRST, the
+    character budget or the elapsed-time deadline. The caller must also
+    :meth:`take` unconditionally before minting any other envelope, which is
+    what keeps ``seq`` monotonic on the wire (a buffered chunk must never be
+    published after an envelope minted later).
+
+    ``clock`` is a **monotonic** source (``time.monotonic`` in production),
+    injected so tests are deterministic without sleeping.
+    """
+
+    max_chars: int
+    max_delay_seconds: float
+    clock: Callable[[], float]
+    kind: _TextKind | None = None
+    _parts: list[str] = field(default_factory=list)
+    _chars: int = 0
+    _opened_at: float = 0.0
+
+    def add(self, kind: _TextKind, chunk: str) -> str | None:
+        """Buffer ``chunk``; return coalesced text when the policy says flush.
+
+        The caller must have drained a buffer of a different ``kind`` first
+        (see :meth:`take`) — mixing kinds in one envelope is not representable.
+        """
+        assert self.kind is None or self.kind == kind, "flush before switching kind"
+        now = self.clock()
+        if self.kind is None:
+            self.kind = kind
+            self._opened_at = now
+        self._parts.append(chunk)
+        self._chars += len(chunk)
+        if self._chars >= self.max_chars or (now - self._opened_at) >= self.max_delay_seconds:
+            return self.take()
+        return None
+
+    def flush_deadline(self) -> float | None:
+        """The monotonic time by which an OPEN buffer must flush (#487/BE-4).
+
+        The TIME half of the add-time policy, surfaced so a stalled provider stream
+        can flush the lone buffered chunk on its deadline WITHOUT waiting for a
+        subsequent :meth:`add` (which is the only other thing that evaluates the
+        elapsed deadline). ``None`` when the buffer is empty — nothing to flush.
+        Read against the SAME ``clock`` the add-time check uses, so the timed flush
+        and the add-time flush agree.
+        """
+        if self.kind is None:
+            return None
+        return self._opened_at + self.max_delay_seconds
+
+    def take(self) -> str | None:
+        """Drain the buffer unconditionally (``None`` when empty)."""
+        if not self._parts:
+            self.kind = None
+            return None
+        text = "".join(self._parts)
+        self._parts.clear()
+        self._chars = 0
+        self.kind = None
+        return text
 
 
 @dataclass(slots=True)
@@ -214,12 +363,36 @@ class _StreamState:
     """Mutable per-stream bookkeeping (seq counter + accumulated answer)."""
 
     stream_id: str
+    # The #487 text-coalescing buffer. Per stream because it holds unpublished
+    # wire content: whatever is in it MUST be flushed before the terminal.
+    buffer: _TextCoalescer
     seq: int = 0
-    # Set once a terminal (``done``/``error``) has been published, so the
+    # Set once a terminal (``done``/``error``) has been CONFIRMED published, so the
     # exactly-one-terminal contract holds even when two terminal paths race —
     # e.g. an error already emitted and then a shutdown ``CancelledError`` tries
-    # to emit its own (issue #156).
+    # to emit its own (issue #156). Flipped only AFTER the backplane publish returns
+    # (R2-2): a terminal publish that raised leaves this False, so the failure arm
+    # still emits a terminal and a committed answer is never left terminal-less.
     terminal_sent: bool = False
+    # The terminal's seq, minted once when the first terminal is built and reused by
+    # any fallback terminal (R2-2 idempotency): if a ``done`` publish ambiguously
+    # fails (the envelope reached Redis but the ack was lost) and the error arm then
+    # emits its own terminal, the two share ONE seq — so the subscriber's monotonic
+    # ``seq``-high-water dedup collapses them to a single terminal rather than
+    # relaying both. ``None`` until the first terminal is built.
+    terminal_seq: int | None = None
+    # True once at least one answer ``delta`` has actually been FLUSHED to the
+    # wire for the current speculative turn (#488). Set in ``_publish_text_
+    # envelope`` (delta kind), cleared by ``_retract_answer``. It is what tells a
+    # retraction whether there is anything on the client to discard: buffered-but-
+    # never-flushed speculative text is dropped silently (no ``answer_retract``),
+    # while flushed text earns the retraction envelope.
+    answer_on_wire: bool = False
+    # True once the assistant turn has COMMITTED (#489/BE-1). A terminal-error path
+    # reached AFTER the commit — a terminal publish that failed over a durable answer
+    # — must NOT retract the answer already on the wire: it is persisted, so wire ==
+    # stored must still hold (#148). Guards ``_terminal_error``'s retraction.
+    answer_committed: bool = False
 
     def next_seq(self) -> int:
         s = self.seq
@@ -313,9 +486,7 @@ def _log_cache_kpi(result: _RunResult) -> None:
         cached_prompt_tokens=result.cached_prompt_tokens,
         prompt_tokens=result.prompt_tokens,
         cache_hit_ratio=(
-            round(result.cached_prompt_tokens / result.prompt_tokens, 3)
-            if reported
-            else None
+            round(result.cached_prompt_tokens / result.prompt_tokens, 3) if reported else None
         ),
         cache_write_tokens=result.cache_write_tokens,
         usage_reported=reported,
@@ -353,6 +524,18 @@ class ChatRuntime:
         suggestions_enabled: bool = _DEFAULT_SUGGESTIONS_ENABLED,
         suggestions_count: int = _DEFAULT_SUGGESTIONS_COUNT,
         suggestions_timeout_seconds: float = _DEFAULT_SUGGESTIONS_TIMEOUT_SECONDS,
+        suggestions_grace_seconds: float = _DEFAULT_SUGGESTIONS_GRACE_SECONDS,
+        suggestions_model: str = _DEFAULT_SUGGESTIONS_MODEL,
+        text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
+        text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
+        clock: Callable[[], float] | None = None,
+        flush_sleep: Callable[[float], Awaitable[None]] | None = None,
+        turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
+        interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
+        interactive_deadline_at: Callable[[float], float] | None = None,
+        terminal_publish_margin_seconds: float | None = _DEFAULT_TERMINAL_PUBLISH_MARGIN_SECONDS,
+        producer_deadline_at: Callable[[float], float] | None = None,
+        answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -388,6 +571,16 @@ class ChatRuntime:
         # API wires ``Settings``; defaults (module constants) keep offline tests
         # and any un-wired caller building prompts exactly as before.
         self._context_config = context_config or ContextConfig()
+        # Per-answer, per-model memoizing token counters (#491, AC-3). The answer
+        # loop refits the grown transcript before every model turn; without
+        # memoisation each refit re-tokenises the WHOLE transcript, so an answer
+        # is O(turns x transcript) tokeniser work on the event loop. One memoiser
+        # per model (keyed on the wire text) makes each refit O(new messages) —
+        # the system prompt, tools block, question, and prior turns are cache
+        # hits. Per-model because a failover refit deliberately re-counts under
+        # the fallback model's tokeniser. The runtime is constructed per answer,
+        # so the cache is bounded by (and lives only for) one answer.
+        self._token_counters: dict[str, TokenCounter] = {}
         # The retrieval service is built per-answer over the runtime's own
         # session. Injectable so the offline tests supply a fake whose
         # ``search_text`` does not need pgvector; defaults to the real adapter.
@@ -429,6 +622,88 @@ class ChatRuntime:
         self._suggestions_enabled = suggestions_enabled
         self._suggestions_count = suggestions_count
         self._suggestions_timeout_seconds = suggestions_timeout_seconds
+        # The server-side post-terminal grace (#489/BE-5), declared on the ``done``
+        # terminal (``suggestionsGraceMs``) so the WS consumer holds the socket open
+        # for EXACTLY the window the server will keep relaying — one source of truth
+        # rather than a hard-coded client guess that a larger server grace overruns.
+        self._suggestions_grace_seconds = suggestions_grace_seconds
+        # The dedicated suggestions model (#490): resolved to its own route so
+        # the nicety runs on a FAST model, not the answer's (possibly frontier)
+        # route. Empty ⇒ inherit the answer route (pre-#490 behaviour).
+        self._suggestions_model = suggestions_model
+        # Streamed-text coalescing knobs (#487): the character budget and the
+        # elapsed-time deadline, whichever fires first. ``clock`` is the
+        # MONOTONIC time source, injectable so tests are deterministic without
+        # sleeping (never a wall clock — a step backwards would stall a flush).
+        self._text_coalesce_chars = text_coalesce_chars
+        self._text_coalesce_seconds = text_coalesce_seconds
+        self._clock: Callable[[], float] = clock or time.monotonic
+        # The coalescer flush timer (#487/BE-4): when a lone chunk is buffered and
+        # the provider then stalls, this bounds how long the buffered text can wait
+        # before its elapsed-time deadline flushes it — without a subsequent chunk to
+        # trip the add-time check. Production sleeps the real remaining time; tests
+        # inject a controllable timer so the deadline is deterministic without a real
+        # sleep. Distinct from ``retry_sleep`` (backoffs) so tests observe each.
+        self._flush_sleep: Callable[[float], Awaitable[None]] = flush_sleep or asyncio.sleep
+        # Interactive timeout budget (#489). ``turn_timeout_seconds`` caps a whole
+        # resilient turn (all same-route retries + backoffs + one failover) as an
+        # asyncio deadline — the load-bearing bound for a hung provider; ``None``
+        # leaves the batch behaviour (the gateway request timeout only).
+        # ``interactive_max_attempts`` caps the same-route retry ladder for a live
+        # turn (2 = one retry); ``None`` keeps the full 3-attempt ladder for
+        # batch/headless callers. Neither is set by the headless/preview/offline
+        # constructors, so their behaviour is byte-identical to pre-#489.
+        self._turn_timeout_seconds = turn_timeout_seconds
+        self._interactive_max_attempts = interactive_max_attempts
+        # BE-7 test seam: mints the absolute monotonic deadline for one interactive
+        # resilient turn. ``None`` (production, every non-test caller) ⇒
+        # ``loop.time() + budget``, byte-identical to ``asyncio.timeout(budget)``.
+        # A test injects one returning an already-elapsed instant so the deadline
+        # fires immediately even at the MAXIMUM configured budget — proving the
+        # <=30s worst-case bound without a real wall-clock wait.
+        self._interactive_deadline_factory = interactive_deadline_at
+        # Terminal-publish budget (R2-8, #489 AC-4). ``terminal_publish_margin_seconds``
+        # is the wall-clock margin the interactive path reserves for publishing the
+        # terminal; combined with ``turn_timeout_seconds`` it is the WHOLE
+        # producer→terminal budget the terminal publish is bounded by, so a stalled
+        # backplane pipeline cannot run past the ceiling. ``None`` (batch/headless/
+        # offline) leaves the terminal publish unbounded, byte-identical to pre-R2-8.
+        # ``_producer_deadline`` is the absolute monotonic deadline for that budget,
+        # minted once per answer in ``run`` (the runtime is per-answer). The factory
+        # is the test seam mirroring ``interactive_deadline_at``: inject one returning
+        # an already-elapsed instant to fire the terminal-publish bound with no real
+        # wait, or a future instant to give a slow-but-alive backplane a fixed window.
+        self._terminal_publish_margin_seconds = terminal_publish_margin_seconds
+        self._producer_deadline_factory = producer_deadline_at
+        self._producer_deadline: float | None = None
+        # Answer/synthesis output ceiling (#488), threaded into every answer-turn
+        # ``stream_tools`` call. ``None`` ⇒ unbounded (the pre-#488 wire); the chat
+        # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
+        # as unbounded (the setting's documented kill switch).
+        self._answer_max_tokens = answer_max_tokens or None
+
+    def _token_counter_for(self, model: str) -> TokenCounter:
+        """The memoizing token counter for ``model`` (#491) — one per answer/model.
+
+        Threaded into every ``assemble_context`` / ``fit_transcript`` call so the
+        expensive tokeniser fires only for the messages each turn appends, not the
+        whole grown transcript every turn. Cached per model id: the primary route
+        accumulates hits across its turns, and a failover route gets its own
+        memoiser (its tokeniser and window differ, so its counts must be fresh).
+        """
+        memo = self._token_counters.get(model)
+        if memo is None:
+            memo = memoizing_token_counter(litellm_token_counter(model))
+            self._token_counters[model] = memo
+        return memo
+
+    def _new_coalescer(self) -> _TextCoalescer:
+        """The per-stream text buffer, built from this runtime's flush policy."""
+        return _TextCoalescer(
+            max_chars=self._text_coalesce_chars,
+            max_delay_seconds=self._text_coalesce_seconds,
+            clock=self._clock,
+        )
 
     async def run(
         self,
@@ -477,13 +752,20 @@ class ChatRuntime:
         typed ``ok=False`` rather than launching a container. A test run therefore
         performs NO real side effect (the load-bearing property of the harness).
         """
-        state = _StreamState(stream_id=stream_id)
+        state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
+        # Mint the absolute producer→terminal deadline for the interactive path
+        # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
+        # leaving the reserved margin; this anchors the WHOLE path so the terminal
+        # publish is later bounded by the time actually left — never an unbounded
+        # Redis pipeline. Off (``None``) for batch/headless/offline or when no margin
+        # is wired: the terminal publish stays unbounded, exactly as before.
+        self._producer_deadline = self._resolve_producer_deadline()
         assistant_message_id = uuid.uuid4()
         await self._publish(
             state,
             envelopes.start(
                 stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 data={
                     "sessionId": str(session_id),
                     "messageId": str(assistant_message_id),
@@ -499,6 +781,13 @@ class ChatRuntime:
                 # itself, keyed off the streaming principal's tenant. No-op off
                 # Postgres (offline tests).
                 await bind_tenant(session, self._principal.tenant_id)
+                # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
+                # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
+                # failure therefore raises out of ``_answer`` into the error arms
+                # below and becomes a typed ``error`` terminal — never a success
+                # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
+                # runs AFTER that commit in its own independent transaction (it cannot
+                # roll the answer back), so this block has no trailing commit.
                 result = await self._answer(
                     session=session,
                     state=state,
@@ -516,7 +805,6 @@ class ChatRuntime:
                     evidence=evidence,
                     mentioned_documents=mentioned_documents,
                 )
-                await session.commit()
         except asyncio.CancelledError:
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
             # cancels every in-flight producer on SIGTERM, issue #156). In Python
@@ -548,39 +836,15 @@ class ChatRuntime:
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
             return False
 
-        if state.terminal_sent:
-            # A terminal already fired (e.g. cancellation mid-commit raced ahead);
-            # never publish a second terminal — exactly-one-terminal contract.
-            return False
-        state.terminal_sent = True
-        await self._publish(
-            state,
-            envelopes.done(
-                stream_id,
-                state.next_seq(),
-                data={
-                    "messageId": str(assistant_message_id),
-                    "finishReason": result.finish_reason,
-                    # The model that ACTUALLY answered (#413) — differs from
-                    # ``start``'s requested model after a failover.
-                    "model": result.model_used,
-                    "citationCount": len(result.citations),
-                    "usage": {
-                        "promptTokens": result.prompt_tokens,
-                        "completionTokens": result.completion_tokens,
-                        "totalTokens": result.total_tokens,
-                        # Provider cache accounting (#409, ADR-0016 §2.6) —
-                        # additive contract fields; zero when the provider
-                        # reports no cache detail.
-                        "cachedPromptTokens": result.cached_prompt_tokens,
-                        "cacheWriteTokens": result.cache_write_tokens,
-                    },
-                },
-            ),
-        )
-        # The KPI emits ONLY here — after the commit above and the successful
-        # ``done`` publication — so a failed answer can never appear in the
-        # per-successful-answer series (round-2 review, NEW-1).
+        # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
+        # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
+        # answer is durably persisted and the client saw exactly one success
+        # terminal. A commit failure instead raises out of ``_answer`` (before any
+        # terminal) into the ``except`` arms above, which emit a typed ``error`` — so
+        # a rolled-back answer never reports success. The cache KPI emits ONLY here,
+        # strictly after that successful commit, so a failed answer never appears in
+        # the per-successful-answer series (round-2 review NEW-1; BE-1 hardens it by
+        # making the terminal itself follow the commit).
         _log_cache_kpi(result)
         return True
 
@@ -639,9 +903,7 @@ class ChatRuntime:
         # enforces the allow-list + approval seam, bounds each call, records a
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
-        allowed = (
-            assistant_config.allowed if assistant_config is not None else default_allowlist()
-        )
+        allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
         # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
         # (never a global registration — they are tenant-scoped and dynamic, so a
         # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
@@ -714,9 +976,7 @@ class ChatRuntime:
         # data): strings only, non-empty, minus the primary itself.
         tenant_row = await TenantRepository(session).get(tenant_id)
         override = tenant_row.max_tool_turns if tenant_row is not None else None
-        max_tool_turns = max(
-            1, override if override is not None else self._default_max_tool_turns
-        )
+        max_tool_turns = max(1, override if override is not None else self._default_max_tool_turns)
         stored = tenant_row.fallback_models or [] if tenant_row else []
         structural: list[str] = []
         for m in stored:
@@ -785,9 +1045,7 @@ class ChatRuntime:
             # survive — a corrupt digest cannot inject arbitrary ids.
             all_chunks = [c for chunks in by_doc.values() for c in chunks]
             chunk_owner = (
-                await retrieval.valid_chunk_pairs(
-                    principal=self._principal, chunk_ids=all_chunks
-                )
+                await retrieval.valid_chunk_pairs(principal=self._principal, chunk_ids=all_chunks)
                 if all_chunks
                 else {}
             )
@@ -805,9 +1063,7 @@ class ChatRuntime:
             if summary:
                 for doc_id, name in mentioned_documents:
                     if doc_id not in permitted and name and name in summary:
-                        summary = summary.replace(
-                            name, "[document no longer accessible]"
-                        )
+                        summary = summary.replace(name, "[document no longer accessible]")
             # INV-6: rehydration is an audited read-side event — how many ids
             # were requested vs still permitted (never the content).
             await audit.emit(
@@ -833,6 +1089,7 @@ class ChatRuntime:
             question=question_for_model,
             tools=advertised,
             config=self._context_config,
+            counter=self._token_counter_for(route_state.route.model),
             summary=summary,
             evidence_lines=tuple(evidence_lines),
         )
@@ -931,6 +1188,7 @@ class ChatRuntime:
                 model=model_id,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(model_id),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
 
@@ -949,29 +1207,24 @@ class ChatRuntime:
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
             )
-            async def _publish_narration(
-                text: str, *, _turn: int = turn_index + 1
-            ) -> None:
+
+            async def _publish_narration(text: str, *, _turn: int = turn_index + 1) -> None:
                 # ADR-0016 §6 (#414): a tool-calling turn's visible narration,
                 # streamed live as transient status — NEVER a delta, never
                 # persisted (the #148 invariant is untouched). Runs in the
                 # answer coroutine, so seq mint + publish stay atomic.
-                await self._publish(
-                    state,
-                    envelopes.event(
-                        state.stream_id,
-                        state.next_seq(),
-                        name="narration",
-                        data={"text": text, "turn": _turn},
-                    ),
-                )
+                # Coalesced per turn (#487); the buffer is drained before the
+                # turn's `think/completed` step, hence before its tool events.
+                await self._stream_text(state, _TextKind("narration", _turn), text)
 
             turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
+                state=state,
                 session=session,
                 route_state=route_state,
                 messages=messages,
@@ -979,10 +1232,14 @@ class ChatRuntime:
                 tools=advertised,
                 refit=_refit,
                 narrate=_publish_narration,
+                max_tokens=self._answer_max_tokens,
             )
             if not turn_tool_calls:
-                # Tool-free turn → this is the answer. Only now is its text known
-                # to be answer content (not narration), so stream it now and stop.
+                # Tool-free turn → this is the answer. Its text ALREADY streamed
+                # live as answer deltas (#488, speculatively); no tool fragment
+                # ever appeared, so none of it was retracted — it stays the
+                # answer. Just close the think step (which flushes any tail of the
+                # coalesced answer) and stop.
                 await self._emit_step(
                     state,
                     key="think",
@@ -990,7 +1247,6 @@ class ChatRuntime:
                     step_state="completed",
                     turn=turn_index + 1,
                 )
-                await self._publish_text(state, turn_text)
                 answer_chunks = turn_text
                 budget_exhausted = False
                 break
@@ -1101,6 +1357,7 @@ class ChatRuntime:
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             await self._emit_step(
@@ -1112,6 +1369,7 @@ class ChatRuntime:
                 turn=max_tool_turns + 1,
             )
             _, finish_reason, turn_text = await self._stream_turn_resilient(
+                state=state,
                 session=session,
                 route_state=route_state,
                 messages=messages,
@@ -1119,6 +1377,7 @@ class ChatRuntime:
                 tools=advertised,
                 tool_choice="none",
                 refit=_refit,
+                max_tokens=self._answer_max_tokens,
             )
             await self._emit_step(
                 state,
@@ -1127,7 +1386,9 @@ class ChatRuntime:
                 step_state="completed",
                 turn=max_tool_turns + 1,
             )
-            await self._publish_text(state, turn_text)
+            # The forced synthesis is tool-IMPOSSIBLE (``tool_choice="none"``), so
+            # its text streamed live unconditionally (#488, AC-2); the think step
+            # above flushed any coalesced tail. Nothing to re-publish here.
             answer_chunks = turn_text
 
         if ask_question is not None:
@@ -1166,9 +1427,8 @@ class ChatRuntime:
                 retrieved_hits=total_hits,
                 cited_document_ids=[],
             )
-            await self._emit_ask_user(state, assistant_message_id, ask_question)
             answer_usage = _answer_usage_totals(route_state, usage)
-            return _RunResult(
+            ask_result = _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
                 citation_count=0,
@@ -1179,6 +1439,30 @@ class ChatRuntime:
                 cached_prompt_tokens=answer_usage.cached_prompt_tokens,
                 cache_write_tokens=answer_usage.cache_write_tokens,
             )
+            # Commit the persisted question + its usage row BEFORE the terminal
+            # (#489/BE-1): a commit failure raises here and becomes a typed ``error``
+            # terminal (nothing misleading was published yet), never a success
+            # ``done``/``ask_user`` event over a rolled-back question.
+            await session.commit()
+            # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): a
+            # post-commit publish failure while emitting ``ask_user``/``done`` reaches
+            # ``run``'s error arms, and an armed salvage would there re-record this
+            # already-committed usage as a duplicate message-less row (#409 — every
+            # billed token recorded exactly once).
+            self._salvage = None
+            # Durable: a terminal-publish failure now must not retract on-wire text.
+            state.answer_committed = True
+            # The clarifying question IS the terminal (spec 0006): no suggestions
+            # follow it, so the ``ask_user`` event + ``done`` stop the stream at once
+            # (no pending window). Both ride AFTER the commit.
+            await self._emit_ask_user(state, assistant_message_id, ask_question)
+            await self._publish_terminal_done(
+                state,
+                assistant_message_id=assistant_message_id,
+                result=ask_result,
+                pending_suggestions=False,
+            )
+            return ask_result
 
         if finish_reason == "length":
             # Length continuation (ADR-0016 §4, #413): the answer hit the output
@@ -1194,18 +1478,18 @@ class ChatRuntime:
                 # A zero-visible-text length turn (budget burned on non-text
                 # content) skips the append — an empty assistant turn helps no
                 # provider — but STILL gets its continuation (#440 finding 6).
-                messages.append(
-                    ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks))
-                )
+                messages.append(ChatMessage(role=Role.ASSISTANT, content="".join(answer_chunks)))
             messages = fit_transcript(
                 messages,
                 model=route_state.route.model,
                 tools=advertised,
                 config=self._context_config,
+                counter=self._token_counter_for(route_state.route.model),
                 cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
             )
             try:
                 _, finish_reason, extra_chunks = await self._stream_turn_resilient(
+                    state=state,
                     session=session,
                     route_state=route_state,
                     messages=messages,
@@ -1219,6 +1503,13 @@ class ChatRuntime:
                     # single-model attribution surface (done.model, the
                     # message row, the audit).
                     allow_failover=False,
+                    # The continuation runs AFTER a finalised answer block, so it
+                    # must NOT stream live (#488): a whole-turn ``answer_retract``
+                    # here would discard the already-finalised partial too. Buffer
+                    # it and publish once it completes, the pre-#488 shape — which
+                    # keeps "at most one un-finalised speculative block" true.
+                    stream_answer=False,
+                    max_tokens=self._answer_max_tokens,
                 )
             except AppError as exc:
                 # Best-effort continuation: if it cannot run (retries
@@ -1233,19 +1524,29 @@ class ChatRuntime:
                 await self._publish_text(state, extra_chunks)
             answer_chunks = [*answer_chunks, *extra_chunks]
 
-        answer_text = "".join(answer_chunks).strip()
+        # Persist the EXACT concatenation of the delivered answer deltas (#148):
+        # stored == streamed must hold BYTE-for-byte, so NEVER strip the persisted
+        # value — a strip here makes the stored message differ from what streamed.
+        # Stripping is used ONLY to detect emptiness below (whether to fall back).
+        answer_text = "".join(answer_chunks)
 
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
-        if not answer_text:
-            # Still no answer text — even a forced synthesis said nothing (e.g.
+        if not answer_text.strip():
+            # No VISIBLE answer text — even a forced synthesis said nothing (e.g.
             # retrieval found nothing). Fall back to an honest "couldn't find it"
-            # rather than persisting an empty turn.
+            # rather than persisting an empty (or whitespace-only) turn. Any
+            # whitespace-only speculative text already on the wire is retracted first
+            # so the fallback is exactly what's delivered (#148).
+            if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
+                await self._retract_answer(state)
             answer_text = NO_SOURCES_FALLBACK
-            await self._publish(
-                state,
-                envelopes.delta(state.stream_id, state.next_seq(), {"text": answer_text}),
-            )
+            # Emit the fallback through the TRACKED ``_stream_text`` seam (#488), not a
+            # raw ``_publish``: that sets ``answer_on_wire``, so a later persistence /
+            # commit failure RETRACTS the fallback like any other answer delta instead
+            # of stranding it on the client under an ``error`` terminal. ``answer_text``
+            # is now EXACTLY the fallback string, so stored == delivered still holds.
+            await self._stream_text(state, _ANSWER_TEXT, answer_text)
 
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="started")
         stored_citations = await self._persist(
@@ -1281,63 +1582,25 @@ class ChatRuntime:
             retrieved_hits=total_hits,
             # Distinct cited documents, first-appearance order — the provenance
             # the Audit "Answers cited" KPI reads (#249).
-            cited_document_ids=list(
-                dict.fromkeys(str(c.document_id) for c in stored_citations)
-            ),
+            cited_document_ids=list(dict.fromkeys(str(c.document_id) for c in stored_citations)),
         )
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="completed")
 
-        # Follow-up suggestions (spec 0006 #429): one config-gated, time-bounded
-        # completion over the visible conversation tail — no retrieval, so no new
-        # INV-2 surface. Any failure / parse miss ⇒ no event, never an error. Its
-        # token usage folds into ``usage`` BEFORE the answer's single llm_usage
-        # row records below, so the nicety's real cost is accounted (#409).
-        # Skipped for the honest "couldn't find it" fallback (HAX guideline 10:
-        # suppress suggestions on low-confidence/refusal answers — follow-ups to
-        # a failed answer read as engagement bait).
-        if self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK:
-            await self._emit_step(
-                state, key="suggest", label="Suggesting follow-ups", step_state="started"
-            )
-            suggestions = await self._generate_suggestions(
-                question=question, answer=answer_text, route=route_state.route, usage=usage
-            )
-            await self._emit_step(
-                state, key="suggest", label="Suggesting follow-ups", step_state="completed"
-            )
-            if suggestions:
-                await self._publish(
-                    state,
-                    envelopes.event(
-                        state.stream_id,
-                        state.next_seq(),
-                        name="suggestions",
-                        data={
-                            "messageId": str(assistant_message_id),
-                            "suggestions": suggestions,
-                        },
-                    ),
-                )
+        # Suggestions are OFF the critical path now (#489). Whether they will be
+        # ATTEMPTED is decided here — config-gated, and suppressed for the honest
+        # "couldn't find it" fallback (HAX guideline 10 / AC-5: follow-ups to a
+        # refusal read as engagement bait). The decision is declared to the client
+        # on the terminal (``pendingSuggestions``) so the consumer knows to hold a
+        # bounded grace open for the one post-terminal event.
+        will_suggest = self._suggestions_enabled and answer_text != NO_SOURCES_FALLBACK
 
-        # Record the answer's summed token/cache usage (#409) — one row per
-        # answer, in the SAME transaction as the message it accounts for. Runs
-        # AFTER suggestion generation so the row carries the whole answer's cost
-        # (turn loop + the suggestions nicety, spec 0006 #429). ``model`` is the
-        # requested id so a per-tenant ``provider:`` id stays attributable,
-        # matching the message row. Zeroed fields (a provider that omitted
-        # usage) still record: the answer happened, and "no usage reported"
-        # must be visible, not a gap.
-        await self._record_usage_scopes(
-            session=session,
-            tenant_id=tenant_id,
-            route_state=route_state,
-            usage=usage,
-            session_id=session_id,
-            assistant_message_id=assistant_message_id,
-        )
-
+        # The answer's summed usage as reported on the terminal — the ANSWER's cost
+        # (turn loop + any failover scopes), computed BEFORE the suggestions nicety
+        # runs. ``done.usage`` is the answer terminal, so it must not wait on (nor
+        # include) the post-terminal nicety; the suggestions tokens are still
+        # accounted on the same DB row (#409 / AC-3) by the post-commit UPDATE below.
         answer_usage = _answer_usage_totals(route_state, usage)
-        return _RunResult(
+        run_result = _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
             citation_count=len(stored_citations),
@@ -1348,6 +1611,85 @@ class ChatRuntime:
             cached_prompt_tokens=answer_usage.cached_prompt_tokens,
             cache_write_tokens=answer_usage.cache_write_tokens,
         )
+
+        # Record the answer's BASE token/cache usage (#409) — one row per answer, in
+        # the SAME transaction as the message it accounts for. This is the ANSWER's
+        # cost only (turn loop + any failover scopes); the post-terminal suggestions
+        # nicety folds its own cost onto this same row afterwards, in its own
+        # transaction (BE-1). ``model`` is the requested id so a per-tenant
+        # ``provider:`` id stays attributable, matching the message row. Zeroed fields
+        # (a provider that omitted usage) still record: "no usage reported" must be
+        # visible, not a gap.
+        await self._record_usage_scopes(
+            session=session,
+            tenant_id=tenant_id,
+            route_state=route_state,
+            usage=usage,
+            session_id=session_id,
+            assistant_message_id=assistant_message_id,
+        )
+
+        # Commit the assistant turn + its base usage row BEFORE the terminal
+        # (#489/BE-1): the answer, its citations/evidence, the audit, and the base
+        # usage row are all durable now, so publishing ``done`` cannot report success
+        # over a rolled-back answer. A commit failure raises here (before any
+        # terminal) into ``run``'s error arms and becomes a typed ``error`` terminal.
+        await session.commit()
+        # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): from here
+        # the answer + its base usage row are committed, so a post-commit cancellation
+        # or a publish failure (the terminal ``done``, or the post-terminal suggestions
+        # event) that reaches ``run``'s error arms must NOT re-record this same usage as
+        # a duplicate message-less row (#409 — every billed token recorded exactly
+        # once). Cleared the instant the spend is durably accounted. (The independent
+        # suggestions transaction below then runs with salvage already disarmed, so its
+        # own commit carries no salvage risk either.)
+        self._salvage = None
+        # Durable now: a terminal-publish failure below must emit its terminal WITHOUT
+        # retracting the answer already on the wire — it is persisted (wire == stored,
+        # #148). ``_terminal_error`` reads this flag to skip retraction (R2-2).
+        state.answer_committed = True
+
+        # Publish the terminal ``done`` now that the answer is durable (#489 AC-1) —
+        # the UI settles the instant the answer is complete, and only the (optional,
+        # independent) suggestions nicety follows.
+        await self._publish_terminal_done(
+            state,
+            assistant_message_id=assistant_message_id,
+            result=run_result,
+            pending_suggestions=will_suggest,
+        )
+
+        # Follow-up suggestions (spec 0006 #429): one config-gated, time-bounded
+        # completion over the visible conversation tail — no retrieval, so no new
+        # INV-2 surface. Generated AFTER the terminal, in an INDEPENDENT transaction
+        # (BE-1) that cannot roll the committed answer back, and delivered as a
+        # bounded POST-terminal ``event:suggestions`` (#489). Any failure / timeout /
+        # parse miss ⇒ no event, never touching the already-published terminal
+        # (AC-6). Its token spend still folds onto the answer's single llm_usage row
+        # via the UPDATE inside that transaction (#409 / AC-3).
+        if will_suggest:
+            suggestions = await self._run_followup_suggestions(
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                answer_route=route_state.route,
+                question=question,
+                answer_text=answer_text,
+            )
+            if suggestions:
+                await self._publish(
+                    state,
+                    envelopes.event(
+                        state.stream_id,
+                        await self._next_seq(state),
+                        name="suggestions",
+                        data={
+                            "messageId": str(assistant_message_id),
+                            "suggestions": suggestions,
+                        },
+                    ),
+                )
+
+        return run_result
 
     async def _resolve_mcp_tools(
         self, session: AsyncSession, allowed: frozenset[str]
@@ -1391,6 +1733,12 @@ class ChatRuntime:
         ``ToolContext.sandbox`` stays ``None`` and a stray ``run_python`` invocation
         reports a typed ``ok=False`` instead of executing. The factory itself may
         also return ``None`` (no runner configured / disabled deploy) — same result.
+
+        The seam borrows the raw ``state.next_seq`` (it publishes straight to the
+        backplane, and a flush needs an ``await``). Safe because ``run_python``
+        executes strictly BETWEEN model turns, while the #487 text buffer can
+        only hold content published from the answer turn onwards — the buffer is
+        provably empty whenever the seam runs.
         """
         if self._sandbox_factory is None or RUN_PYTHON_TOOL_NAME not in allowed:
             return None
@@ -1494,6 +1842,7 @@ class ChatRuntime:
     async def _stream_turn_resilient(
         self,
         *,
+        state: _StreamState,
         session: AsyncSession,
         route_state: _RouteState,
         messages: list[ChatMessage],
@@ -1503,16 +1852,25 @@ class ChatRuntime:
         refit: Callable[[str], list[ChatMessage]] | None = None,
         allow_failover: bool = True,
         narrate: Callable[[str], Awaitable[None]] | None = None,
+        stream_answer: bool = True,
+        max_tokens: int | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
-        """One buffered turn with bounded retries + model failover (ADR-0016 §4, #413).
+        """One turn with bounded retries + model failover (ADR-0016 §4, #413/#488).
 
-        Safe by construction: an UNCLASSIFIED turn publishes nothing (its text
-        is buffered; only the caller decides what streams) and tools run
-        between turns — so a retried or failed-over turn can neither duplicate
-        wire output nor re-execute a tool. A turn CLASSIFIED tool-calling
-        (ADR-0016 §6, #414) may publish narration through the ``narrate``
-        seam — and from that classification instant the window below is
-        closed: no retry, no failover. Policy, in order:
+        Safe by construction even though the answer now streams LIVE (#488):
+        speculative answer ``delta``s are wire output that can be UN-published, so
+        a retried or failed-over turn is preceded by an ``answer_retract`` that
+        undoes them — the retry window therefore stays open despite live streaming.
+        Tools run between turns, so a retry can never re-execute a tool. A turn
+        CLASSIFIED tool-calling (ADR-0016 §6, #414) publishes narration through the
+        ``narrate`` seam — narration cannot be un-published, so from that
+        classification instant the window is closed: no retry, no failover.
+
+        ``stream_answer`` gates live answer streaming: the tool-loop and forced-
+        synthesis turns stream (``True``); the length continuation buffers
+        (``False``) because it runs after a finalised answer block, where a
+        whole-turn retraction would wrongly discard the finalised partial too
+        (#488). ``max_tokens`` bounds the turn's generation. Policy, in order:
 
         * a gateway-classified RETRYABLE fault (timeout / connection / 429 /
           provider 5xx) retries on the SAME route, ≤ ``len(_RETRY_BACKOFF_
@@ -1531,8 +1889,36 @@ class ChatRuntime:
         A partially-consumed failed turn may already have folded provider
         ``usage`` into the running totals — deliberately kept: those tokens
         were genuinely spent, and the usage row is billing-honest.
+
+        **Interactive deadline (#489).** When ``turn_timeout_seconds`` is set (the
+        chat API path), the WHOLE resilient turn — every same-route retry, its
+        backoffs, and any failover attempt — is bounded by one ``asyncio.timeout``.
+        A hung/unreachable provider therefore surfaces a typed 503 within the budget
+        (AC-4) instead of stacking the batch request timeout per retry. A fired
+        deadline is re-raised as a typed :class:`DependencyError` (503) — never a raw
+        ``TimeoutError``, which would bypass ``run``'s ``except AppError`` arm and
+        become an opaque 500. ``None`` (batch/headless/offline) keeps the pre-#489
+        behaviour: the gateway's request timeout is the only bound.
         """
-        emitted = {"narration": False}
+        # ``narration`` closes the retry window (§6); ``answer`` records that
+        # speculative answer text has been streamed live this attempt and is
+        # therefore RETRACTABLE before a retry/failover (#488).
+        emitted = {"narration": False, "answer": False}
+
+        async def _speak_answer(text: str) -> None:
+            # Speculative / tool-impossible answer text, streamed live as
+            # ``delta`` (#488). Recorded BEFORE the publish so a fault mid-publish
+            # still knows to retract on the way to a retry.
+            emitted["answer"] = True
+            await self._stream_text(state, _ANSWER_TEXT, text)
+
+        async def _retract_speculative_answer() -> None:
+            # Un-publish the current turn's speculative answer ``delta``s (#488):
+            # discards the still-buffered tail and — if any delta already reached
+            # the wire — emits ``answer_retract``. Resets the flag so the next
+            # attempt streams cleanly and a second retract is a no-op.
+            await self._retract_answer(state)
+            emitted["answer"] = False
 
         async def _narrate_and_close_window(text: str) -> None:
             # ADR-0016 §4/§6 (#414): the window closes at the CLASSIFICATION
@@ -1546,64 +1932,174 @@ class ChatRuntime:
             if narrate is not None and text:
                 await narrate(text)
 
-        while True:
-            last: LlmProviderError | None = None
-            for attempt in range(1 + len(_RETRY_BACKOFF_SECONDS)):
-                if attempt:
-                    delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
-                    hint = last.retry_after_seconds if last is not None else None
-                    if hint is not None:
-                        delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
-                    await self._retry_sleep(delay)
-                try:
-                    return await self._stream_one_turn(
-                        messages=messages,
-                        route=route_state.route,
-                        usage=usage,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        narrate=(
-                            _narrate_and_close_window if narrate is not None else None
-                        ),
-                    )
-                except LlmProviderError as exc:
-                    if not exc.retryable or emitted["narration"]:
-                        # Terminal — or the turn already emitted narration
-                        # (ADR-0016 §4: the retry window closed at first
-                        # emission; a retry could duplicate wire output).
-                        raise
-                    last = exc
-                    # Class-name-derived detail only — never vendor text (#36 AC-7).
-                    log.warning(
-                        "llm.turn_retryable_fault",
-                        model=route_state.model,
-                        attempt=attempt,
-                        code=exc.code,
-                    )
-            # Retries exhausted on this route. Fail over if a candidate remains:
-            # close the dying route's usage scope (its spend stays attributed to
-            # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
-            # tokenizer/window (#440 review, finding 3): a smaller fallback must
-            # get a prompt trimmed for ITS budget, not the primary's.
-            if last is None:  # pragma: no cover — the loop always sets it
-                raise RuntimeError("retry loop exited without a fault")
-            dying_model = route_state.model
-            if not allow_failover:
-                # The length-continuation turn (#440 round-2 NEW-5): visible
-                # answer text is already on the wire from the CURRENT route, so
-                # switching models mid-answer would make ``done.model`` (and
-                # every attribution surface) name a model that produced only
-                # part of the visible content. Retries stay; failover does not.
-                raise last
-            if not await self._advance_to_fallback(session, route_state):
-                raise last
-            route_state.spent.append((dying_model, usage.snapshot_and_reset()))
-            if refit is not None:
-                messages = refit(route_state.route.model)
+        def _buffer_flush_deadline() -> float | None:
+            # BE-4: the monotonic time the open coalesce buffer must flush by, so a
+            # provider stall after a lone chunk cannot strand it past its deadline.
+            return state.buffer.flush_deadline()
 
-    async def _advance_to_fallback(
-        self, session: AsyncSession, route_state: _RouteState
-    ) -> bool:
+        async def _drain_buffer() -> None:
+            # BE-4: drive the coalescer's TIME flush from the answer coroutine (seq
+            # mint + publish stay ordered). Flushes whatever kind is buffered —
+            # speculative answer text becomes a live ``delta``, narration an
+            # ``event:narration`` — exactly what the add-time deadline would emit.
+            await self._flush_text(state)
+
+        async def _run_attempts() -> tuple[list[ToolCall], str, list[str]]:
+            nonlocal messages
+            while True:
+                last: LlmProviderError | None = None
+                for attempt in range(self._turn_attempt_count()):
+                    if attempt:
+                        delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
+                        hint = last.retry_after_seconds if last is not None else None
+                        if hint is not None:
+                            delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
+                        await self._retry_sleep(delay)
+                    try:
+                        return await self._stream_one_turn(
+                            messages=messages,
+                            route=route_state.route,
+                            usage=usage,
+                            tools=tools,
+                            tool_choice=tool_choice,
+                            max_tokens=max_tokens,
+                            narrate=(_narrate_and_close_window if narrate is not None else None),
+                            speak=(_speak_answer if stream_answer else None),
+                            # Retraction is only meaningful where a tool call can
+                            # still appear (narrate seam wired); a tool-impossible
+                            # turn never classifies, so it never retracts here.
+                            on_retract=(
+                                _retract_speculative_answer if narrate is not None else None
+                            ),
+                            # BE-4: the coalescer flush-timer seams — a stalled
+                            # provider still flushes a lone buffered chunk on its
+                            # deadline. In THIS coroutine, so ordering/monotonicity
+                            # hold and the timed flush never races the terminal.
+                            flush_deadline=_buffer_flush_deadline,
+                            flush=_drain_buffer,
+                        )
+                    except LlmProviderError as exc:
+                        if not exc.retryable or emitted["narration"]:
+                            # Terminal — or the turn already emitted narration
+                            # (ADR-0016 §4: the retry window closed at first
+                            # emission; a retry could duplicate wire output).
+                            raise
+                        # Retryable and NOT classified tool-calling: any answer
+                        # text streamed speculatively this attempt is retractable
+                        # (#488). Un-publish it so the retry/failover re-streams
+                        # cleanly — this is what keeps the window open despite
+                        # live streaming.
+                        if emitted["answer"]:
+                            await _retract_speculative_answer()
+                        last = exc
+                        # Class-name-derived detail only — never vendor text (#36 AC-7).
+                        log.warning(
+                            "llm.turn_retryable_fault",
+                            model=route_state.model,
+                            attempt=attempt,
+                            code=exc.code,
+                        )
+                # Retries exhausted on this route. Fail over if a candidate remains:
+                # close the dying route's usage scope (its spend stays attributed to
+                # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
+                # tokenizer/window (#440 review, finding 3): a smaller fallback must
+                # get a prompt trimmed for ITS budget, not the primary's.
+                if last is None:  # pragma: no cover — the loop always sets it
+                    raise RuntimeError("retry loop exited without a fault")
+                dying_model = route_state.model
+                if not allow_failover:
+                    # The length-continuation turn (#440 round-2 NEW-5): visible
+                    # answer text is already on the wire from the CURRENT route, so
+                    # switching models mid-answer would make ``done.model`` (and
+                    # every attribution surface) name a model that produced only
+                    # part of the visible content. Retries stay; failover does not.
+                    raise last
+                if not await self._advance_to_fallback(session, route_state):
+                    raise last
+                route_state.spent.append((dying_model, usage.snapshot_and_reset()))
+                if refit is not None:
+                    messages = refit(route_state.route.model)
+
+        budget = self._turn_timeout_seconds
+        if budget is None:
+            return await _run_attempts()
+        # Bound the WHOLE resilient turn by one absolute monotonic deadline (BE-7):
+        # in production ``loop.time() + budget`` — byte-identical to
+        # ``asyncio.timeout(budget)`` — but minted through an injectable seam so a
+        # test can force an already-elapsed deadline and fire this instantly at the
+        # MAXIMUM configured budget with no real wait.
+        try:
+            async with asyncio.timeout_at(self._interactive_deadline_at(budget)) as cm:
+                return await _run_attempts()
+        except TimeoutError:
+            if cm.expired():
+                # The interactive per-turn budget expired on a hung/unreachable
+                # provider (#489 AC-4). Surface it as the same typed 503 the
+                # gateway maps a provider timeout to — the client gets one terminal
+                # error within the budget, not the ~182s retry cliff.
+                log.warning("llm.turn_timeout", model=route_state.model, budget=budget)
+                raise DependencyError(
+                    "The model did not respond within the interactive time budget."
+                ) from None
+            raise
+
+    def _interactive_deadline_at(self, budget: float) -> float:
+        """Absolute monotonic deadline for one interactive resilient turn (BE-7).
+
+        Production returns ``loop.time() + budget`` — byte-identical to what
+        ``asyncio.timeout(budget)`` computes internally. Injectable via the
+        ``interactive_deadline_at`` constructor seam so a test can return a
+        deadline already in the past, firing the interactive timeout instantly at
+        the MAXIMUM configured budget with no real wall-clock wait (#489 AC-4).
+        """
+        if self._interactive_deadline_factory is not None:
+            return self._interactive_deadline_factory(budget)
+        return asyncio.get_running_loop().time() + budget
+
+    def _resolve_producer_deadline(self) -> float | None:
+        """The absolute producer→terminal deadline for this answer (R2-8), or ``None``.
+
+        Set once per answer at the top of :meth:`run`. Enabled only on the
+        interactive path — both the per-turn deadline (``turn_timeout_seconds``) and
+        the terminal-publish margin (``terminal_publish_margin_seconds``) must be
+        wired, since only that path carries the <=30s worst-case SLA. The budget is
+        ``turn deadline + margin`` (which config guarantees is <= the ceiling); the
+        turn loop separately consumes at most the turn deadline, so at terminal time
+        at least the margin remains for publishing. ``None`` for batch/headless/
+        offline callers, leaving the terminal publish unbounded, exactly as before.
+        """
+        if self._turn_timeout_seconds is None or self._terminal_publish_margin_seconds is None:
+            return None
+        budget = self._turn_timeout_seconds + self._terminal_publish_margin_seconds
+        return self._producer_deadline_at(budget)
+
+    def _producer_deadline_at(self, budget: float) -> float:
+        """Absolute monotonic deadline for the whole producer→terminal budget (R2-8).
+
+        Production returns ``loop.time() + budget``. Injectable via the
+        ``producer_deadline_at`` constructor seam (mirroring
+        ``interactive_deadline_at``) so a test can force an already-elapsed instant —
+        firing the terminal-publish bound with no real wait — or a fixed future
+        instant that hands a slow-but-alive backplane an exact window.
+        """
+        if self._producer_deadline_factory is not None:
+            return self._producer_deadline_factory(budget)
+        return asyncio.get_running_loop().time() + budget
+
+    def _turn_attempt_count(self) -> int:
+        """Same-route attempts for one turn — capped for the interactive path (#489).
+
+        The full ladder is ``1 + len(_RETRY_BACKOFF_SECONDS)`` (3 attempts, the
+        batch/headless default). The chat API caps it via ``interactive_max_attempts``
+        (2 = one retry) so a live turn does not stack the ladder inside the
+        interactive budget. Never exceeds the number of defined backoffs + 1.
+        """
+        attempts = 1 + len(_RETRY_BACKOFF_SECONDS)
+        if self._interactive_max_attempts is not None:
+            attempts = min(attempts, self._interactive_max_attempts)
+        return attempts
+
+    async def _advance_to_fallback(self, session: AsyncSession, route_state: _RouteState) -> bool:
         """Advance to the next resolvable fallback route; False when exhausted (#413).
 
         Candidates were validated at the admin write, but resolution can still
@@ -1618,9 +2114,7 @@ class ChatRuntime:
             try:
                 route = await self._resolve_model_route(session, candidate)
             except AppError as exc:
-                log.warning(
-                    "llm.fallback_unresolvable", model=candidate, code=exc.code
-                )
+                log.warning("llm.fallback_unresolvable", model=candidate, code=exc.code)
                 continue
             if is_provider_model_id(candidate) and route.model == candidate:
                 # UNRESOLVED passthrough: a resolved ``provider:`` route always
@@ -1635,9 +2129,7 @@ class ChatRuntime:
                     "llm.fallback_unresolvable", model=candidate, code="provider_unresolved"
                 )
                 continue
-            log.warning(
-                "llm.failover", from_model=route_state.model, to_model=candidate
-            )
+            log.warning("llm.failover", from_model=route_state.model, to_model=candidate)
             route_state.model = candidate
             route_state.route = route
             return True
@@ -1681,6 +2173,80 @@ class ChatRuntime:
             return ModelRoute(model=model)
         return await self._model_route_resolver(session, model)
 
+    async def _resolve_suggestions_route(
+        self, session: AsyncSession, answer_route: ModelRoute
+    ) -> ModelRoute:
+        """The follow-up-suggestions gateway route (#490).
+
+        A DEDICATED model, resolved through the SAME per-tenant route seam as
+        the answer, so the <=400-token nicety runs on a FAST id instead of the
+        answer's (possibly frontier) route. An empty ``suggestions_model`` (the
+        constructor default, and headless/offline callers) falls back to the
+        answer route — the exact pre-#490 behaviour, so nothing regresses for
+        callers that do not configure one.
+        """
+        if not self._suggestions_model:
+            return answer_route
+        return await self._resolve_model_route(session, self._suggestions_model)
+
+    async def _run_followup_suggestions(
+        self,
+        *,
+        session_id: UUID,
+        assistant_message_id: UUID,
+        answer_route: ModelRoute,
+        question: str,
+        answer_text: str,
+    ) -> list[str]:
+        """Generate follow-up suggestions POST-terminal, in an INDEPENDENT txn (BE-1).
+
+        Runs only AFTER the answer has committed and its terminal ``done`` is on the
+        wire (#489), so it can neither delay the terminal nor roll the answer back. It
+        owns a FRESH tenant-bound session (RLS-armed via :func:`bind_tenant`): it
+        resolves the FAST suggestions route (#490), runs the bounded nicety completion
+        (#429), and — whenever the nicety actually spent tokens — records that spend on
+        its OWN usage row attributed to the ACTUAL suggestions model (ADR-0016 §2.6
+        actual-model attribution), idempotently and still linked to this answer/session
+        (#409). The whole thing is best-effort: ANY failure (route resolution, the
+        write, the commit) is swallowed and yields ``[]`` — a nicety must never surface
+        an error onto a settled answer. Returns the suggestions to publish (``[]`` ⇒
+        publish nothing). ``_generate_suggestions`` already contains its own
+        gateway/timeout/parse failures.
+        """
+        nicety_usage = _Usage()
+        try:
+            async with self._sessionmaker() as session:
+                await bind_tenant(session, self._principal.tenant_id)
+                route = await self._resolve_suggestions_route(session, answer_route)
+                suggestions = await self._generate_suggestions(
+                    question=question, answer=answer_text, route=route, usage=nicety_usage
+                )
+                # Record the suggestion spend whenever tokens were billed — parse
+                # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
+                # the completion returned, so an unparseable result must still account
+                # them (the old code RETURNED on a parse miss, dropping billed spend).
+                # Its OWN scope, attributed to the ACTUAL suggestions model
+                # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
+                # folded onto the answer model's row. A provider that reported nothing
+                # skips the no-op write.
+                if nicety_usage.total_tokens or nicety_usage.prompt_tokens:
+                    usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
+                    await usage_repo.record_suggestion_usage(
+                        model=route.model,
+                        session_id=session_id,
+                        answer_id=assistant_message_id,
+                        prompt_tokens=nicety_usage.prompt_tokens,
+                        completion_tokens=nicety_usage.completion_tokens,
+                        total_tokens=nicety_usage.total_tokens,
+                        cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
+                        cache_write_tokens=nicety_usage.cache_write_tokens,
+                    )
+                    await session.commit()
+                return suggestions
+        except Exception as exc:  # noqa: BLE001 — a nicety must never break a settled answer
+            log.debug("chat_runtime.suggestions_txn_failed", error_type=type(exc).__name__)
+            return []
+
     async def _stream_one_turn(
         self,
         *,
@@ -1689,31 +2255,59 @@ class ChatRuntime:
         usage: _Usage,
         tools: Sequence[ToolSpec],
         tool_choice: str | None = None,
+        max_tokens: int | None = None,
         narrate: Callable[[str], Awaitable[None]] | None = None,
+        speak: Callable[[str], Awaitable[None]] | None = None,
+        on_retract: Callable[[], Awaitable[None]] | None = None,
+        flush_deadline: Callable[[], float | None] | None = None,
+        flush: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
-        Buffers the turn's text chunks and folds token ``usage`` into the running
-        total. ANSWER text is never published from here (only the caller knows a
-        tool-free turn's text is the answer — issue #148); a turn PROVEN
-        tool-calling (the first tool fragment, ADR-0016 §6 #414) flushes its
-        buffered text through the optional ``narrate`` callback and streams the
-        rest live as transient narration — the one publishing this method does,
-        and only via that caller-supplied seam. ``tools`` is the run's
-        allow-list rendered as ``ToolSpec``s (issue
-        #207 §2 — the model is only offered tools it may call). ``tool_choice="none"``
-        forces a tool-free turn — the final synthesis once the budget is spent.
+        Buffers the turn's text chunks (for persistence) and folds token ``usage``
+        into the running total. Publishing is entirely through caller-supplied
+        seams, so this method never decides what a chunk MEANS:
+
+        * ``speak`` — when set (#488), each text chunk is forwarded LIVE as answer
+          ``delta`` the instant it arrives, *before* the turn is proven tool-free.
+          The caller enables it only where that is safe: a tool-impossible turn
+          (``tool_choice="none"`` / empty tools) streams unconditionally, and a
+          tool-advertised turn streams SPECULATIVELY.
+        * ``narrate`` + ``on_retract`` — the classification seam (ADR-0016 §6,
+          #414). The FIRST tool-call fragment proves the turn tool-calling, hence
+          its text narration: ``on_retract`` un-publishes any speculative answer
+          ``delta`` (#488), the buffer flushes through ``narrate`` as
+          ``event:narration``, and the rest of the turn narrates live. ``narrate``
+          also CLOSES the turn's retry window (§4 — an emitting turn never retries).
+
+        Answer text is thus never published as answer once the turn is known
+        tool-calling: it is retracted and re-emitted as narration, so the
+        streamed-and-not-retracted answer still equals the persisted one (#148).
+        ``tools`` is the run's allow-list rendered as ``ToolSpec``s (issue #207 §2).
+        ``tool_choice="none"`` forces a tool-free turn — the final synthesis once
+        the budget is spent. ``max_tokens`` bounds the generation (#488).
 
         ``route`` carries the answer's resolved gateway route (PR 2a): the raw model
         id + (for a per-tenant provider) the api_key/base_url override. The SAME
         route is passed on every turn of the loop, so a provider's decrypted key is
         reused, never re-decrypted per turn.
+
+        ``flush_deadline`` + ``flush`` are the #487/BE-4 coalescer-timer seams: between
+        provider events this coroutine waits on the next event AND a timer set to the
+        open coalesce buffer's deadline, so a lone buffered chunk flushes on its
+        deadline even when the provider then stalls (defeating the TTFT bound is the
+        whole failure this closes). The drive stays in THIS coroutine (never an async
+        generator), so awaited futures resume normally and the seq mint + publish stay
+        ordered — a timed flush never races the terminal. The next-event task is never
+        cancelled by the timer (only the timer is), so the provider generator is never
+        corrupted mid-``__anext__``. Unset seams ⇒ a plain drain, byte-identical to the
+        pre-BE-4 iteration.
         """
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
         narrating = False
-        async for ev in self._gateway.stream_tools(
+        gen = self._gateway.stream_tools(
             messages,
             tools=list(tools),
             model=route.model,
@@ -1724,49 +2318,135 @@ class ChatRuntime:
             # OpenAI-style implicit caching lands consecutive answers of one
             # conversation on the same cache shard.
             cache_key=str(self._cache_key) if self._cache_key else None,
-        ):
-            if (
-                (ev.tool_call_started or ev.tool_calls)
-                and not narrating
-                and narrate is not None
-            ):
-                # The classification point (ADR-0016 §6, #414): the FIRST
-                # tool-call fragment proves this turn is tool-calling, hence
-                # its text is narration. Flush the buffer as narration and
-                # stream the rest live; the caller's callback also CLOSES the
-                # turn's retry window (§4 — an emitting turn never retries).
-                narrating = True
-                buffered = "".join(text_chunks)
-                # ALWAYS invoke — an empty buffer still closes the retry
-                # window (the amendment's letter: the window closes AT the
-                # classification point, #447 round-2 blocker-1 edge); the
-                # wrapper's callback skips publishing empty text.
-                await narrate(buffered)
-            if ev.text:
-                if narrating and narrate is not None:
-                    await narrate(ev.text)
-                text_chunks.append(ev.text)
-            if ev.tool_calls:
-                turn_tool_calls = list(ev.tool_calls)
-            if ev.finish_reason:
-                finish_reason = ev.finish_reason
-            if ev.usage is not None:
-                usage.add(ev.usage)
-                usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
+            # Output ceiling (#488): only forwarded when set, so an unbounded
+            # (offline/headless) turn keeps its exact pre-#488 wire.
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+        )
+        timed = flush is not None and flush_deadline is not None
+        pending: asyncio.Task[StreamEvent | object] | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.ensure_future(self._next_stream_event(gen))
+                if timed and not pending.done():
+                    assert flush is not None and flush_deadline is not None  # narrow for mypy
+                    deadline = flush_deadline()
+                    if deadline is not None:
+                        remaining = deadline - self._clock()
+                        if remaining <= 0:
+                            # The deadline already elapsed: drain the lone buffered
+                            # chunk before blocking on the (possibly stalled) event.
+                            await flush()
+                        else:
+                            timer = asyncio.ensure_future(self._sleep_until_flush(remaining))
+                            try:
+                                await asyncio.wait(
+                                    {pending, timer}, return_when=asyncio.FIRST_COMPLETED
+                                )
+                            finally:
+                                if not timer.done():
+                                    timer.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await timer
+                            if not pending.done():
+                                # Timer won: the provider stalled past the deadline.
+                                # Drain the buffer, keep the SAME event task pending.
+                                await flush()
+                                continue
+                ev = await pending
+                pending = None
+                if ev is _STREAM_END:
+                    break
+                assert isinstance(ev, StreamEvent)
+                if (
+                    (ev.tool_call_started or ev.tool_calls)
+                    and not narrating
+                    and narrate is not None
+                ):
+                    # The classification point (ADR-0016 §6, #414): the FIRST
+                    # tool-call fragment proves this turn is tool-calling, hence
+                    # its text is narration. First RETRACT any answer text already
+                    # streamed speculatively (#488) — the client discards it —
+                    # then flush the buffer as narration and stream the rest live;
+                    # ``narrate`` also CLOSES the turn's retry window (§4 — an
+                    # emitting turn never retries).
+                    narrating = True
+                    if on_retract is not None:
+                        await on_retract()
+                    buffered = "".join(text_chunks)
+                    # ALWAYS invoke — an empty buffer still closes the retry
+                    # window (the amendment's letter: the window closes AT the
+                    # classification point, #447 round-2 blocker-1 edge); the
+                    # wrapper's callback skips publishing empty text.
+                    await narrate(buffered)
+                if ev.text:
+                    if narrating and narrate is not None:
+                        await narrate(ev.text)
+                    elif speak is not None:
+                        # Speculative / tool-impossible answer text, streamed live
+                        # as ``delta`` (#488). Only reached while NOT narrating.
+                        await speak(ev.text)
+                    text_chunks.append(ev.text)
+                if ev.tool_calls:
+                    turn_tool_calls = list(ev.tool_calls)
+                if ev.finish_reason:
+                    finish_reason = ev.finish_reason
+                if ev.usage is not None:
+                    usage.add(ev.usage)
+                    usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
+        finally:
+            # Reap a still-pending next-event task and close the provider generator
+            # on any early exit (a fault raised out of a seam, or cancellation),
+            # without swallowing an in-flight cancellation of THIS coroutine.
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with suppress(BaseException):
+                    await pending
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                with suppress(Exception):
+                    await aclose()
         return turn_tool_calls, finish_reason, text_chunks
 
-    async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
-        """Publish answer text as ``delta`` envelopes, preserving chunk granularity.
+    @staticmethod
+    async def _next_stream_event(gen: AsyncIterator[StreamEvent]) -> StreamEvent | object:
+        """One provider event, or the :data:`_STREAM_END` sentinel at exhaustion.
 
-        Called only for the answer turn's text — the tool-free turn or the forced
-        synthesis — never for a tool-calling turn's pre-tool narration (issue
-        #148), so the streamed answer equals the persisted one.
+        Wraps ``__anext__`` so its ``StopAsyncIteration`` becomes an ordinary return
+        value (a Task must not carry ``StopAsyncIteration`` across ``await``), while a
+        provider fault propagates as the task's exception for the caller to raise.
+        """
+        try:
+            return await gen.__anext__()
+        except StopAsyncIteration:
+            return _STREAM_END
+
+    async def _sleep_until_flush(self, remaining: float) -> None:
+        """Await the coalescer flush deadline (#487/BE-4), via the injectable timer.
+
+        A thin wrapper so the timer is always a coroutine (clean to schedule/cancel)
+        and tests can drive it deterministically without a real sleep.
+        """
+        await self._flush_sleep(remaining)
+
+    async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
+        """Publish BUFFERED answer text as ``delta`` envelopes, coalesced (#487).
+
+        Since #488 the answer/synthesis turns stream their text LIVE (through the
+        ``speak`` seam), so this is now used ONLY by the length continuation — the
+        one answer turn that stays buffered, because it runs after a finalised
+        answer block where a whole-turn retraction could not apply (#488). Never
+        for a tool-calling turn's pre-tool narration (issue #148), so the
+        streamed-and-not-retracted answer equals the persisted one.
+
+        Adjacent chunks are merged under the flush policy instead of minting one
+        envelope per provider chunk. The CONCATENATION is byte-identical either
+        way; only the envelope count changes. Anything still buffered is drained
+        by the next :meth:`_next_seq` — i.e. before the ``finalize`` step, the
+        citations, and the terminal.
         """
         for chunk in chunks:
-            if chunk:
-                await self._publish(
-                    state, envelopes.delta(state.stream_id, state.next_seq(), {"text": chunk})
-                )
+            await self._stream_text(state, _ANSWER_TEXT, chunk)
 
     async def _run_tool_batch(
         self,
@@ -1911,7 +2591,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="tool_call",
                 data={"callId": call.id, "tool": call.name, "args": call.arguments},
             ),
@@ -1925,7 +2605,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="tool_result",
                 data={
                     "callId": call.id,
@@ -2075,7 +2755,7 @@ class ChatRuntime:
             data["turn"] = turn
         await self._publish(
             state,
-            envelopes.event(state.stream_id, state.next_seq(), name="step", data=data),
+            envelopes.event(state.stream_id, await self._next_seq(state), name="step", data=data),
         )
 
     async def _emit_ask_user(
@@ -2086,7 +2766,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="ask_user",
                 data={
                     "messageId": str(message_id),
@@ -2153,7 +2833,7 @@ class ChatRuntime:
             state,
             envelopes.event(
                 state.stream_id,
-                state.next_seq(),
+                await self._next_seq(state),
                 name="citation",
                 data={
                     "id": str(citation.id),
@@ -2168,6 +2848,139 @@ class ChatRuntime:
             ),
         )
 
+    async def _publish_terminal_done(
+        self,
+        state: _StreamState,
+        *,
+        assistant_message_id: UUID,
+        result: _RunResult,
+        pending_suggestions: bool,
+    ) -> None:
+        """Publish the terminal ``done`` (the exactly-one terminal; #489).
+
+        Moved out of ``run`` into ``_answer`` so the terminal settles the UI BEFORE
+        the follow-up-suggestions nicety runs (AC-1). ``done.usage`` carries the
+        ANSWER's summed usage (the suggestions call had not run yet); its cost is
+        still recorded on the DB usage row afterwards (#409). ``pending_suggestions``
+        declares that one post-terminal ``event:suggestions`` may still follow within
+        the consumer's grace window, and (BE-5) carries the server's own grace as
+        ``suggestionsGraceMs`` so the consumer waits exactly the server's window
+        rather than a hard-coded default; absent/false keeps the classic
+        stop-at-terminal behaviour. The ``terminal_sent`` guard preserves
+        exactly-one-terminal across the shutdown race (issue #156) as ``run`` did.
+
+        ``terminal_sent`` is flipped ONLY after the backplane publish returns (R2-2):
+        the answer is already committed (#489/BE-1), so a ``done`` that fails to
+        publish must leave the flag False and fall into ``run``'s error arm, which
+        emits a terminal reusing this same ``terminal_seq`` — the committed answer is
+        never left without a terminal, and a partial-write ``done`` cannot pair with a
+        second, higher-seq terminal.
+
+        The payload is byte-identical to the pre-#489 ``done`` (built in ``run``)
+        except for the additive ``pendingSuggestions`` flag: the ACTUAL post-failover
+        model, the citation count, and the answer usage sub-object.
+        """
+        if state.terminal_sent:
+            # A terminal already fired (e.g. cancellation mid-answer raced ahead);
+            # never publish a second terminal — exactly-one-terminal contract.
+            return
+        data: dict[str, object] = {
+            "messageId": str(assistant_message_id),
+            "finishReason": result.finish_reason,
+            # The model that ACTUALLY answered (#413) — differs from ``start``'s
+            # requested model after a failover.
+            "model": result.model_used,
+            "citationCount": result.citation_count,
+            "usage": {
+                "promptTokens": result.prompt_tokens,
+                "completionTokens": result.completion_tokens,
+                "totalTokens": result.total_tokens,
+                # Provider cache accounting (#409, ADR-0016 §2.6) — additive
+                # contract fields; zero when the provider reports no cache detail.
+                "cachedPromptTokens": result.cached_prompt_tokens,
+                "cacheWriteTokens": result.cache_write_tokens,
+            },
+        }
+        if pending_suggestions:
+            # One post-terminal ``event:suggestions`` may still follow (#489); the
+            # subscriber holds a bounded grace open for it.
+            data["pendingSuggestions"] = True
+            # BE-5: carry the server's grace on the terminal so the consumer waits
+            # EXACTLY the window the server will relay — not a hard-coded client
+            # default a larger server grace would silently overrun (dropping a
+            # slow-but-arriving suggestion). Milliseconds for the JS timer.
+            data["suggestionsGraceMs"] = round(self._suggestions_grace_seconds * 1000)
+        # Mint the terminal seq ONCE (flushing any buffered text first) and cache it,
+        # so a fallback / degrade terminal can reuse it (R2-2 idempotency).
+        if state.terminal_seq is None:
+            state.terminal_seq = await self._next_seq(state)
+        done = envelopes.done(state.stream_id, state.terminal_seq, data=data)
+        deadline = self._producer_deadline
+        margin = self._terminal_publish_margin_seconds
+        if deadline is None or margin is None:
+            # Unbounded path (batch/headless/offline): publish exactly as before, and
+            # flip ``terminal_sent`` only after the confirmed publish returns (R2-2).
+            await self._publish(state, done)
+            state.terminal_sent = True
+            return
+        # Bound the terminal publish by the producer→terminal budget (R2-8): publishing
+        # the terminal awaits a Redis pipeline that can stall unbounded
+        # (``realtime/backplane.py``), so a hung backplane must not hold the producer
+        # past the <=30s worst-case ceiling. The ``done`` gets the leading slice; a
+        # small tail is reserved for one degrade re-attempt. Only a CONFIRMED publish
+        # flips ``terminal_sent`` (R2-2).
+        reserve = margin * _TERMINAL_DEGRADE_RESERVE_FRACTION
+        if await self._publish_terminal(state, done, deadline=deadline - reserve):
+            state.terminal_sent = True
+            return
+        # The backplane stalled publishing ``done`` over an ALREADY-COMMITTED answer
+        # (R2-8). Degrade with ONE bounded re-attempt of the SAME terminal (same seq →
+        # the subscriber's monotonic-seq dedup collapses a partial-write first attempt
+        # and this one to a single relayed terminal) within the reserved tail — a
+        # transient stall that clears still lands the TRUTHFUL ``done``, and the whole
+        # path still fits the one producer→terminal deadline (never a second, unbounded
+        # window). Re-emitting an ``error`` here would misreport a committed answer.
+        log.warning("llm.terminal_publish_retry", stream_id=state.stream_id)
+        if await self._publish_terminal(state, done, deadline=deadline):
+            state.terminal_sent = True
+            return
+        # Undeliverable within budget — a truly-unresponsive backplane. The answer is
+        # durably committed; the producer returns bounded rather than hanging on the
+        # pipeline. ``terminal_sent`` stays False, but ``_answer`` returns to ``run``'s
+        # SUCCESS arm (no exception), so no misleading error terminal follows — the
+        # honest limit against a dead backplane, now bounded instead of an infinite hang.
+        log.error("llm.terminal_undeliverable", stream_id=state.stream_id)
+
+    async def _publish_terminal(
+        self, state: _StreamState, envelope: dict[str, object], *, deadline: float | None
+    ) -> bool:
+        """Publish a terminal envelope, optionally bounded by an absolute deadline (R2-8).
+
+        Returns True iff the publish confirmed. On the interactive path ``deadline`` is
+        an instant within the producer→terminal budget: a backplane whose publish
+        stalls (``RedisBackplane.publish`` awaits an unbounded Redis pipeline) is cut
+        off at the deadline and this returns False instead of hanging the producer past
+        the <=30s worst-case ceiling — the caller degrades to a bounded best-effort
+        re-attempt. ``deadline=None`` (batch/headless/offline) publishes unbounded,
+        byte-identical to pre-R2-8. Only the deadline fires here; an EXTERNAL
+        cancellation (shutdown, #156) still raises ``CancelledError``, never swallowed
+        as a timeout.
+        """
+        if deadline is None:
+            await self._publish(state, envelope)
+            return True
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._publish(state, envelope)
+        except TimeoutError:
+            log.warning(
+                "llm.terminal_publish_timeout",
+                stream_id=state.stream_id,
+                kind=envelope.get("type"),
+            )
+            return False
+        return True
+
     async def _terminal_error(
         self, state: _StreamState, status: int, title: str, code: str, detail: str | None
     ) -> None:
@@ -2176,11 +2989,128 @@ class ChatRuntime:
             # (exactly-one-terminal contract). Guards the case where an error and a
             # shutdown ``CancelledError`` both reach a terminal path (issue #156).
             return
+        # #148/BE-3: an error terminal persists NO answer, so any SPECULATIVE answer
+        # text still live on the wire (or buffered) must be UN-published before the
+        # error — never flushed as a delta ahead of it, which would leave a
+        # pre-tool / unpersisted fragment on the client as answer text. This is the
+        # single backstop for EVERY fault exit that ends here: a terminal provider
+        # fault, the interactive deadline, cancellation, or a commit failure.
+        # ``_retract_answer`` discards the pending answer buffer and, if a delta
+        # already reached the client, emits ``answer_retract``. Buffered NARRATION
+        # (transient, never an answer) is left for the ``_next_seq`` flush below,
+        # exactly as before — narration may legitimately precede an error.
+        #
+        # But NEVER retract once the answer has COMMITTED (R2-2): a terminal-publish
+        # failure over a durable answer lands here, and its deltas are persisted — so
+        # retracting them would break wire == stored (#148). Only SPECULATIVE
+        # (uncommitted) answer text is retractable.
+        if not state.answer_committed and (
+            state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT
+        ):
+            await self._retract_answer(state)
         state.terminal_sent = True
         problem: dict[str, object] = {"title": title, "status": status, "code": code}
         if detail:
             problem["detail"] = detail
-        await self._publish(state, envelopes.error(state.stream_id, state.next_seq(), problem))
+        # Reuse the seq a failed ``done`` already minted, if any (R2-2 idempotency):
+        # the ambiguously-failed ``done`` and this error then carry ONE seq, so the
+        # subscriber's monotonic-seq dedup relays a single terminal even when the
+        # ``done`` reached the backplane before its publish raised. With no prior
+        # terminal (the ordinary pre-commit fault), mint fresh — flushing buffered
+        # narration first, exactly as before.
+        seq = state.terminal_seq if state.terminal_seq is not None else await self._next_seq(state)
+        # Bound the error terminal publish by the producer→terminal budget too (R2-8):
+        # a stalled backplane must not hang the producer on this path either (the
+        # interactive-deadline fault, a commit failure, cancellation). Best-effort — a
+        # failure to confirm within budget is logged inside ``_publish_terminal``; the
+        # answer transaction already rolled back, so there is nothing further to try.
+        await self._publish_terminal(
+            state, envelopes.error(state.stream_id, seq, problem), deadline=self._producer_deadline
+        )
+
+    async def _next_seq(self, state: _StreamState) -> int:
+        """Flush any buffered streamed text, then mint the next ``seq`` (#487).
+
+        EVERY non-text envelope mints through here. Flushing *before* the mint is
+        the whole ordering guarantee: a buffered ``delta``/narration always gets a
+        lower ``seq`` **and** goes on the wire first, so coalescing can never
+        strand text behind a terminal (subscribers stop at the terminal) nor
+        publish an envelope whose ``seq`` was minted earlier than one already
+        sent. The seq allocator itself stays the plain non-atomic counter — safe
+        because every mint+publish pair runs in the answer coroutine.
+        """
+        await self._flush_text(state)
+        return state.next_seq()
+
+    async def _stream_text(self, state: _StreamState, kind: _TextKind, chunk: str) -> None:
+        """Buffer one chunk of streamed text, publishing when the policy fires.
+
+        Text of a different :class:`_TextKind` (answer vs narration, or a new
+        turn's narration) drains the buffer first, so two kinds never merge into
+        one envelope.
+        """
+        if not chunk:
+            return
+        if state.buffer.kind is not None and state.buffer.kind != kind:
+            await self._flush_text(state)
+        ready = state.buffer.add(kind, chunk)
+        if ready is not None:
+            await self._publish_text_envelope(state, kind, ready)
+
+    async def _flush_text(self, state: _StreamState) -> None:
+        """Publish whatever streamed text is buffered (no-op when empty)."""
+        kind = state.buffer.kind
+        text = state.buffer.take()
+        if kind is None or text is None:
+            return
+        await self._publish_text_envelope(state, kind, text)
+
+    async def _publish_text_envelope(self, state: _StreamState, kind: _TextKind, text: str) -> None:
+        """Mint + publish one coalesced text envelope for ``kind``.
+
+        Mints via ``state.next_seq()`` directly — going through
+        :meth:`_next_seq` would recurse into the flush that produced ``text``.
+        """
+        if kind.envelope == "narration":
+            envelope = envelopes.event(
+                state.stream_id,
+                state.next_seq(),
+                name="narration",
+                data={"text": text, "turn": kind.turn},
+            )
+        else:
+            # An answer ``delta`` is now on the wire — a later retraction (#488)
+            # has something to discard on the client.
+            state.answer_on_wire = True
+            envelope = envelopes.delta(state.stream_id, state.next_seq(), {"text": text})
+        await self._publish(state, envelope)
+
+    async def _retract_answer(self, state: _StreamState) -> None:
+        """Retract the current speculative turn's answer ``delta``s (#488).
+
+        First DISCARD any answer text still buffered in the coalescer — it is
+        being retracted, so publishing it now (then discarding it on the client)
+        would be pointless AND would race a stray ``delta`` onto the wire with a
+        HIGHER ``seq`` than the retraction (a buffered chunk flushed by the next
+        ``_next_seq`` would land after ``answer_retract`` and never be discarded).
+        Then, only if a ``delta`` actually reached the wire, publish
+        ``event:answer_retract`` — a whole-turn retraction (contract #488). A
+        turn whose speculative text only ever buffered (never flushed) is undone
+        by the discard alone, with no envelope. ``seq`` is minted directly (the
+        buffer is already drained, so ``_next_seq``'s flush would be a no-op).
+        """
+        # The buffer, if non-empty here, holds this turn's un-flushed answer text
+        # (kind == _ANSWER_TEXT). Discard it. Any other kind (impossible at a
+        # retraction point) is flushed rather than silently dropped.
+        if state.buffer.kind is None or state.buffer.kind == _ANSWER_TEXT:
+            state.buffer.take()
+        else:  # pragma: no cover — defensive; retraction only follows answer text
+            await self._flush_text(state)
+        if not state.answer_on_wire:
+            return
+        state.answer_on_wire = False
+        seq = state.next_seq()
+        await self._publish(state, envelopes.event(state.stream_id, seq, name="answer_retract"))
 
     async def _publish(self, state: _StreamState, envelope: dict[str, object]) -> None:
         await self._backplane.publish(state.stream_id, envelope)
@@ -2386,9 +3316,7 @@ def _is_retrieval_call(call: ToolCall) -> bool:
 # The retrieval tools' names, read once from their impl module (the single source
 # of truth for what a "retrieval tool" is) so the retrieval-specific audit stays
 # correct as tools are added elsewhere.
-_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
-    defn.name for defn in _retrieval_impl.TOOLS
-)
+_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(defn.name for defn in _retrieval_impl.TOOLS)
 
 
 __all__ = [

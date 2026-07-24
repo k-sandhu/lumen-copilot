@@ -300,8 +300,27 @@ function deltaText(data: unknown): string | null {
 
 /** Fold one envelope into the stream state. Pure; returns a new state object. */
 export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamState {
-  // Already terminal — ignore stragglers after done/error.
-  if (state.phase === 'done' || state.phase === 'error') return state;
+  // Already terminal — ignore stragglers after done/error, with ONE exception:
+  // a `done` that declared `pendingSuggestions` (#489) accepts exactly one
+  // post-terminal `event:suggestions`. It attaches the follow-ups WITHOUT
+  // un-settling the terminal (phase stays 'done'); a second suggestions event,
+  // any other post-terminal envelope, and any post-`error` envelope are still
+  // ignored by identity (so useReducer bails out and nothing re-renders).
+  if (state.phase === 'done' || state.phase === 'error') {
+    if (
+      state.phase === 'done' &&
+      state.done?.pendingSuggestions === true &&
+      state.suggestions === null &&
+      envelope.type === 'event' &&
+      envelope.name === 'suggestions' &&
+      envelope.seq > state.lastSeq
+    ) {
+      const suggestions = asSuggestions(envelope.data);
+      if (!suggestions) return state;
+      return { ...state, lastSeq: envelope.seq, suggestions };
+    }
+    return state;
+  }
   // Dedupe / out-of-order guard: only apply strictly-newer envelopes.
   if (envelope.seq <= state.lastSeq) return state;
 
@@ -322,6 +341,16 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
     }
 
     case 'event': {
+      if (envelope.name === 'answer_retract') {
+        // Speculative-streaming retraction (#488): every answer `delta` for the
+        // CURRENTLY streaming turn was narration, not answer — discard the live
+        // answer text. The server re-emits the same text as event:narration
+        // right after (surfaced by the existing #414 narration affordance), so
+        // nothing is lost, only re-classified. The turn is still streaming, and
+        // the seq is consumed (return `base`, never identity) so a same-seq
+        // replay cannot re-clear later answer text.
+        return { ...base, text: '' };
+      }
       if (envelope.name === 'citation') {
         const citation = asCitation(envelope.data);
         if (!citation) return base;

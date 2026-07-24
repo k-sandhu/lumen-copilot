@@ -1764,6 +1764,14 @@ export interface ChatNarration {
   turn: number;
 }
 
+// `event:answer_retract` (ADR-0016 §6, #488) is an EventEnvelope with
+// name='answer_retract' and NO data. Meaning: every answer `delta` delivered so
+// far for the currently streaming assistant turn was NOT answer text — the
+// reducer discards the live answer text. The server normally re-emits the same
+// text as event:narration immediately after, so it is surfaced through the
+// transient narration affordance rather than vanishing. No payload interface is
+// needed (the event carries none); the reducer keys off the name.
+
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
   messageId: string;
@@ -1775,6 +1783,23 @@ export interface ChatDoneData {
    * fallback. Additive — older servers omit it.
    */
   model?: string;
+  /**
+   * When true (#489), the server will attempt follow-up suggestions AFTER this
+   * terminal and MAY deliver one post-terminal `event:suggestions` within a
+   * bounded grace window. The client settles the UI as terminal as usual, but
+   * keeps the socket open for that one event; absent/false ⇒ the stream stops
+   * here (a refusal / ask_user answer, or suggestions disabled). Additive.
+   */
+  pendingSuggestions?: boolean;
+  /**
+   * The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present
+   * only alongside `pendingSuggestions=true`: the single source of truth for how
+   * long the subscriber should hold the socket open for the one trailing
+   * `event:suggestions`. The consumer honours this instead of a hard-coded default
+   * (which a larger server grace would overrun, dropping a slow suggestion); absent
+   * ⇒ fall back to a sane client default. Additive.
+   */
+  suggestionsGraceMs?: number;
   citationCount: number;
   usage?: {
     promptTokens?: number;
