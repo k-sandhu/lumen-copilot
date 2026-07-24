@@ -5133,12 +5133,12 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
 async def test_cache_kpi_not_emitted_when_commit_fails(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-2 NEW-1, amended by #489: the answer streams fine and its terminal
-    ``done`` is published (it now precedes the commit — #489 AC-1), but the
-    transaction COMMIT then fails. The KPI must NOT be emitted (it fires only
-    AFTER a successful commit), no SECOND terminal is published (exactly-one-
-    terminal holds: the ``done`` already went out), and ``run`` reports False so
-    the caller never feeds the unpersisted answer into memory."""
+    """BE-1 (was round-2 NEW-1): the answer streams fine, but the transaction COMMIT
+    — which now PRECEDES the terminal (#489/BE-1) — fails. The client must see a
+    typed ``error`` terminal, NOT a success ``done`` over a rolled-back answer; the
+    cache KPI must NOT fire (it is strictly after a successful commit); ``run``
+    reports False so the caller never feeds the unpersisted answer into memory.
+    Exactly one terminal, and no ``done``."""
     log_rec = _patch_runtime_log(monkeypatch)
 
     def _failing_commit_sessionmaker() -> AsyncSession:
@@ -5177,13 +5177,13 @@ async def test_cache_kpi_not_emitted_when_commit_fails(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert ok is False
-    # #489: the terminal ``done`` is published INSIDE the answer, before the
-    # commit — so a commit failure leaves that (already-sent) success terminal on
-    # the wire. Exactly one terminal: no error is published on top of it, and the
-    # KPI still did not fire (it is strictly after a successful commit).
-    assert envs[-1]["type"] == "done"
+    # BE-1: the commit now PRECEDES the terminal, so a commit failure raises before
+    # any terminal and surfaces as a typed ``error`` — never a success ``done`` over
+    # a rolled-back answer. Exactly one terminal (the error), no ``done``, and the
+    # KPI did not fire (it is strictly after a successful commit).
+    assert envs[-1]["type"] == "error"
     assert sum(1 for e in envs if e["type"] in ("done", "error")) == 1
-    assert not any(e["type"] == "error" for e in envs)
+    assert not any(e["type"] == "done" for e in envs)
     assert log_rec.kpis() == []
 
 

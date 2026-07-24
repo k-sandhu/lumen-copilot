@@ -4047,6 +4047,52 @@ class LlmUsageRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_llm_usage(row)
 
+    async def add_suggestion_tokens(
+        self,
+        *,
+        answer_id: UUID,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        cached_prompt_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> bool:
+        """Fold the post-terminal follow-up-suggestions spend into the answer's row.
+
+        The #489/BE-1 answer path commits the answer + its base usage row and
+        publishes the terminal ``done`` BEFORE the follow-up-suggestions nicety runs;
+        the nicety then executes in its OWN independent transaction and calls this to
+        add its token cost to the answer's single message-bearing usage row — so the
+        suggestion tokens still land on the answer's one row (#409), never a second
+        one, and the nicety's transaction can never roll the committed answer back.
+
+        An in-place ``UPDATE ... SET col = col + delta`` on the winning
+        (message-bearing) scope, keyed by ``message_id == answer_id`` (its
+        partial-unique row). Deltas are clamped non-negative HERE (the single write
+        chokepoint), matching :meth:`record`. Returns whether the row was found — a
+        missing row (the answer recorded no usage) is a no-op the caller treats as
+        "nothing to fold". Tenant-scoped (INV-1): only THIS tenant's row can be
+        touched.
+        """
+        stmt = (
+            update(models.LlmUsage)
+            .where(
+                models.LlmUsage.tenant_id == self._tenant_id,
+                models.LlmUsage.message_id == answer_id,
+            )
+            .values(
+                prompt_tokens=models.LlmUsage.prompt_tokens + max(0, prompt_tokens),
+                completion_tokens=models.LlmUsage.completion_tokens + max(0, completion_tokens),
+                total_tokens=models.LlmUsage.total_tokens + max(0, total_tokens),
+                cached_prompt_tokens=models.LlmUsage.cached_prompt_tokens
+                + max(0, cached_prompt_tokens),
+                cache_write_tokens=models.LlmUsage.cache_write_tokens + max(0, cache_write_tokens),
+            )
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return bool(result.rowcount)
+
     async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[LlmUsageRecord]:
         """The usage records for one chat session (tenant-scoped), oldest first."""
         stmt = (

@@ -680,6 +680,13 @@ class ChatRuntime:
                 # itself, keyed off the streaming principal's tenant. No-op off
                 # Postgres (offline tests).
                 await bind_tenant(session, self._principal.tenant_id)
+                # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
+                # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
+                # failure therefore raises out of ``_answer`` into the error arms
+                # below and becomes a typed ``error`` terminal — never a success
+                # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
+                # runs AFTER that commit in its own independent transaction (it cannot
+                # roll the answer back), so this block has no trailing commit.
                 result = await self._answer(
                     session=session,
                     state=state,
@@ -697,7 +704,6 @@ class ChatRuntime:
                     evidence=evidence,
                     mentioned_documents=mentioned_documents,
                 )
-                await session.commit()
         except asyncio.CancelledError:
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
             # cancels every in-flight producer on SIGTERM, issue #156). In Python
@@ -729,19 +735,15 @@ class ChatRuntime:
             await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
             return False
 
-        # The terminal ``done`` is now published INSIDE ``_answer`` (#489), BEFORE
-        # follow-up suggestions are generated, so the UI settles the instant the
-        # answer is complete instead of waiting on the suggestions nicety. It rides
-        # the still-open answer transaction: the message/citations/evidence are
-        # flushed before it, and the only DB work left after it is the usage rows +
-        # this commit. A commit failure after a published ``done`` is the documented
-        # rollback-after-terminal exposure (deltas + citations already went on the
-        # wire pre-commit too); the ``terminal_sent`` guard keeps it to exactly one
-        # terminal and this KPI stays gated on a SUCCESSFUL commit below.
-        # The KPI emits ONLY here — after the commit above and after ``_answer``
-        # published its terminal ``done`` — so a failed answer (including a commit
-        # failure, which lands in the ``except`` arms above) never appears in the
-        # per-successful-answer series (round-2 review NEW-1; #489 keeps the gate).
+        # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
+        # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
+        # answer is durably persisted and the client saw exactly one success
+        # terminal. A commit failure instead raises out of ``_answer`` (before any
+        # terminal) into the ``except`` arms above, which emit a typed ``error`` — so
+        # a rolled-back answer never reports success. The cache KPI emits ONLY here,
+        # strictly after that successful commit, so a failed answer never appears in
+        # the per-successful-answer series (round-2 review NEW-1; BE-1 hardens it by
+        # making the terminal itself follow the commit).
         _log_cache_kpi(result)
         return True
 
@@ -1324,7 +1326,6 @@ class ChatRuntime:
                 retrieved_hits=total_hits,
                 cited_document_ids=[],
             )
-            await self._emit_ask_user(state, assistant_message_id, ask_question)
             answer_usage = _answer_usage_totals(route_state, usage)
             ask_result = _RunResult(
                 finish_reason="ask_user",
@@ -1337,8 +1338,15 @@ class ChatRuntime:
                 cached_prompt_tokens=answer_usage.cached_prompt_tokens,
                 cache_write_tokens=answer_usage.cache_write_tokens,
             )
+            # Commit the persisted question + its usage row BEFORE the terminal
+            # (#489/BE-1): a commit failure raises here and becomes a typed ``error``
+            # terminal (nothing misleading was published yet), never a success
+            # ``done``/``ask_user`` event over a rolled-back question.
+            await session.commit()
             # The clarifying question IS the terminal (spec 0006): no suggestions
-            # follow it, so ``done`` stops the stream at once (no pending window).
+            # follow it, so the ``ask_user`` event + ``done`` stop the stream at once
+            # (no pending window). Both ride AFTER the commit.
+            await self._emit_ask_user(state, assistant_message_id, ask_question)
             await self._publish_terminal_done(
                 state,
                 assistant_message_id=assistant_message_id,
@@ -1472,7 +1480,7 @@ class ChatRuntime:
         # (turn loop + any failover scopes), computed BEFORE the suggestions nicety
         # runs. ``done.usage`` is the answer terminal, so it must not wait on (nor
         # include) the post-terminal nicety; the suggestions tokens are still
-        # accounted in the DB row below (#409 / AC-3).
+        # accounted on the same DB row (#409 / AC-3) by the post-commit UPDATE below.
         answer_usage = _answer_usage_totals(route_state, usage)
         run_result = _RunResult(
             finish_reason=finish_reason,
@@ -1486,10 +1494,33 @@ class ChatRuntime:
             cache_write_tokens=answer_usage.cache_write_tokens,
         )
 
-        # Publish the terminal ``done`` FIRST (#489 AC-1) — the UI settles the
-        # instant the answer is complete. It rides the still-open transaction; the
-        # message/citations/evidence are already flushed, and the only DB work left
-        # is the usage rows + the commit in ``run``.
+        # Record the answer's BASE token/cache usage (#409) — one row per answer, in
+        # the SAME transaction as the message it accounts for. This is the ANSWER's
+        # cost only (turn loop + any failover scopes); the post-terminal suggestions
+        # nicety folds its own cost onto this same row afterwards, in its own
+        # transaction (BE-1). ``model`` is the requested id so a per-tenant
+        # ``provider:`` id stays attributable, matching the message row. Zeroed fields
+        # (a provider that omitted usage) still record: "no usage reported" must be
+        # visible, not a gap.
+        await self._record_usage_scopes(
+            session=session,
+            tenant_id=tenant_id,
+            route_state=route_state,
+            usage=usage,
+            session_id=session_id,
+            assistant_message_id=assistant_message_id,
+        )
+
+        # Commit the assistant turn + its base usage row BEFORE the terminal
+        # (#489/BE-1): the answer, its citations/evidence, the audit, and the base
+        # usage row are all durable now, so publishing ``done`` cannot report success
+        # over a rolled-back answer. A commit failure raises here (before any
+        # terminal) into ``run``'s error arms and becomes a typed ``error`` terminal.
+        await session.commit()
+
+        # Publish the terminal ``done`` now that the answer is durable (#489 AC-1) —
+        # the UI settles the instant the answer is complete, and only the (optional,
+        # independent) suggestions nicety follows.
         await self._publish_terminal_done(
             state,
             assistant_message_id=assistant_message_id,
@@ -1499,15 +1530,19 @@ class ChatRuntime:
 
         # Follow-up suggestions (spec 0006 #429): one config-gated, time-bounded
         # completion over the visible conversation tail — no retrieval, so no new
-        # INV-2 surface. Now generated AFTER the terminal and delivered as a bounded
-        # POST-terminal ``event:suggestions`` (#489). Any failure / timeout / parse
-        # miss ⇒ no event, never touching the already-published terminal (AC-6). Its
-        # token usage folds into ``usage`` BEFORE the answer's single llm_usage row
-        # records below, so the nicety's real cost is still accounted (#409 / AC-3).
+        # INV-2 surface. Generated AFTER the terminal, in an INDEPENDENT transaction
+        # (BE-1) that cannot roll the committed answer back, and delivered as a
+        # bounded POST-terminal ``event:suggestions`` (#489). Any failure / timeout /
+        # parse miss ⇒ no event, never touching the already-published terminal
+        # (AC-6). Its token spend still folds onto the answer's single llm_usage row
+        # via the UPDATE inside that transaction (#409 / AC-3).
         if will_suggest:
-            suggestions_route = await self._resolve_suggestions_route(session, route_state.route)
-            suggestions = await self._generate_suggestions(
-                question=question, answer=answer_text, route=suggestions_route, usage=usage
+            suggestions = await self._run_followup_suggestions(
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                answer_route=route_state.route,
+                question=question,
+                answer_text=answer_text,
             )
             if suggestions:
                 await self._publish(
@@ -1522,23 +1557,6 @@ class ChatRuntime:
                         },
                     ),
                 )
-
-        # Record the answer's summed token/cache usage (#409) — one row per
-        # answer, in the SAME transaction as the message it accounts for. Still runs
-        # AFTER suggestion generation so the row carries the whole answer's cost
-        # (turn loop + the suggestions nicety), even though ``done.usage`` above
-        # reported the answer-only total. ``model`` is the requested id so a
-        # per-tenant ``provider:`` id stays attributable, matching the message row.
-        # Zeroed fields (a provider that omitted usage) still record: the answer
-        # happened, and "no usage reported" must be visible, not a gap.
-        await self._record_usage_scopes(
-            session=session,
-            tenant_id=tenant_id,
-            route_state=route_state,
-            usage=usage,
-            session_id=session_id,
-            assistant_message_id=assistant_message_id,
-        )
 
         return run_result
 
@@ -1973,6 +1991,58 @@ class ChatRuntime:
         if not self._suggestions_model:
             return answer_route
         return await self._resolve_model_route(session, self._suggestions_model)
+
+    async def _run_followup_suggestions(
+        self,
+        *,
+        session_id: UUID,
+        assistant_message_id: UUID,
+        answer_route: ModelRoute,
+        question: str,
+        answer_text: str,
+    ) -> list[str]:
+        """Generate follow-up suggestions POST-terminal, in an INDEPENDENT txn (BE-1).
+
+        Runs only AFTER the answer has committed and its terminal ``done`` is on the
+        wire (#489), so it can neither delay the terminal nor roll the answer back. It
+        owns a FRESH tenant-bound session (RLS-armed via :func:`bind_tenant`): it
+        resolves the FAST suggestions route (#490), runs the bounded nicety completion
+        (#429), and — only if the nicety produced suggestions AND actually spent
+        tokens — folds that spend onto the answer's already-committed usage row via an
+        atomic UPDATE (#409 — the suggestion tokens still land on the answer's single
+        row). The whole thing is best-effort: ANY failure (route resolution, the
+        UPDATE, the commit) is swallowed and yields ``[]`` — a nicety must never
+        surface an error onto a settled answer. Returns the suggestions to publish
+        (``[]`` ⇒ publish nothing). ``_generate_suggestions`` already contains its own
+        gateway/timeout/parse failures.
+        """
+        nicety_usage = _Usage()
+        try:
+            async with self._sessionmaker() as session:
+                await bind_tenant(session, self._principal.tenant_id)
+                route = await self._resolve_suggestions_route(session, answer_route)
+                suggestions = await self._generate_suggestions(
+                    question=question, answer=answer_text, route=route, usage=nicety_usage
+                )
+                if not suggestions:
+                    return []
+                # Fold the nicety's real cost onto the answer's single usage row
+                # (#409); a provider that reported nothing skips the no-op UPDATE.
+                if nicety_usage.total_tokens or nicety_usage.prompt_tokens:
+                    usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
+                    await usage_repo.add_suggestion_tokens(
+                        answer_id=assistant_message_id,
+                        prompt_tokens=nicety_usage.prompt_tokens,
+                        completion_tokens=nicety_usage.completion_tokens,
+                        total_tokens=nicety_usage.total_tokens,
+                        cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
+                        cache_write_tokens=nicety_usage.cache_write_tokens,
+                    )
+                await session.commit()
+                return suggestions
+        except Exception as exc:  # noqa: BLE001 — a nicety must never break a settled answer
+            log.debug("chat_runtime.suggestions_txn_failed", error_type=type(exc).__name__)
+            return []
 
     async def _stream_one_turn(
         self,

@@ -773,3 +773,75 @@ async def test_llm_usage_one_row_per_message_is_structural(
             run_id=uuid.uuid4(),
         )
     await session.flush()
+
+
+async def test_llm_usage_add_suggestion_tokens_folds_onto_the_answer_row(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """BE-1 / #409: the post-terminal suggestions nicety folds its token spend onto
+    the answer's single message-bearing usage row via an in-place UPDATE — the tokens
+    land on the SAME row, no second row appears, and clamping/tenant-scoping hold."""
+    from app.db.repositories import LlmUsageRepository, MessageRepository
+    from app.domain.entities import MessageRole, Role
+
+    tenant_a, tenant_b = two_tenants
+    user = await UserRepository(session, tenant_a).create(
+        email="fold@a.test", password_hash="x", roles=[Role.MEMBER]
+    )
+    chat = await ChatSessionRepository(session, tenant_a).create(
+        owner_id=user.id, model="m", title="t"
+    )
+    msg = await MessageRepository(session, tenant_a).add(
+        session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="m"
+    )
+    await session.flush()
+
+    repo = LlmUsageRepository(session, tenant_a)
+    # The answer's base usage row (the winning, message-bearing scope).
+    await repo.record(
+        model="m",
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        cached_prompt_tokens=3,
+        cache_write_tokens=2,
+        session_id=chat.id,
+        answer_id=msg.id,
+        message_id=msg.id,
+    )
+    await session.flush()
+
+    # INV-1 negative: tenant B cannot touch tenant A's row (no match, no-op).
+    assert (
+        await LlmUsageRepository(session, tenant_b).add_suggestion_tokens(
+            answer_id=msg.id, prompt_tokens=5, completion_tokens=7, total_tokens=12
+        )
+        is False
+    )
+
+    # The nicety folds its spend (clamps a stray negative to 0) onto the same row.
+    found = await repo.add_suggestion_tokens(
+        answer_id=msg.id,
+        prompt_tokens=5,
+        completion_tokens=7,
+        total_tokens=12,
+        cached_prompt_tokens=-9,
+        cache_write_tokens=1,
+    )
+    assert found is True
+
+    rows = await repo.list_for_session(chat.id)
+    assert len(rows) == 1  # still ONE row — folded in place, never a second
+    assert rows[0].prompt_tokens == 15  # 10 + 5
+    assert rows[0].completion_tokens == 12  # 5 + 7
+    assert rows[0].total_tokens == 27  # 15 + 12
+    assert rows[0].cached_prompt_tokens == 3  # 3 + max(0, -9)
+    assert rows[0].cache_write_tokens == 3  # 2 + 1
+
+    # A missing answer id is a no-op the caller treats as "nothing to fold".
+    assert (
+        await repo.add_suggestion_tokens(
+            answer_id=uuid.uuid4(), prompt_tokens=1, completion_tokens=1, total_tokens=2
+        )
+        is False
+    )
