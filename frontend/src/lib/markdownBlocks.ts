@@ -9,14 +9,27 @@
  */
 
 /**
- * A link reference definition (`[label]: url`), a footnote definition
- * (`[^label]: …`), or a footnote reference (`[^label]`). These resolve ACROSS
- * blocks, so a per-block split would break them (a reference in one block, its
- * definition in another). When any appear we fall back to a single whole-document
- * parse — correctness over incrementality; such constructs are rare in a chat
- * answer, so the streaming win is preserved for the common case.
+ * Any construct that can resolve ACROSS block boundaries, so a per-block split
+ * would render it differently from a whole-document parse. Three shapes:
+ *   1. a link-reference / footnote DEFINITION (`[label]: url`, `[^label]: …`),
+ *   2. a footnote REFERENCE (`[^label]`),
+ *   3. a reference-style link USE — full `[text][id]`, collapsed `[text][]`, or
+ *      SHORTCUT `[label]` (syntactically identical to a citation marker) — i.e. any
+ *      `[…]` NOT immediately followed by `(` (the `(?!\()` excludes self-contained
+ *      inline links/images `[text](url)` / `![alt](url)`, whose target is inline).
+ * Why the USE (shape 3) matters, not just the definition: a shortcut/reference use
+ * can appear and let earlier blocks SETTLE, and then the matching DEFINITION lands
+ * in a LATER delta — which would (a) un-settle & remount every earlier block and
+ * (b) retroactively turn the use into a link, so the settled standalone render (a
+ * literal `[label]`) would no longer equal the one-shot render (a link). Tripping
+ * on the USE keeps the whole source in the trailing region from the moment the use
+ * appears — BEFORE anything settles — so the settled set stays append-only and the
+ * final DOM still matches one-shot. Correctness over granularity: err toward
+ * trailing. (Cost: an answer carrying `[n]` citation markers streams as one
+ * re-parsed block rather than settling incrementally — acceptable, and rare vs. the
+ * bracket-free common case.)
  */
-const CROSS_BLOCK_REFERENCE = /(^ {0,3}\[[^\]]+\]:\s)|(\[\^)/m;
+const CROSS_BLOCK_REFERENCE = /(^ {0,3}\[[^\]]+\]:\s)|(\[\^)|(\[[^\]]*\](?!\())/m;
 /** A CommonMark list-item marker (bullet or ordered) with ≤3 leading spaces. */
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 /** An indented (list/quote continuation) line — 1+ leading spaces then content. */

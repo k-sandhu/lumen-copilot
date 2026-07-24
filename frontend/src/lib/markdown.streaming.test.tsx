@@ -179,6 +179,51 @@ describe('AC-2 — a settled block is not re-parsed when later blocks/deltas arr
   });
 });
 
+describe('FE-7 — a late reference definition never un-settles an earlier block', () => {
+  // A reference-style USE (`[text][id]`, or the shortcut `[x]`) can appear and let
+  // earlier blocks settle; when the matching DEFINITION lands in a LATER delta the
+  // old safety valve suddenly tripped and collapsed the whole document to one
+  // trailing block — remounting & reparsing every already-settled block (a visible
+  // flash, defeating AC-2), and turning the use into a link so the settled render no
+  // longer matched one-shot. The valve now trips on the USE itself, so nothing
+  // settles while an unresolved reference is outstanding.
+  const doc = 'Uses a ref [x].\n\nSecond para.\n\n[x]: https://e.com';
+
+  it('keeps the settled set APPEND-ONLY across every delta (no un-settle / remount)', () => {
+    // The settled array is the source of the React content-keys; if it is
+    // append-only (each step keeps the previous blocks as an ordered prefix and
+    // only grows), no settled block can change key ⇒ none remounts.
+    let prev: string[] = [];
+    for (let k = 1; k <= doc.length; k++) {
+      const { settled } = splitStreamingBlocks(doc.slice(0, k));
+      expect(settled.length).toBeGreaterThanOrEqual(prev.length);
+      expect(settled.slice(0, prev.length)).toEqual(prev);
+      prev = settled;
+    }
+    // With the reference use outstanding the whole source stays trailing, so no
+    // block ever settles — the strongest possible guarantee against un-settling.
+    expect(prev).toEqual([]);
+  });
+
+  it('streams to a DOM identical to one shot despite the cross-block reference', () => {
+    const oneShot = render(<MarkdownView>{doc}</MarkdownView>, { wrapper: MemoryRouter });
+    const expected = proseHtml(oneShot.container);
+    oneShot.unmount();
+
+    const stream = render(<MarkdownView streaming>{doc.slice(0, 1)}</MarkdownView>, {
+      wrapper: MemoryRouter,
+    });
+    for (let k = 2; k <= doc.length; k++) {
+      stream.rerender(<MarkdownView streaming>{doc.slice(0, k)}</MarkdownView>);
+    }
+    expect(proseHtml(stream.container)).toBe(expected);
+    // The definition resolved the use into a real link (proving the reference is
+    // genuinely cross-block, so settling `Uses a ref [x].` alone would have been
+    // WRONG — it would have rendered a literal `[x]`).
+    expect(stream.container.querySelector('a[href="https://e.com"]')).not.toBeNull();
+  });
+});
+
 describe('AC-1 — pipeline invocations bounded by (settled blocks + trailing flushes), not deltas', () => {
   it('parses one block at a time — no parse ever spans two settled blocks', () => {
     const first = 'Block one is fully done.';
