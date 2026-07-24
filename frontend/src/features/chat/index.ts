@@ -35,10 +35,13 @@ export {
   type UiCitation,
   type CitationKind,
 } from './model/citation';
+// NOTE (FE-9): the shared model registry is deliberately NOT re-exported here.
+// It lives in `@/features/models` so eagerly-rendered shell consumers (the
+// preferences default-model control) never import this barrel — importing it
+// drags ChatView → lib/markdown into the entry chunk and closes a barrel cycle.
 export {
   useChatSessions,
   useMessages,
-  useModels,
   useCreateSession,
   useUpdateSession,
   useDeleteSession,

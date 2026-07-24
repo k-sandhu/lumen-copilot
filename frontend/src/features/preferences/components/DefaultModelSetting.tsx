@@ -14,7 +14,12 @@
 import { useMemo } from 'react';
 import { ApiError } from '@/api';
 import type { ModelTier } from '@/api';
-import { useModels } from '@/features/chat';
+// The registry comes from the dependency-free `models` slice, NOT the chat barrel
+// (FE-9): this control is rendered eagerly by the app shell, so importing
+// `@/features/chat` here would pull ChatView → lib/markdown into the entry chunk
+// and close a chat↔preferences barrel cycle. Guarded by
+// `buildguards/chat-pipeline-not-in-entry.test.ts`.
+import { useModels } from '@/features/models';
 import { usePreferences, useUpdatePreferences } from '../model/queries';
 
 const TIER_ORDER: ModelTier[] = ['frontier', 'fast', 'oss'];

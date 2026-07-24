@@ -190,7 +190,9 @@ function MessageBubbleComponent({
                   }
                 : {})}
             >
-              <MarkdownView className="lc-answer">{content}</MarkdownView>
+              <MarkdownView className="lc-answer" streaming={streaming}>
+                {content}
+              </MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>
 

@@ -53,9 +53,7 @@ export default defineConfig(({ mode }) => {
   // git-ignored). `vite build` never runs in 'test' mode, so this never relaxes
   // the production default; the OFF build is proven by `dist-no-dev-pages.test.ts`.
   const devPagesEnabled =
-    mode === 'test' && rawDevPagesFlag === undefined
-      ? true
-      : parseDevPagesFlag(rawDevPagesFlag);
+    mode === 'test' && rawDevPagesFlag === undefined ? true : parseDevPagesFlag(rawDevPagesFlag);
 
   return {
     plugins: [react()],
@@ -63,6 +61,41 @@ export default defineConfig(({ mode }) => {
     // Rollup can statically drop the dev-page branches + their chunks when OFF.
     define: {
       __DEV_PAGES_ENABLED__: JSON.stringify(devPagesEnabled),
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          // #494: isolate the markdown + syntax-highlight rendering pipeline into
+          // its OWN chunk so it is not part of the entry chunk. react-markdown,
+          // the unified/remark/rehype/micromark/mdast/hast ecosystem, and
+          // highlight.js are heavy and only needed by content-rendering screens
+          // (chat, search, artifacts, schedules, docs) — all lazy routes. These
+          // packages are markdown-exclusive leaves (no app-code imports), so
+          // co-locating them cannot introduce an app-level circular chunk.
+          // (The chat route itself is lazy; see features/chat/route.tsx.)
+          manualChunks(id: string) {
+            // FE-9: the React runtime gets its OWN group, and it must be tested
+            // BEFORE the markdown group. A manual chunk acts as a Rollup entry
+            // point, so a module every entry shares (react, react/jsx-runtime)
+            // was being absorbed INTO the `markdown` chunk — which then forced
+            // the app entry chunk to import `markdown-*.js` statically just to
+            // get React, dragging the whole pipeline back onto first paint. Its
+            // own group keeps the shared runtime out of any feature chunk.
+            // `buildguards/chat-pipeline-not-in-entry.test.ts` asserts the result.
+            if (/[\\/]node_modules[\\/](?:\.pnpm[\\/])?(react|react-dom|scheduler)[\\/]/.test(id)) {
+              return 'react-vendor';
+            }
+            if (
+              /[\\/]node_modules[\\/](?:\.pnpm[\\/])?(react-markdown|remark[-\w]*|rehype[-\w]*|micromark[-\w]*|mdast[-\w]*|hast[-\w]*|unist[-\w]*|unified|vfile[-\w]*|property-information|hastscript|space-separated-tokens|comma-separated-tokens|character-entities[-\w]*|decode-named-character-reference|stringify-entities|parse-entities|trim-lines|longest-streak|zwitch|markdown-table|html-url-attributes|html-void-elements|web-namespaces|devlop|ccount|highlight\.js)[\\/]/.test(
+                id,
+              )
+            ) {
+              return 'markdown';
+            }
+            return undefined;
+          },
+        },
+      },
     },
     resolve: {
       alias: {

@@ -12,14 +12,16 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, KnowledgeMode, SendMessageRequest } from '@/api';
+import type { ChatModelInfo, KnowledgeMode, Message, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
+import { useModels } from '@/features/models';
 import { useChatStore, type SessionScope } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
+import type { UiCitation } from '../model/citation';
 import '../chat.css';
-import { useMessages, useModels, useSendMessage, useUpdateSession } from '../model/queries';
+import { useMessages, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
@@ -37,6 +39,11 @@ function defaultModelId(models: ChatModelInfo[] | undefined): string {
   if (!models || models.length === 0) return '';
   return (models.find((m) => m.is_default) ?? models[0])?.id ?? '';
 }
+
+// Stable empty collections so a prop keeps its identity while its query loads (a
+// fresh `[]` each render would defeat the memoised child it feeds, #495).
+const EMPTY_MODELS: ChatModelInfo[] = [];
+const EMPTY_MESSAGES: Message[] = [];
 
 export function ChatView() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -58,6 +65,25 @@ export function ChatView() {
 
   const models = useModels();
   const queryClient = useQueryClient();
+
+  // Stable identity so nothing downstream of `ActiveSession` churns when this
+  // component re-renders (#495 — the same rule the callbacks inside
+  // `ActiveSession` follow). `queryClient` is stable for the provider's lifetime.
+  const onDoneReload = useCallback(() => {
+    if (!activeSessionId) return;
+    void queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
+    // A settled answer moved the token accounting (spec 0007 AC-1).
+    void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+  }, [activeSessionId, queryClient]);
+
+  // BE2-7: the follow-up suggestion is generated AFTER the terminal, so its
+  // token spend lands after the `done` refresh above — the meter would otherwise
+  // keep showing the pre-suggestion total until something else invalidated it.
+  // Re-read usage once the suggestions window has settled (delivered or expired).
+  const onSuggestionsSettled = useCallback(() => {
+    if (!activeSessionId) return;
+    void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+  }, [activeSessionId, queryClient]);
 
   // At narrow widths the subrail is an off-canvas drawer (see chat.css); this
   // drives it. Selecting/creating a session closes the drawer so the narrow-width
@@ -125,15 +151,8 @@ export function ChatView() {
               startStream={startStream}
               endStream={endStream}
               openViewer={openViewer}
-              onDoneReload={() => {
-                void queryClient.invalidateQueries({
-                  queryKey: chatKeys.messages(activeSessionId),
-                });
-                // A settled answer moved the token accounting (spec 0007 AC-1).
-                void queryClient.invalidateQueries({
-                  queryKey: chatKeys.usage(activeSessionId),
-                });
-              }}
+              onDoneReload={onDoneReload}
+              onSuggestionsSettled={onSuggestionsSettled}
             />
           </ErrorBoundary>
         ) : (
@@ -288,6 +307,8 @@ interface ActiveSessionProps {
     url?: string;
   }) => void;
   onDoneReload: () => void;
+  /** Called once the post-terminal suggestions window settles (BE2-7). */
+  onSuggestionsSettled: () => void;
 }
 
 function ActiveSession({
@@ -300,12 +321,26 @@ function ActiveSession({
   endStream,
   openViewer,
   onDoneReload,
+  onSuggestionsSettled,
 }: ActiveSessionProps) {
   const messages = useMessages(sessionId);
   const send = useSendMessage(sessionId);
   const updateSession = useUpdateSession();
   const prefs = usePreferences();
   const setDefaultPref = useUpdatePreferences();
+
+  // #495 INVARIANT — every callback that reaches the persisted render path must
+  // depend on the STABLE `mutate` function, never on the `useMutation` RESULT.
+  // TanStack returns `{ ...result, mutate, mutateAsync }`: a brand-new wrapper
+  // object on EVERY render, while `mutate`/`mutateAsync` keep their identity for
+  // the observer's lifetime. Closing over the result object makes `doSend` — and
+  // therefore `onSend`, which every `MessageBubble` receives as `onChooseOption`
+  // — change on every streamed delta, which silently defeats `PersistedMessages`'
+  // memo and re-renders the whole thread per token. Pinned by
+  // `ChatViewRenderHygiene.test.tsx`, which drives deltas through this wiring.
+  const sendMutate = send.mutate;
+  const updateSessionMutate = updateSession.mutate;
+  const setDefaultPrefMutate = setDefaultPref.mutate;
 
   // The selected model: default until the user changes it (AC-3). The session
   // model is persisted via PATCH when changed.
@@ -334,8 +369,8 @@ function ActiveSession({
 
   // Persist the currently-selected model as the caller's default for new chats.
   const onSetDefaultModel = useCallback(() => {
-    if (model) setDefaultPref.mutate({ default_model_id: model });
-  }, [model, setDefaultPref]);
+    if (model) setDefaultPrefMutate({ default_model_id: model });
+  }, [model, setDefaultPrefMutate]);
 
   // The assistant messageId we're waiting for the server reload to surface. The
   // live answer stays rendered until the persisted message arrives, so the turn
@@ -386,42 +421,99 @@ function ActiveSession({
     if (stream.phase === 'done' && stream.done) setPendingDoneId(stream.done.messageId);
   }, [stream.phase, stream.done]);
 
+  // BE2-7 — persisted-bubble retirement and SOCKET lifetime are separate. The
+  // live bubble is retired the moment the authoritative server copy arrives (as
+  // before), but that must not end the subscription: a `done(pendingSuggestions)`
+  // keeps the socket open for the trailing `event:suggestions` (#489), and the
+  // reload reliably beats it. Calling `endStream()` here — as this effect used
+  // to — unmounted `useChatStream` and closed the socket, so the suggestion was
+  // dropped and the usage query cached the pre-suggestion total. This holds the
+  // stream id (hence the hook) until the window settles; `retiredStreamId` is
+  // compared against the ACTIVE id, so a new turn self-clears it.
+  const [retiredStreamId, setRetiredStreamId] = useState<string | null>(null);
+  const liveRetired = retiredStreamId !== null && retiredStreamId === activeStreamId;
+
   // When the server reload includes the persisted assistant message, retire the
-  // live stream — the authoritative server copy now renders it.
+  // live turn — the authoritative server copy now renders it.
   const reloadedIds = messages.data?.items;
   useEffect(() => {
     if (!pendingDoneId || !reloadedIds) return;
     if (reloadedIds.some((m) => m.id === pendingDoneId)) {
       setPendingDoneId(null);
-      endStream();
+      setRetiredStreamId(activeStreamId);
     }
-  }, [pendingDoneId, reloadedIds, endStream]);
+  }, [pendingDoneId, reloadedIds, activeStreamId]);
 
-  const live: LiveAnswer | null = activeStreamId
-    ? {
-        phase: stream.phase,
-        text: stream.text,
-        citations: stream.citations,
-        tools: stream.tools,
-        codeRuns: stream.codeRuns,
-        steps: stream.steps,
-        narration: stream.narration?.text ?? null,
-        askUser: stream.askUser,
-        problem: stream.problem,
-        model: stream.start?.model ?? model,
-      }
-    : null;
+  // Retire the SUBSCRIPTION only once the retired turn has nothing outstanding:
+  // `awaitingSuggestions` is true exactly while the hook holds the socket open
+  // for the post-terminal suggestion, and false again the instant it is
+  // delivered, the grace elapses, or the stream is cancelled.
+  const awaitingSuggestions = stream.awaitingSuggestions;
+  useEffect(() => {
+    if (!liveRetired || awaitingSuggestions) return;
+    endStream();
+  }, [liveRetired, awaitingSuggestions, endStream]);
+
+  // The suggestion's own token spend is recorded after the terminal, so refresh
+  // usage when the window closes (BE2-7) — the `done` refresh saw the pre-
+  // suggestion total. Only fires for turns that actually awaited a suggestion.
+  const awaitedSuggestionsRef = useRef(false);
+  useEffect(() => {
+    if (awaitingSuggestions) {
+      awaitedSuggestionsRef.current = true;
+      return;
+    }
+    if (!awaitedSuggestionsRef.current) return;
+    awaitedSuggestionsRef.current = false;
+    onSuggestionsSettled();
+  }, [awaitingSuggestions, onSuggestionsSettled]);
+
+  // Memoised so its identity only changes when a stream field actually changes
+  // (#495). A stable `live` lets ChatThread's memoised subtrees skip re-rendering
+  // when ActiveSession re-renders for a reason unrelated to the stream.
+  const live: LiveAnswer | null = useMemo(
+    () =>
+      activeStreamId && !liveRetired
+        ? {
+            phase: stream.phase,
+            text: stream.text,
+            citations: stream.citations,
+            tools: stream.tools,
+            codeRuns: stream.codeRuns,
+            steps: stream.steps,
+            narration: stream.narration?.text ?? null,
+            askUser: stream.askUser,
+            problem: stream.problem,
+            model: stream.start?.model ?? model,
+          }
+        : null,
+    [
+      activeStreamId,
+      liveRetired,
+      stream.phase,
+      stream.text,
+      stream.citations,
+      stream.tools,
+      stream.codeRuns,
+      stream.steps,
+      stream.narration,
+      stream.askUser,
+      stream.problem,
+      stream.start,
+      model,
+    ],
+  );
 
   const doSend = useCallback(
     (req: SendMessageRequest) => {
       lastSendRef.current = req;
       // A new question supersedes the previous turn's follow-ups (spec 0006).
       setFollowUps([]);
-      send.mutate(req, {
+      sendMutate(req, {
         onSuccess: (res) => startStream(res.stream_id),
       });
     },
-    [send, startStream],
+    [sendMutate, startStream],
   );
 
   const onSend = useCallback(
@@ -441,18 +533,44 @@ function ActiveSession({
     if (lastSendRef.current) doSend(lastSendRef.current);
   }, [doSend]);
 
+  // Depend on `stream.cancel` (stable across renders — useChatStream memoises it)
+  // not the whole `stream` result (a fresh object every render), so `onStop` keeps
+  // a stable identity per delta and does not defeat Composer's memo (#495).
+  const cancelStream = stream.cancel;
   const onStop = useCallback(() => {
-    stream.cancel();
+    cancelStream();
     endStream();
-  }, [stream, endStream]);
+  }, [cancelStream, endStream]);
+
+  // Opening a citation forwards only what the citation wire provides about the
+  // source; the answer-time `meta` is NOT source provenance and is intentionally
+  // not forwarded as freshness/last-indexed (#120). A web citation (#221)
+  // forwards its `url` so the inspector opens the web-source pane. Stable
+  // identity (useCallback) so it does not defeat every MessageBubble's memo (the
+  // single highest-leverage prop on the render path, #495).
+  const onOpenCitation = useCallback(
+    (c: UiCitation) =>
+      openViewer({
+        documentId: c.documentId,
+        documentName: c.documentName,
+        charStart: c.charStart,
+        charEnd: c.charEnd,
+        snippet: c.snippet,
+        ...(c.url ? { url: c.url } : {}),
+      }),
+    [openViewer],
+  );
+
+  const refetchMessages = messages.refetch;
+  const onRetryLoad = useCallback(() => void refetchMessages(), [refetchMessages]);
 
   const onModelChange = useCallback(
     (next: string) => {
       setModel(next);
       // Persist as the session default (best-effort; per-turn override still set).
-      updateSession.mutate({ sessionId, body: { model: next } });
+      updateSessionMutate({ sessionId, body: { model: next } });
     },
-    [sessionId, updateSession],
+    [sessionId, updateSessionMutate],
   );
 
   const streaming = live?.phase === 'streaming';
@@ -500,32 +618,18 @@ function ActiveSession({
       </div>
       <div className="min-h-0 flex-1">
         <ChatThread
-          messages={messages.data?.items ?? []}
+          messages={messages.data?.items ?? EMPTY_MESSAGES}
           models={models}
           isLoading={messages.isLoading}
           isError={messages.isError}
           error={messages.error}
-          onRetryLoad={() => void messages.refetch()}
+          onRetryLoad={onRetryLoad}
           live={live}
           onRetryStream={onRetryStream}
           onSendText={onSend}
           sendBusy={busy}
           suggestions={followUps}
-          onOpenCitation={(c) =>
-            // The viewer carries only what the citation wire provides about the
-            // source; the answer-time `meta` is NOT a source-provenance signal
-            // and is intentionally not forwarded as freshness/last-indexed (#120).
-            // A web citation (#221) forwards its `url` so the inspector opens the
-            // web-source pane instead of trying to fetch corpus bytes.
-            openViewer({
-              documentId: c.documentId,
-              documentName: c.documentName,
-              charStart: c.charStart,
-              charEnd: c.charEnd,
-              snippet: c.snippet,
-              ...(c.url ? { url: c.url } : {}),
-            })
-          }
+          onOpenCitation={onOpenCitation}
         />
       </div>
 
@@ -536,7 +640,7 @@ function ActiveSession({
           </p>
         )}
         <Composer
-          models={models ?? []}
+          models={models ?? EMPTY_MODELS}
           model={model}
           onModelChange={onModelChange}
           busy={busy}

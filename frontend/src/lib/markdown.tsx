@@ -9,6 +9,7 @@
  * streamed assistant responses.
  */
 import {
+  Fragment,
   isValidElement,
   memo,
   useCallback,
@@ -24,7 +25,15 @@ import remarkGfm from 'remark-gfm';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeHighlight from 'rehype-highlight';
 import type { Options as SanitizeSchema } from 'rehype-sanitize';
+// The highlight.js theme for the code blocks rehype-highlight marks up. It lives
+// HERE, not in `main.tsx` (FE-9): the entry importing it made the entry chunk
+// statically import the `markdown` chunk — the theme's id matches that
+// manualChunks group — which put the whole pipeline back on the first-paint path
+// (#494 AC-5). Co-located with the renderer, it loads with the pipeline that
+// needs it, exactly once (module singleton).
+import 'highlight.js/styles/github-dark.css';
 import { cn } from './cn';
+import { blockKey, splitStreamingBlocks } from './markdownBlocks';
 
 // Extend the safe default schema to allow highlight.js class names on
 // <code>/<span> (rehype-highlight emits `hljs-*` classes) and the disabled
@@ -53,6 +62,17 @@ export interface MarkdownProps {
    * new tab — the chat behavior, unchanged.
    */
   resolveInternalLink?: (href: string) => string | null;
+  /**
+   * #494: while an answer is actively streaming, parse INCREMENTALLY — split the
+   * source into settled blocks (each parsed once, memoised on content) plus one
+   * trailing in-progress block that re-parses as deltas land. A settled turn (the
+   * default, `streaming` false/absent) renders the whole document in one parse, so
+   * the settled DOM is byte-identical to a one-shot render (AC-3). Every block
+   * goes through the SAME sanitize pipeline, so the XSS posture is unchanged
+   * (AC-4). Only the chat streaming bubble sets this; all other consumers keep the
+   * whole-document path.
+   */
+  streaming?: boolean;
 }
 
 /**
@@ -174,7 +194,59 @@ const MarkdownPipeline = memo(function MarkdownPipeline({
   );
 });
 
-function MarkdownViewComponent({ children, className, resolveInternalLink }: MarkdownProps) {
+/**
+ * The incremental streaming body (#494): render each SETTLED block through its own
+ * `MarkdownPipeline` with a stable content-derived key so it parses exactly once
+ * and never remounts as later text arrives (AC-2), plus one trailing pipeline for
+ * the in-progress block that re-parses per delta. Because settled blocks carry
+ * content keys — not array indices — a block that stays settled keeps its element
+ * across flushes even if boundaries shift, so its (memoised) parse is reused. Every
+ * block flows through the SAME `MarkdownPipeline`, so sanitisation, the link
+ * override, and citation text are identical to the whole-document path (AC-4/AC-6).
+ *
+ * A single whole-document parse joins its top-level block elements with a `\n` text
+ * node (`</p>\n<h2>`); parsing each block standalone drops those inter-block
+ * separators. To keep the streamed DOM BYTE-identical to one-shot (AC-3, tested via
+ * raw `innerHTML`), we re-insert exactly one `\n` text node BETWEEN adjacent blocks
+ * (never before the first / after the last, matching the one-shot join). The
+ * separator rides inside the following block's keyed Fragment, so content-keyed
+ * blocks still reuse their memoised parse across flushes.
+ */
+function StreamingMarkdownBody({
+  source,
+  resolveInternalLink,
+}: {
+  source: string;
+  resolveInternalLink?: (href: string) => string | null;
+}) {
+  const { settled, trailing } = splitStreamingBlocks(source);
+  // Disambiguate identical settled blocks (e.g. two `---`) so keys stay unique.
+  const seen = new Map<string, number>();
+  const blocks = settled.map((block) => {
+    const h = blockKey(block);
+    const n = seen.get(h) ?? 0;
+    seen.set(h, n + 1);
+    return { key: n === 0 ? h : `${h}#${n}`, source: block };
+  });
+  if (trailing !== '') blocks.push({ key: '__trailing__', source: trailing });
+  return (
+    <>
+      {blocks.map((block, i) => (
+        <Fragment key={block.key}>
+          {i > 0 && '\n'}
+          <MarkdownPipeline source={block.source} resolveInternalLink={resolveInternalLink} />
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+function MarkdownViewComponent({
+  children,
+  className,
+  resolveInternalLink,
+  streaming,
+}: MarkdownProps) {
   // #166: while an answer streams, `children` grows by one delta per token and the
   // full remark/rehype/sanitize/highlight pipeline re-runs each time (O(n^2) over a
   // long answer). `useDeferredValue` lets React keep the urgent updates (the caret,
@@ -187,7 +259,14 @@ function MarkdownViewComponent({ children, className, resolveInternalLink }: Mar
   const source = useDeferredValue(children);
   return (
     <div className={`prose-md ${className ?? ''}`.trim()}>
-      <MarkdownPipeline source={source} resolveInternalLink={resolveInternalLink} />
+      {streaming ? (
+        // #494: incremental per-block parse for the live bubble. Settle flips this
+        // component out for the whole-document path below, whose DOM is identical
+        // to a one-shot render (AC-3), so the hand-off is seamless.
+        <StreamingMarkdownBody source={children} resolveInternalLink={resolveInternalLink} />
+      ) : (
+        <MarkdownPipeline source={source} resolveInternalLink={resolveInternalLink} />
+      )}
     </div>
   );
 }
