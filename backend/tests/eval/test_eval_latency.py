@@ -13,8 +13,10 @@ import pytest
 
 from tests.eval.latency import (
     StreamTiming,
+    TimedEnvelope,
     fold_answer_text,
     is_answer_delta,
+    measure_client_stream,
     measure_stream,
     percentile,
     summarise_ttft,
@@ -163,6 +165,104 @@ def test_measure_stream_tolerates_unparseable_ts() -> None:
     assert t.ttft_seconds is None
     assert t.total_seconds is None
     assert t.terminal_type == "done"  # structure still classified
+
+
+# --- client-perspective timing (FE-1: perf_counter at receipt, not server ts) ---
+
+
+def _te(recv: float, envelope: dict[str, object]) -> TimedEnvelope:
+    """A received envelope stamped with a monotonic client-receipt time."""
+    return TimedEnvelope(recv=recv, envelope=envelope)
+
+
+def test_measure_client_stream_ttft_and_total_from_receipt_times() -> None:
+    # recv times are perf_counter readings the consumer took as each envelope
+    # arrived off the backplane; the ts strings are deliberately different so a
+    # regression to server-ts measurement would be caught.
+    events = [
+        _te(100.00, _start(0, "2026-07-23T00:00:00.000000+00:00")),
+        _te(
+            100.10, _event(1, "2026-07-23T00:00:00.050000+00:00", "narration", {"text": "hunting"})
+        ),
+        _te(100.90, _delta(2, "2026-07-23T00:00:00.400000+00:00", "Based on ")),
+        _te(101.00, _delta(3, "2026-07-23T00:00:00.450000+00:00", "your docs")),
+        _te(101.50, _done(4, "2026-07-23T00:00:00.500000+00:00")),
+    ]
+    t = measure_client_stream(events)
+    assert t.ttft_seconds == pytest.approx(0.9, abs=1e-9)  # start recv -> first answer-delta recv
+    assert t.total_seconds == pytest.approx(1.5, abs=1e-9)  # start recv -> terminal recv
+    assert t.terminal_type == "done"
+    assert t.answer_text == "Based on your docs"
+    assert t.answer_delta_count == 2
+    assert t.retract_count == 0
+
+
+def test_measure_client_stream_measures_receipt_not_server_ts() -> None:
+    # The FE-1 crux: server ts says first token was 0.4s after start; the client
+    # actually received it 0.9s after start (publish + backplane + relay). AC-1 is
+    # the client number, so measure_client_stream must report 0.9, not 0.4.
+    events = [
+        _te(100.00, _start(0, "2026-07-23T00:00:00.000000+00:00")),
+        _te(100.90, _delta(1, "2026-07-23T00:00:00.400000+00:00", "answer")),
+        _te(101.30, _done(2, "2026-07-23T00:00:00.700000+00:00")),
+    ]
+    t = measure_client_stream(events)
+    assert t.ttft_seconds == pytest.approx(0.9, abs=1e-9)
+    assert t.total_seconds == pytest.approx(1.3, abs=1e-9)
+
+
+def test_measure_client_stream_ignores_narration_for_ttft() -> None:
+    events = [
+        _te(50.0, _start(0, "2026-07-23T00:00:00.000000+00:00")),
+        _te(
+            50.2,
+            _event(1, "2026-07-23T00:00:00.100000+00:00", "narration", {"text": "x", "turn": 1}),
+        ),
+        _te(50.8, _delta(2, "2026-07-23T00:00:00.900000+00:00", "The answer")),
+        _te(51.0, _done(3, "2026-07-23T00:00:01.000000+00:00")),
+    ]
+    assert measure_client_stream(events).ttft_seconds == pytest.approx(0.8, abs=1e-9)
+
+
+def test_measure_client_stream_classifies_typed_error_terminal() -> None:
+    events = [
+        _te(200.0, _start(0, "2026-07-23T00:00:00.000000+00:00")),
+        _te(
+            225.0,
+            _error(
+                1, "2026-07-23T00:00:24.000000+00:00", code="dependency_unavailable", status=503
+            ),
+        ),
+    ]
+    t = measure_client_stream(events)
+    assert t.terminal_type == "error"
+    assert t.problem_code == "dependency_unavailable"
+    assert t.problem_status == 503
+    assert t.total_seconds == pytest.approx(25.0, abs=1e-9)  # client-side start -> error
+    assert t.ttft_seconds is None  # no answer token ever arrived
+
+
+def test_measure_client_stream_folds_retract_and_reports_first_wire_ttft() -> None:
+    events = [
+        _te(10.0, _start(0, "2026-07-23T00:00:00.000000+00:00")),
+        _te(10.5, _delta(1, "2026-07-23T00:00:00.500000+00:00", "speculative ")),
+        _te(10.6, _delta(2, "2026-07-23T00:00:00.600000+00:00", "text")),
+        _te(10.7, _event(3, "2026-07-23T00:00:00.700000+00:00", "answer_retract")),
+        _te(11.0, _delta(4, "2026-07-23T00:00:01.000000+00:00", "real answer")),
+        _te(11.2, _done(5, "2026-07-23T00:00:01.200000+00:00")),
+    ]
+    t = measure_client_stream(events)
+    assert t.answer_text == "real answer"
+    assert t.retract_count == 1
+    assert t.ttft_seconds == pytest.approx(0.5, abs=1e-9)  # first token on the wire
+
+
+def test_measure_client_stream_handles_missing_start_and_terminal() -> None:
+    t = measure_client_stream([_te(1.0, _delta(1, "2026-07-23T00:00:00+00:00", "x"))])
+    assert t.ttft_seconds is None  # no start receipt to measure from
+    assert t.total_seconds is None
+    assert t.terminal_type is None
+    assert t.answer_delta_count == 1
 
 
 # --- percentile math --------------------------------------------------------

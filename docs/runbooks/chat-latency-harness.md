@@ -25,11 +25,16 @@ with the pure helpers in `backend/tests/eval/latency.py`:
   *typed* terminal (a Problem `code` + `status`) arrives within the interactive
   budget (**≤ 30s**), not after the old ~182s retry cliff.
 
-**Timing source.** Every envelope carries a server-set `ts` ("Server send time"
-per `contracts/websocket-envelopes.schema.json`). The harness measures from
-envelope `ts` deltas (`start.ts` → first-answer-`delta`.ts), so the numbers are
-independent of when the harness happened to drain the bounded replay — they are
-the true producer send times, i.e. exactly what a WS client observes.
+**Timing source — client-perspective, not server send time.** AC-1 is the
+wall-clock a *browser* waits, so the harness subscribes through the real backplane
+**before** generation and stamps `time.perf_counter()` the instant it drains each
+envelope off the wire. TTFAT is `first-answer-delta receipt − start receipt` and
+total is `terminal receipt − start receipt`, both from the consumer's side — so
+the number **includes** the Redis publish, the WS relay, and the fan-out to the
+client (exactly what the old server-`ts` measurement excluded). The envelope's
+server `ts` is retained only as a diagnostic (`measure_stream`) to attribute how
+much of the observed latency is generation vs. transport; it is not what the AC
+asserts.
 
 **Backplane.** When a real Redis is reachable the harness measures over
 `RedisBackplane` (so the #487 pooled-publish path is on the clock). Otherwise it
@@ -41,12 +46,16 @@ includes it.
 
 Same as the live eval (`scripts/run-live-eval.ps1`): the stack up (ADR-0005), an
 OpenRouter key, and reachable Postgres + OpenSearch. Redis is optional (see
-above). The pytest **skips cleanly** when the key / Postgres / OpenSearch are
-absent, so there is nothing to clean up on a machine without the stack.
+above). Because the harness spends real tokens it is **opt-in** — it runs only
+when `RUN_LIVE=1` is set (issue #94 parity, mirroring the live backplane/eval
+tests) **and** the key / datastores are reachable, and otherwise **skips cleanly**
+(no socket probed, nothing spent), so there is nothing to clean up on a machine
+without the stack. The `run-latency-harness.ps1` wrapper sets `RUN_LIVE=1` for you.
 
 ```powershell
 docker compose up -d           # ADR-0005 — brings up Postgres, OpenSearch, Redis
 $env:OPENROUTER_API_KEY = 'sk-or-...'
+$env:RUN_LIVE = '1'            # explicit live opt-in (the wrapper sets this for you)
 ```
 
 ## Run it — one command
@@ -59,10 +68,12 @@ Or directly (the wrapper just sets env and shells out):
 
 ```powershell
 cd backend
+$env:RUN_LIVE = '1'            # without this the harness skips (offline-safe)
 uv run --extra dev pytest tests/eval/test_chat_latency_live.py -s -v
 ```
 
-The `-s` is required for the harness's printed report to reach the console.
+The `-s` is required for the harness's printed report to reach the console. Omit
+`RUN_LIVE=1` and the two tests skip cleanly — that is the default offline posture.
 
 ### Tuning (all optional, env-overridable)
 
@@ -124,6 +135,11 @@ retracted on the single-tool path (so TTFT is unambiguously answer-token time).
   `backend/tests/test_chat_runtime.py`; the harness's `fold_answer_text` mirrors
   the same folding for a live cross-check.
 
-The measurement math itself (envelope → TTFT/total, retract folding, percentiles)
-is unit-tested offline in `backend/tests/eval/test_eval_latency.py`, so the
-harness's own correctness is proven, not assumed.
+The measurement math itself — both the client-perspective reduction
+(`measure_client_stream`: receipt-time → TTFAT/total) and the server-`ts`
+diagnostic (`measure_stream`), plus retract folding and percentiles — is
+unit-tested offline in `backend/tests/eval/test_eval_latency.py`, so the harness's
+own correctness is proven, not assumed. The **opt-in gate** (no import-time socket,
+`RUN_LIVE` required, the `live` marker present) is pinned offline in
+`backend/tests/eval/test_chat_latency_gating.py`, so a regression that spends
+tokens on an ordinary `pytest` run would fail there.

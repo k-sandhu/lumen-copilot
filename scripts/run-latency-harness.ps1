@@ -17,13 +17,17 @@
 
   It measures over the REAL Redis backplane when Redis is reachable (so the #487
   pooled-publish path is on the clock), else the in-memory fan-out (the printed
-  report names which). Timing uses each envelope's server `ts`, so the numbers are
-  independent of when the harness drains the replay.
+  report names which). Timing is client-perspective: the harness subscribes before
+  generation and stamps `time.perf_counter()` at the instant it drains each
+  envelope, so TTFAT / total include the publish, the WS relay, and the fan-out a
+  browser pays (the server `ts` is kept only as a generation-vs-transport diagnostic).
 
-  The underlying pytest SKIPS cleanly when the key / Postgres / OpenSearch are
-  absent (offline-safe), so this script just sets the environment and shells out.
-  It does NOT bring the stack up; do that first with `docker compose up -d`
-  (ADR-0005). See docs/runbooks/chat-latency-harness.md.
+  The harness is opt-in: it spends real tokens, so it runs only when RUN_LIVE=1 is
+  set (plus a reachable key / Postgres / OpenSearch) and otherwise SKIPS cleanly
+  (offline-safe, no socket, no tokens). This script sets RUN_LIVE=1 for you so the
+  documented one-command path runs live; when the key or a datastore is absent the
+  pytest still skips cleanly. It does NOT bring the stack up; do that first with
+  `docker compose up -d` (ADR-0005). See docs/runbooks/chat-latency-harness.md.
 
 .PARAMETER ApiKey
   The OpenRouter API key. Defaults to the existing $env:OPENROUTER_API_KEY.
@@ -59,6 +63,10 @@ if ([string]::IsNullOrWhiteSpace($ApiKey)) {
   Write-Warning 'OPENROUTER_API_KEY is not set. The harness will SKIP (offline-safe). Pass -ApiKey or set $env:OPENROUTER_API_KEY.'
 }
 
+# The explicit live opt-in (issue #94 parity): the harness only runs — and only
+# then probes datastores / spends tokens — when RUN_LIVE is set. This documented
+# wrapper is the "run it live" path, so it sets it; a bare pytest stays offline-safe.
+$env:RUN_LIVE = '1'
 $env:OPENROUTER_API_KEY = $ApiKey
 $env:DATABASE_URL = $DatabaseUrl
 $env:LATENCY_SAMPLES = "$Samples"

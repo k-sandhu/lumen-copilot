@@ -4,8 +4,11 @@ The parent tracking issue (#486) closes on numbers, not vibes, but its own
 *instrumentation caveat* is that AC-1 and AC-7 **cannot be verified without a
 timing harness** — the repo has no metrics or tracing. This module is that
 harness, built the way the repo already runs live checks (``test_eval_live.py`` +
-``scripts/run-live-eval.ps1``): a live-gated pytest that **skips cleanly offline**
-and is driven by one documented command against the running dev stack.
+``test_realtime_backplane_live.py``): a **doubly-gated** pytest that spends real
+tokens, so it runs only on an explicit ``RUN_LIVE=1`` opt-in *and* a reachable
+stack, and otherwise **skips cleanly offline** (the default ``pytest`` opens no
+socket and spends nothing — issue #94 parity). It is driven by one documented
+command against the running dev stack.
 
 What it measures, from a **client's** perspective (see
 :mod:`tests.eval.latency`), off the real ``realtime/`` backplane — the exact
@@ -20,16 +23,19 @@ envelope stream the WS relay forwards to a browser:
   asserting a *typed* terminal (a Problem ``code`` + ``status``) arrives within
   the interactive budget (``≤ 30s``) — proving the ~182s retry cliff is gone.
 
-Timing uses each envelope's server ``ts`` (see :mod:`tests.eval.latency`), so the
-numbers are independent of when this harness drains the replay. When a real Redis
-is reachable the harness measures over :class:`RedisBackplane` (so the #487
-pooled-publish path is on the clock); otherwise it falls back to
+Timing is **client-perspective**: the harness subscribes through the real
+backplane *before* generation and stamps ``time.perf_counter()`` at the instant it
+drains each envelope, so TTFAT / total include the Redis publish, the WS relay, and
+the fan-out a browser actually pays (see :func:`tests.eval.latency.measure_client_stream`).
+When a real Redis is reachable the harness measures over :class:`RedisBackplane`
+(so the #487 pooled-publish path is on the clock); otherwise it falls back to
 :class:`InMemoryBackplane` and says so in the printed report.
 
 Run it with the stack up (see ``docs/runbooks/chat-latency-harness.md``)::
 
     docker compose up -d
     export OPENROUTER_API_KEY=sk-...
+    export RUN_LIVE=1
     cd backend && uv run --extra dev pytest tests/eval/test_chat_latency_live.py -s -v
 
 Tuning env vars (all optional): ``LATENCY_SAMPLES`` (default 5),
@@ -40,11 +46,13 @@ Tuning env vars (all optional): ``LATENCY_SAMPLES`` (default 5),
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
+import time
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -74,7 +82,12 @@ from app.services.chat_runtime import ChatRuntime
 from app.services.provider_models import ModelRoute
 from tests.eval.golden import GOLDEN_DOCUMENTS
 from tests.eval.harness import seed_corpus
-from tests.eval.latency import StreamTiming, measure_stream, summarise_ttft
+from tests.eval.latency import (
+    StreamTiming,
+    TimedEnvelope,
+    measure_client_stream,
+    summarise_ttft,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -107,21 +120,26 @@ def _redis_reachable(url: str) -> bool:
     return _reachable(parsed.hostname or "localhost", parsed.port or 6379)
 
 
+# The harness is DOUBLY gated (issue #94 parity, mirroring test_realtime_backplane_live):
+# an explicit RUN_LIVE=1 opt-in gates collection, and reachability (key + Postgres +
+# OpenSearch) is probed INSIDE the `_stack_reachable` fixture — never at import — so an
+# ordinary offline `pytest` neither opens a socket nor spends a token on ~5 answers.
+_RUN_LIVE = os.environ.get("RUN_LIVE", "").strip() not in ("", "0", "false", "False")
+
+# Read at import (no socket); the actual reachability probe is deferred to the fixture.
 _has_key = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
-_pg_up = _pg_reachable(_PG_URL)
-_os_up = _os_reachable(_OS_URL)
 
 # Redis is OPTIONAL: with it the harness measures the real pooled-publish path
-# (#487); without it, the in-memory fan-out (the report names which was used).
+# (#487); without it, the in-memory fan-out (the report names which was used). Its
+# reachability probe lives in `_make_backplane`, not here — again, no import-time socket.
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:47184/0")
-_redis_up = _redis_reachable(_REDIS_URL)
 
 _live = pytest.mark.skipif(
-    not (_has_key and _pg_up and _os_up),
+    not _RUN_LIVE,
     reason=(
-        "live latency harness needs OPENROUTER_API_KEY + reachable Postgres + OpenSearch "
-        f"(key={'set' if _has_key else 'unset'}, pg@{_PG_URL}={'up' if _pg_up else 'down'}, "
-        f"os@{_OS_URL}={'up' if _os_up else 'down'}); skipped (offline-safe)."
+        "live latency harness opted out: needs RUN_LIVE=1 (plus OPENROUTER_API_KEY + "
+        f"reachable Postgres/OpenSearch) — RUN_LIVE={'set' if _RUN_LIVE else 'unset'}; "
+        "skipped (offline-safe, no socket, no tokens)."
     ),
 )
 
@@ -139,6 +157,34 @@ _QUESTION = os.environ.get(
 # Assert the AC budgets by default (the DoD: no sub-issue closes on "looks
 # faster"); LATENCY_ASSERT=0 turns the run into measure-only for exploration.
 _ASSERT = os.environ.get("LATENCY_ASSERT", "1") != "0"
+
+# How long to let the consumer register its subscription before the producer
+# publishes `start`, so start / first-delta / terminal all arrive LIVE and their
+# receipt times reflect true publish→consumer latency (the same settle the live
+# backplane regression test uses). The bounded replay is the safety net if a
+# sample still subscribes late, so a wiring hiccup can never drop the stream.
+_SUBSCRIBE_SETTLE_SECONDS = float(os.environ.get("LATENCY_SUBSCRIBE_SETTLE_SECONDS", "0.3"))
+
+
+@pytest.fixture
+def _stack_reachable() -> None:
+    """Skip cleanly when opted in (RUN_LIVE=1) but the key/stack isn't actually usable.
+
+    Sockets are probed **only here** — a fixture that runs after the RUN_LIVE gate
+    (``@_live``) has already let the test through — so an offline collection never
+    opens one (FE-2). Mirrors ``test_realtime_backplane_live``'s fixture-side skip.
+    """
+    missing: list[str] = []
+    if not _has_key:
+        missing.append("OPENROUTER_API_KEY")
+    if not _pg_reachable(_PG_URL):
+        missing.append(f"Postgres@{_PG_URL}")
+    if not _os_reachable(_OS_URL):
+        missing.append(f"OpenSearch@{_OS_URL}")
+    if missing:
+        pytest.skip(
+            "chat-latency harness unreachable (opted in via RUN_LIVE): " + ", ".join(missing)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,32 +274,37 @@ async def _seeded_stack() -> AsyncIterator[_Stack]:
 
 
 def _make_backplane() -> tuple[Backplane, str]:
-    """The real Redis backplane when reachable (#487 on the clock), else in-memory."""
-    if _redis_up:
+    """The real Redis backplane when reachable (#487 on the clock), else in-memory.
+
+    Reachability is probed here (inside a live test, after the RUN_LIVE gate), never
+    at import — so an offline collection opens no Redis socket (FE-2).
+    """
+    if _redis_reachable(_REDIS_URL):
         return RedisBackplane(_REDIS_URL), f"redis@{_REDIS_URL}"
     return InMemoryBackplane(), "in-memory (Redis unreachable)"
 
 
-async def _drain(backplane: Backplane, stream_id: str) -> list[dict[str, object]]:
-    """Collect a finished stream's envelopes from the backplane replay.
+async def _capture_stream(
+    backplane: Backplane, stream_id: str, events: list[TimedEnvelope]
+) -> None:
+    """Subscribe and stamp each envelope's monotonic CLIENT-receipt time.
 
-    The producer has already run to completion, so ``subscribe`` drains the
-    bounded replay (both impls replay — the #153 late-subscriber contract) and
-    stops at the terminal. Wrapped in a wait_for so a wiring bug can never hang
-    the harness.
+    Runs as a background task started BEFORE the producer, so ``start``, the first
+    answer ``delta``, and the terminal all arrive live and their
+    ``time.perf_counter()`` receipt times include the publish → backplane → consumer
+    path a browser pays (#486 AC-1). The generator is ``aclose``d in the ``finally``
+    so the pub/sub connection (Redis) is released deterministically and nothing leaks
+    under ``filterwarnings=error``. The bounded replay (both impls — the #153
+    late-subscriber contract) guarantees the whole stream is seen even on a late join.
     """
-    import asyncio
-
-    collected: list[dict[str, object]] = []
-
-    async def _collect() -> None:
-        async for env in backplane.subscribe(stream_id):
-            collected.append(env)
+    gen = backplane.subscribe(stream_id)
+    try:
+        async for env in gen:
+            events.append(TimedEnvelope(recv=time.perf_counter(), envelope=env))
             if is_terminal(env):
                 break
-
-    await asyncio.wait_for(_collect(), timeout=90.0)
-    return collected
+    finally:
+        await gen.aclose()
 
 
 def _build_runtime(
@@ -265,7 +316,7 @@ def _build_runtime(
     """A ChatRuntime wired like the chat API's ``_schedule_answer`` (the paths that matter).
 
     Suggestions are disabled: they are POST-terminal (#489) and out of the
-    answer-time measurement (AC-5), and turning them off keeps the drain from
+    answer-time measurement (AC-5), and turning them off keeps the consumer from
     holding open for the grace window. The interactive timeout budget (#489) and
     the answer output cap (#488) are wired from Settings exactly as production
     does, so AC-7's bound is the real one.
@@ -305,23 +356,43 @@ async def _run_once(
     *,
     route_resolver: object | None = None,
 ) -> StreamTiming:
-    """Produce one answer and return its client-perspective timing."""
+    """Produce one answer while consuming it live, and return client-perspective timing.
+
+    The consumer subscribes through the real backplane and starts stamping receipt
+    times BEFORE generation, so TTFAT / total are measured from the client side
+    (FE-1), inclusive of publish + relay — not from the producer's pre-publish ``ts``.
+    """
     runtime = _build_runtime(stack, backplane, route_resolver=route_resolver)
     session_id = await _new_session_id(stack)
     stream_id = uuid.uuid4().hex
-    await runtime.run(
-        stream_id=stream_id,
-        session_id=session_id,
-        question=_QUESTION,
-        model=stack.model,
-        history=[],
-        collection_ids=None,
-    )
-    return measure_stream(await _drain(backplane, stream_id))
+
+    events: list[TimedEnvelope] = []
+    consumer = asyncio.create_task(_capture_stream(backplane, stream_id, events))
+    try:
+        # Register the subscription before the producer publishes `start`.
+        await asyncio.sleep(_SUBSCRIBE_SETTLE_SECONDS)
+        await runtime.run(
+            stream_id=stream_id,
+            session_id=session_id,
+            question=_QUESTION,
+            model=stack.model,
+            history=[],
+            collection_ids=None,
+        )
+        # The terminal has been published; the live consumer receives it and stops.
+        # Bounded so a wiring bug can never hang the harness.
+        await asyncio.wait_for(consumer, timeout=90.0)
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+            with suppress(asyncio.CancelledError):
+                await consumer
+    return measure_client_stream(events)
 
 
 @_live
-async def test_time_to_first_answer_token_p50_under_budget() -> None:
+@pytest.mark.live
+async def test_time_to_first_answer_token_p50_under_budget(_stack_reachable: None) -> None:
     """AC-1: single-tool grounded TTFT p50 < 2s on the FAST default model."""
     async with _seeded_stack() as stack:
         backplane, backplane_name = _make_backplane()
@@ -354,7 +425,10 @@ async def test_time_to_first_answer_token_p50_under_budget() -> None:
 
 
 @_live
-async def test_unreachable_provider_yields_typed_terminal_error_within_budget() -> None:
+@pytest.mark.live
+async def test_unreachable_provider_yields_typed_terminal_error_within_budget(
+    _stack_reachable: None,
+) -> None:
     """AC-7: an unreachable provider surfaces a typed error within the interactive budget."""
 
     async def _unreachable_route(_session: AsyncSession, model: str) -> ModelRoute:

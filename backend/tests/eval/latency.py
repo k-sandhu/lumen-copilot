@@ -16,15 +16,23 @@ feeds its captured stream through *exactly these functions* — so what the live
 run asserts is what the offline test pins (the "prove the harness, don't assume
 it" discipline the rest of ``tests/eval`` already follows).
 
-**Timing source — the server ``ts``.** Every envelope carries a server-set ``ts``
-(ISO-8601; "Server send time" per ``contracts/websocket-envelopes.schema.json``).
-Measuring from envelope ``ts`` deltas — ``start.ts`` → first-answer-``delta``.ts —
-is the client-perspective wall-clock from the ``start`` envelope to the first
-answer token being **sent**, and is immune to the harness's own subscribe race
-(with the bounded replay, the producer may well finish before the consumer drains
-it, so consumer arrival times are meaningless; the embedded ``ts`` is not). This
-is precisely AC-1's "from the client's ``start`` envelope to its first ``delta``
-carrying answer text".
+**Timing source — the client's monotonic receipt time.** AC-1 is a *client*
+number: the wall-clock a browser waits from the ``start`` envelope to the first
+``delta`` carrying answer text, **inclusive** of the Redis publish, the WS relay,
+and the fan-out to the consumer. So the live harness subscribes through the real
+``realtime/`` backplane *before* generation and stamps ``time.perf_counter()`` at
+the instant it drains each envelope; :class:`TimedEnvelope` pairs that receipt time
+with the envelope, and :func:`measure_client_stream` reduces the pair-stream to
+TTFAT (first-answer-``delta`` receipt − ``start`` receipt) and total (terminal
+receipt − ``start`` receipt). This is the number the parent AC-1 requires.
+
+A *second*, purely diagnostic view is the producer **send** time carried on each
+envelope's server ``ts`` (ISO-8601; "Server send time" per
+``contracts/websocket-envelopes.schema.json``). :func:`measure_stream` reduces a
+stream to TTFT/total from those ``ts`` deltas — it excludes publish/relay/receipt,
+so it is *not* the AC-1 measurement, but it is useful to attribute how much of the
+observed client latency is generation vs. transport. The live harness asserts the
+client-receipt number; ``measure_stream`` stays for offline diagnostics.
 
 **Answer text, not narration (AC-6).** Only ``type:"delta"`` envelopes carry
 answer text; a tool-calling turn's narration rides ``event:"narration"`` and is
@@ -132,11 +140,97 @@ class StreamTiming:
     tool path — the AC-1 scenario asserts this so TTFT is unambiguous)."""
 
 
-def measure_stream(envelopes: Sequence[Mapping[str, object]]) -> StreamTiming:
-    """Reduce a captured envelope stream to its client-perspective timing.
+@dataclass(frozen=True, slots=True)
+class TimedEnvelope:
+    """A received envelope stamped with the monotonic client-receipt time.
 
-    Uses the embedded server ``ts`` (see the module docstring) so the result is
-    independent of when the harness happened to drain the replay.
+    ``recv`` is a :func:`time.perf_counter` reading taken the instant the consumer
+    drained the envelope off the backplane — client-perspective receipt, inclusive
+    of publish + relay + fan-out (unlike the producer-set ``ts``). Deliberately a
+    plain float so the reduction stays I/O-free and unit-testable offline.
+    """
+
+    recv: float
+    envelope: Mapping[str, object]
+
+
+def _terminal_problem(envelope: Mapping[str, object]) -> tuple[str | None, int | None]:
+    """Extract the typed Problem ``(code, status)`` from an ``error`` terminal."""
+    problem = envelope.get("problem")
+    if not isinstance(problem, Mapping):
+        return None, None
+    code = problem.get("code")
+    status = problem.get("status")
+    return (
+        code if isinstance(code, str) else None,
+        status if isinstance(status, int) else None,
+    )
+
+
+def measure_client_stream(events: Sequence[TimedEnvelope]) -> StreamTiming:
+    """Reduce a captured *client-receipt* stream to its timing (#486 AC-1/AC-7).
+
+    Timing is measured from each envelope's monotonic receipt time
+    (:func:`time.perf_counter`), so TTFAT and total include the publish → backplane
+    → consumer path a browser actually pays — the parent AC-1 requirement, and what
+    the live harness asserts. Terminal classification and answer folding are the
+    same as :func:`measure_stream` (they read the envelope bodies, not the clock).
+    """
+    start_recv: float | None = None
+    first_answer_recv: float | None = None
+    terminal_recv: float | None = None
+    terminal_type: str | None = None
+    problem_code: str | None = None
+    problem_status: int | None = None
+    answer_delta_count = 0
+    retract_count = 0
+
+    for event in events:
+        env = event.envelope
+        etype = env.get("type")
+        if etype == "start" and start_recv is None:
+            start_recv = event.recv
+            continue
+        if _is_answer_retract(env):
+            retract_count += 1
+            continue
+        if is_answer_delta(env):
+            answer_delta_count += 1
+            if first_answer_recv is None:
+                first_answer_recv = event.recv
+            continue
+        if etype in _TERMINAL_TYPES:
+            # The LAST terminal wins (exactly one in a well-formed stream; scanning
+            # on tolerates a trailing post-terminal event).
+            terminal_recv = event.recv
+            terminal_type = str(etype)
+            problem_code = None
+            problem_status = None
+            if etype == "error":
+                problem_code, problem_status = _terminal_problem(env)
+
+    def _delta(a: float | None, b: float | None) -> float | None:
+        return None if a is None or b is None else a - b
+
+    return StreamTiming(
+        ttft_seconds=_delta(first_answer_recv, start_recv),
+        total_seconds=_delta(terminal_recv, start_recv),
+        terminal_type=terminal_type,
+        problem_code=problem_code,
+        problem_status=problem_status,
+        answer_text=fold_answer_text([event.envelope for event in events]),
+        answer_delta_count=answer_delta_count,
+        retract_count=retract_count,
+    )
+
+
+def measure_stream(envelopes: Sequence[Mapping[str, object]]) -> StreamTiming:
+    """Reduce a captured envelope stream to its producer **send-time** timing.
+
+    Uses the embedded server ``ts`` (see the module docstring), so it excludes the
+    publish/relay/receipt path and is a *diagnostic* view, not the AC-1 number —
+    :func:`measure_client_stream` is the client-perspective measurement the live
+    harness asserts.
     """
     start_ts: float | None = None
     first_answer_ts: float | None = None
@@ -266,8 +360,10 @@ def summarise_ttft(timings: Sequence[StreamTiming]) -> LatencyReport:
 __all__ = [
     "LatencyReport",
     "StreamTiming",
+    "TimedEnvelope",
     "fold_answer_text",
     "is_answer_delta",
+    "measure_client_stream",
     "measure_stream",
     "percentile",
     "summarise_ttft",
