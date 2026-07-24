@@ -50,7 +50,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from uuid import UUID
 
@@ -72,7 +72,7 @@ from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
-from app.domain.llm import ChatMessage, Role, TokenUsage, ToolCall, ToolSpec
+from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
 from app.llm.context import (
@@ -263,6 +263,11 @@ class _TextKind:
 
 _ANSWER_TEXT = _TextKind("delta")
 
+# The sentinel a stream-event task returns at generator exhaustion (#487/BE-4) — a
+# Task must not carry ``StopAsyncIteration`` across an ``await``, so the coalescer
+# timer wrapper turns exhaustion into this ordinary value.
+_STREAM_END = object()
+
 
 @dataclass(slots=True)
 class _TextCoalescer:
@@ -303,6 +308,20 @@ class _TextCoalescer:
         if self._chars >= self.max_chars or (now - self._opened_at) >= self.max_delay_seconds:
             return self.take()
         return None
+
+    def flush_deadline(self) -> float | None:
+        """The monotonic time by which an OPEN buffer must flush (#487/BE-4).
+
+        The TIME half of the add-time policy, surfaced so a stalled provider stream
+        can flush the lone buffered chunk on its deadline WITHOUT waiting for a
+        subsequent :meth:`add` (which is the only other thing that evaluates the
+        elapsed deadline). ``None`` when the buffer is empty — nothing to flush.
+        Read against the SAME ``clock`` the add-time check uses, so the timed flush
+        and the add-time flush agree.
+        """
+        if self.kind is None:
+            return None
+        return self._opened_at + self.max_delay_seconds
 
     def take(self) -> str | None:
         """Drain the buffer unconditionally (``None`` when empty)."""
@@ -472,6 +491,7 @@ class ChatRuntime:
         text_coalesce_chars: int = _DEFAULT_TEXT_COALESCE_CHARS,
         text_coalesce_seconds: float = _DEFAULT_TEXT_COALESCE_SECONDS,
         clock: Callable[[], float] | None = None,
+        flush_sleep: Callable[[float], Awaitable[None]] | None = None,
         turn_timeout_seconds: float | None = _DEFAULT_TURN_TIMEOUT_SECONDS,
         interactive_max_attempts: int | None = _DEFAULT_INTERACTIVE_MAX_ATTEMPTS,
         answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
@@ -572,6 +592,13 @@ class ChatRuntime:
         self._text_coalesce_chars = text_coalesce_chars
         self._text_coalesce_seconds = text_coalesce_seconds
         self._clock: Callable[[], float] = clock or time.monotonic
+        # The coalescer flush timer (#487/BE-4): when a lone chunk is buffered and
+        # the provider then stalls, this bounds how long the buffered text can wait
+        # before its elapsed-time deadline flushes it — without a subsequent chunk to
+        # trip the add-time check. Production sleeps the real remaining time; tests
+        # inject a controllable timer so the deadline is deterministic without a real
+        # sleep. Distinct from ``retry_sleep`` (backoffs) so tests observe each.
+        self._flush_sleep: Callable[[float], Awaitable[None]] = flush_sleep or asyncio.sleep
         # Interactive timeout budget (#489). ``turn_timeout_seconds`` caps a whole
         # resilient turn (all same-route retries + backoffs + one failover) as an
         # asyncio deadline — the load-bearing bound for a hung provider; ``None``
@@ -1801,6 +1828,18 @@ class ChatRuntime:
             if narrate is not None and text:
                 await narrate(text)
 
+        def _buffer_flush_deadline() -> float | None:
+            # BE-4: the monotonic time the open coalesce buffer must flush by, so a
+            # provider stall after a lone chunk cannot strand it past its deadline.
+            return state.buffer.flush_deadline()
+
+        async def _drain_buffer() -> None:
+            # BE-4: drive the coalescer's TIME flush from the answer coroutine (seq
+            # mint + publish stay ordered). Flushes whatever kind is buffered —
+            # speculative answer text becomes a live ``delta``, narration an
+            # ``event:narration`` — exactly what the add-time deadline would emit.
+            await self._flush_text(state)
+
         async def _run_attempts() -> tuple[list[ToolCall], str, list[str]]:
             nonlocal messages
             while True:
@@ -1828,6 +1867,12 @@ class ChatRuntime:
                             on_retract=(
                                 _retract_speculative_answer if narrate is not None else None
                             ),
+                            # BE-4: the coalescer flush-timer seams — a stalled
+                            # provider still flushes a lone buffered chunk on its
+                            # deadline. In THIS coroutine, so ordering/monotonicity
+                            # hold and the timed flush never races the terminal.
+                            flush_deadline=_buffer_flush_deadline,
+                            flush=_drain_buffer,
                         )
                     except LlmProviderError as exc:
                         if not exc.retryable or emitted["narration"]:
@@ -2056,6 +2101,8 @@ class ChatRuntime:
         narrate: Callable[[str], Awaitable[None]] | None = None,
         speak: Callable[[str], Awaitable[None]] | None = None,
         on_retract: Callable[[], Awaitable[None]] | None = None,
+        flush_deadline: Callable[[], float | None] | None = None,
+        flush: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """Consume one completion turn; return ``(tool_calls, finish_reason, text)``.
 
@@ -2086,12 +2133,23 @@ class ChatRuntime:
         id + (for a per-tenant provider) the api_key/base_url override. The SAME
         route is passed on every turn of the loop, so a provider's decrypted key is
         reused, never re-decrypted per turn.
+
+        ``flush_deadline`` + ``flush`` are the #487/BE-4 coalescer-timer seams: between
+        provider events this coroutine waits on the next event AND a timer set to the
+        open coalesce buffer's deadline, so a lone buffered chunk flushes on its
+        deadline even when the provider then stalls (defeating the TTFT bound is the
+        whole failure this closes). The drive stays in THIS coroutine (never an async
+        generator), so awaited futures resume normally and the seq mint + publish stay
+        ordered — a timed flush never races the terminal. The next-event task is never
+        cancelled by the timer (only the timer is), so the provider generator is never
+        corrupted mid-``__anext__``. Unset seams ⇒ a plain drain, byte-identical to the
+        pre-BE-4 iteration.
         """
         turn_tool_calls: list[ToolCall] = []
         finish_reason = "stop"
         text_chunks: list[str] = []
         narrating = False
-        async for ev in self._gateway.stream_tools(
+        gen = self._gateway.stream_tools(
             messages,
             tools=list(tools),
             model=route.model,
@@ -2105,40 +2163,113 @@ class ChatRuntime:
             # Output ceiling (#488): only forwarded when set, so an unbounded
             # (offline/headless) turn keeps its exact pre-#488 wire.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),
-        ):
-            if (ev.tool_call_started or ev.tool_calls) and not narrating and narrate is not None:
-                # The classification point (ADR-0016 §6, #414): the FIRST
-                # tool-call fragment proves this turn is tool-calling, hence
-                # its text is narration. First RETRACT any answer text already
-                # streamed speculatively (#488) — the client discards it —
-                # then flush the buffer as narration and stream the rest live;
-                # ``narrate`` also CLOSES the turn's retry window (§4 — an
-                # emitting turn never retries).
-                narrating = True
-                if on_retract is not None:
-                    await on_retract()
-                buffered = "".join(text_chunks)
-                # ALWAYS invoke — an empty buffer still closes the retry
-                # window (the amendment's letter: the window closes AT the
-                # classification point, #447 round-2 blocker-1 edge); the
-                # wrapper's callback skips publishing empty text.
-                await narrate(buffered)
-            if ev.text:
-                if narrating and narrate is not None:
-                    await narrate(ev.text)
-                elif speak is not None:
-                    # Speculative / tool-impossible answer text, streamed live
-                    # as ``delta`` (#488). Only reached while NOT narrating.
-                    await speak(ev.text)
-                text_chunks.append(ev.text)
-            if ev.tool_calls:
-                turn_tool_calls = list(ev.tool_calls)
-            if ev.finish_reason:
-                finish_reason = ev.finish_reason
-            if ev.usage is not None:
-                usage.add(ev.usage)
-                usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
+        )
+        timed = flush is not None and flush_deadline is not None
+        pending: asyncio.Task[StreamEvent | object] | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.ensure_future(self._next_stream_event(gen))
+                if timed and not pending.done():
+                    assert flush is not None and flush_deadline is not None  # narrow for mypy
+                    deadline = flush_deadline()
+                    if deadline is not None:
+                        remaining = deadline - self._clock()
+                        if remaining <= 0:
+                            # The deadline already elapsed: drain the lone buffered
+                            # chunk before blocking on the (possibly stalled) event.
+                            await flush()
+                        else:
+                            timer = asyncio.ensure_future(self._sleep_until_flush(remaining))
+                            try:
+                                await asyncio.wait(
+                                    {pending, timer}, return_when=asyncio.FIRST_COMPLETED
+                                )
+                            finally:
+                                if not timer.done():
+                                    timer.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await timer
+                            if not pending.done():
+                                # Timer won: the provider stalled past the deadline.
+                                # Drain the buffer, keep the SAME event task pending.
+                                await flush()
+                                continue
+                ev = await pending
+                pending = None
+                if ev is _STREAM_END:
+                    break
+                assert isinstance(ev, StreamEvent)
+                if (
+                    (ev.tool_call_started or ev.tool_calls)
+                    and not narrating
+                    and narrate is not None
+                ):
+                    # The classification point (ADR-0016 §6, #414): the FIRST
+                    # tool-call fragment proves this turn is tool-calling, hence
+                    # its text is narration. First RETRACT any answer text already
+                    # streamed speculatively (#488) — the client discards it —
+                    # then flush the buffer as narration and stream the rest live;
+                    # ``narrate`` also CLOSES the turn's retry window (§4 — an
+                    # emitting turn never retries).
+                    narrating = True
+                    if on_retract is not None:
+                        await on_retract()
+                    buffered = "".join(text_chunks)
+                    # ALWAYS invoke — an empty buffer still closes the retry
+                    # window (the amendment's letter: the window closes AT the
+                    # classification point, #447 round-2 blocker-1 edge); the
+                    # wrapper's callback skips publishing empty text.
+                    await narrate(buffered)
+                if ev.text:
+                    if narrating and narrate is not None:
+                        await narrate(ev.text)
+                    elif speak is not None:
+                        # Speculative / tool-impossible answer text, streamed live
+                        # as ``delta`` (#488). Only reached while NOT narrating.
+                        await speak(ev.text)
+                    text_chunks.append(ev.text)
+                if ev.tool_calls:
+                    turn_tool_calls = list(ev.tool_calls)
+                if ev.finish_reason:
+                    finish_reason = ev.finish_reason
+                if ev.usage is not None:
+                    usage.add(ev.usage)
+                    usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
+        finally:
+            # Reap a still-pending next-event task and close the provider generator
+            # on any early exit (a fault raised out of a seam, or cancellation),
+            # without swallowing an in-flight cancellation of THIS coroutine.
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with suppress(BaseException):
+                    await pending
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                with suppress(Exception):
+                    await aclose()
         return turn_tool_calls, finish_reason, text_chunks
+
+    @staticmethod
+    async def _next_stream_event(gen: AsyncIterator[StreamEvent]) -> StreamEvent | object:
+        """One provider event, or the :data:`_STREAM_END` sentinel at exhaustion.
+
+        Wraps ``__anext__`` so its ``StopAsyncIteration`` becomes an ordinary return
+        value (a Task must not carry ``StopAsyncIteration`` across ``await``), while a
+        provider fault propagates as the task's exception for the caller to raise.
+        """
+        try:
+            return await gen.__anext__()
+        except StopAsyncIteration:
+            return _STREAM_END
+
+    async def _sleep_until_flush(self, remaining: float) -> None:
+        """Await the coalescer flush deadline (#487/BE-4), via the injectable timer.
+
+        A thin wrapper so the timer is always a coroutine (clean to schedule/cancel)
+        and tests can drive it deterministically without a real sleep.
+        """
+        await self._flush_sleep(remaining)
 
     async def _publish_text(self, state: _StreamState, chunks: list[str]) -> None:
         """Publish BUFFERED answer text as ``delta`` envelopes, coalesced (#487).

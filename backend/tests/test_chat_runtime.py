@@ -308,6 +308,7 @@ def _runtime(
     text_coalesce_chars: int | None = None,
     text_coalesce_seconds: float | None = None,
     clock: object = None,
+    flush_sleep: object = None,
     turn_timeout_seconds: float | None = None,
     interactive_max_attempts: int | None = None,
     retry_sleep: object = None,
@@ -320,6 +321,8 @@ def _runtime(
         extra["text_coalesce_seconds"] = text_coalesce_seconds
     if clock is not None:
         extra["clock"] = clock
+    if flush_sleep is not None:
+        extra["flush_sleep"] = flush_sleep
     if retry_sleep is not None:
         extra["retry_sleep"] = retry_sleep
     if answer_max_tokens is not None:
@@ -5429,9 +5432,13 @@ async def test_pending_narration_is_flushed_before_a_terminal_error(ctx: _Ctx) -
 async def test_the_elapsed_deadline_flushes_before_the_character_budget(ctx: _Ctx) -> None:
     """AC-2: the time half of "whichever comes first", deterministically.
 
-    An injected monotonic clock advances 50ms per read, so every chunk after the
-    first trips the 40ms deadline while the character budget (10k) never fires.
-    No test sleeps — the clock is the seam.
+    An injected monotonic clock advances 50ms per read, so every chunk sits past the
+    40ms deadline while the character budget (10k) never fires. Since #487/BE-4 the
+    elapsed deadline is evaluated PROACTIVELY between chunks (not only when the next
+    ``add`` happens), so each chunk flushes on its own already-elapsed deadline
+    rather than waiting for a successor — the whole point of BE-4, so a lone chunk is
+    never stranded by a provider stall. The character budget never being the trigger
+    is what this asserts. No test sleeps — the clock is the seam.
     """
     reads = iter(range(1, 10_000))
     envs = await _run_coalesced(
@@ -5444,9 +5451,99 @@ async def test_the_elapsed_deadline_flushes_before_the_character_budget(ctx: _Ct
     )
 
     assert envs[-1]["type"] == "done"
-    # "a" opens the buffer; "b" trips the deadline and flushes "ab"; "c" opens a
-    # new buffer that the pre-``finalize`` flush drains.
-    assert _texts_of(envs, "delta") == ["ab", "c"]
+    # Each chunk's 40ms deadline has already elapsed (50ms/read) by the time the next
+    # event is awaited, so each flushes on its own deadline — never coalesced behind
+    # a char budget that never trips.
+    assert _texts_of(envs, "delta") == ["a", "b", "c"]
+
+
+async def test_lone_chunk_flushes_on_its_deadline_across_a_provider_stall(ctx: _Ctx) -> None:
+    """BE-4: a lone buffered chunk flushes on its elapsed TIME deadline even when the
+    provider then STALLS before the next chunk — driven by a real timer, not only by
+    the next ``add`` (which pre-BE-4 was the only thing that evaluated the deadline).
+
+    Fully deterministic, NO real sleeps: a constant injected clock means the add-time
+    check never time-flushes and the buffer's deadline is a fixed point in the future;
+    an injected flush timer that returns immediately models "that deadline elapsed";
+    and the SECOND chunk is withheld until the first's ``delta`` is observed on the
+    wire. Pre-BE-4 the first chunk would sit buffered until the second arrived — but
+    the second is gated on the first, so the run would deadlock; the timer is what
+    breaks the stall.
+    """
+    release_second = asyncio.Event()
+
+    class _StallBetweenChunks(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__([[StreamEvent(finish_reason="stop")]])  # unused
+
+        async def stream_tools(
+            self,
+            messages: object,
+            *,
+            tools: object,
+            model: object = None,
+            tool_choice: object = None,
+            api_key: object = None,
+            api_base: object = None,
+            cache_key: object = None,
+            max_tokens: object = None,
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="chunk1")
+            await release_second.wait()  # the provider stall — chunk2 withheld
+            yield StreamEvent(text="chunk2")
+            yield StreamEvent(finish_reason="stop")
+
+    async def _fire_immediately(_delay: float) -> None:
+        return  # the flush deadline "elapses" at once — no real sleep
+
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+
+    async def _consume() -> list[dict[str, object]]:
+        seen: list[dict[str, object]] = []
+        async for env in backplane.subscribe(stream_id):
+            seen.append(env)
+            data = cast("dict[str, object]", env["data"])
+            if env["type"] == "delta" and "chunk1" in cast(str, data["text"]):
+                release_second.set()
+        return seen
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=_StallBetweenChunks(),
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        text_coalesce_chars=10_000,  # only the TIME deadline can flush
+        text_coalesce_seconds=0.04,
+        clock=lambda: 100.0,  # constant: add-time never time-flushes; deadline is fixed
+        flush_sleep=_fire_immediately,
+    )
+    # ``run`` is launched as a background task (the production shape — off the 202
+    # send handler), never wrapped in ``wait_for``; the consumer's bounded wait is
+    # the hang guard. If the timed flush were missing, chunk1 would never surface,
+    # the consumer would never release chunk2, and the wait would time out.
+    run_task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert envs[-1]["type"] == "done"
+    # chunk1 flushed as its OWN delta on its deadline BEFORE chunk2 was released; the
+    # two never coalesced into one, and the run did not deadlock waiting for chunk2.
+    assert _texts_of(envs, "delta") == ["chunk1", "chunk2"]
+    assert _effective_answer(envs) == "chunk1chunk2" == await _stored_answer(ctx)
+    seqs = [cast(int, e["seq"]) for e in envs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
 async def test_coalescing_is_disabled_by_a_zero_character_budget(ctx: _Ctx) -> None:
