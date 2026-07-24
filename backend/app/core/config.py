@@ -667,13 +667,18 @@ class Settings(BaseSettings):
     # reactive compaction above only fires when the transcript is over budget,
     # which a frontier-sized window never reaches — so on the default routes a
     # superseded search result rides every later turn at full size (the re-sent
-    # -evidence tax #491 measured). With this ON, ``fit_transcript`` shrinks a
-    # tool result to a bounded head digest (capped at CONTEXT_COMPACTION_DIGEST
-    # _CHARS) once it is BOTH superseded by a later tool group AND represented in
+    # -evidence tax #491 measured). With this ON, ``fit_transcript`` digests a tool
+    # result once it is BOTH superseded by a later tool group AND represented in
     # citations — the newest tool group (the evidence a pending call is about to
-    # reference) is always preserved, and cited evidence stays durable in the
-    # citation records. Default ON for the chat answer path; a kill-switch, not a
-    # tuning knob (the retained-head SIZE is the tuning knob above).
+    # reference) is always preserved. The digest is the SAME ``_context_digest`` the
+    # reactive path builds: the bounded content-bearing head (capped at
+    # CONTEXT_COMPACTION_DIGEST_CHARS) PLUS every cited snippet re-embedded VERBATIM
+    # (BE-2 / R2-9, INV-3 — a citation must resolve to evidence the model actually
+    # saw in the prompt, not merely to a record kept elsewhere; a cited passage
+    # beyond the head would otherwise be truncated away). The strict cost-reduction
+    # guard still gates each result, so one whose verbatim snippet cannot be kept
+    # while shrinking is left VERBATIM. Default ON for the chat answer path; a
+    # kill-switch, not a tuning knob (the retained-HEAD size is the tuning knob above).
     context_proactive_compaction_enabled: bool = Field(
         default=True, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
     )
