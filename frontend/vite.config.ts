@@ -64,6 +64,30 @@ export default defineConfig(({ mode }) => {
     define: {
       __DEV_PAGES_ENABLED__: JSON.stringify(devPagesEnabled),
     },
+    build: {
+      rollupOptions: {
+        output: {
+          // #494: isolate the markdown + syntax-highlight rendering pipeline into
+          // its OWN chunk so it is not part of the entry chunk. react-markdown,
+          // the unified/remark/rehype/micromark/mdast/hast ecosystem, and
+          // highlight.js are heavy and only needed by content-rendering screens
+          // (chat, search, artifacts, schedules, docs) — all lazy routes. These
+          // packages are markdown-exclusive leaves (no app-code imports), so
+          // co-locating them cannot introduce an app-level circular chunk.
+          // (The chat route itself is lazy; see features/chat/route.tsx.)
+          manualChunks(id: string) {
+            if (
+              /[\\/]node_modules[\\/](?:\.pnpm[\\/])?(react-markdown|remark[-\w]*|rehype[-\w]*|micromark[-\w]*|mdast[-\w]*|hast[-\w]*|unist[-\w]*|unified|vfile[-\w]*|property-information|hastscript|space-separated-tokens|comma-separated-tokens|character-entities[-\w]*|decode-named-character-reference|stringify-entities|parse-entities|trim-lines|longest-streak|zwitch|markdown-table|html-url-attributes|html-void-elements|web-namespaces|devlop|ccount|highlight\.js)[\\/]/.test(
+                id,
+              )
+            ) {
+              return 'markdown';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
