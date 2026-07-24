@@ -111,6 +111,23 @@ New `event.name` values riding the existing chat stream:
 | `event:step` | `ChatStep { key, label, state: started\|completed, detail?, turn? }` | many; phases in run order; a re-`started` key restarts that row (e.g. `think` per turn) |
 | `event:ask_user` | `ChatAskUser { messageId, question, options[{label, description?}], allowFreeText }` | ≤ 1 per stream; if present the stream has no suggestions and ends `done(finishReason="ask_user")` |
 | `event:suggestions` | `ChatSuggestions { messageId, suggestions: string[1..N] }` | ≤ 1 per stream; POST-terminal (#489) — after `done(pendingSuggestions=true)`, within a bounded grace window |
+| `event:answer_retract` | *(no data)* | speculative-streaming retraction (#488); discards every answer `delta` streamed so far for the currently-streaming turn — targets at most one un-finalised speculative block, never appears after the answer is finalised nor after a terminal |
+
+The answer surface now streams **speculatively** (#488, ADR-0016 §6): the answer
+turn's text streams live as `delta` *before* the turn is proven tool-free. If the
+turn then reveals a tool call, one `event:answer_retract` discards those
+speculative deltas — the same text is re-emitted as `event:narration` (the #414
+transient affordance), so no content is lost, only its classification
+(answer→narration) is corrected. Clients clear the live answer text on
+`answer_retract` and ignore it once the answer has settled.
+
+The full lifecycle (authoritative in `contracts/websocket-envelopes.schema.json`
+`x-chatStream.lifecycle`): `start → ( delta | event:answer_retract | event:step |
+event:narration | event:tool_call | event:tool_result | event:citation |
+event:code_output | event:code_result | event:ask_user )* → done | error → [
+event:suggestions ]?` — exactly one terminal (`done`/`error`), with the single
+narrow post-terminal exception being one `event:suggestions` after a
+`done(pendingSuggestions=true)`.
 
 Step keys fixed by this spec: `prepare` (context assembly), `think` (one model
 turn; `turn` ordinal, `detail` set on completion), `finalize` (persist +
