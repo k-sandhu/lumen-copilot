@@ -213,6 +213,17 @@ export function useChatStream({
     discardPendingText();
     terminalRef.current = false;
 
+    // FE-4: a per-run liveness token. A real WebSocket reports `closed`
+    // ASYNCHRONOUSLY, so THIS socket's onStateChange/onEnvelope can still fire
+    // AFTER this effect run is torn down — on unmount, or on a streamId change
+    // that has already reset the shared refs (terminalRef/clientRef/buffer) for
+    // the NEXT stream. Every socket callback checks `active` and no-ops once
+    // stale, so a late callback from the old socket can neither setConnection on
+    // an unmounted hook nor bleed into the new stream (flush its buffer, dispatch
+    // a disconnect, or close its client). Invalidated in cleanup BEFORE
+    // client.close() so even a synchronous close is inert here.
+    let active = true;
+
     const armWatchdog = () => {
       clearWatchdog();
       watchdogRef.current = setTimeout(() => {
@@ -242,6 +253,7 @@ export function useChatStream({
     const client = makeClient({
       path: `/chat/${streamId}`,
       onStateChange: (next) => {
+        if (!active) return; // FE-4: stale callback from a torn-down run — no-op.
         setConnection(next);
         if (next === 'open') {
           armWatchdog();
@@ -273,6 +285,7 @@ export function useChatStream({
         }
       },
       onEnvelope: (envelope) => {
+        if (!active) return; // FE-4: stale callback from a torn-down run — no-op.
         // Only the matching stream's envelopes (defensive — one socket per id).
         if (envelope.streamId !== streamId) return;
         clearWatchdog();
@@ -350,10 +363,13 @@ export function useChatStream({
     client.connect();
 
     return () => {
-      // Unmount / streamId change: stop the socket (cancels pending reconnect),
-      // drop any pending post-terminal grace timer (#489), and discard any
-      // buffered-but-unflushed text so no trailing frame fires after teardown
-      // (#493 AC-4).
+      // Unmount / streamId change: invalidate this run's liveness token FIRST
+      // (FE-4) so the socket's asynchronous `closed`/late-envelope callbacks
+      // no-op instead of touching the next stream's shared refs. Then stop the
+      // socket (cancels pending reconnect), drop any pending post-terminal grace
+      // timer (#489), and discard any buffered-but-unflushed text so no trailing
+      // frame fires after teardown (#493 AC-4).
+      active = false;
       terminalRef.current = true;
       clearWatchdog();
       clearGrace();

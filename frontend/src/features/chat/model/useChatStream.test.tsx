@@ -605,3 +605,109 @@ describe('useChatStream — delta batching (#493)', () => {
     expect(result.current.text).toBe('real answer');
   });
 });
+
+// --- FE-4: socket callbacks must not survive teardown ------------------------
+// A real WebSocket.close() reports `closed` on a LATER tick, so the socket that a
+// finished effect run created can still fire onStateChange/onEnvelope AFTER that
+// run is torn down — on unmount, or on a streamId change that has already reset
+// the shared refs for the NEXT stream. Each effect run carries a liveness token;
+// a stale callback must observe it and no-op (no setConnection after unmount, no
+// bleed into the new stream's terminalRef / clientRef / delta buffer).
+describe('useChatStream — teardown liveness (FE-4)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Like FakeSocket, but close() reports `closed` on a later tick (real WS). */
+  class AsyncCloseSocket implements StreamSocket {
+    opts: WsClientOptions;
+    closed = false;
+    constructor(opts: WsClientOptions) {
+      this.opts = opts;
+    }
+    connect(): void {
+      this.opts.onStateChange?.('open');
+    }
+    close(): void {
+      if (this.closed) return;
+      this.closed = true;
+      // A real WebSocket's 'close' event lands asynchronously, not inline.
+      setTimeout(() => this.opts.onStateChange?.('closed'), 0);
+    }
+    getState() {
+      return this.closed ? ('closed' as const) : ('open' as const);
+    }
+    emit(envelope: WsEnvelope): void {
+      this.opts.onEnvelope?.(envelope);
+    }
+  }
+
+  function multiHarness() {
+    const sockets: AsyncCloseSocket[] = [];
+    const makeClient: ClientFactory = (opts) => {
+      const s = new AsyncCloseSocket(opts);
+      sockets.push(s);
+      return s;
+    };
+    return { makeClient, sockets };
+  }
+
+  it('a stale async close from the previous streamId does not bleed into the new stream', () => {
+    vi.useFakeTimers();
+    const h = multiHarness();
+    const { result, rerender } = renderHook(
+      (props: { streamId: string }) =>
+        useChatStream({ ...props, makeClient: h.makeClient, idleTimeoutMs: 50_000 }),
+      { initialProps: { streamId: SID } },
+    );
+
+    // Stream A is mid-flight (start + a partial delta buffered).
+    act(() => {
+      h.sockets[0].emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.sockets[0].emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'A-partial' } });
+    });
+
+    // Switch streams: cleanup closes socket A, but A only reports `closed` on a
+    // LATER tick. The new effect run resets the shared refs and opens socket B.
+    act(() => {
+      rerender({ streamId: 'stream-B' });
+    });
+    act(() => {
+      h.sockets[1].emit({ type: 'start', streamId: 'stream-B', seq: 0, data: {} });
+    });
+    expect(result.current.phase).toBe('streaming');
+    expect(result.current.connection).toBe('open');
+
+    // NOW socket A's deferred `closed` fires. It must be inert against stream B:
+    // no synthesized disconnect, no connection flip, no close of B's socket.
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(result.current.phase).toBe('streaming');
+    expect(result.current.connection).toBe('open');
+    expect(h.sockets[1].closed).toBe(false);
+    expect(result.current.problem).toBeNull();
+  });
+
+  it('a deferred close after unmount performs no state update (no act warning)', () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const h = multiHarness();
+    const { unmount } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 50_000 }),
+    );
+    act(() => {
+      h.sockets[0].emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.sockets[0].emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
+    });
+
+    unmount();
+    // The socket's deferred `closed` lands after teardown; the stale callback
+    // must no-op — no setConnection on the unmounted hook, hence no act warning.
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
