@@ -12,12 +12,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, KnowledgeMode, SendMessageRequest } from '@/api';
+import type { ChatModelInfo, KnowledgeMode, Message, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useChatStore, type SessionScope } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
+import type { UiCitation } from '../model/citation';
 import '../chat.css';
 import { useMessages, useModels, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
@@ -37,6 +38,11 @@ function defaultModelId(models: ChatModelInfo[] | undefined): string {
   if (!models || models.length === 0) return '';
   return (models.find((m) => m.is_default) ?? models[0])?.id ?? '';
 }
+
+// Stable empty collections so a prop keeps its identity while its query loads (a
+// fresh `[]` each render would defeat the memoised child it feeds, #495).
+const EMPTY_MODELS: ChatModelInfo[] = [];
+const EMPTY_MESSAGES: Message[] = [];
 
 export function ChatView() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -397,20 +403,40 @@ function ActiveSession({
     }
   }, [pendingDoneId, reloadedIds, endStream]);
 
-  const live: LiveAnswer | null = activeStreamId
-    ? {
-        phase: stream.phase,
-        text: stream.text,
-        citations: stream.citations,
-        tools: stream.tools,
-        codeRuns: stream.codeRuns,
-        steps: stream.steps,
-        narration: stream.narration?.text ?? null,
-        askUser: stream.askUser,
-        problem: stream.problem,
-        model: stream.start?.model ?? model,
-      }
-    : null;
+  // Memoised so its identity only changes when a stream field actually changes
+  // (#495). A stable `live` lets ChatThread's memoised subtrees skip re-rendering
+  // when ActiveSession re-renders for a reason unrelated to the stream.
+  const live: LiveAnswer | null = useMemo(
+    () =>
+      activeStreamId
+        ? {
+            phase: stream.phase,
+            text: stream.text,
+            citations: stream.citations,
+            tools: stream.tools,
+            codeRuns: stream.codeRuns,
+            steps: stream.steps,
+            narration: stream.narration?.text ?? null,
+            askUser: stream.askUser,
+            problem: stream.problem,
+            model: stream.start?.model ?? model,
+          }
+        : null,
+    [
+      activeStreamId,
+      stream.phase,
+      stream.text,
+      stream.citations,
+      stream.tools,
+      stream.codeRuns,
+      stream.steps,
+      stream.narration,
+      stream.askUser,
+      stream.problem,
+      stream.start,
+      model,
+    ],
+  );
 
   const doSend = useCallback(
     (req: SendMessageRequest) => {
@@ -441,10 +467,36 @@ function ActiveSession({
     if (lastSendRef.current) doSend(lastSendRef.current);
   }, [doSend]);
 
+  // Depend on `stream.cancel` (stable across renders — useChatStream memoises it)
+  // not the whole `stream` result (a fresh object every render), so `onStop` keeps
+  // a stable identity per delta and does not defeat Composer's memo (#495).
+  const cancelStream = stream.cancel;
   const onStop = useCallback(() => {
-    stream.cancel();
+    cancelStream();
     endStream();
-  }, [stream, endStream]);
+  }, [cancelStream, endStream]);
+
+  // Opening a citation forwards only what the citation wire provides about the
+  // source; the answer-time `meta` is NOT source provenance and is intentionally
+  // not forwarded as freshness/last-indexed (#120). A web citation (#221)
+  // forwards its `url` so the inspector opens the web-source pane. Stable
+  // identity (useCallback) so it does not defeat every MessageBubble's memo (the
+  // single highest-leverage prop on the render path, #495).
+  const onOpenCitation = useCallback(
+    (c: UiCitation) =>
+      openViewer({
+        documentId: c.documentId,
+        documentName: c.documentName,
+        charStart: c.charStart,
+        charEnd: c.charEnd,
+        snippet: c.snippet,
+        ...(c.url ? { url: c.url } : {}),
+      }),
+    [openViewer],
+  );
+
+  const refetchMessages = messages.refetch;
+  const onRetryLoad = useCallback(() => void refetchMessages(), [refetchMessages]);
 
   const onModelChange = useCallback(
     (next: string) => {
@@ -500,32 +552,18 @@ function ActiveSession({
       </div>
       <div className="min-h-0 flex-1">
         <ChatThread
-          messages={messages.data?.items ?? []}
+          messages={messages.data?.items ?? EMPTY_MESSAGES}
           models={models}
           isLoading={messages.isLoading}
           isError={messages.isError}
           error={messages.error}
-          onRetryLoad={() => void messages.refetch()}
+          onRetryLoad={onRetryLoad}
           live={live}
           onRetryStream={onRetryStream}
           onSendText={onSend}
           sendBusy={busy}
           suggestions={followUps}
-          onOpenCitation={(c) =>
-            // The viewer carries only what the citation wire provides about the
-            // source; the answer-time `meta` is NOT a source-provenance signal
-            // and is intentionally not forwarded as freshness/last-indexed (#120).
-            // A web citation (#221) forwards its `url` so the inspector opens the
-            // web-source pane instead of trying to fetch corpus bytes.
-            openViewer({
-              documentId: c.documentId,
-              documentName: c.documentName,
-              charStart: c.charStart,
-              charEnd: c.charEnd,
-              snippet: c.snippet,
-              ...(c.url ? { url: c.url } : {}),
-            })
-          }
+          onOpenCitation={onOpenCitation}
         />
       </div>
 
@@ -536,7 +574,7 @@ function ActiveSession({
           </p>
         )}
         <Composer
-          models={models ?? []}
+          models={models ?? EMPTY_MODELS}
           model={model}
           onModelChange={onModelChange}
           busy={busy}
