@@ -2125,13 +2125,13 @@ class ChatRuntime:
         wire (#489), so it can neither delay the terminal nor roll the answer back. It
         owns a FRESH tenant-bound session (RLS-armed via :func:`bind_tenant`): it
         resolves the FAST suggestions route (#490), runs the bounded nicety completion
-        (#429), and — only if the nicety produced suggestions AND actually spent
-        tokens — folds that spend onto the answer's already-committed usage row via an
-        atomic UPDATE (#409 — the suggestion tokens still land on the answer's single
-        row). The whole thing is best-effort: ANY failure (route resolution, the
-        UPDATE, the commit) is swallowed and yields ``[]`` — a nicety must never
-        surface an error onto a settled answer. Returns the suggestions to publish
-        (``[]`` ⇒ publish nothing). ``_generate_suggestions`` already contains its own
+        (#429), and — whenever the nicety actually spent tokens — records that spend on
+        its OWN usage row attributed to the ACTUAL suggestions model (ADR-0016 §2.6
+        actual-model attribution), idempotently and still linked to this answer/session
+        (#409). The whole thing is best-effort: ANY failure (route resolution, the
+        write, the commit) is swallowed and yields ``[]`` — a nicety must never surface
+        an error onto a settled answer. Returns the suggestions to publish (``[]`` ⇒
+        publish nothing). ``_generate_suggestions`` already contains its own
         gateway/timeout/parse failures.
         """
         nicety_usage = _Usage()
@@ -2142,13 +2142,19 @@ class ChatRuntime:
                 suggestions = await self._generate_suggestions(
                     question=question, answer=answer_text, route=route, usage=nicety_usage
                 )
-                if not suggestions:
-                    return []
-                # Fold the nicety's real cost onto the answer's single usage row
-                # (#409); a provider that reported nothing skips the no-op UPDATE.
+                # Record the suggestion spend whenever tokens were billed — parse
+                # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
+                # the completion returned, so an unparseable result must still account
+                # them (the old code RETURNED on a parse miss, dropping billed spend).
+                # Its OWN scope, attributed to the ACTUAL suggestions model
+                # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
+                # folded onto the answer model's row. A provider that reported nothing
+                # skips the no-op write.
                 if nicety_usage.total_tokens or nicety_usage.prompt_tokens:
                     usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
-                    await usage_repo.add_suggestion_tokens(
+                    await usage_repo.record_suggestion_usage(
+                        model=route.model,
+                        session_id=session_id,
                         answer_id=assistant_message_id,
                         prompt_tokens=nicety_usage.prompt_tokens,
                         completion_tokens=nicety_usage.completion_tokens,
@@ -2156,7 +2162,7 @@ class ChatRuntime:
                         cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
                         cache_write_tokens=nicety_usage.cache_write_tokens,
                     )
-                await session.commit()
+                    await session.commit()
                 return suggestions
         except Exception as exc:  # noqa: BLE001 — a nicety must never break a settled answer
             log.debug("chat_runtime.suggestions_txn_failed", error_type=type(exc).__name__)

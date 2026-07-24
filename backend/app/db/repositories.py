@@ -4047,9 +4047,11 @@ class LlmUsageRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_llm_usage(row)
 
-    async def add_suggestion_tokens(
+    async def record_suggestion_usage(
         self,
         *,
+        model: str,
+        session_id: UUID,
         answer_id: UUID,
         prompt_tokens: int,
         completion_tokens: int,
@@ -4057,41 +4059,52 @@ class LlmUsageRepository(_TenantScopedRepository):
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> bool:
-        """Fold the post-terminal follow-up-suggestions spend into the answer's row.
+        """Record the post-terminal follow-up-suggestions spend as its OWN usage scope.
 
-        The #489/BE-1 answer path commits the answer + its base usage row and
-        publishes the terminal ``done`` BEFORE the follow-up-suggestions nicety runs;
-        the nicety then executes in its OWN independent transaction and calls this to
-        add its token cost to the answer's single message-bearing usage row — so the
-        suggestion tokens still land on the answer's one row (#409), never a second
-        one, and the nicety's transaction can never roll the committed answer back.
+        ADR-0016 §2.6 actual-model attribution: since #490 the suggestions nicety can
+        run on a **dedicated** model, so its tokens are attributed to THAT model on
+        their own row — never folded onto the ANSWER model's row (which would
+        misattribute the spend to a model that did not incur it). The row is
+        message-less (the nicety produced no assistant message) but grouped by
+        ``session_id`` + ``answer_id`` so the spend stays accounted
+        (:meth:`totals_for_session` sums it) and queryable, while
+        ``COUNT(message_id)`` still excludes it — a suggestions call is not an extra
+        "answer".
 
-        An in-place ``UPDATE ... SET col = col + delta`` on the winning
-        (message-bearing) scope, keyed by ``message_id == answer_id`` (its
-        partial-unique row). Deltas are clamped non-negative HERE (the single write
-        chokepoint), matching :meth:`record`. Returns whether the row was found — a
-        missing row (the answer recorded no usage) is a no-op the caller treats as
-        "nothing to fold". Tenant-scoped (INV-1): only THIS tenant's row can be
-        touched.
+        **Idempotent** (R2-3 / #409): ``run_id == answer_id`` tags the suggestions
+        scope — a tag the answer's base row and its #413 failover/salvage scopes (all
+        ``run_id`` NULL) never carry. The spend is recorded at most ONCE per answer, so
+        a repeated post-terminal application (a retry, a double-call) is a no-op and
+        genuinely-billed tokens land exactly once. The post-terminal nicety is a single
+        producer per answer, so this check-then-insert has no concurrent writer to
+        race. Deltas are clamped non-negative by :meth:`record`. Tenant-scoped (INV-1).
+
+        Returns whether a new row was written (``False`` ⇒ already recorded).
         """
-        stmt = (
-            update(models.LlmUsage)
+        existing = await self._session.execute(
+            select(models.LlmUsage.id)
             .where(
                 models.LlmUsage.tenant_id == self._tenant_id,
-                models.LlmUsage.message_id == answer_id,
+                models.LlmUsage.answer_id == answer_id,
+                models.LlmUsage.run_id == answer_id,
             )
-            .values(
-                prompt_tokens=models.LlmUsage.prompt_tokens + max(0, prompt_tokens),
-                completion_tokens=models.LlmUsage.completion_tokens + max(0, completion_tokens),
-                total_tokens=models.LlmUsage.total_tokens + max(0, total_tokens),
-                cached_prompt_tokens=models.LlmUsage.cached_prompt_tokens
-                + max(0, cached_prompt_tokens),
-                cache_write_tokens=models.LlmUsage.cache_write_tokens + max(0, cache_write_tokens),
-            )
+            .limit(1)
         )
-        result = await self._session.execute(stmt)
-        await self._session.flush()
-        return bool(result.rowcount)
+        if existing.first() is not None:
+            return False
+        await self.record(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_tokens=cache_write_tokens,
+            session_id=session_id,
+            answer_id=answer_id,
+            message_id=None,
+            run_id=answer_id,
+        )
+        return True
 
     async def list_for_session(self, session_id: UUID, *, limit: int = 200) -> list[LlmUsageRecord]:
         """The usage records for one chat session (tenant-scoped), oldest first."""

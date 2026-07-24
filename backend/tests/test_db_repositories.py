@@ -775,73 +775,80 @@ async def test_llm_usage_one_row_per_message_is_structural(
     await session.flush()
 
 
-async def test_llm_usage_add_suggestion_tokens_folds_onto_the_answer_row(
+async def test_llm_usage_record_suggestion_usage_own_row_and_idempotent(
     session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
-    """BE-1 / #409: the post-terminal suggestions nicety folds its token spend onto
-    the answer's single message-bearing usage row via an in-place UPDATE — the tokens
-    land on the SAME row, no second row appears, and clamping/tenant-scoping hold."""
+    """R2-3 / #409 / ADR-0016 §2.6: the post-terminal suggestions spend is recorded on
+    its OWN message-less row, attributed to the ACTUAL suggestions model (never folded
+    onto the answer model's row), linked to the answer/session, and IDEMPOTENT — a
+    repeated application does not double-count. Tenant-scoped (INV-1)."""
     from app.db.repositories import LlmUsageRepository, MessageRepository
     from app.domain.entities import MessageRole, Role
 
     tenant_a, tenant_b = two_tenants
     user = await UserRepository(session, tenant_a).create(
-        email="fold@a.test", password_hash="x", roles=[Role.MEMBER]
+        email="sugg@a.test", password_hash="x", roles=[Role.MEMBER]
     )
     chat = await ChatSessionRepository(session, tenant_a).create(
-        owner_id=user.id, model="m", title="t"
+        owner_id=user.id, model="answer/model", title="t"
     )
     msg = await MessageRepository(session, tenant_a).add(
-        session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="m"
+        session_id=chat.id, role=MessageRole.ASSISTANT, content="a", model="answer/model"
     )
     await session.flush()
 
     repo = LlmUsageRepository(session, tenant_a)
-    # The answer's base usage row (the winning, message-bearing scope).
+    # The answer's base usage row (the winning, message-bearing scope) — ANSWER model.
     await repo.record(
-        model="m",
+        model="answer/model",
         prompt_tokens=10,
         completion_tokens=5,
         total_tokens=15,
-        cached_prompt_tokens=3,
-        cache_write_tokens=2,
         session_id=chat.id,
         answer_id=msg.id,
         message_id=msg.id,
     )
     await session.flush()
 
-    # INV-1 negative: tenant B cannot touch tenant A's row (no match, no-op).
+    # The nicety records its spend on its OWN row, attributed to the SUGGESTIONS model.
     assert (
-        await LlmUsageRepository(session, tenant_b).add_suggestion_tokens(
-            answer_id=msg.id, prompt_tokens=5, completion_tokens=7, total_tokens=12
+        await repo.record_suggestion_usage(
+            model="suggest/model",
+            session_id=chat.id,
+            answer_id=msg.id,
+            prompt_tokens=5,
+            completion_tokens=7,
+            total_tokens=12,
+        )
+        is True
+    )
+    # Idempotent: a second application writes nothing (no double-count).
+    assert (
+        await repo.record_suggestion_usage(
+            model="suggest/model",
+            session_id=chat.id,
+            answer_id=msg.id,
+            prompt_tokens=5,
+            completion_tokens=7,
+            total_tokens=12,
         )
         is False
     )
-
-    # The nicety folds its spend (clamps a stray negative to 0) onto the same row.
-    found = await repo.add_suggestion_tokens(
-        answer_id=msg.id,
-        prompt_tokens=5,
-        completion_tokens=7,
-        total_tokens=12,
-        cached_prompt_tokens=-9,
-        cache_write_tokens=1,
-    )
-    assert found is True
 
     rows = await repo.list_for_session(chat.id)
-    assert len(rows) == 1  # still ONE row — folded in place, never a second
-    assert rows[0].prompt_tokens == 15  # 10 + 5
-    assert rows[0].completion_tokens == 12  # 5 + 7
-    assert rows[0].total_tokens == 27  # 15 + 12
-    assert rows[0].cached_prompt_tokens == 3  # 3 + max(0, -9)
-    assert rows[0].cache_write_tokens == 3  # 2 + 1
+    assert len(rows) == 2  # answer row + ITS suggestions row — never merged
+    answer_row = next(r for r in rows if r.message_id is not None)
+    sugg_row = next(r for r in rows if r.message_id is None)
+    assert answer_row.model == "answer/model"
+    assert answer_row.total_tokens == 15  # unchanged — the spend is NOT folded in
+    assert sugg_row.model == "suggest/model"  # actual-model attribution (ADR-0016)
+    assert sugg_row.total_tokens == 12
+    assert sugg_row.answer_id == msg.id  # linked to the same answer
+    assert sugg_row.run_id == msg.id  # the suggestions-scope tag (idempotency key)
 
-    # A missing answer id is a no-op the caller treats as "nothing to fold".
-    assert (
-        await repo.add_suggestion_tokens(
-            answer_id=uuid.uuid4(), prompt_tokens=1, completion_tokens=1, total_tokens=2
-        )
-        is False
-    )
+    totals = await repo.totals_for_session(chat.id)
+    assert totals.answers == 1  # the suggestions row is not an extra "answer"
+    assert totals.total_tokens == 27  # 15 + 12 still accounted (#409)
+
+    # INV-1: tenant B's tenant-scoped check sees none of A's rows.
+    assert await LlmUsageRepository(session, tenant_b).list_for_session(chat.id) == []

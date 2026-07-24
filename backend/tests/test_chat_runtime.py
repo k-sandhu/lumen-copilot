@@ -1801,8 +1801,8 @@ async def test_ask_user_not_intercepted_when_non_interactive(ctx: _Ctx) -> None:
 async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
     """#489 AC-1/AC-2/AC-3: the terminal ``done`` is published BEFORE suggestions
     are generated, declaring ``pendingSuggestions``; the one suggestions event
-    then arrives POST-terminal; ``done.usage`` is answer-only while the llm_usage
-    ROW still folds in the suggestions cost (#409)."""
+    then arrives POST-terminal; ``done.usage`` is answer-only while the suggestions
+    cost is accounted on its OWN llm_usage row (R2-3 / #409)."""
     import asyncio
 
     gateway = _ScriptedGateway(
@@ -1864,13 +1864,23 @@ async def test_suggestions_emitted_after_answer(ctx: _Ctx) -> None:
     assert not any(k == "suggest" for k, _ in _steps(envs))
     # AC-3: ``done.usage`` reports the ANSWER only (the nicety had not run yet)...
     assert done["data"]["usage"]["totalTokens"] == 15  # type: ignore[index]
-    # ...while the single llm_usage ROW still accounts the suggestions cost too.
+    # ...while the suggestions cost is accounted on its OWN row (R2-3): the answer row
+    # stays 15, a separate suggestions row adds 12, and the session totals sum both
+    # (#409) — no fold onto the answer's row.
     from app.db.repositories import LlmUsageRepository
 
     async with ctx.sessionmaker() as session:
-        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
-        assert len(rows) == 1
-        assert rows[0].total_tokens == 27  # 15 answer + 12 suggestions (#409)
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        assert len(rows) == 2
+        answer_row = next(r for r in rows if r.message_id is not None)
+        sugg_row = next(r for r in rows if r.message_id is None)
+        assert answer_row.total_tokens == 15  # answer only — matches done.usage
+        assert sugg_row.total_tokens == 12  # suggestions on their own scope
+        assert sugg_row.answer_id == answer_row.message_id  # linked to this answer
+        totals = await repo.totals_for_session(ctx.session_id)
+        assert totals.answers == 1  # the suggestions row is not an extra "answer"
+        assert totals.total_tokens == 27  # 15 + 12 still accounted (#409)
 
 
 class _ModelCapturingGateway(_ScriptedGateway):
@@ -1973,6 +1983,118 @@ async def test_suggestions_use_dedicated_model_not_the_answer_route(ctx: _Ctx) -
     # The suggestions still landed (distinct model, same behaviour).
     sugg = [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
     assert len(sugg) == 1
+
+
+async def test_suggestions_usage_attributed_to_the_dedicated_model(ctx: _Ctx) -> None:
+    """R2-3 / #490 / ADR-0016 §2.6: the suggestions spend is recorded on its OWN row
+    attributed to the DEDICATED suggestions model — never folded onto the answer
+    model's row. The answer row keeps the answer model + its tokens; the suggestions
+    row carries the suggestions model + its tokens."""
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(prompt_tokens=4, completion_tokens=6, total_tokens=10),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=2.0)
+
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+    answer_row = next(r for r in rows if r.message_id is not None)
+    sugg_row = next(r for r in rows if r.message_id is None)
+    assert answer_row.model == answer_model  # the answer stays the answer model
+    assert answer_row.total_tokens == 15
+    assert sugg_row.model == suggestions_model  # actual-model attribution (#490)
+    assert sugg_row.total_tokens == 10
+
+
+async def test_suggestions_spend_recorded_on_parse_miss(ctx: _Ctx) -> None:
+    """R2-3 / #409: a suggestions completion that BILLED tokens but whose output does
+    not parse into suggestions STILL records its spend (on its own row). The old code
+    returned before recording, dropping genuinely-billed tokens — a #409 leak. No
+    suggestions event is published, but the ledger accounts the cost."""
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content="Sorry, no follow-ups to offer.",  # unparseable → zero suggestions
+            model="anthropic/claude-opus-4.8",
+            usage=TokenUsage(prompt_tokens=4, completion_tokens=6, total_tokens=10),
+        ),
+    )
+    backplane = InMemoryBackplane(post_terminal_grace_seconds=0.05)
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # A parse miss publishes NO suggestions event...
+    assert not [e for e in envs if e["type"] == "event" and e.get("name") == "suggestions"]
+    # ...but the billed suggestion spend was still recorded on its own row (#409).
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+    assert len(rows) == 2
+    sugg_row = next(r for r in rows if r.message_id is None)
+    assert sugg_row.total_tokens == 10
+    assert sugg_row.answer_id is not None
 
 
 async def test_suggestions_default_to_the_answer_route_when_unconfigured(ctx: _Ctx) -> None:
@@ -2469,8 +2591,9 @@ async def test_suggestions_skipped_for_no_sources_fallback(ctx: _Ctx) -> None:
 
 async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ctx) -> None:
     """#434 NEW-1: llm_usage.context_prompt_tokens is the FINAL answer-loop
-    turn's prompt size (window occupancy); prompt_tokens stays the billing sum
-    across turns + the suggestions call."""
+    turn's prompt size (window occupancy); the ANSWER row's prompt_tokens stays the
+    billing sum across its turns. Since R2-3 the suggestions spend sits on its own
+    row, so the answer row is the answer's turns only (10 + 30), never the nicety."""
     import asyncio
 
     from app.db.repositories import LlmUsageRepository
@@ -2495,8 +2618,8 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
                 ),
             ],
         ],
-        # The suggestions nicety bills 5 more prompt tokens but must NOT move
-        # the recorded window occupancy.
+        # The suggestions nicety bills 5 more prompt tokens on its OWN row (R2-3),
+        # so it must NOT move the answer row's window occupancy or billing sum.
         chat_completion=Completion(
             content='["Next?"]',
             model="m",
@@ -2534,10 +2657,12 @@ async def test_context_prompt_tokens_records_final_turn_not_billing_sum(ctx: _Ct
 
     async with ctx.sessionmaker() as session:
         rows = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row.prompt_tokens == 45  # 10 + 30 + 5 — the billing sum
-        assert row.context_prompt_tokens == 30  # the final loop turn only
+        assert len(rows) == 2  # answer row + its own suggestions row (R2-3)
+        answer_row = next(r for r in rows if r.message_id is not None)
+        sugg_row = next(r for r in rows if r.message_id is None)
+        assert answer_row.prompt_tokens == 40  # 10 + 30 — the answer's billing sum
+        assert answer_row.context_prompt_tokens == 30  # the final loop turn only
+        assert sugg_row.prompt_tokens == 5  # the nicety, on its own scope
 
 
 # --- #412: concurrent tool execution within a turn ---------------------------
