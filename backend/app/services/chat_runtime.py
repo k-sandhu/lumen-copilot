@@ -350,11 +350,20 @@ class _StreamState:
     # wire content: whatever is in it MUST be flushed before the terminal.
     buffer: _TextCoalescer
     seq: int = 0
-    # Set once a terminal (``done``/``error``) has been published, so the
+    # Set once a terminal (``done``/``error``) has been CONFIRMED published, so the
     # exactly-one-terminal contract holds even when two terminal paths race —
     # e.g. an error already emitted and then a shutdown ``CancelledError`` tries
-    # to emit its own (issue #156).
+    # to emit its own (issue #156). Flipped only AFTER the backplane publish returns
+    # (R2-2): a terminal publish that raised leaves this False, so the failure arm
+    # still emits a terminal and a committed answer is never left terminal-less.
     terminal_sent: bool = False
+    # The terminal's seq, minted once when the first terminal is built and reused by
+    # any fallback terminal (R2-2 idempotency): if a ``done`` publish ambiguously
+    # fails (the envelope reached Redis but the ack was lost) and the error arm then
+    # emits its own terminal, the two share ONE seq — so the subscriber's monotonic
+    # ``seq``-high-water dedup collapses them to a single terminal rather than
+    # relaying both. ``None`` until the first terminal is built.
+    terminal_seq: int | None = None
     # True once at least one answer ``delta`` has actually been FLUSHED to the
     # wire for the current speculative turn (#488). Set in ``_publish_text_
     # envelope`` (delta kind), cleared by ``_retract_answer``. It is what tells a
@@ -362,6 +371,11 @@ class _StreamState:
     # never-flushed speculative text is dropped silently (no ``answer_retract``),
     # while flushed text earns the retraction envelope.
     answer_on_wire: bool = False
+    # True once the assistant turn has COMMITTED (#489/BE-1). A terminal-error path
+    # reached AFTER the commit — a terminal publish that failed over a durable answer
+    # — must NOT retract the answer already on the wire: it is persisted, so wire ==
+    # stored must still hold (#148). Guards ``_terminal_error``'s retraction.
+    answer_committed: bool = False
 
     def next_seq(self) -> int:
         s = self.seq
@@ -1396,6 +1410,8 @@ class ChatRuntime:
             # already-committed usage as a duplicate message-less row (#409 — every
             # billed token recorded exactly once).
             self._salvage = None
+            # Durable: a terminal-publish failure now must not retract on-wire text.
+            state.answer_committed = True
             # The clarifying question IS the terminal (spec 0006): no suggestions
             # follow it, so the ``ask_user`` event + ``done`` stop the stream at once
             # (no pending window). Both ride AFTER the commit.
@@ -1579,6 +1595,10 @@ class ChatRuntime:
         # suggestions transaction below then runs with salvage already disarmed, so its
         # own commit carries no salvage risk either.)
         self._salvage = None
+        # Durable now: a terminal-publish failure below must emit its terminal WITHOUT
+        # retracting the answer already on the wire — it is persisted (wire == stored,
+        # #148). ``_terminal_error`` reads this flag to skip retraction (R2-2).
+        state.answer_committed = True
 
         # Publish the terminal ``done`` now that the answer is durable (#489 AC-1) —
         # the UI settles the instant the answer is complete, and only the (optional,
@@ -2764,6 +2784,13 @@ class ChatRuntime:
         stop-at-terminal behaviour. The ``terminal_sent`` guard preserves
         exactly-one-terminal across the shutdown race (issue #156) as ``run`` did.
 
+        ``terminal_sent`` is flipped ONLY after the backplane publish returns (R2-2):
+        the answer is already committed (#489/BE-1), so a ``done`` that fails to
+        publish must leave the flag False and fall into ``run``'s error arm, which
+        emits a terminal reusing this same ``terminal_seq`` — the committed answer is
+        never left without a terminal, and a partial-write ``done`` cannot pair with a
+        second, higher-seq terminal.
+
         The payload is byte-identical to the pre-#489 ``done`` (built in ``run``)
         except for the additive ``pendingSuggestions`` flag: the ACTUAL post-failover
         model, the citation count, and the answer usage sub-object.
@@ -2772,7 +2799,6 @@ class ChatRuntime:
             # A terminal already fired (e.g. cancellation mid-answer raced ahead);
             # never publish a second terminal — exactly-one-terminal contract.
             return
-        state.terminal_sent = True
         data: dict[str, object] = {
             "messageId": str(assistant_message_id),
             "finishReason": result.finish_reason,
@@ -2799,9 +2825,13 @@ class ChatRuntime:
             # default a larger server grace would silently overrun (dropping a
             # slow-but-arriving suggestion). Milliseconds for the JS timer.
             data["suggestionsGraceMs"] = round(self._suggestions_grace_seconds * 1000)
-        await self._publish(
-            state, envelopes.done(state.stream_id, await self._next_seq(state), data=data)
-        )
+        # Mint the terminal seq ONCE (flushing any buffered text first) and cache it,
+        # so a fallback terminal can reuse it (R2-2 idempotency). Publish, then mark
+        # sent — only a CONFIRMED publish flips ``terminal_sent``.
+        if state.terminal_seq is None:
+            state.terminal_seq = await self._next_seq(state)
+        await self._publish(state, envelopes.done(state.stream_id, state.terminal_seq, data=data))
+        state.terminal_sent = True
 
     async def _terminal_error(
         self, state: _StreamState, status: int, title: str, code: str, detail: str | None
@@ -2821,13 +2851,26 @@ class ChatRuntime:
         # already reached the client, emits ``answer_retract``. Buffered NARRATION
         # (transient, never an answer) is left for the ``_next_seq`` flush below,
         # exactly as before — narration may legitimately precede an error.
-        if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
+        #
+        # But NEVER retract once the answer has COMMITTED (R2-2): a terminal-publish
+        # failure over a durable answer lands here, and its deltas are persisted — so
+        # retracting them would break wire == stored (#148). Only SPECULATIVE
+        # (uncommitted) answer text is retractable.
+        if not state.answer_committed and (
+            state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT
+        ):
             await self._retract_answer(state)
         state.terminal_sent = True
         problem: dict[str, object] = {"title": title, "status": status, "code": code}
         if detail:
             problem["detail"] = detail
-        seq = await self._next_seq(state)
+        # Reuse the seq a failed ``done`` already minted, if any (R2-2 idempotency):
+        # the ambiguously-failed ``done`` and this error then carry ONE seq, so the
+        # subscriber's monotonic-seq dedup relays a single terminal even when the
+        # ``done`` reached the backplane before its publish raised. With no prior
+        # terminal (the ordinary pre-commit fault), mint fresh — flushing buffered
+        # narration first, exactly as before.
+        seq = state.terminal_seq if state.terminal_seq is not None else await self._next_seq(state)
         await self._publish(state, envelopes.error(state.stream_id, seq, problem))
 
     async def _next_seq(self, state: _StreamState) -> int:

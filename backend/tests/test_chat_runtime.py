@@ -4289,6 +4289,78 @@ async def test_salvage_disarmed_after_commit_no_dup_on_post_commit_cancellation(
     assert rows[0].total_tokens == 15
 
 
+async def test_terminal_publish_failure_before_write_still_emits_a_terminal(ctx: _Ctx) -> None:
+    """R2-2 (#489/BE-1): the answer commits, then the ``done`` publish fails BEFORE it
+    reaches the backplane. ``terminal_sent`` flips only after a CONFIRMED publish, so
+    the failure arm STILL emits a terminal — the committed answer is never left
+    terminal-less (no client hang). The durable answer is NOT retracted (wire ==
+    stored, #148), and the client sees exactly one terminal."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("down"), record_first=False)
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    published = list(backplane._replay[stream_id])  # noqa: SLF001 — publisher-side view
+    ptypes = [e["type"] for e in published]
+    # The ``done`` never reached the backplane; the fallback terminal WAS emitted.
+    assert ptypes.count("done") == 0
+    assert ptypes.count("error") == 1
+    # The durable answer is not retracted (answer_committed guard).
+    assert not any(e["type"] == "event" and e.get("name") == "answer_retract" for e in published)
+    # Client view: exactly one terminal (the error), and the answer still streamed.
+    client = await _drain(backplane, stream_id)
+    assert [e["type"] for e in client][-1] == "error"
+    assert _texts_of(client, "delta") == ["The answer."]
+    assert await _stored_answer(ctx) == "The answer."
+
+
+async def test_terminal_publish_failure_after_write_is_idempotent(ctx: _Ctx) -> None:
+    """R2-2 (#489/BE-1): a Redis partial success — the ``done`` reached the backplane
+    but its publish then raised (ack lost). The fallback error reuses the ``done``'s
+    seq, so the two terminals share ONE seq and the subscriber collapses them: the
+    CLIENT sees exactly one terminal (the ``done``), never two. The durable answer is
+    not retracted."""
+    backplane = _FailTerminalBackplane(exc=RuntimeError("down"), record_first=True)
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx, gateway=_spending_answer_gateway(), retrieval=_FakeRetrieval([]), backplane=backplane
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+    )
+    assert ok is False
+    published = list(backplane._replay[stream_id])  # noqa: SLF001 — publisher-side view
+    dones = [e for e in published if e["type"] == "done"]
+    errors = [e for e in published if e["type"] == "error"]
+    # Both terminals were published, but they carry ONE seq (idempotency): the
+    # subscriber's seq-high-water dedup can never relay both.
+    assert len(dones) == 1
+    assert len(errors) == 1
+    assert dones[0]["seq"] == errors[0]["seq"]
+    # Client view: exactly one terminal (the done); the error is never relayed.
+    client = await _drain(backplane, stream_id)
+    ctypes = [e["type"] for e in client]
+    assert ctypes.count("done") == 1
+    assert ctypes.count("error") == 0
+    assert ctypes[-1] == "done"
+    assert not any(e["type"] == "event" and e.get("name") == "answer_retract" for e in client)
+    assert await _stored_answer(ctx) == "The answer."
+
+
 async def test_anonymous_provider_fallback_is_not_skipped(ctx: _Ctx) -> None:
     """#440 round-2 NEW-3: a RESOLVED anonymous provider fallback (api_base
     set, no key — a legitimate config) fails over fine; an UNRESOLVED
