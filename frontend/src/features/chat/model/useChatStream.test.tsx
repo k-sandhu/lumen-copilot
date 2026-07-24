@@ -534,7 +534,9 @@ describe('useChatStream — delta batching (#493)', () => {
   it('cancels the pending flush on unmount so nothing fires after teardown (AC-4)', () => {
     vi.useFakeTimers();
     const h = harness();
-    const { unmount } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
+    const { unmount } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient }),
+    );
 
     act(() => {
       h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
@@ -652,6 +654,13 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
     return { makeClient, sockets };
   }
 
+  /** The nth constructed socket — throws (rather than silently no-op) if absent. */
+  function socketAt(sockets: AsyncCloseSocket[], index: number): AsyncCloseSocket {
+    const socket = sockets[index];
+    if (!socket) throw new Error(`expected a socket at index ${index}`);
+    return socket;
+  }
+
   it('a stale async close from the previous streamId does not bleed into the new stream', () => {
     vi.useFakeTimers();
     const h = multiHarness();
@@ -663,8 +672,13 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
 
     // Stream A is mid-flight (start + a partial delta buffered).
     act(() => {
-      h.sockets[0].emit({ type: 'start', streamId: SID, seq: 0, data: {} });
-      h.sockets[0].emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'A-partial' } });
+      socketAt(h.sockets, 0).emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      socketAt(h.sockets, 0).emit({
+        type: 'delta',
+        streamId: SID,
+        seq: 1,
+        data: { text: 'A-partial' },
+      });
     });
 
     // Switch streams: cleanup closes socket A, but A only reports `closed` on a
@@ -673,7 +687,7 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
       rerender({ streamId: 'stream-B' });
     });
     act(() => {
-      h.sockets[1].emit({ type: 'start', streamId: 'stream-B', seq: 0, data: {} });
+      socketAt(h.sockets, 1).emit({ type: 'start', streamId: 'stream-B', seq: 0, data: {} });
     });
     expect(result.current.phase).toBe('streaming');
     expect(result.current.connection).toBe('open');
@@ -685,7 +699,7 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
     });
     expect(result.current.phase).toBe('streaming');
     expect(result.current.connection).toBe('open');
-    expect(h.sockets[1].closed).toBe(false);
+    expect(socketAt(h.sockets, 1).closed).toBe(false);
     expect(result.current.problem).toBeNull();
   });
 
@@ -697,8 +711,13 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
       useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 50_000 }),
     );
     act(() => {
-      h.sockets[0].emit({ type: 'start', streamId: SID, seq: 0, data: {} });
-      h.sockets[0].emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
+      socketAt(h.sockets, 0).emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      socketAt(h.sockets, 0).emit({
+        type: 'delta',
+        streamId: SID,
+        seq: 1,
+        data: { text: 'partial' },
+      });
     });
 
     unmount();
@@ -709,5 +728,143 @@ describe('useChatStream — teardown liveness (FE-4)', () => {
     });
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+// --- FE-5: envelopes arriving after the stream is terminal -------------------
+// Once the stream has settled (done/error/cancel/disconnect), a queued or stray
+// `delta` must NOT re-arm the idle watchdog or schedule a flush, and every close
+// path must leave no timer alive. The one exception is the single post-terminal
+// `event:suggestions` we hold the socket open for (#489), still honoured.
+describe('useChatStream — post-terminal envelopes (FE-5)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('ignores a late delta after done: no watchdog re-arm, no scheduled flush, no surviving timer', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 10_000 }),
+    );
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer.' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0 },
+      });
+    });
+    expect(result.current.phase).toBe('done');
+    expect(result.current.text).toBe('Answer.');
+    // Clean done closed the socket and cleared EVERY timer (watchdog + flush).
+    expect(vi.getTimerCount()).toBe(0);
+
+    // A straggler delta after the terminal must be ignored entirely: it must not
+    // buffer text, schedule a flush frame, or re-arm the idle watchdog.
+    act(() => {
+      h.get().emit({ type: 'delta', streamId: SID, seq: 3, data: { text: ' LATE' } });
+    });
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Advancing past the idle timeout synthesizes no disconnect and the stray
+    // text never lands — the terminal `done` stands.
+    act(() => {
+      vi.advanceTimersByTime(20_000);
+    });
+    expect(result.current.phase).toBe('done');
+    expect(result.current.text).toBe('Answer.');
+    expect(result.current.problem).toBeNull();
+  });
+
+  it('ignores a late delta after a terminal error and leaves no timer alive', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 10_000 }),
+    );
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({
+        type: 'error',
+        streamId: SID,
+        seq: 1,
+        problem: { title: 'boom', status: 500, code: 'x' },
+      });
+    });
+    expect(result.current.phase).toBe('error');
+    expect(vi.getTimerCount()).toBe(0);
+
+    act(() => {
+      h.get().emit({ type: 'delta', streamId: SID, seq: 2, data: { text: 'stray' } });
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => {
+      vi.advanceTimersByTime(20_000);
+    });
+    expect(result.current.phase).toBe('error');
+  });
+
+  it('ignores a late delta after cancel() so nothing re-arms', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, idleTimeoutMs: 10_000 }),
+    );
+
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
+    });
+    act(() => {
+      result.current.cancel();
+    });
+    // cancel() cleared the watchdog and the pending flush.
+    expect(vi.getTimerCount()).toBe(0);
+
+    act(() => {
+      h.get().emit({ type: 'delta', streamId: SID, seq: 2, data: { text: ' more' } });
+    });
+    // No re-arm, no scheduled flush from a post-cancel straggler.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still accepts the one post-terminal suggestions event within the grace (#489 preserved)', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { result } = renderHook(() =>
+      useChatStream({ streamId: SID, makeClient: h.makeClient, suggestionsGraceMs: 5_000 }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Answer.' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0, pendingSuggestions: true },
+      });
+    });
+    expect(result.current.phase).toBe('done');
+    expect(h.get().closed).toBe(false); // held open for the trailing suggestions
+
+    act(() => {
+      h.get().emit({
+        type: 'event',
+        streamId: SID,
+        seq: 3,
+        name: 'suggestions',
+        data: { messageId: 'm', suggestions: ['Next?'] },
+      });
+    });
+    // The awaited suggestions is applied (not ignored) and the socket closes.
+    expect(result.current.suggestions).toEqual({ messageId: 'm', suggestions: ['Next?'] });
+    expect(h.get().closed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(result.current.problem).toBeNull();
   });
 });

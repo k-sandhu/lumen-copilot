@@ -268,6 +268,12 @@ export function useChatStream({
         // is expected — do NOT synthesize a disconnect; just drop the grace timer.
         if (next === 'closed') {
           if (terminalRef.current) {
+            // FE-5: clear ALL timers on this terminal close path — the watchdog
+            // too, not just the grace. A healthy terminal already cleared the
+            // watchdog on the terminal envelope, but clearing here unconditionally
+            // means no close path can ever leave a watchdog alive after the socket
+            // is gone.
+            clearWatchdog();
             clearGrace();
             // Already terminal (e.g. server ending the post-terminal grace): no
             // buffered text can be pending, but drop any scheduled frame so it
@@ -288,6 +294,27 @@ export function useChatStream({
         if (!active) return; // FE-4: stale callback from a torn-down run — no-op.
         // Only the matching stream's envelopes (defensive — one socket per id).
         if (envelope.streamId !== streamId) return;
+
+        // FE-5: once the stream is terminal (done/error/cancel/disconnect) it has
+        // settled. The ONLY envelope still honoured is the single post-terminal
+        // `event:suggestions` we hold the socket open for (#489). Every other
+        // late/queued/stray envelope — a straggler delta, a duplicate terminal, a
+        // late side-band — is ignored here BEFORE it can buffer text, schedule a
+        // flush, or re-arm the idle watchdog (which would leave a timer alive past
+        // close). Handled first so the delta/non-text paths below only ever run
+        // pre-terminal.
+        if (terminalRef.current) {
+          if (envelope.type === 'event' && envelope.name === 'suggestions') {
+            // The awaited post-terminal suggestions arrived within the grace: the
+            // reducer attaches it without un-settling the terminal (phase stays
+            // 'done'); we got what we waited for, so drop the grace and close.
+            // No text can be buffered here — post-terminal deltas were ignored.
+            dispatch({ kind: 'flush', envelopes: [envelope] });
+            clearGrace();
+            clientRef.current?.close();
+          }
+          return;
+        }
         clearWatchdog();
 
         // TEXT DELTAS (#493): accumulate and coalesce into one React commit per
@@ -339,16 +366,6 @@ export function useChatStream({
           terminalRef.current = true;
           clearGrace();
           clientRef.current?.close();
-          return;
-        }
-        // A post-terminal `event:suggestions` arrived within the grace window
-        // (#489): the reducer applied it above; we got what we waited for, so
-        // close the socket now and drop the grace timer.
-        if (terminalRef.current) {
-          if (envelope.type === 'event' && envelope.name === 'suggestions') {
-            clearGrace();
-            clientRef.current?.close();
-          }
           return;
         }
         // Re-arm after EVERY non-terminal envelope (start / event), matching the
