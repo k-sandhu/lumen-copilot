@@ -247,9 +247,7 @@ async def test_runner_denies_gated_tool_without_policy(
 ) -> None:
     """The run_python negative: no admin policy ⇒ approval_denied, handler never runs."""
     calls: list[str] = []
-    monkeypatch.setattr(
-        "app.services.tools.runner.get_tool", lambda name: _gated_tool(calls)
-    )
+    monkeypatch.setattr("app.services.tools.runner.get_tool", lambda name: _gated_tool(calls))
     runner = _runner(world, PolicyApprovalGate(world.session, tenant_id=world.tenant_id))
     result = await runner.run(
         call=ToolCall(id="c1", name="run_python", arguments={}), context=_context(world)
@@ -264,9 +262,7 @@ async def test_runner_executes_gated_tool_once_admin_preapproves(
 ) -> None:
     """The run_python unlock: admin enables + pre-approves ⇒ the handler runs."""
     calls: list[str] = []
-    monkeypatch.setattr(
-        "app.services.tools.runner.get_tool", lambda name: _gated_tool(calls)
-    )
+    monkeypatch.setattr("app.services.tools.runner.get_tool", lambda name: _gated_tool(calls))
     # The admin turns run_python on for the tenant (enabled + pre-approved).
     await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
         tool_name="run_python", enabled=True, requires_approval=False, updated_by=world.user_id

@@ -272,9 +272,7 @@ async def test_catalogue_body_validates_against_the_openapi_contract(
     token = await _login(client, seeded.member_a_email)
     resp = await client.get("/api/v1/tools", headers=_auth(token))
     assert resp.status_code == 200, resp.text
-    jsonschema.validate(
-        resp.json(), {**schemas["ToolCatalog"], "components": {"schemas": schemas}}
-    )
+    jsonschema.validate(resp.json(), {**schemas["ToolCatalog"], "components": {"schemas": schemas}})
 
 
 # --- Negatives ---------------------------------------------------------------
