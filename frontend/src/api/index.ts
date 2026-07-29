@@ -34,6 +34,7 @@ export {
 } from './chat';
 export type { PageParams } from './chat';
 export { listModels } from './models';
+export { listTools } from './tools';
 export { search } from './search';
 export { getPreferences, updatePreferences } from './preferences';
 export { updateAvatar, clearAvatar } from './user';

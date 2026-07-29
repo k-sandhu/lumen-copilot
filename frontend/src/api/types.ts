@@ -713,6 +713,34 @@ export interface ToolPolicyUpdate {
   requires_approval: boolean;
 }
 
+// --- Tool catalogue (contracts §tools, #505) ---
+
+/**
+ * One registered tool as the assistant builder sees it (issue #505): the registry's
+ * static `description` / `risk_tier` / `read_only` plus this tenant's EFFECTIVE
+ * governance flags. `/admin/tool-policy` carries the same data but is admin-only, so
+ * an assistant owner reads it here instead (this endpoint grants nothing).
+ *
+ * A `risk_tier` above `T0` is side-effecting and must be presented as such — never
+ * as an ordinary read-only tool. `enabled: false` means the tenant's admin switched
+ * the tool off, so the picker must show it as unavailable rather than offering a
+ * control whose selection the run-time gate would refuse.
+ */
+export interface ToolCatalogEntry {
+  tool_name: string;
+  description: string;
+  risk_tier: RiskTierId;
+  read_only: boolean;
+  enabled: boolean;
+  requires_approval: boolean;
+  is_default: boolean;
+}
+
+/** 200 from GET /tools — every registered tool, ordered by `tool_name`. */
+export interface ToolCatalog {
+  items: ToolCatalogEntry[];
+}
+
 // --- Admin sandbox-governance policy (contracts §admin, #233) ---
 
 /**

@@ -23,7 +23,7 @@ reported by its own name in the run's `stderr` (issue #502):
 |---|---|---|---|
 | 1 | `SANDBOX_ENABLED` — the deploy kill-switch | `.env`, needs an API + worker restart | "turned off for this deployment" |
 | 2 | Tenant sandbox policy `enabled` | Admin → Code execution | "no sandbox policy" / "switched off in this workspace" |
-| 3 | Tool policy for `run_python` | Admin → Tools; the assistant's allow-list | the tool is never offered to the model |
+| 3 | Tool policy for `run_python` | Admin → Tools; the assistant's allow-list (builder → *Tools*) | the tool is never offered to the model |
 | 4 | `sandbox-runner` reachable | compose `sandbox` profile | "the code sandbox service is unreachable" |
 
 Gate 4 also covers **a missing execution image**: the runner cannot launch what is
@@ -101,8 +101,17 @@ require gVisor there.
 2. **Admin → Tools**: enable `run_python` for the tenant. Leave *requires approval*
    **off** unless an interactive approval path exists (#501) — a tool marked as
    requiring approval is refused, not queued for a human.
-3. Add `run_python` to the **assistant's allow-list**. It is `default_offered=False`,
-   so no ad-hoc chat offers it.
+3. Add `run_python` to the **assistant's allow-list**: open the assistant in the
+   builder (Assistants → the assistant → *Tools*), tick **Run Python (code
+   execution)**, Save, and Publish. It is `default_offered=False`, so no ad-hoc chat
+   offers it — an assistant grant is the only way a model is offered the tool.
+
+   The picker reads `GET /tools` (issue #505), so it shows every registered tool with
+   its risk tier and *this tenant's* effective policy. `run_python` is flagged **T2 /
+   side-effecting**; if step 2 was skipped the row reads *"Requires approval"*, and if
+   an admin disabled the tool for the tenant the row reads **Unavailable** and cannot
+   be ticked. Before #505 the picker was a hardcoded list of four retrieval tools, so
+   this grant could only be made with a direct database write.
 
 Changing the image later does **not** re-image live chat sandboxes: a sandbox keeps
 the `image_digest` it was created with until it is **reset** (`POST

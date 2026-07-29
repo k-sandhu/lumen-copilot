@@ -36,6 +36,7 @@ import {
   listCollections,
   listMembers,
   listSources,
+  listTools,
   publishAssistant,
   rollbackAssistant,
   testAssistant,
@@ -57,6 +58,7 @@ import type {
   CollectionList,
   MemberList,
   SourceList,
+  ToolCatalog,
 } from '@/api';
 
 /** Stable query keys for the slice. */
@@ -238,6 +240,25 @@ export function useMembers(): UseQueryResult<MemberList> {
   return useQuery<MemberList>({
     queryKey: ['admin', 'members'],
     queryFn: ({ signal }) => listMembers({}, signal),
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * The tool catalogue for the allow-list picker (GET /tools, issue #505): every
+ * registered tool with its risk tier and the tenant's effective governance flags.
+ * Member-readable by design — the equivalent admin surface (`/admin/tool-policy`)
+ * 403s for an ordinary assistant owner, which is why the builder used to render a
+ * hardcoded stub that omitted `run_python` entirely.
+ *
+ * Cached generously: the registry and the tenant's policy both change rarely, and a
+ * governance change lands on the next mount. The read grants nothing; the tenant
+ * policy and the run-time approval gate remain the enforcement points.
+ */
+export function useToolCatalog(): UseQueryResult<ToolCatalog> {
+  return useQuery<ToolCatalog>({
+    queryKey: ['tools', 'catalog'],
+    queryFn: ({ signal }) => listTools(signal),
     staleTime: 60_000,
   });
 }
