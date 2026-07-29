@@ -172,7 +172,65 @@ docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
 - `status=failed` with "the code sandbox service is unreachable" → the runner is
   down, or the execution image is missing from the host daemon (§1).
 
-## 6. Bump the execution image
+## 6. Verify it automatically — the live execution test (#506)
+
+Everything in §5 is a human looking at a database row. The automated equivalent is
+`backend/tests/test_sandbox_execution_live.py`, which runs **real Python in a real
+container** through the real `HttpSandboxRunner` seam and asserts the real stdout.
+
+> **Why it exists.** Every other sandbox test substitutes something for reality — a
+> mock HTTP transport, a fake `SandboxRunner`, a fake Docker client, or the
+> Dockerfile read as *text*. None of them ever executed a line of Python, which is
+> exactly how the defects behind #501–#505 all shipped under a green suite.
+
+It needs the `sandbox` compose profile up (§2) **and** the execution image built
+(§1). One command, from the repo root:
+
+```bash
+docker compose exec backend sh -lc \
+  "UV_PROJECT_ENVIRONMENT=/tmp/lumen-dev-venv RUN_LIVE=1 \
+   uv run --frozen --extra dev pytest -q -p no:cacheprovider tests/test_sandbox_execution_live.py"
+```
+
+It runs from **inside the backend container** because ADR-0020 §2 gives the runner
+no published host port — the compose network is the only way in, which is also
+exactly how the worker reaches it. Two details are not optional:
+`UV_PROJECT_ENVIRONMENT` keeps the dev venv out of the bind-mounted `/app`, where it
+would otherwise land on the host checkout's own `backend/.venv`, and
+`-p no:cacheprovider` keeps `.pytest_cache` out of that same mount. (Wrapping it in
+`sh -lc "…"` also stops Git Bash on Windows from rewriting `/tmp/...` into a Windows
+path.) To run it from the host instead, point `SANDBOX_RUNNER_URL` at a forwarded
+port.
+
+What it covers, all against the live runner:
+
+| Case | Asserts |
+|---|---|
+| stdlib | exact stdout, `exit_code=0`, empty stderr, a measured duration |
+| pandas + numpy | the ADR-0013 §3 stack computes (#503) |
+| control-plane absence | `fastapi` / the Docker SDK are **not** importable — proof the run is in `lumen-sandbox-exec`, not `lumen-sandbox-runner` (#503) |
+| matplotlib | backend is `Agg`, no font-cache warning on stderr, and the rendered PNG comes back through output collection |
+| **negative** — egress | a raw IP, a DNS name and the metadata IP all fail closed (`--network none`, ADR-0013 §5 G2–G4) |
+| **negative** — crash | a raising script is reported `failed` with exit 1 and its traceback |
+| session reuse | a second execution in one generation sees the first one's files (ADR-0020 §4) |
+
+**It is off by default and never passes silently.** The opt-in is a strict
+`RUN_LIVE=1` (only that exact string), and reachability is probed inside a fixture,
+so a default `uv run --extra dev pytest` opens no socket and starts no container. If
+you opt in and the runner is not there, it **skips with a reason naming the URL and
+the command to start it** — it never reports green. If the runner answers but cannot
+launch the image, that is a hard **failure** pointing at §1, because a missing
+execution image is the #503 defect itself.
+
+`backend/tests/test_sandbox_execution_gating.py` guards that gate offline (strict
+opt-in parse, no import-time socket, every live test marked, and a named skip when
+the runner is absent). It needs no Docker and runs in the normal suite.
+
+What it does **not** cover, so read it honestly: the policy layers above the runner
+(§0 gates 1–3), and the persistence of a `code_runs` row. Those have their own
+offline tests; §5 remains the end-to-end check through chat.
+
+## 7. Bump the execution image
 
 1. Edit `sandbox_exec/requirements.txt` (keep every entry a `==` pin).
 2. Bump the tag in `docker-compose.yml` (`sandbox-exec-image`) and the
