@@ -87,6 +87,27 @@ inside the offline container as root. Inputs are staged **after** installation. 
 package installer never receives tenant data and model-authored code never receives a
 network route. Installed packages persist for the session generation.
 
+**Amendment ([#504](https://github.com/k-sandhu/lumen-copilot/issues/504), 2026-07-29)
+— a distribution the execution image already ships is admitted WITHOUT an install.**
+As written, this section made every `packages=[...]` request fail in practice: a
+tenant's `allowed_packages` starts **empty** (deny-by-default, #233), so even
+`packages=["pandas"]` was denied — for a distribution sitting in the image — and the
+only path to yes was an admin grant plus a wheel download. The check is now ordered:
+deny entries still win over everything; then a requirement the image **provably**
+satisfies (its distribution is in the image manifest, the shipped version satisfies
+the requested specifier, and the request carries no extras or environment marker) is
+admitted and **removed from what the runner is asked to install** — nothing is
+fetched, so it works on a deploy with no route to an index; then the ordinary
+allow-list decides the rest. The manifest is `sandbox_exec/requirements.txt`, mirrored
+into `Settings.sandbox_preinstalled_packages`, with a test that fails if the two
+drift. Two consequences are stated rather than hidden: a pin the image **cannot**
+satisfy is a real install and still needs the allow-list (admitting it as "available"
+would silently run a different version); and denying a pre-installed package refuses
+the *request* but cannot make it un-importable — that requires a custom image.
+Unchanged: model-authored code never gets a network route, and the per-tenant
+`egress_allowed` flag does not open one, so arbitrary installation remains gated on
+the **runner's** outbound access, which a locked-down deploy is expected to withhold.
+
 ### 4. Execution and persistence
 
 - The runtime container starts once and remains idle between executions.

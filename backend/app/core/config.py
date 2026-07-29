@@ -122,6 +122,29 @@ _MAX_INTERACTIVE_TIMEOUT_SECONDS = (
     _INTERACTIVE_WORST_CASE_CEILING_SECONDS - _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
 )
 
+# The exact, version-pinned closure the sandbox EXECUTION image ships (issue #504).
+# It is a literal copy of ``sandbox_exec/requirements.txt`` — that file is the build
+# input, this tuple is what the admission path treats as "already installed, no
+# fetch needed", and ``backend/tests/test_sandbox_exec_image.py`` fails if they
+# drift. It cannot simply READ that file: the backend image is built from
+# ``backend/`` alone and never contains it.
+_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES: tuple[str, ...] = (
+    "contourpy==1.3.3",
+    "cycler==0.12.1",
+    "et_xmlfile==2.0.0",
+    "fonttools==4.63.0",
+    "kiwisolver==1.5.0",
+    "matplotlib==3.11.1",
+    "numpy==2.5.1",
+    "openpyxl==3.1.5",
+    "packaging==26.2",
+    "pandas==3.0.5",
+    "pillow==12.3.0",
+    "pyparsing==3.3.2",
+    "python-dateutil==2.9.0.post0",
+    "six==1.17.0",
+)
+
 
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration, sourced from the environment.
@@ -1080,13 +1103,48 @@ class Settings(BaseSettings):
     sandbox_runner_url: str = Field(
         default="http://sandbox-runner:8000", alias="SANDBOX_RUNNER_URL"
     )
-    # The pinned base image the sandbox runs (curated Python + scientific stack,
-    # ADR-0013 §3). Pinned by digest, no ``:latest``. The runner uses this; recorded
-    # per run for reproducibility (E3-7).
+    # The pinned image model-authored code EXECUTES in (curated Python + scientific
+    # stack, ADR-0013 §3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
+    # reproducibility (E3-7).
+    #
+    # Issue #503: this defaulted to ``lumen-sandbox-runner:0.2.0`` — the RUNNER's own
+    # control-plane image (python-slim + fastapi/docker/pydantic). Every run therefore
+    # executed with no pandas, numpy, or matplotlib, so "run Python" could not do the
+    # data work the capability exists for, and tenant code ran in the image of the one
+    # service that holds the Docker socket. The execution image is a separate artifact
+    # from the runner and must stay one.
+    #
+    # The runner launches this on the HOST daemon, so the image has to EXIST there:
+    # ``docker compose --profile sandbox build sandbox-exec-image`` (see the runbook,
+    # docs/runbooks/sandbox-code-execution.md).
     sandbox_image: str = Field(
-        default="lumen-sandbox-runner:0.2.0",
+        default="lumen-sandbox-exec:0.1.0",
         alias="SANDBOX_IMAGE",
     )
+    # What the execution image above ALREADY SHIPS — the exact, version-pinned closure
+    # in ``sandbox_exec/requirements.txt`` (the drift guard in
+    # ``backend/tests/test_sandbox_exec_image.py`` fails if the two diverge).
+    #
+    # Issue #504: a tenant's ``allowed_packages`` starts EMPTY and the sandbox has no
+    # network, so every ``packages=[...]`` request was refused with no install path to
+    # offer. A distribution that is already in the image needs no install at all, so
+    # the admission path admits it against this list without asking the runner to
+    # fetch anything — the offline-correct answer. Anything NOT here is a genuine
+    # install: it needs the admin allow-list AND the runner's own outbound network.
+    # Override only when running a custom execution image (comma-separated pins).
+    sandbox_preinstalled_packages: tuple[str, ...] = Field(
+        default=_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES,
+        alias="SANDBOX_PREINSTALLED_PACKAGES",
+    )
+
+    @field_validator("sandbox_preinstalled_packages", mode="before")
+    @classmethod
+    def _split_sandbox_preinstalled_packages(cls, value: object) -> object:
+        """Accept a comma-separated env string as the image's package manifest."""
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
     # The OCI runtime: ``runc`` (hardened Docker baseline, laptop-viable) or ``runsc``
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.

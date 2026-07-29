@@ -218,6 +218,34 @@ services:
       retries: 10
       start_period: 20s
 
+  # The sandbox EXECUTION image (ADR-0013 §3, issue #503) — the image model-authored
+  # Python actually runs IN, as opposed to `sandbox-runner` above, which is the small
+  # control plane that launches it. They are deliberately different artifacts: before
+  # #503 `SANDBOX_IMAGE` pointed at the runner's own image, so every run had fastapi
+  # and the docker SDK available and no pandas/numpy/matplotlib at all.
+  #
+  # This service exists to BUILD that image onto the host daemon — the runner drives
+  # the HOST engine through the socket above, so the image has to exist THERE and
+  # nothing pulls it from a registry. It is not a long-running component: it prints
+  # the stack it ships and exits 0.
+  #
+  #   docker compose --profile sandbox build sandbox-exec-image
+  #
+  # See docs/runbooks/sandbox-code-execution.md.
+  sandbox-exec-image:
+    build:
+      context: ./sandbox_exec
+    image: lumen-sandbox-exec:0.1.0
+    profiles: ["sandbox"]
+    # Build-and-verify only — never restart it, and give it nothing: no socket, no
+    # volumes, no network, no env from .env.
+    restart: "no"
+    network_mode: "none"
+    command:
+      - "python"
+      - "-c"
+      - "import matplotlib, numpy, pandas, openpyxl; print('lumen-sandbox-exec ready:', 'numpy', numpy.__version__, 'pandas', pandas.__version__, 'matplotlib', matplotlib.__version__)"
+
   worker:
     build:
       context: ./backend

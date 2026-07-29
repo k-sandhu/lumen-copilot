@@ -8,10 +8,11 @@ from uuid import UUID
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import ConflictError, NotFoundError, ValidationError
+from app.core.errors import ConflictError, DependencyError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import (
     AuditEventRepository,
@@ -21,6 +22,14 @@ from app.db.repositories import (
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
+from app.domain.code_execution import (
+    SANDBOX_REASON_PACKAGE_DENIED,
+    SANDBOX_REASON_RUN_ERROR,
+    SANDBOX_REASON_RUNNER_UNAVAILABLE,
+    SANDBOX_REASON_SESSION_REQUIRED,
+    SANDBOX_REASON_TENANT_DISABLED,
+    sandbox_reason_message,
+)
 from app.domain.entities import (
     ArtifactProducedBy,
     AuditOutcome,
@@ -45,6 +54,19 @@ class PackagePolicyError(ValidationError):
     code = "sandbox_package_denied"
 
 
+def _failure_reason(exc: BaseException) -> str:
+    """Classify a crash on the execution path into a typed reason (issue #502).
+
+    A :class:`~app.core.errors.DependencyError` is the runner boundary saying it
+    could not be reached (``sandbox/runner.py`` raises exactly that for any
+    transport fault), which is the ONE failure an operator can act on directly —
+    so it gets its own reason instead of the generic "failed unexpectedly".
+    """
+    if isinstance(exc, DependencyError):
+        return SANDBOX_REASON_RUNNER_UNAVAILABLE
+    return SANDBOX_REASON_RUN_ERROR
+
+
 def _policy_names(values: tuple[str, ...]) -> frozenset[str]:
     return frozenset(
         "*" if value.strip() == "*" else canonicalize_name(value.strip())
@@ -53,12 +75,100 @@ def _policy_names(values: tuple[str, ...]) -> frozenset[str]:
     )
 
 
+def _preinstalled_index(values: tuple[str, ...]) -> dict[str, Version]:
+    """Map canonical distribution name → the version the execution image ships.
+
+    ``values`` is the image's manifest as ``name==version`` pins
+    (``Settings.sandbox_preinstalled_packages``, mirroring
+    ``sandbox_exec/requirements.txt``). An entry that is not a single ``==`` pin is
+    ignored rather than trusted: "already installed" must be a *provable* claim, so
+    a fuzzy manifest entry falls through to the ordinary allow-list path.
+    """
+    index: dict[str, Version] = {}
+    for raw in values:
+        value = raw.strip()
+        if not value:
+            continue
+        try:
+            requirement = Requirement(value)
+        except InvalidRequirement:
+            continue
+        pins = [spec.version for spec in requirement.specifier if spec.operator == "=="]
+        if len(pins) != 1:
+            continue
+        try:
+            index[canonicalize_name(requirement.name)] = Version(pins[0])
+        except InvalidVersion:
+            continue
+    return index
+
+
+def _satisfied_by_image(requirement: Requirement, shipped: Version | None) -> bool:
+    """Whether the execution image ALREADY satisfies this exact requirement.
+
+    Every condition is necessary, because "no install needed" must be provable:
+
+    * the distribution is in the image manifest at a known version;
+    * the request carries **no extras and no environment marker** — an extra pulls in
+      further distributions the manifest promises nothing about, and a marker decides
+      *whether* to install at all; both are pip's job, not ours;
+    * the shipped version satisfies the requested specifier — otherwise admitting the
+      request would silently run a DIFFERENT version than the one asked for, which is
+      worse than refusing it.
+    """
+    if shipped is None or requirement.extras or requirement.marker is not None:
+        return False
+    return requirement.specifier.contains(shipped, prereleases=True)
+
+
+def _install_refusal(name: str, value: str, shipped: Version | None) -> str:
+    """The refusal sentence for a package that would need a real install (#504).
+
+    Model- and user-facing (it becomes the run's ``stderr``), so it names the control
+    that changes the answer and never tenant-internal detail. The two cases are kept
+    apart because they need different actions: a version the image cannot provide is
+    an allow-list decision, while an unknown distribution is that PLUS the runner's
+    outbound network — the honest limitation, since the sandbox itself never has one.
+    """
+    if shipped is not None:
+        return (
+            f"Package '{name}' is available in the code sandbox image as version "
+            f"{shipped}, which does not satisfy '{value}'. Installing a different "
+            f"version needs '{name}' on this workspace's allowed-packages list "
+            "(Admin → Code execution)."
+        )
+    return (
+        f"Package '{name}' is not installed in the code sandbox image and is not on "
+        "this workspace's allowed-packages list. An admin can add it under "
+        "Admin → Code execution; installing it also requires the sandbox service to "
+        "have outbound network access."
+    )
+
+
 def validate_requested_packages(
-    requested: tuple[str, ...], *, allowed: tuple[str, ...], denied: tuple[str, ...]
+    requested: tuple[str, ...],
+    *,
+    allowed: tuple[str, ...],
+    denied: tuple[str, ...],
+    preinstalled: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """Validate PEP-508 package requirements; deny URLs and apply deny-wins policy."""
+    """Admit PEP-508 requirements and return the ones that still need INSTALLING.
+
+    Deny-wins over everything, direct URLs are never permitted, and the returned
+    tuple is what the runner is asked to fetch and install — which is *not* the same
+    as what the run may use (issue #504).
+
+    ``preinstalled`` is the execution image's own manifest. A requirement the image
+    already satisfies is **admitted without an install**: it needs no wheel download,
+    so it works on a deploy whose runner has no route to PyPI, and it cannot be
+    refused merely because the tenant's ``allowed_packages`` is empty — which is the
+    deny-by-default state of every new tenant, and the reason every ``packages=[...]``
+    request used to fail. Anything else is a real install and still needs a real
+    grant: the tenant allow-list AND the runner's outbound network.
+    """
     allowed_names = _policy_names(allowed)
     denied_names = _policy_names(denied)
+    shipped = _preinstalled_index(preinstalled)
     accepted: list[str] = []
     seen: set[str] = set()
     for raw in requested:
@@ -72,8 +182,16 @@ def validate_requested_packages(
             raise PackagePolicyError(
                 f"Package requirement '{value}' uses a direct URL, which is not permitted."
             )
-        if name in denied_names or ("*" not in allowed_names and name not in allowed_names):
+        if name in denied_names:
+            # An explicit denial is an admin decision and outranks the image: a denied
+            # distribution is never installed, even though a baked one stays importable.
             raise PackagePolicyError(f"Package '{name}' is not allowed for this tenant.")
+        shipped_version = shipped.get(name)
+        if _satisfied_by_image(requirement, shipped_version):
+            # Already in the image: nothing to fetch, nothing to install, no egress.
+            continue
+        if "*" not in allowed_names and name not in allowed_names:
+            raise PackagePolicyError(_install_refusal(name, value, shipped_version))
         if name in seen:
             continue
         seen.add(name)
@@ -278,12 +396,18 @@ class SandboxSessionService:
             raise NotFoundError("Chat session not found.")
 
     async def _require_enabled(self) -> None:
+        """Refuse a lifecycle action when code execution is off — saying which switch.
+
+        The error CODE stays ``code_execution_disabled`` (a frozen contract value);
+        issue #502 only makes the human ``detail`` specific, so the admin console
+        surfaces the deploy kill-switch and the tenant policy as different problems.
+        """
         policy = await SandboxPolicyReader(
             self._session, tenant_id=self._tenant_id, settings=self._settings
         ).resolve()
         if not policy.enabled:
             raise ConflictError(
-                "Code execution is disabled for this tenant.",
+                sandbox_reason_message(policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED),
                 code="code_execution_disabled",
             )
 
@@ -366,27 +490,48 @@ class SandboxService:
         if run.status is not CodeRunStatus.QUEUED:
             return run.status
 
+        # Every refusal below names the switch that refused (issue #502): the
+        # deploy kill-switch, the tenant sandbox policy (absent vs disabled), an
+        # unreadable policy, the package policy, or a missing parent chat session.
+        # Before this, all of them collapsed into one "disabled for this tenant"
+        # line and an operator could not tell which control to change.
         policy = await self._effective_policy(session)
-        denial: str | None = None
+        reason: str | None = None
         packages: tuple[str, ...] = ()
+        denial: str | None = None
         if not policy.enabled:
-            denial = "Code execution is disabled for this tenant."
+            reason = policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED
+            denial = sandbox_reason_message(reason)
         elif run.session_id is None:
-            denial = "Reusable code execution requires a parent chat session."
+            reason = SANDBOX_REASON_SESSION_REQUIRED
+            denial = sandbox_reason_message(reason)
         else:
             try:
+                # ``packages`` is what the runner must INSTALL — the requested
+                # distributions the execution image does not already ship (#504).
+                # Everything the image ships is usable without a fetch, so an empty
+                # tenant allow-list no longer refuses `packages=["pandas"]`.
                 packages = validate_requested_packages(
                     run.requested_packages,
                     allowed=policy.allowed_packages,
                     denied=policy.denied_packages,
+                    preinstalled=self._settings.sandbox_preinstalled_packages,
                 )
             except PackagePolicyError as exc:
+                reason = SANDBOX_REASON_PACKAGE_DENIED
                 denial = exc.detail or "A requested package is not allowed."
         if denial is not None:
+            log.warning(
+                "sandbox.run_denied",
+                code_run_id=str(run.id),
+                reason_code=reason,
+            )
             await runs.mark_terminal(
                 run.id,
                 status=CodeRunStatus.DENIED,
                 finished_at=datetime.now(UTC),
+                # The model-facing reply is this row's stderr, so the actionable
+                # sentence reaches the model and the transcript verbatim.
                 stderr=denial,
                 duration_ms=0,
             )
@@ -395,7 +540,7 @@ class SandboxService:
                 AuditAction.CODE_RUN_DENIED,
                 run.id,
                 AuditOutcome.DENIED,
-                {"reason": denial},
+                {"reason": denial, "reason_code": reason},
             )
             return CodeRunStatus.DENIED
 
@@ -417,8 +562,11 @@ class SandboxService:
                 "sandbox.session_start_failed",
                 code_run_id=str(run.id),
                 error_type=type(exc).__name__,
+                reason_code=_failure_reason(exc),
             )
-            return await self._finalize_failure(runs, audit, run.id, started_at)
+            return await self._finalize_failure(
+                runs, audit, run.id, started_at, reason=_failure_reason(exc)
+            )
         session_spec = lifecycle._spec(sandbox)  # noqa: SLF001 - same owning module
         running = await runs.mark_running(
             run.id,
@@ -459,9 +607,16 @@ class SandboxService:
         try:
             result = await self._runner.execute(session_spec, spec)
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
-            log.error("sandbox.run_failed", code_run_id=str(run.id), error_type=type(exc).__name__)
+            log.error(
+                "sandbox.run_failed",
+                code_run_id=str(run.id),
+                error_type=type(exc).__name__,
+                reason_code=_failure_reason(exc),
+            )
             await bind_tenant(session, self._tenant_id)
-            return await self._finalize_failure(runs, audit, run.id, started_at)
+            return await self._finalize_failure(
+                runs, audit, run.id, started_at, reason=_failure_reason(exc)
+            )
 
         await bind_tenant(session, self._tenant_id)
         artifact_ids = await self._capture_outputs(session, result, run.id, run.session_id)
@@ -544,13 +699,21 @@ class SandboxService:
         audit: AuditSink,
         code_run_id: UUID,
         started_at: datetime,
+        *,
+        reason: str = SANDBOX_REASON_RUN_ERROR,
     ) -> CodeRunStatus:
+        """Terminate a run that could not complete, saying WHAT could not (#502).
+
+        An unreachable ``sandbox-runner`` is a **dependency** fault, not a policy
+        denial, so the run stays ``failed`` — but it must say so, or an operator
+        whose four policy switches are all green has nothing left to look at.
+        """
         finished_at = datetime.now(UTC)
         terminal = await runs.mark_terminal(
             code_run_id,
             status=CodeRunStatus.FAILED,
             finished_at=finished_at,
-            stderr="The sandbox run failed unexpectedly.",
+            stderr=sandbox_reason_message(reason),
             duration_ms=int((finished_at - started_at).total_seconds() * 1000),
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
@@ -559,7 +722,7 @@ class SandboxService:
             AuditAction.CODE_RUN_FINISHED,
             code_run_id,
             AuditOutcome.ERROR,
-            {"status": effective_status.value},
+            {"status": effective_status.value, "reason_code": reason},
         )
         return effective_status
 

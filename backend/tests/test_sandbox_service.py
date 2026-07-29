@@ -243,6 +243,54 @@ async def test_allowed_packages_reach_runner_canonicalized(session: AsyncSession
     assert runner.executions[0][1].packages == ("numpy==2.1.0", "pandas[excel]>=2")
 
 
+async def test_preinstalled_package_runs_on_an_empty_allow_list_without_an_install(
+    session: AsyncSession,
+) -> None:
+    """Issue #504: what the execution image ships needs no install, so no grant.
+
+    Every tenant starts with ``allowed_packages=()`` (deny-by-default, #233) and the
+    sandbox never has a network, so before this a plain ``packages=["pandas"]`` was
+    DENIED with no install path anyone could offer. pandas is baked into
+    ``lumen-sandbox-exec``; the run is admitted and the runner is asked to install
+    NOTHING — which is what makes it work on a deploy with no route to PyPI.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=())
+    runner, store = _FakeRunner(), _FakeStore()
+    value = await _run(session, tenant, owner, chat, packages=("pandas", "matplotlib>=3"))
+
+    assert (
+        await _service(tenant, owner, runner, store).execute(session, value.id)
+        is CodeRunStatus.SUCCEEDED
+    )
+    assert runner.executions[0][1].packages == ()
+
+
+async def test_package_outside_the_image_and_allow_list_is_denied(
+    session: AsyncSession,
+) -> None:
+    """The negative half of #504: a real install still needs a real grant.
+
+    Admitting the baked stack must not turn into admitting everything — an unknown
+    distribution is refused before any container command runs, and the refusal says
+    what to change.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=())
+    runner, store = _FakeRunner(), _FakeStore()
+    value = await _run(session, tenant, owner, chat, packages=("scikit-learn",))
+
+    assert (
+        await _service(tenant, owner, runner, store).execute(session, value.id)
+        is CodeRunStatus.DENIED
+    )
+    assert runner.ensured == []
+    persisted = await CodeRunRepository(session, tenant).get(value.id)
+    assert persisted is not None
+    assert "not installed in the code sandbox image" in persisted.stderr
+    assert "allowed-packages" in persisted.stderr
+
+
 async def test_denied_package_never_reaches_runner(session: AsyncSession) -> None:
     tenant, owner, chat = await _principal_chat(session)
     await _enable(session, tenant, allowed=("*",), denied=("requests",))
