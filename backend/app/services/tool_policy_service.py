@@ -43,12 +43,18 @@ from app.services.tools.registry import all_tools, has_tool
 class ToolPolicyEntryView:
     """The effective governance for one registered tool in this tenant (issue #223).
 
-    ``risk_tier`` / ``read_only`` are the tool's static registry metadata (for
-    display). ``enabled`` / ``requires_approval`` are the effective flags — the
-    admin override if one exists, else the tool's built-in default. ``is_default``
-    says whether no override exists (so the UI can show "default"). A gated tool
-    executes only when ``enabled and not requires_approval`` (the admin
+    ``description`` / ``risk_tier`` / ``read_only`` are the tool's static registry
+    metadata (for display). ``enabled`` / ``requires_approval`` are the effective
+    flags — the admin override if one exists, else the tool's built-in default.
+    ``is_default`` says whether no override exists (so the UI can show "default"). A
+    gated tool executes only when ``enabled and not requires_approval`` (the admin
     pre-approved it); otherwise the approval gate denies it (deny-by-default).
+
+    ``description`` is the registry's model-facing summary; the member-readable
+    ``GET /tools`` catalogue (issue #505) surfaces it so the assistant builder can
+    label a tool honestly instead of carrying a hardcoded stub. The admin
+    ``/admin/tool-policy`` response does not include it (that surface is a
+    governance table, not a picker).
     """
 
     tool_name: str
@@ -57,6 +63,7 @@ class ToolPolicyEntryView:
     enabled: bool
     requires_approval: bool
     is_default: bool
+    description: str = ""
 
 
 class ToolPolicyService:
@@ -84,10 +91,7 @@ class ToolPolicyService:
         Tenant-scoped (INV-1).
         """
         overrides = {p.tool_name: p for p in await self._policies.list_all()}
-        return [
-            self._entry(name, risk_tier, read_only, requires_approval, overrides)
-            for name, risk_tier, read_only, requires_approval in _registry_rows()
-        ]
+        return [self._entry(row, overrides) for row in _registry_rows()]
 
     async def set_policy(
         self,
@@ -110,9 +114,7 @@ class ToolPolicyService:
         """
         if not has_tool(tool_name):
             # Deny-by-default: an unknown tool name cannot be stored (INV-8).
-            raise ValidationError(
-                f"Unknown tool: {tool_name!r}.", code="unknown_tool"
-            )
+            raise ValidationError(f"Unknown tool: {tool_name!r}.", code="unknown_tool")
         await self._policies.upsert(
             tool_name=tool_name,
             enabled=enabled,
@@ -141,10 +143,7 @@ class ToolPolicyService:
 
     def _entry(
         self,
-        tool_name: str,
-        risk_tier: str,
-        read_only: bool,
-        default_requires_approval: bool,
+        row: _RegistryRow,
         overrides: dict[str, TenantToolPolicy],
     ) -> ToolPolicyEntryView:
         """Project one tool + its optional override into the effective view.
@@ -153,37 +152,56 @@ class ToolPolicyService:
         default; a gated tool keeps its ``requires_approval`` default, i.e. denied),
         marked ``is_default=True``. An override wins on both flags.
         """
-        override = overrides.get(tool_name)
+        override = overrides.get(row.tool_name)
         if override is None:
             return ToolPolicyEntryView(
-                tool_name=tool_name,
-                risk_tier=risk_tier,
-                read_only=read_only,
+                tool_name=row.tool_name,
+                risk_tier=row.risk_tier,
+                read_only=row.read_only,
                 # Built-in default: a tool is offered/enabled by default; whether it
                 # still needs approval is its registry ``requires_approval`` flag.
                 enabled=True,
-                requires_approval=default_requires_approval,
+                requires_approval=row.requires_approval,
                 is_default=True,
+                description=row.description,
             )
         return ToolPolicyEntryView(
-            tool_name=tool_name,
-            risk_tier=risk_tier,
-            read_only=read_only,
+            tool_name=row.tool_name,
+            risk_tier=row.risk_tier,
+            read_only=row.read_only,
             enabled=override.enabled,
             requires_approval=override.requires_approval,
             is_default=False,
+            description=row.description,
         )
 
 
-def _registry_rows() -> list[tuple[str, str, bool, bool]]:
-    """The registry's (name, risk_tier, read_only, requires_approval) rows, sorted.
+@dataclass(frozen=True, slots=True)
+class _RegistryRow:
+    """One tool's static registry metadata, free of the adapter-bound definition."""
+
+    tool_name: str
+    risk_tier: str
+    read_only: bool
+    requires_approval: bool
+    description: str
+
+
+def _registry_rows() -> list[_RegistryRow]:
+    """The registry's static per-tool metadata rows, sorted by tool name.
 
     Localizes the registry read so :meth:`ToolPolicyService.list_policy` iterates a
-    plain tuple rather than the adapter-bound ``ToolDefinition`` — the service stays
+    plain record rather than the adapter-bound ``ToolDefinition`` — the service stays
     free of the tool-platform's handler/schema surface.
     """
     return [
-        (defn.name, defn.risk_tier.value, defn.read_only, defn.requires_approval)
+        _RegistryRow(
+            tool_name=defn.name,
+            risk_tier=defn.risk_tier.value,
+            read_only=defn.read_only,
+            requires_approval=defn.requires_approval,
+            description=defn.description,
+        )
         for defn in all_tools()
     ]
 
