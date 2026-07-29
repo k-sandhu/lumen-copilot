@@ -85,6 +85,30 @@ ERROR_TOOL_TIMEOUT = "tool_timeout"
 ERROR_BAD_ARGS = "tool_bad_args"
 
 
+# --- Approval refusal reasons (issue #502; the #500 honesty fix) ------------
+# ``ERROR_APPROVAL_DENIED`` is the STABLE code every approval refusal keeps —
+# these are the ADDITIVE sub-reasons that say WHICH switch refused, so an
+# operator reading a blocked run can tell "nobody enabled this tool" from "an
+# admin ticked requires-approval, which no surface can satisfy". They ride on
+# the ``ApprovalDecision`` the gate returns and land in the model-facing tool
+# reply, the ``tool_invocations`` row, and the ``tool.invoked``/``tool.result``
+# audit metadata (``denied_reason``).
+
+#: No admin tool-policy row exists for the tool (deny-by-default, issue #223).
+APPROVAL_REASON_POLICY_ABSENT = "tool_policy_absent"
+#: An admin row exists and says ``enabled=false`` — the tenant turned it off.
+APPROVAL_REASON_POLICY_DISABLED = "tool_policy_disabled"
+#: The tool is ENABLED but still flagged ``requires_approval`` — and no surface
+#: can grant that approval (issue #500). Mechanically a permanent deny, so it
+#: must never read as "disabled": the fix is to clear the flag, not to enable.
+#: The interactive approval flow itself is #501 (spec first) and does not exist.
+APPROVAL_REASON_APPROVAL_UNAVAILABLE = "approval_required_unavailable"
+#: The tool policy could not be read; the call was refused fail-closed (INV-7).
+APPROVAL_REASON_POLICY_UNREADABLE = "tool_policy_unreadable"
+#: No real approval gate is wired in this deployment (the inert deny-all default).
+APPROVAL_REASON_GATE_INERT = "approval_gate_inert"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolResult:
     """The uniform result of one tool invocation (issue #207 §4).
@@ -172,6 +196,11 @@ class ToolHandlerResult:
 
 
 __all__ = [
+    "APPROVAL_REASON_APPROVAL_UNAVAILABLE",
+    "APPROVAL_REASON_GATE_INERT",
+    "APPROVAL_REASON_POLICY_ABSENT",
+    "APPROVAL_REASON_POLICY_DISABLED",
+    "APPROVAL_REASON_POLICY_UNREADABLE",
     "ERROR_APPROVAL_DENIED",
     "ERROR_AUTONOMY_DENIED",
     "ERROR_BAD_ARGS",

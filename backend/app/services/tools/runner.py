@@ -18,7 +18,11 @@ governance contract, in this fixed order:
 4. **Approval seam** (issue #207 §3 / AC-3 / INV-7): a ``requires_approval`` tool
    (T2+) — and a T1 tool at ``act_with_approval`` (step 3) — is routed to the
    :class:`~app.services.tools.types.ApprovalGate` and blocks until approved; a
-   denial → ``approval_denied`` and the handler never runs.
+   denial → ``approval_denied`` and the handler never runs. The gate may name the
+   switch that refused (:class:`~app.services.tools.types.ApprovalDecision`,
+   issue #502); the error CODE stays ``approval_denied`` and the typed reason
+   rides alongside it into the model's reply, the trace row, the audit metadata
+   (``denied_reason``) and the structured log.
 5. **Bounded execute** (issue #207 §7 / AC-5): the handler runs under a per-tool
    timeout; a raised or timed-out handler → an ``ok=False`` result with a safe
    message — never a crashed stream.
@@ -65,6 +69,7 @@ from app.domain.tools import (
 from app.services.audit import AuditSink
 from app.services.tools.registry import UnknownToolError, get_tool
 from app.services.tools.types import (
+    ApprovalDecision,
     ApprovalGate,
     ApprovalRequest,
     DenyAllApprovalGate,
@@ -379,16 +384,26 @@ class ToolRunner:
         # A denial refuses the call BEFORE the handler runs — no consequential action
         # executes without approval.
         if definition.requires_approval or requires_gate:
-            approved = await self._gate.request(
-                ApprovalRequest(
-                    call_id=call.id,
-                    tool_name=call.name,
-                    risk_tier=definition.risk_tier,
-                    principal=context.principal,
-                    arguments=call.arguments,
+            approval = _as_decision(
+                await self._gate.request(
+                    ApprovalRequest(
+                        call_id=call.id,
+                        tool_name=call.name,
+                        risk_tier=definition.risk_tier,
+                        principal=context.principal,
+                        arguments=call.arguments,
+                    )
                 )
             )
-            if not approved:
+            if not approval.approved:
+                # (iii) the structured log (issue #502): a blocked run is
+                # diagnosable from the logs alone, naming the gate that refused.
+                log.warning(
+                    "tool.approval_denied",
+                    tool=call.name,
+                    risk_tier=definition.risk_tier.value,
+                    reason=approval.reason,
+                )
                 return await self._finalise(
                     call=call,
                     args_hash=args_hash,
@@ -398,14 +413,25 @@ class ToolRunner:
                         call_id=call.id,
                         name=call.name,
                         error=ERROR_APPROVAL_DENIED,
-                        content=(
+                        # (i) the model-facing reply carries the specific, actionable
+                        # reason when the gate gave one; the old generic line is the
+                        # fallback for a gate that still answers with a bare bool.
+                        content=approval.detail
+                        or (
                             f"Tool {call.name!r} requires approval, which was not granted. "
                             "The action was not performed."
                         ),
-                        summary="approval denied",
+                        # (ii) the tool_invocations row: the typed reason, not just
+                        # "approval denied", so the trace distinguishes the gates.
+                        summary=(
+                            f"approval denied: {approval.reason}"
+                            if approval.reason
+                            else "approval denied"
+                        ),
                         duration_ms=_elapsed_ms(started),
                     ),
                     outcome=AuditOutcome.DENIED,
+                    denied_reason=approval.reason,
                 )
 
         # (5) Bounded execute (AC-5). A raised/timed-out handler becomes an
@@ -508,6 +534,7 @@ class ToolRunner:
         ordinal: int,
         result: ToolResult,
         outcome: AuditOutcome,
+        denied_reason: str | None = None,
     ) -> ToolResult:
         """Audit (invoked + result) and record the ``tool_invocations`` row (AC-4).
 
@@ -526,6 +553,10 @@ class ToolRunner:
         The ``finally`` advances the drain even when a write raises — the
         exception still propagates (the answer dies with a terminal), but a
         sibling finalise is never left waiting on a wedged ordinal.
+
+        ``denied_reason`` (issue #502) is the typed sub-reason behind a
+        governance denial — the specific switch that refused, carried into the
+        audit metadata so an operator can tell the gates apart after the fact.
         """
         metadata = {
             "tool": call.name,
@@ -534,6 +565,7 @@ class ToolRunner:
             "ok": result.ok,
             "ordinal": ordinal,
             **({"error": result.error} if result.error else {}),
+            **({"denied_reason": denied_reason} if denied_reason else {}),
         }
         async with self._persist_gate:
             await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)
@@ -607,6 +639,19 @@ def _complete(call: ToolCall, body: ToolHandlerResult, duration_ms: int) -> Tool
         passages=body.passages,
         document_ids=body.document_ids,
     )
+
+
+def _as_decision(value: bool | ApprovalDecision) -> ApprovalDecision:
+    """Normalise a gate answer to an :class:`ApprovalDecision` (issue #502).
+
+    A gate may still answer with a plain ``bool`` (a test fake, or any gate
+    written before the reason seam existed); only an explicit approval allows.
+    A bare ``True``/``False`` simply carries no reason, and the runner falls back
+    to the generic denial line — never to executing the call.
+    """
+    if isinstance(value, ApprovalDecision):
+        return value
+    return ApprovalDecision(approved=bool(value))
 
 
 def _elapsed_ms(started: float) -> int:

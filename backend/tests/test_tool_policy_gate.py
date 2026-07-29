@@ -14,6 +14,12 @@ retrieval so no pgvector is needed). The point of the issue is proven **both way
   action on a policy it could not read).
 * Cross-tenant isolation (INV-1): tenant A's pre-approval never enables tenant B's
   tool.
+
+Since #502 the gate answers with an :class:`~app.services.tools.types.ApprovalDecision`
+rather than a bare bool, so each of the four refusals also names ITSELF; every
+case below pins its reason. The end-to-end diagnostic contract (the reason
+reaching the model, the trace row and the audit) lives in
+``tests/test_run_python_refusal_reasons.py``.
 """
 
 from __future__ import annotations
@@ -39,7 +45,15 @@ from app.db.repositories import (
 from app.domain.audit import AuditActor
 from app.domain.entities import Role
 from app.domain.llm import ToolCall
-from app.domain.tools import ERROR_APPROVAL_DENIED, RiskTier, ToolHandlerResult
+from app.domain.tools import (
+    APPROVAL_REASON_APPROVAL_UNAVAILABLE,
+    APPROVAL_REASON_POLICY_ABSENT,
+    APPROVAL_REASON_POLICY_DISABLED,
+    APPROVAL_REASON_POLICY_UNREADABLE,
+    ERROR_APPROVAL_DENIED,
+    RiskTier,
+    ToolHandlerResult,
+)
 from app.services.audit import AuditSink
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.runner import ToolRunner
@@ -119,17 +133,24 @@ def _approval_request(world: _World, *, tenant_id: uuid.UUID | None = None) -> A
 async def test_gate_denies_when_no_policy_row(world: _World) -> None:
     """Deny-by-default: a gated tool with no admin override is denied (INV-7)."""
     gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
-    assert await gate.request(_approval_request(world)) is False
+    decision = await gate.request(_approval_request(world))
+    assert decision.approved is False
+    assert bool(decision) is False  # truthy iff approved — a bare `if` still denies
+    assert decision.reason == APPROVAL_REASON_POLICY_ABSENT
 
 
 async def test_gate_denies_when_enabled_but_still_requires_approval(world: _World) -> None:
-    """Enabled but not pre-approved ⇒ still denied (approval is required, no reviewer)."""
+    """Enabled but not pre-approved ⇒ still denied — and it says approval is
+    UNAVAILABLE, not that the tool is off (issue #500; see
+    ``test_run_python_refusal_reasons`` for the full honesty contract)."""
     await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
         tool_name="run_python", enabled=True, requires_approval=True, updated_by=world.user_id
     )
     await world.session.commit()
     gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
-    assert await gate.request(_approval_request(world)) is False
+    decision = await gate.request(_approval_request(world))
+    assert decision.approved is False
+    assert decision.reason == APPROVAL_REASON_APPROVAL_UNAVAILABLE
 
 
 async def test_gate_denies_when_disabled_even_if_preapproved(world: _World) -> None:
@@ -139,7 +160,9 @@ async def test_gate_denies_when_disabled_even_if_preapproved(world: _World) -> N
     )
     await world.session.commit()
     gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
-    assert await gate.request(_approval_request(world)) is False
+    decision = await gate.request(_approval_request(world))
+    assert decision.approved is False
+    assert decision.reason == APPROVAL_REASON_POLICY_DISABLED
 
 
 async def test_gate_allows_when_enabled_and_preapproved(world: _World) -> None:
@@ -149,7 +172,10 @@ async def test_gate_allows_when_enabled_and_preapproved(world: _World) -> None:
     )
     await world.session.commit()
     gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
-    assert await gate.request(_approval_request(world)) is True
+    decision = await gate.request(_approval_request(world))
+    assert decision.approved is True
+    # An approval carries no refusal reason — nothing refused.
+    assert decision.reason is None
 
 
 async def test_gate_is_tenant_scoped(world: _World) -> None:
@@ -160,7 +186,9 @@ async def test_gate_is_tenant_scoped(world: _World) -> None:
     await world.session.commit()
     # A gate scoped to tenant B sees no override → deny-by-default.
     gate_b = PolicyApprovalGate(world.session, tenant_id=world.tenant_b_id)
-    assert await gate_b.request(_approval_request(world, tenant_id=world.tenant_b_id)) is False
+    decision = await gate_b.request(_approval_request(world, tenant_id=world.tenant_b_id))
+    assert decision.approved is False
+    assert decision.reason == APPROVAL_REASON_POLICY_ABSENT
 
 
 async def test_gate_fails_closed_on_read_error(world: _World) -> None:
@@ -171,7 +199,10 @@ async def test_gate_fails_closed_on_read_error(world: _World) -> None:
             raise RuntimeError("db is down")
 
     gate = PolicyApprovalGate(_BoomSession(), tenant_id=world.tenant_id)  # type: ignore[arg-type]
-    assert await gate.request(_approval_request(world)) is False
+    decision = await gate.request(_approval_request(world))
+    assert decision.approved is False
+    # Distinct from "nobody enabled it": this one is an infrastructure fault.
+    assert decision.reason == APPROVAL_REASON_POLICY_UNREADABLE
 
 
 # --- End-to-end through the governed runner (the observable unlock) ---------

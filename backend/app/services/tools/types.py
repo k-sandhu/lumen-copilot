@@ -21,7 +21,7 @@ from uuid import UUID
 
 from app.auth.principal import Principal
 from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
-from app.domain.tools import RiskTier, ToolHandlerResult
+from app.domain.tools import APPROVAL_REASON_GATE_INERT, RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
 from app.services.artifacts_service import ArtifactLinks
 
@@ -248,20 +248,60 @@ class ApprovalRequest:
     arguments: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalDecision:
+    """An approval outcome that can say WHY it refused (issue #502).
+
+    A bare ``bool`` cannot distinguish the four ways an approval can fail — no
+    admin policy row, an explicitly disabled tool, a tool an admin left flagged
+    ``requires_approval`` (which no surface can satisfy, issue #500), and a policy
+    that could not be read at all. Each needs a *different* operator action, so a
+    gate returns this instead: the verdict plus a stable ``reason`` code (one of
+    ``domain.tools.APPROVAL_REASON_*``) and a model-safe, operator-actionable
+    ``detail`` sentence naming the control that changes the answer.
+
+    It is **truthy iff approved**, so a gate that still returns a plain ``bool``
+    (a test fake, the inert deny-all default) keeps working unchanged — the runner
+    normalises either shape. ``detail`` is surfaced verbatim to the model, so it
+    names controls ("Admin → Tool governance"), never tenant-internal state.
+    """
+
+    approved: bool
+    reason: str | None = None
+    detail: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.approved
+
+    @classmethod
+    def allow(cls) -> ApprovalDecision:
+        """The approved outcome (no reason needed — nothing refused)."""
+        return cls(approved=True)
+
+    @classmethod
+    def deny(cls, reason: str, detail: str) -> ApprovalDecision:
+        """A refusal carrying its typed ``reason`` + actionable ``detail``."""
+        return cls(approved=False, reason=reason, detail=detail)
+
+
 @runtime_checkable
 class ApprovalGate(Protocol):
     """The read-before-write chokepoint (CC-7, spec 0004 §2.5 / INV-7).
 
     A ``requires_approval`` tool call is routed here *before* it can execute; the
-    gate returns True only if the action is approved. T0/T1 tools bypass the gate
+    gate approves only if the action is permitted. T0/T1 tools bypass the gate
     entirely (the runner never calls it for them). The seam is built now though no
     T2+ tool ships in v1 — the default implementation denies everything, so the
     invariant "no unapproved consequential action" holds by construction, and a
-    future approval flow (F-ADMIN-TOOLS) is a swap of this one collaborator.
+    future approval flow (#501) is a swap of this one collaborator.
+
+    A gate may answer with a plain ``bool`` or with the richer
+    :class:`ApprovalDecision` (issue #502) that also names *why* it refused; the
+    runner accepts either and only ever treats an explicit approval as allow.
     """
 
-    async def request(self, request: ApprovalRequest) -> bool:
-        """Return True iff the gated action is approved; False denies it."""
+    async def request(self, request: ApprovalRequest) -> bool | ApprovalDecision:
+        """Approve the gated action, or refuse it (optionally saying why)."""
         ...
 
 
@@ -273,13 +313,24 @@ class DenyAllApprovalGate:
     flow wired, this denies it (the run continues with an ``approval_denied``
     result) rather than silently executing a consequential action. This is the
     inert-by-default gate the spec calls for — a real gate replaces it later.
+
+    It says so explicitly (issue #502): the refusal names *this deployment has no
+    approval flow wired*, so an operator does not go hunting for a tenant switch
+    that would not have helped.
     """
 
-    async def request(self, request: ApprovalRequest) -> bool:
-        return False
+    async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+        return ApprovalDecision.deny(
+            APPROVAL_REASON_GATE_INERT,
+            (
+                f"Tool {request.tool_name!r} needs approval, but this deployment has no "
+                "approval flow wired, so the call was refused. The action was not performed."
+            ),
+        )
 
 
 __all__ = [
+    "ApprovalDecision",
     "ApprovalGate",
     "ApprovalRequest",
     "ArtifactWriter",
