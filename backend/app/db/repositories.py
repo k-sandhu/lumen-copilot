@@ -1805,6 +1805,31 @@ class DocumentRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return to_document(row) if row is not None else None
 
+    async def get_many(self, document_ids: Iterable[UUID]) -> dict[UUID, Document]:
+        """Fetch many documents by id in **one** query — the batch form of :meth:`get`.
+
+        For callers holding a page of rows that reference documents (search
+        result enrichment, #514): a lookup per id puts a serialized round-trip on
+        the critical path for every distinct document.
+
+        Tenant-scoped exactly like :meth:`get` (INV-1). An id belonging to
+        another tenant, or one that no longer exists, is simply **absent** from
+        the mapping — so a caller keying off the result drops it the same way a
+        per-id ``None`` did, with no way to mistake a miss for a hit. Returned as
+        a mapping rather than a list so no caller can depend on row order.
+        """
+        # Duplicates collapse (a page routinely holds many chunks of one
+        # document) and an empty page skips the query entirely.
+        ids = list(dict.fromkeys(document_ids))
+        if not ids:
+            return {}
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id.in_(ids),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.id: to_document(row) for row in rows}
+
     async def list_ids_page(self, *, after_id: UUID | None, limit: int) -> list[UUID]:
         """One keyset page of this tenant's document ids, ascending by id.
 

@@ -358,6 +358,76 @@ async def test_inv1_document_and_chunk_get_is_tenant_scoped(
     assert await chunks_b.list_for_document(doc.id) == []
 
 
+async def test_get_many_batches_and_stays_tenant_scoped(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """The batch lookup (#514) must fail closed exactly like per-id ``get``.
+
+    ``get_many`` exists so a page of results costs one query instead of one per
+    document. Widening the predicate to an ``IN`` list is precisely where a
+    tenant scope is easy to lose, so this pins that a foreign id is *absent*
+    from the mapping rather than returned alongside the legitimate rows.
+    """
+    tenant_a, tenant_b = two_tenants
+
+    async def _doc(tenant: uuid.UUID, email: str, name: str) -> uuid.UUID:
+        owner = await UserRepository(session, tenant).create(
+            email=email, password_hash="h", roles=[Role.MEMBER]
+        )
+        coll = await CollectionRepository(session, tenant).create(owner_id=owner.id, name="C")
+        created = await DocumentRepository(session, tenant).create(
+            owner_id=owner.id,
+            collection_id=coll.id,
+            filename=name,
+            mime_type="application/pdf",
+            size_bytes=1,
+            storage_key="k",
+            acl_enforced=False,
+        )
+        return created.id
+
+    first = await _doc(tenant_a, "a1@x.test", "one.pdf")
+    second = await _doc(tenant_a, "a2@x.test", "two.pdf")
+    foreign = await _doc(tenant_b, "b@x.test", "theirs.pdf")
+    missing = uuid.uuid4()
+
+    docs_a = DocumentRepository(session, tenant_a)
+    found = await docs_a.get_many([first, foreign, second, missing])
+
+    # Only this tenant's rows come back, keyed by their own id (INV-1).
+    assert set(found) == {first, second}
+    assert found[first].filename == "one.pdf"
+    assert found[second].filename == "two.pdf"
+    # A foreign id is a miss, indistinguishable from one that never existed.
+    assert foreign not in found
+    assert missing not in found
+
+
+async def test_get_many_handles_duplicates_and_empty_input(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """Repeated ids collapse to one entry; an empty page needs no query at all."""
+    tenant_a, _ = two_tenants
+    owner = await UserRepository(session, tenant_a).create(
+        email="a@x.test", password_hash="h", roles=[Role.MEMBER]
+    )
+    coll = await CollectionRepository(session, tenant_a).create(owner_id=owner.id, name="C")
+    doc = await DocumentRepository(session, tenant_a).create(
+        owner_id=owner.id,
+        collection_id=coll.id,
+        filename="f.pdf",
+        mime_type="application/pdf",
+        size_bytes=1,
+        storage_key="k",
+        acl_enforced=False,
+    )
+
+    docs_a = DocumentRepository(session, tenant_a)
+    # Many chunks of one document is the common case — it must not multiply rows.
+    assert set(await docs_a.get_many([doc.id, doc.id, doc.id])) == {doc.id}
+    assert await docs_a.get_many([]) == {}
+
+
 async def test_inv1_chat_and_audit_are_tenant_scoped(
     session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
