@@ -82,17 +82,46 @@ class SandboxPolicy:
 
 @dataclass(frozen=True, slots=True)
 class SandboxSessionSpec:
-    """The opaque reusable-container identity passed to the runner (ADR-0020)."""
+    """The opaque reusable-container identity passed to the runner (ADR-0020).
+
+    ``output_bytes_cap`` is the one limit ADR-0020 does enforce, and it protects the
+    RUNNER rather than the run: collected output files are read into the runner's
+    memory, and the runner is the single holder of the Docker socket, so an unbounded
+    collection let one chat turn OOM the process every tenant's code execution depends
+    on. ``None`` leaves the runner's own ceiling in force.
+
+    ``cpus``/``memory_bytes``/``pids_limit`` bound the session CONTAINER, and they are
+    ``None`` by default because ADR-0020 ships unbounded on purpose (its Consequences
+    section: no automatic protection against infinite loops, fork bombs or disk growth,
+    explicit cancel being the recovery path). A deploy unwilling to accept that sets
+    ``SANDBOX_SESSION_LIMITS_ENABLED`` and these carry its ``SANDBOX_CPUS`` /
+    ``SANDBOX_MEMORY_BYTES`` / ``SANDBOX_PIDS_LIMIT`` down to the engine flags.
+    """
 
     sandbox_session_id: UUID
     generation: int
     image: str
     runtime: str
+    output_bytes_cap: int | None = None
+    cpus: float | None = None
+    memory_bytes: int | None = None
+    pids_limit: int | None = None
     env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.generation < 1:
             raise ValueError("sandbox generation must be >= 1")
+        if self.output_bytes_cap is not None and self.output_bytes_cap < 1:
+            raise ValueError("sandbox output_bytes_cap must be >= 1 when set")
+        # A non-positive bound is not "no bound": it is a container the engine refuses
+        # to create, and discovering that at session start would take code execution
+        # down for a whole deploy. Rejected here, where the operator can read it.
+        if self.cpus is not None and self.cpus <= 0:
+            raise ValueError("sandbox cpus must be > 0 when set")
+        if self.memory_bytes is not None and self.memory_bytes < 1:
+            raise ValueError("sandbox memory_bytes must be >= 1 when set")
+        if self.pids_limit is not None and self.pids_limit < 1:
+            raise ValueError("sandbox pids_limit must be >= 1 when set")
 
 
 @dataclass(frozen=True, slots=True)

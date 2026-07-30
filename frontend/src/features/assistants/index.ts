@@ -30,4 +30,4 @@ export {
   canPublish,
   type AssistantFormState,
 } from './model/form';
-export { KNOWN_TOOLS, type ToolOption } from './model/tools';
+export { toolLabel, toToolOption, toToolOptions, type ToolOption } from './model/tools';

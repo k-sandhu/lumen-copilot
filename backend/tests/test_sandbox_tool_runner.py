@@ -38,6 +38,7 @@ from app.db.repositories import (
     TenantSandboxPolicyRepository,
     UserRepository,
 )
+from app.domain.code_execution import SANDBOX_REASON_DEPLOY_DISABLED
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.realtime.backplane import InMemoryBackplane
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
@@ -296,6 +297,11 @@ async def test_disabled_tenant_is_denied_without_calling_runner(world: _World) -
     # Refused before execution: the runner was NEVER called, the run is denied.
     assert summary.status is CodeRunStatus.DENIED
     assert runner.calls == 0
+    # …and the seam carries the TYPED reason out, not just the refusal's prose
+    # (issue #502): ``reason_code`` is not a ``code_runs`` column, so it can only
+    # come from the execution outcome. This is what puts the stable code in the
+    # durable ``tool_invocations`` row instead of a truncated sentence.
+    assert summary.reason_code == SANDBOX_REASON_DEPLOY_DISABLED
     # A denied run emits a code_result (terminal) but no process code_output.
     events = _events(backplane, "stream-1")
     assert [e for e in events if e.get("name") == "code_output"] == []

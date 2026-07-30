@@ -16,7 +16,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { Assistant, Member } from '@/api';
+import type { Assistant, Member, ToolCatalogEntry } from '@/api';
 import { AssistantEditor } from './AssistantEditor';
 
 function json(body: unknown, status = 200): Response {
@@ -25,7 +25,11 @@ function json(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
-function problem(status: number, title: string, errors?: { field: string; message: string }[]): Response {
+function problem(
+  status: number,
+  title: string,
+  errors?: { field: string; message: string }[],
+): Response {
   return new Response(JSON.stringify({ type: 'about:blank', title, status, errors }), {
     status,
     headers: { 'Content-Type': 'application/problem+json' },
@@ -61,6 +65,29 @@ const members: Member[] = [
 ];
 
 /**
+ * The tool catalogue GET /tools serves the allow-list picker (#505). `run_python` is
+ * the T2, side-effecting entry that used to be unreachable from the builder.
+ */
+const toolCatalog: ToolCatalogEntry[] = [
+  {
+    tool_name: 'search_text',
+    description: 'Keyword search across permitted sources.',
+    risk_tier: 'T0',
+    read_only: true,
+    enabled: true,
+    requires_approval: false,
+  },
+  {
+    tool_name: 'run_python',
+    description: 'Write and run Python in an isolated sandbox.',
+    risk_tier: 'T2',
+    read_only: false,
+    enabled: true,
+    requires_approval: true,
+  },
+];
+
+/**
  * Route the mocked fetch by URL. `assistant` seeds GET /assistants/{id}; the
  * collections/sources/members reads return their (possibly empty) lists.
  */
@@ -80,7 +107,9 @@ function mockRoutes(opts: {
       return Promise.resolve(opts.onPublish ? opts.onPublish() : json(makeAssistant(), 200));
     }
     if (url.includes('/assistants/a1/versions') && method === 'GET') {
-      return Promise.resolve(json({ items: opts.versions ? opts.versions() : [], next_cursor: null }));
+      return Promise.resolve(
+        json({ items: opts.versions ? opts.versions() : [], next_cursor: null }),
+      );
     }
     if (url.match(/\/assistants\/a1$/) && method === 'PATCH') {
       return Promise.resolve(opts.onPatch ? opts.onPatch() : json(makeAssistant(), 200));
@@ -92,9 +121,12 @@ function mockRoutes(opts: {
       if (a === 'error-500') return Promise.resolve(problem(500, 'Server Error'));
       return Promise.resolve(json(a ?? makeAssistant()));
     }
-    if (url.includes('/admin/members')) return Promise.resolve(json({ items: members, next_cursor: null }));
+    if (url.includes('/tools')) return Promise.resolve(json({ items: toolCatalog }));
+    if (url.includes('/admin/members'))
+      return Promise.resolve(json({ items: members, next_cursor: null }));
     if (url.includes('/models')) return Promise.resolve(json({ items: [] }));
-    if (url.includes('/collections')) return Promise.resolve(json({ items: [], next_cursor: null }));
+    if (url.includes('/collections'))
+      return Promise.resolve(json({ items: [], next_cursor: null }));
     if (url.includes('/sources')) return Promise.resolve(json({ items: [], next_cursor: null }));
     return Promise.resolve(json({ items: [], next_cursor: null }));
   });
@@ -185,6 +217,64 @@ describe('AssistantEditor — new mode', () => {
     await screen.findByRole('heading', { name: /new assistant/i });
     await user.click(screen.getByRole('button', { name: /save draft/i }));
     expect(await screen.findByText(/give your assistant a name/i)).toBeInTheDocument();
+  });
+});
+
+describe('AssistantEditor — granting run_python (#505)', () => {
+  it('ticks run_python in the picker and PATCHes it into the allow-list', async () => {
+    let patchBody: unknown = null;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.match(/\/assistants\/a1$/) && method === 'PATCH') {
+        patchBody = JSON.parse(String(init?.body));
+        return Promise.resolve(
+          json(makeAssistant({ toolAllowlist: ['search_text', 'run_python'] })),
+        );
+      }
+      if (url.match(/\/assistants\/a1$/) && method === 'GET') {
+        return Promise.resolve(json(makeAssistant()));
+      }
+      if (url.includes('/tools')) return Promise.resolve(json({ items: toolCatalog }));
+      if (url.includes('/admin/members'))
+        return Promise.resolve(json({ items: members, next_cursor: null }));
+      return Promise.resolve(json({ items: [], next_cursor: null }));
+    });
+
+    const user = userEvent.setup();
+    renderEditor('a1');
+
+    // The T2 tool is offered by the picker at all — the #505 regression.
+    const box = await screen.findByRole('checkbox', { name: /run python/i });
+    expect(box).toBeEnabled();
+    await user.click(box);
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect((patchBody as { toolAllowlist: string[] }).toolAllowlist).toEqual([
+      'search_text',
+      'run_python',
+    ]);
+  });
+
+  it('shows a tenant-disabled tool as unavailable instead of a silent no-op', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      if (url.match(/\/assistants\/a1$/)) return Promise.resolve(json(makeAssistant()));
+      if (url.includes('/tools')) {
+        return Promise.resolve(
+          json({
+            items: [toolCatalog[0], { ...toolCatalog[1], enabled: false }],
+          }),
+        );
+      }
+      return Promise.resolve(json({ items: [], next_cursor: null }));
+    });
+
+    renderEditor('a1');
+    const box = await screen.findByRole('checkbox', { name: /run python/i });
+    expect(box).toBeDisabled();
+    expect(screen.getByText(/an admin has turned this tool off/i)).toBeInTheDocument();
   });
 });
 

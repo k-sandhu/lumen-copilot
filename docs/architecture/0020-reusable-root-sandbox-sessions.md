@@ -17,7 +17,9 @@ one chat session and is reused until the user resets it, closes it, or deletes t
 The model runs as root **inside that isolated container** so approved packages can be
 installed into the mutable environment. This intentionally trades the original
 resource-abuse posture for interactive flexibility: v1 has no automatic execution or
-idle timeout and no per-run CPU, memory, PID, output, or daily-runtime limit.
+idle timeout and no per-run CPU, memory, PID, or daily-runtime limit. (Collected
+**output** is the one bounded quantity — see §4 — because it is consumed by the shared
+runner rather than by the run.)
 
 Root plus direct network access would let model-authored code bypass domain allowlists,
 scan internal services, or exfiltrate staged tenant data. Root therefore does not imply
@@ -87,6 +89,27 @@ inside the offline container as root. Inputs are staged **after** installation. 
 package installer never receives tenant data and model-authored code never receives a
 network route. Installed packages persist for the session generation.
 
+**Amendment ([#504](https://github.com/k-sandhu/lumen-copilot/issues/504), 2026-07-29)
+— a distribution the execution image already ships is admitted WITHOUT an install.**
+As written, this section made every `packages=[...]` request fail in practice: a
+tenant's `allowed_packages` starts **empty** (deny-by-default, #233), so even
+`packages=["pandas"]` was denied — for a distribution sitting in the image — and the
+only path to yes was an admin grant plus a wheel download. The check is now ordered:
+deny entries still win over everything; then a requirement the image **provably**
+satisfies (its distribution is in the image manifest, the shipped version satisfies
+the requested specifier, and the request carries no extras or environment marker) is
+admitted and **removed from what the runner is asked to install** — nothing is
+fetched, so it works on a deploy with no route to an index; then the ordinary
+allow-list decides the rest. The manifest is `sandbox_exec/requirements.txt`, mirrored
+into `Settings.sandbox_preinstalled_packages`, with a test that fails if the two
+drift. Two consequences are stated rather than hidden: a pin the image **cannot**
+satisfy is a real install and still needs the allow-list (admitting it as "available"
+would silently run a different version); and denying a pre-installed package refuses
+the *request* but cannot make it un-importable — that requires a custom image.
+Unchanged: model-authored code never gets a network route, and the per-tenant
+`egress_allowed` flag does not open one, so arbitrary installation remains gated on
+the **runner's** outbound access, which a locked-down deploy is expected to withhold.
+
 ### 4. Execution and persistence
 
 - The runtime container starts once and remains idle between executions.
@@ -98,9 +121,23 @@ network route. Installed packages persist for the session generation.
   image digest, stdout/stderr, exit, duration, artifacts, and trace.
   The run's opaque sandbox UUID is historical data rather than a foreign key, so it
   survives deletion of the chat-scoped lifecycle row for audit/reconstruction.
-- There is no automatic runtime/resource/output limit. `duration_ms` and best-effort
+- There is no automatic runtime/CPU/memory/PID limit. `duration_ms` and best-effort
   usage remain observational. The compatibility statuses `timeout` and `killed` remain
   readable for historical rows and explicit cancellation/runtime failures.
+- **Amendment (PR #507 review, 2026-07-29): output COLLECTION is bounded.** The one
+  exception to the line above, and it is not a limit on the run — it protects the
+  *runner*. Collecting `LUMEN_OUTPUT_DIR` streams a tar of a model-controlled directory
+  into the runner's memory, and the runner is the single Docker-socket holder, so a run
+  that writes one very large file could push it past its container memory limit and let
+  the OOM killer take code execution away from **every** tenant. `output_bytes_cap`
+  existed on the wire but was typed `None` and read by nothing; it now carries
+  `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB), the runner clamps it to its own 64 MiB
+  ceiling and applies that ceiling when the field is absent, and collection stops at
+  the budget. Complete files up to the cap are returned; a file the budget cuts in half
+  is **dropped rather than delivered short** (a truncated PNG or xlsx persisted as an
+  artifact would be a silently corrupt deliverable), and the run's `stderr` says
+  collection was partial. The execution itself is untouched — it still ran, and its
+  status is unchanged.
 
 ### 5. Runner boundary and cancellation
 
@@ -142,3 +179,23 @@ Additive audit events record `sandbox_session.created`, `.reset`, `.closed`, and
 - Package supply-chain risk remains even without sandbox egress. Admin package policy,
   binary-only downloads, pinned requirements where practical, and the audit trail are
   the initial controls; hash-locked organisation mirrors are a future hardening option.
+
+**Amendment (PR #507 review, 2026-07-30) — the unbounded posture stays the default, but
+it is now configurable, and two of the controls above are weaker than they read.**
+
+- *Bounds.* "No automatic protection against … resource monopolisation" remains the
+  shipped default and the sponsor decision stands. What was not decided is that the
+  runner's wire schema typed `cpus`/`memory_bytes`/`pids_limit` as `None`, so a deploy
+  that *wanted* a bound could not ask for one. Those fields now accept a positive value
+  which the engine applies as `--cpus`/`--memory`/`--pids-limit`, and
+  `SANDBOX_SESSION_LIMITS_ENABLED` (default **off**) is how a deploy opts in. Absent, the
+  container is created exactly as before. They bound a long-lived session rather than one
+  run, so a bound that suits one turn can still stop a later turn in the same chat. There
+  is still **no wall clock**: nothing enforces one, so the field stays unsettable.
+- *Supply chain.* "Binary-only downloads … and the audit trail" understates the exposure.
+  §3's install path fetches from the **default public PyPI with no hash pinning and no
+  index pin** — ADR-0013 §3's "admin-allowlisted, hash-pinned internal mirror" is not
+  implemented (see the matching amendment there). And the audit row records only the
+  **top-level** requested name, while the wheelhouse is resolved with dependencies, so a
+  *denied* distribution can still be installed as a transitive dependency of an allowed
+  one and nothing in the trail names it.

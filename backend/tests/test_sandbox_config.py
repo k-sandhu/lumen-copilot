@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config import Settings
 from tests._sandbox_helpers import sandbox_settings
 
 
@@ -68,3 +69,164 @@ def test_known_runtimes_accepted(runtime: str) -> None:
     """gVisor is a config swap — both runtimes construct cleanly."""
     settings = sandbox_settings(SANDBOX_RUNTIME=runtime)
     assert settings.sandbox_runtime == runtime
+
+
+# --- The image the tenant code actually runs in is pinned at LAUNCH time ------
+#
+# ADR-0013 §3 asks for an execution image "pinned by digest, no ``:latest``". The
+# ``sandbox_exec/Dockerfile`` FROM line pins its BASE by digest, but that is a
+# BUILD-time fact about a layer; the reference the runner launches comes from
+# ``SANDBOX_IMAGE`` at run time. Until these validators existed that value took
+# ``:latest``, a tagless name, or a remote ref unchallenged — so the documented
+# guarantee applied to the base layer while the thing model code executes in was a
+# mutable tag.
+
+_DIGEST = "sha256:" + "a" * 64
+
+
+def test_default_execution_image_is_tag_pinned_and_not_latest() -> None:
+    """The shipped default names an exact tag — never a floating one."""
+    image = sandbox_settings().sandbox_image
+
+    assert ":latest" not in image
+    assert ":" in image.rsplit("/", 1)[-1]
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "lumen-sandbox-exec:latest",
+        "lumen-sandbox-exec",
+        "ghcr.io/lumen/lumen-sandbox-exec",
+        "registry.internal:5000/lumen-sandbox-exec",
+        "lumen-sandbox-exec@sha256:abc",
+    ],
+)
+def test_floating_or_malformed_execution_image_is_rejected(image: str) -> None:
+    """A mutable or unparseable reference refuses to boot rather than run code."""
+    with pytest.raises(ValueError, match="SANDBOX_IMAGE"):
+        sandbox_settings(SANDBOX_IMAGE=image)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [f"lumen-sandbox-exec@{_DIGEST}", f"lumen-sandbox-exec:0.1.1@{_DIGEST}"],
+)
+def test_digest_pinned_execution_image_is_accepted(image: str) -> None:
+    """``name@sha256:…`` (with or without a readability tag) is the strongest pin."""
+    assert sandbox_settings(SANDBOX_IMAGE=image).sandbox_image == image
+
+
+def _production_env(**overrides: object) -> dict[str, object]:
+    """The minimal non-local boot env (see test_sandbox_isolation for the pedigree)."""
+    base: dict[str, object] = {
+        "ENVIRONMENT": "production",
+        "JWT_SECRET": "production-secret-that-is-not-the-dev-default",
+        "SECRETS_ENCRYPTION_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "https://api.example.com",
+        "CONNECTOR_OAUTH_FRONTEND_RETURN_URL": "https://app.example.com/sources",
+        "GDRIVE_OAUTH_CLIENT_ID": "prod-google-client-id",
+        "GDRIVE_OAUTH_CLIENT_SECRET": "prod-google-client-secret",
+        "SANDBOX_RUNTIME": "runsc",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_enabled_sandbox_outside_local_requires_a_digest_pinned_image() -> None:
+    """A tag is trust-on-first-build; outside local dev the digest is mandatory."""
+    with pytest.raises(ValueError, match="@sha256"):
+        sandbox_settings(**_production_env(SANDBOX_IMAGE="lumen-sandbox-exec:0.1.1"))
+
+    settings = sandbox_settings(**_production_env(SANDBOX_IMAGE=f"lumen-sandbox-exec@{_DIGEST}"))
+    assert settings.sandbox_image.endswith(_DIGEST)
+
+
+def test_disabled_sandbox_outside_local_still_boots_on_the_tag_default() -> None:
+    """The digest requirement follows the capability, not the environment alone.
+
+    A deploy with code execution OFF launches nothing, so holding its boot hostage
+    to an image reference it never uses would be a gratuitous outage.
+    """
+    settings = sandbox_settings(**_production_env(SANDBOX_ENABLED="false"))
+
+    assert settings.sandbox_enabled is False
+    assert settings.sandbox_image == "lumen-sandbox-exec:0.1.1"
+
+
+# --- The pre-installed manifest must be settable from the ENVIRONMENT ---------
+#
+# Not a style point. ``pydantic-settings`` JSON-decodes a complex-typed field's env
+# value inside ``EnvSettingsSource``, BEFORE field validators run, so the
+# ``mode="before"`` comma splitter never saw env input: every documented form raised
+# ``SettingsError``. The empty form was the shipped one — ``.env.example`` carried a
+# commented ``SANDBOX_PREINSTALLED_PACKAGES=``, and an operator who copied the file and
+# uncommented that line broke the API *and* the worker at boot. These tests go through
+# real environment variables (``sandbox_settings(**kwargs)`` uses the INIT source and
+# cannot reproduce the defect).
+
+_ENV_BOOT_MINIMUM = {
+    "DATABASE_URL": "sqlite+aiosqlite://",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "CELERY_BROKER_URL": "redis://localhost:6379/1",
+    "CELERY_RESULT_BACKEND": "redis://localhost:6379/2",
+    "S3_ENDPOINT_URL": "http://localhost:9000",
+    "S3_ACCESS_KEY": "lumen",
+    "S3_SECRET_KEY": "lumen_local_dev_secret",
+    "S3_BUCKET": "b",
+    "OPENROUTER_API_KEY": "",
+    "SANDBOX_ENABLED": "true",
+}
+
+
+def _settings_from_env(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
+    """Construct ``Settings`` from the ENV source alone (``.env`` deliberately off)."""
+    for key, value in {**_ENV_BOOT_MINIMUM, **env}.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_preinstalled_manifest_parses_the_documented_comma_form_from_the_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The form the config docstring, ``.env.example`` and the runbook all document."""
+    settings = _settings_from_env(
+        monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="numpy==1.0, pandas==2.0"
+    )
+
+    assert settings.sandbox_preinstalled_packages == ("numpy==1.0", "pandas==2.0")
+
+
+def test_a_single_pin_from_the_env_is_not_mistaken_for_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One entry has no comma at all — the JSON decoder choked on this too."""
+    settings = _settings_from_env(monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="numpy==1.0")
+
+    assert settings.sandbox_preinstalled_packages == ("numpy==1.0",)
+
+
+def test_an_empty_manifest_value_boots_instead_of_killing_the_api_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact regression: the empty assignment must not be a boot failure.
+
+    It now means what it reads as — "this image ships nothing" — so every
+    ``packages=[...]`` request is refused. That is fail-closed and recoverable; a
+    ``SettingsError`` at import was neither.
+    """
+    settings = _settings_from_env(monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="")
+
+    assert settings.sandbox_preinstalled_packages == ()
+
+
+def test_unset_manifest_keeps_the_shipped_image_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent the variable, config still mirrors ``sandbox_exec/requirements.txt``."""
+    from app.core.config import _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES
+
+    monkeypatch.delenv("SANDBOX_PREINSTALLED_PACKAGES", raising=False)
+    settings = _settings_from_env(monkeypatch)
+
+    assert settings.sandbox_preinstalled_packages == _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES

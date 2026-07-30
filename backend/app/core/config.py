@@ -13,10 +13,12 @@ process refuses to boot misconfigured rather than failing deep in a request.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as _APP_VERSION
 from app.domain.models import ModelTier
@@ -121,6 +123,34 @@ _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS = 3.0
 _MAX_INTERACTIVE_TIMEOUT_SECONDS = (
     _INTERACTIVE_WORST_CASE_CEILING_SECONDS - _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS
 )
+
+# The exact, version-pinned closure the sandbox EXECUTION image ships (issue #504).
+# It is a literal copy of ``sandbox_exec/requirements.txt`` — that file is the build
+# input, this tuple is what the admission path treats as "already installed, no
+# fetch needed", and ``backend/tests/test_sandbox_exec_image.py`` fails if they
+# drift. It cannot simply READ that file: the backend image is built from
+# ``backend/`` alone and never contains it.
+_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES: tuple[str, ...] = (
+    "contourpy==1.3.3",
+    "cycler==0.12.1",
+    "et_xmlfile==2.0.0",
+    "fonttools==4.63.0",
+    "kiwisolver==1.5.0",
+    "matplotlib==3.11.1",
+    "numpy==2.5.1",
+    "openpyxl==3.1.5",
+    "packaging==26.2",
+    "pandas==3.0.5",
+    "pillow==12.3.0",
+    "pyparsing==3.3.2",
+    "python-dateutil==2.9.0.post0",
+    "six==1.17.0",
+)
+
+# An OCI content digest as it appears in an image reference (``name@sha256:<hex>``).
+# Only this form makes ``SANDBOX_IMAGE`` immutable: a tag can be repointed on the
+# daemon between two sessions of the same deploy.
+_SANDBOX_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class Settings(BaseSettings):
@@ -1080,25 +1110,135 @@ class Settings(BaseSettings):
     sandbox_runner_url: str = Field(
         default="http://sandbox-runner:8000", alias="SANDBOX_RUNNER_URL"
     )
-    # The pinned base image the sandbox runs (curated Python + scientific stack,
-    # ADR-0013 §3). Pinned by digest, no ``:latest``. The runner uses this; recorded
-    # per run for reproducibility (E3-7).
+    # The pinned image model-authored code EXECUTES in (curated Python + scientific
+    # stack, ADR-0013 §3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
+    # reproducibility (E3-7).
+    #
+    # Issue #503: this defaulted to ``lumen-sandbox-runner:0.2.0`` — the RUNNER's own
+    # control-plane image (python-slim + fastapi/docker/pydantic). Every run therefore
+    # executed with no pandas, numpy, or matplotlib, so "run Python" could not do the
+    # data work the capability exists for, and tenant code ran in the image of the one
+    # service that holds the Docker socket. The execution image is a separate artifact
+    # from the runner and must stay one.
+    #
+    # The runner launches this on the HOST daemon, so the image has to EXIST there:
+    # ``docker compose --profile sandbox build sandbox-exec-image`` (see the runbook,
+    # docs/runbooks/sandbox-code-execution.md).
+    #
+    # PINNED AT LAUNCH TIME, not only at build time. ``sandbox_exec/Dockerfile``
+    # pins its BASE by digest, but that is a fact about a layer at build time; this
+    # value is the reference the runner resolves per session. It was previously
+    # unvalidated, so ``:latest`` or a tagless name — either of which can change
+    # what tenant code executes in without any deploy — was accepted while
+    # ADR-0013 §3 claimed a digest pin. The validators below require an exact tag
+    # (never ``latest``), and require the ``name@sha256:<64 hex>`` digest form once
+    # code execution is enabled outside local development. In local dev a tag is
+    # trust-on-first-build: you built the image yourself, on this daemon.
     sandbox_image: str = Field(
-        default="lumen-sandbox-runner:0.2.0",
+        default="lumen-sandbox-exec:0.1.1",
         alias="SANDBOX_IMAGE",
     )
+
+    @field_validator("sandbox_image")
+    @classmethod
+    def _sandbox_image_is_pinned(cls, value: str) -> str:
+        """Refuse a mutable or unparseable execution-image reference (ADR-0013 §3)."""
+        reference = value.strip()
+        if not reference:
+            raise ValueError("SANDBOX_IMAGE must name the sandbox execution image")
+        name, _, digest = reference.partition("@")
+        if digest and not _SANDBOX_IMAGE_DIGEST.fullmatch(digest):
+            raise ValueError("SANDBOX_IMAGE digest must be 'sha256:<64 hex chars>' (ADR-0013 §3)")
+        # Docker allows a port in the registry host (``host:5000/name``), so the tag
+        # is only the colon inside the FINAL path segment.
+        _, _, tag = name.rsplit("/", 1)[-1].partition(":")
+        if not digest and not tag:
+            raise ValueError(
+                "SANDBOX_IMAGE must be pinned to an exact tag or digest, not a bare "
+                "image name (ADR-0013 §3, ADR-0005: no floating references)"
+            )
+        if tag == "latest":
+            raise ValueError("SANDBOX_IMAGE must not use the ':latest' tag (ADR-0013 §3)")
+        return reference
+
+    # What the execution image above ALREADY SHIPS — the exact, version-pinned closure
+    # in ``sandbox_exec/requirements.txt`` (the drift guard in
+    # ``backend/tests/test_sandbox_exec_image.py`` fails if the two diverge).
+    #
+    # Issue #504: a tenant's ``allowed_packages`` starts EMPTY and the sandbox has no
+    # network, so every ``packages=[...]`` request was refused with no install path to
+    # offer. A distribution that is already in the image needs no install at all, so
+    # the admission path admits it against this list without asking the runner to
+    # fetch anything — the offline-correct answer. Anything NOT here is a genuine
+    # install: it needs the admin allow-list AND the runner's own outbound network.
+    # Override only when running a custom execution image (comma-separated pins).
+    #
+    # ``NoDecode`` is load-bearing, not decoration. ``pydantic-settings`` JSON-decodes
+    # a complex-typed field's env value inside ``EnvSettingsSource`` — BEFORE any
+    # validator runs — so the ``mode="before"`` splitter below was dead code for env
+    # input and every documented comma form raised ``SettingsError`` at import. The
+    # empty form shipped on the commented ``.env.example`` line was the worst case: an
+    # operator who copied the file and uncommented that line broke BOTH the API and
+    # the worker at boot. ``NoDecode`` hands the raw string to the validator instead,
+    # which is what makes the documented form actually work.
+    #
+    # An explicitly EMPTY value therefore now means what it says — "this image ships
+    # nothing" — and refuses every ``packages=[...]`` request rather than crashing the
+    # process. Leave the variable UNSET unless you run a custom execution image.
+    sandbox_preinstalled_packages: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES,
+        alias="SANDBOX_PREINSTALLED_PACKAGES",
+    )
+
+    @field_validator("sandbox_preinstalled_packages", mode="before")
+    @classmethod
+    def _split_sandbox_preinstalled_packages(cls, value: object) -> object:
+        """Accept a comma-separated env string as the image's package manifest."""
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
     # The OCI runtime: ``runc`` (hardened Docker baseline, laptop-viable) or ``runsc``
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # Compatibility-only ADR-0013 settings. Existing admin-policy rows and API clients
-    # still read these fields, so they remain validated and configurable, but ADR-0020
-    # reusable sessions deliberately do NOT pass them to the runner or enforce them.
+    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED — no cpu,
+    # memory or PID limit on the execution container — which is a deliberate sponsor
+    # decision (ADR-0020 Consequences) and the largest residual operational risk in
+    # that design: one ``run_python`` call can exhaust host RAM, saturate every core or
+    # fork-bomb, and explicit cancel/reset is the only recovery.
+    #
+    # These three values are what a deploy that does NOT want to accept that risk sends
+    # instead, and ``SANDBOX_SESSION_LIMITS_ENABLED`` is the switch. Off (the default)
+    # preserves ADR-0020's posture exactly; on, they are passed to the runner, which
+    # applies them as ``--memory`` / ``--pids-limit`` / ``--cpus`` on the session
+    # container. They bound a long-lived session rather than one run, so a bound that
+    # is comfortable for a single analysis turn can still stop a later one.
+    #
+    # ``sandbox_wall_clock_seconds`` stays compatibility-only: ADR-0020 removed the
+    # automatic timeout, nothing enforces a wall clock, and the runner's wire schema
+    # refuses the field rather than accept a promise no code keeps.
     sandbox_cpus: float = Field(default=1.0, alias="SANDBOX_CPUS")
     sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
-    sandbox_output_bytes_cap: int = Field(default=1 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP")
+    sandbox_session_limits_enabled: bool = Field(
+        default=False, alias="SANDBOX_SESSION_LIMITS_ENABLED"
+    )
+    # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
+    # execution's output directory the runner will read into its own memory before it
+    # stops and reports partial collection. This protects the RUNNER, not the run —
+    # the runner is the single Docker-socket holder, so an unbounded collection let one
+    # chat turn's 4GB file OOM the process every tenant's code execution depends on
+    # (the field was previously sent as ``None`` and read by nothing).
+    #
+    # 32 MiB: comfortably above a real analysis turn (a matplotlib PNG is tens of KB, a
+    # generated spreadsheet a few MB) and far below the runner's own container memory
+    # limit even after base64 expansion. The runner clamps anything larger to its own
+    # ceiling; lowering this only narrows collection.
+    sandbox_output_bytes_cap: int = Field(
+        default=32 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
+    )
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
     # Compatibility-only tenant quota values; not enforced for ADR-0020 sessions.
     sandbox_max_concurrent_per_tenant: int = Field(
@@ -1140,6 +1280,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SANDBOX_RUNTIME must be 'runsc' when SANDBOX_ENABLED=true outside local "
                 "development (ADR-0020)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _sandbox_image_digest_outside_local(self) -> Settings:
+        """An enabled sandbox outside local development runs a digest-pinned image.
+
+        A tag is mutable on the daemon: whoever can push/retag it chooses what
+        model-authored code executes in, with no deploy and no audit trail. Local dev
+        may keep the tag (you built it there yourself, from this checkout); anywhere
+        else the digest is the pin ADR-0013 §3 promises. Gated on ``sandbox_enabled``
+        so a deploy that launches nothing is not held hostage to a reference it never
+        resolves.
+        """
+        if (
+            self.sandbox_enabled
+            and self.environment != "local"
+            and "@sha256:" not in self.sandbox_image
+        ):
+            raise ValueError(
+                "SANDBOX_IMAGE must be digest-pinned ('name@sha256:<64 hex chars>') when "
+                "SANDBOX_ENABLED=true outside local development (ADR-0013 §3)"
             )
         return self
 

@@ -151,6 +151,8 @@ def test_container_is_root_writable_offline_and_has_no_automatic_limits() -> Non
     assert flags.memory_bytes is None
     assert flags.pids_limit is None
     assert flags.wall_clock_seconds is None
+    # The output budget is the exception: it is whatever the spec carries (None here
+    # because this spec sets none) and bounds the RUNNER's memory, not the run.
     assert flags.output_bytes_cap is None
 
 

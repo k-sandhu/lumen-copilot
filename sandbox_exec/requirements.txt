@@ -1,0 +1,28 @@
+# The sandbox EXECUTION image's package manifest (issues #503 / #504).
+#
+# The COMPLETE, version-pinned closure installed into `lumen-sandbox-exec` — the
+# image model-authored Python actually runs in. ADR-0013 §3 requires a curated,
+# version-pinned scientific stack (pandas, numpy, matplotlib, openpyxl); the rest
+# are their pinned transitive dependencies, listed here so the image contents are
+# exactly this file (the Dockerfile installs it with `--no-deps` and then runs
+# `pip check`, which fails the build if the closure is incomplete).
+#
+# This file is the SINGLE SOURCE OF TRUTH for what a run may use without an
+# install. `Settings.sandbox_preinstalled_packages` mirrors it, and
+# `backend/tests/test_sandbox_exec_image.py` fails if the two ever drift.
+#
+# Resolved on python:3.12.13-slim-bookworm (linux/amd64), 2026-07-30.
+contourpy==1.3.3
+cycler==0.12.1
+et_xmlfile==2.0.0
+fonttools==4.63.0
+kiwisolver==1.5.0
+matplotlib==3.11.1
+numpy==2.5.1
+openpyxl==3.1.5
+packaging==26.2
+pandas==3.0.5
+pillow==12.3.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+six==1.17.0

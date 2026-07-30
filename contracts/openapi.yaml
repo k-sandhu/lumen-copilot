@@ -1801,6 +1801,39 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
 
+  /tools:
+    get:
+      operationId: listTools
+      summary: The tool catalogue with this tenant's effective governance (read-only).
+      description: >
+        Every registered tool with its static registry metadata (`description`,
+        `risk_tier`, `read_only`) plus this tenant's **effective** governance flags
+        (`enabled` / `requires_approval`, an admin override where one exists, else the
+        tool's built-in default). Deterministically ordered by `tool_name`.
+
+
+        This is the source the **assistant builder** composes a `toolAllowlist`
+        against (issue #505). `/admin/tool-policy` carries the same data but is
+        `admin`-only (INV-5), so an ordinary assistant owner could not see which tools
+        exist or which their admin had switched off, and the builder shipped a
+        hardcoded stub that omitted `run_python` entirely.
+
+
+        Read-only and **grants nothing**: changing a tenant's policy stays an admin
+        write on `PATCH /admin/tool-policy`, and the runtime approval gate still
+        decides whether an allowed tool may actually execute. A tool with
+        `enabled: false` must be surfaced as unavailable rather than offered as a
+        selectable control that would be refused at run time. Requires a valid bearer
+        token (**401** otherwise, INV-4); tenant-scoped (INV-1).
+      tags: [tools]
+      responses:
+        "200":
+          description: The tenant's tool catalogue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolCatalog" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # --- merged: /assistants, /assistants/{assistantId}, /assistants/{assistantId}/publish, /assistants/{assistantId}/versions, /assistants/{assistantId}/rollback ---
   /assistants:
     get:
@@ -3891,6 +3924,56 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/ToolPolicyEntry" }
+
+    # --- Tool catalogue (member-readable, read-only; #505) ------------------
+    ToolCatalogEntry:
+      type: object
+      additionalProperties: false
+      description: >
+        One registered tool as the assistant builder sees it (issue #505):
+        the registry's static `description` / `risk_tier` / `read_only` plus this
+        tenant's effective `enabled` / `requires_approval` flags. A `risk_tier` above
+        `T0` is side-effecting and must be presented as such; `enabled: false` means
+        the tenant's admin has switched the tool off, so it must be shown as
+        unavailable rather than offered as a selectable control.
+      required: [tool_name, description, risk_tier, read_only, enabled, requires_approval]
+      properties:
+        tool_name:
+          type: string
+          description: The registered tool name, as persisted into `Assistant.toolAllowlist`.
+        description:
+          type: string
+          description: The registry's human-readable summary of what the tool does.
+        risk_tier: { $ref: "#/components/schemas/RiskTier/properties/tier" }
+        read_only:
+          type: boolean
+          description: True for a read-only (T0) tool; write-tier tools are not read-only.
+        enabled:
+          type: boolean
+          description: Whether the tool is enabled for this tenant (an admin switch).
+        requires_approval:
+          type: boolean
+          description: >
+            Whether an invocation is still approval-gated for this tenant. Selecting
+            such a tool is allowed (it is a configuration-time grant), but the UI must
+            say so: the run-time gate, not the allow-list, decides execution.
+        # NOTE: `is_default` is deliberately NOT on this schema. It records whether an
+        # admin has ever overridden the row — governance provenance with no consumer in
+        # the builder, and this read is available to every tenant MEMBER. Minimum
+        # disclosure for a widened audience; it stays on the admin-only
+        # `ToolPolicyEntry`.
+
+    ToolCatalog:
+      type: object
+      additionalProperties: false
+      description: >
+        Every registered tool with this tenant's effective governance, ordered by
+        `tool_name` (issue #505). Read-only; it grants nothing.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ToolCatalogEntry" }
 
     ToolPolicyUpdate:
       type: object
@@ -6086,3 +6169,9 @@ tags:
   - name: runs
     description: "The run inbox \u2014 list runs and read a run's detail (status, transcript, tool\
   \ calls, citations, outputs, error). Live attach reuses the chat WS envelopes."
+  - name: tools
+    description: >-
+      The tool catalogue (read-only): every registered tool with its risk tier and
+      the caller's tenant's effective governance flags, so the assistant builder can
+      offer a truthful allow-list picker (issue #505). Granting/ungranting a tool for
+      a tenant stays an admin write on `/admin/tool-policy`.

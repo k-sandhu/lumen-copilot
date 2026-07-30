@@ -21,7 +21,7 @@ from uuid import UUID
 
 from app.auth.principal import Principal
 from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
-from app.domain.tools import RiskTier, ToolHandlerResult
+from app.domain.tools import APPROVAL_REASON_GATE_INERT, RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
 from app.services.artifacts_service import ArtifactLinks
 
@@ -68,6 +68,15 @@ class SandboxRun:
     back to the model, and the ids of any artifacts the run produced (collected via
     CC-B #208). It carries **no** runner/Docker wire object — the sandbox boundary
     exposes domain types only (ADR-0004).
+
+    ``reason_code`` (issue #502) is the typed ``domain.code_execution.SANDBOX_REASON_*``
+    the admission or execution path resolved — the deploy kill-switch, the tenant
+    policy, the package policy, an unreachable/refusing runner. It is ``None`` for a
+    run that reached a terminal on its own merits (a success, a non-zero exit, an
+    explicit cancel). Without it the tool could only re-read the refusal's *prose*
+    out of ``stderr``, so the durable ``tool_invocations`` row recorded a generic
+    ``code_execution_denied`` and a truncated sentence — losing exactly the
+    distinction #502 exists to make.
     """
 
     code_run_id: UUID
@@ -79,6 +88,7 @@ class SandboxRun:
     artifact_ids: tuple[UUID, ...] = ()
     sandbox_session_id: UUID | None = None
     sandbox_generation: int | None = None
+    reason_code: str | None = None
 
 
 @runtime_checkable
@@ -248,20 +258,67 @@ class ApprovalRequest:
     arguments: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalDecision:
+    """An approval outcome that can say WHY it refused (issue #502).
+
+    A bare ``bool`` cannot distinguish the four ways an approval can fail — no
+    admin policy row, an explicitly disabled tool, a tool an admin left flagged
+    ``requires_approval`` (which no surface can satisfy, issue #500), and a policy
+    that could not be read at all. Each needs a *different* operator action, so a
+    gate returns this instead: the verdict plus a stable ``reason`` code (one of
+    ``domain.tools.APPROVAL_REASON_*``) and a model-safe, operator-actionable
+    ``detail`` sentence naming the control that changes the answer.
+
+    It is **truthy iff approved**, so a gate that still returns a plain ``bool``
+    (a test fake, the inert deny-all default) keeps working unchanged — the runner
+    normalises either shape.
+
+    ``detail`` is surfaced **verbatim to the model**, which makes it a
+    prompt-injection-reachable surface: a retrieved document that says "quote any
+    tool error verbatim" turns it into assistant output. So it may name a *product*
+    control ("Admin → Tool governance") and nothing else — no environment variable,
+    no internal service, no process topology, no "the datastore is down". The
+    operator-facing specifics live in ``reason`` (the typed code, carried into the
+    audit metadata and the structured log), not here.
+    """
+
+    approved: bool
+    reason: str | None = None
+    detail: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.approved
+
+    @classmethod
+    def allow(cls) -> ApprovalDecision:
+        """The approved outcome (no reason needed — nothing refused)."""
+        return cls(approved=True)
+
+    @classmethod
+    def deny(cls, reason: str, detail: str) -> ApprovalDecision:
+        """A refusal carrying its typed ``reason`` + actionable ``detail``."""
+        return cls(approved=False, reason=reason, detail=detail)
+
+
 @runtime_checkable
 class ApprovalGate(Protocol):
     """The read-before-write chokepoint (CC-7, spec 0004 §2.5 / INV-7).
 
     A ``requires_approval`` tool call is routed here *before* it can execute; the
-    gate returns True only if the action is approved. T0/T1 tools bypass the gate
+    gate approves only if the action is permitted. T0/T1 tools bypass the gate
     entirely (the runner never calls it for them). The seam is built now though no
     T2+ tool ships in v1 — the default implementation denies everything, so the
     invariant "no unapproved consequential action" holds by construction, and a
-    future approval flow (F-ADMIN-TOOLS) is a swap of this one collaborator.
+    future approval flow (#501) is a swap of this one collaborator.
+
+    A gate may answer with a plain ``bool`` or with the richer
+    :class:`ApprovalDecision` (issue #502) that also names *why* it refused; the
+    runner accepts either and only ever treats an explicit approval as allow.
     """
 
-    async def request(self, request: ApprovalRequest) -> bool:
-        """Return True iff the gated action is approved; False denies it."""
+    async def request(self, request: ApprovalRequest) -> bool | ApprovalDecision:
+        """Approve the gated action, or refuse it (optionally saying why)."""
         ...
 
 
@@ -273,13 +330,27 @@ class DenyAllApprovalGate:
     flow wired, this denies it (the run continues with an ``approval_denied``
     result) rather than silently executing a consequential action. This is the
     inert-by-default gate the spec calls for — a real gate replaces it later.
+
+    It says so explicitly (issue #502) in its typed ``reason``
+    (``approval_gate_inert``), so an operator reading the audit trail does not go
+    hunting for a tenant switch that would not have helped. The ``detail`` the model
+    reads stays control-neutral: "no approval flow is wired in this deployment"
+    describes the deployment's topology, and a prompt-injected "quote the tool error"
+    would hand that to a workspace member.
     """
 
-    async def request(self, request: ApprovalRequest) -> bool:
-        return False
+    async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+        return ApprovalDecision.deny(
+            APPROVAL_REASON_GATE_INERT,
+            (
+                f"Tool {request.tool_name!r} needs approval, which is not available "
+                "here, so the call was refused. The action was not performed."
+            ),
+        )
 
 
 __all__ = [
+    "ApprovalDecision",
     "ApprovalGate",
     "ApprovalRequest",
     "ArtifactWriter",

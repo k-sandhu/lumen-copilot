@@ -11,8 +11,68 @@ from uuid import UUID
 import httpx
 
 from app.core.errors import DependencyError
+from app.core.logging import get_logger
+from app.domain.code_execution import (
+    SANDBOX_REASON_RUNNER_ERROR,
+    SANDBOX_REASON_RUNNER_REJECTED,
+    SANDBOX_REASON_RUNNER_UNAVAILABLE,
+)
 from app.domain.entities import CodeRunStatus, ResourceUsage
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
+
+log = get_logger(__name__)
+
+
+class SandboxRunnerUnavailable(DependencyError):
+    """Nothing answered: a refused connection, a DNS failure, a transport fault.
+
+    The ONLY case that is honestly "unreachable" — the one an operator fixes by
+    starting the service.
+    """
+
+    code = "sandbox_runner_unavailable"
+    sandbox_reason = SANDBOX_REASON_RUNNER_UNAVAILABLE
+
+
+class SandboxRunnerRejected(DependencyError):
+    """The runner answered and REFUSED the request (4xx) — so it is up (issue #502).
+
+    A package it could not resolve or download (422), a rejected staged-input path
+    (422), a session generation it no longer holds (409/404). Reporting these as
+    "the runner is unreachable" sent an operator to check a service that was
+    answering every request correctly.
+
+    Still a :class:`~app.core.errors.DependencyError` (→ 503) rather than a 422,
+    because the HTTP caller of the lifecycle endpoints sent a perfectly valid
+    request — it is the *downstream* service that refused, and the sandbox
+    endpoints' declared responses are 404/409/503. The distinction this class
+    exists for is ``sandbox_reason``, which is internal.
+
+    The runner's own sentence is deliberately NOT carried into ``detail``: it names
+    host-side facts ("the execution image is not present on the host daemon") and
+    this error renders into an HTTP problem body on the lifecycle endpoints. It is
+    logged instead.
+    """
+
+    code = "sandbox_runner_rejected"
+    sandbox_reason = SANDBOX_REASON_RUNNER_REJECTED
+
+
+class SandboxRunnerFailed(DependencyError):
+    """The runner answered with an internal error (5xx) — reachable, but broken.
+
+    Distinct from :class:`SandboxRunnerUnavailable` because the remedy differs: the
+    service is up, so the next place to look is its own log and the execution image
+    on the host daemon, not whether the container is running.
+    """
+
+    code = "sandbox_runner_error"
+    sandbox_reason = SANDBOX_REASON_RUNNER_ERROR
+
+
+#: How much of the runner's own refusal sentence to put in the operator log. It is
+#: runner-authored, never model-authored, but a bound keeps one log line bounded.
+_RUNNER_DETAIL_BUDGET = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,17 +86,36 @@ class ContainerFlags:
     cap_drop: tuple[str, ...] = ("ALL",)
     security_opt: tuple[str, ...] = ("no-new-privileges:true",)
     runtime: str = "runc"
-    # ADR-0020 intentionally starts without automatic resource/time/output limits.
+    # ADR-0020 intentionally starts without automatic CPU/memory/PID/time limits, so
+    # these stay ``None`` unless a deploy sets ``SANDBOX_SESSION_LIMITS_ENABLED``. The
+    # runner's wire schema accepts a positive value and applies the engine flag; a
+    # wall clock is the exception, since no code enforces one (ADR-0020 replaced the
+    # ADR-0013 timeout with explicit cancel/reset).
     cpus: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
     wall_clock_seconds: int | None = None
+    # The exception, and it is not about the run: collected output is read into the
+    # RUNNER's memory, and the runner is the only Docker-socket holder, so unbounded
+    # collection made one chat turn able to take code execution down for every tenant.
     output_bytes_cap: int | None = None
 
 
 def build_container_flags(spec: SandboxSessionSpec) -> ContainerFlags:
-    """Return the fixed contained-root posture for a reusable session."""
-    return ContainerFlags(runtime=spec.runtime)
+    """Return the fixed contained-root posture for a reusable session.
+
+    Everything that makes the container contained — no network, no binds, all
+    capabilities dropped, no-new-privileges — is fixed here and cannot be widened by a
+    caller. Only the *narrowing* values ride on the spec: the output-collection budget
+    and, when a deploy opts in, the cpu/memory/PID bounds.
+    """
+    return ContainerFlags(
+        runtime=spec.runtime,
+        output_bytes_cap=spec.output_bytes_cap,
+        cpus=spec.cpus,
+        memory_bytes=spec.memory_bytes,
+        pids_limit=spec.pids_limit,
+    )
 
 
 class SandboxRunner(Protocol):
@@ -158,12 +237,36 @@ class HttpSandboxRunner:
         try:
             async with self._client() as client:
                 response = await client.request(method, path, json=json, params=params)
-                response.raise_for_status()
-                return response
         except (httpx.HTTPError, KeyError, ValueError) as exc:
-            raise DependencyError(
-                "sandbox runner unavailable", code="sandbox_runner_unavailable"
-            ) from exc
+            # Nothing answered. This — and only this — is "unreachable" (#502).
+            raise SandboxRunnerUnavailable("sandbox runner unavailable") from exc
+        if response.is_success:
+            return response
+        # The runner ANSWERED. Preserve which way it said no, or the one failure an
+        # operator can act on directly becomes indistinguishable from a bad package.
+        detail = self._answer_detail(response)
+        log.warning(
+            "sandbox.runner_refused",
+            method=method,
+            path=path,
+            status_code=response.status_code,
+            # Runner-authored (its RunnerError text), never model-authored, and this
+            # is the operator surface — so the specific sentence lives here.
+            runner_detail=detail,
+        )
+        if response.is_client_error:
+            raise SandboxRunnerRejected("the sandbox runner refused the request")
+        raise SandboxRunnerFailed("the sandbox runner failed the request")
+
+    @staticmethod
+    def _answer_detail(response: httpx.Response) -> str:
+        """The runner's own refusal sentence, bounded — for the operator log only."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        raw = body.get("detail") if isinstance(body, dict) else None
+        return str(raw if raw is not None else response.text)[:_RUNNER_DETAIL_BUDGET]
 
     @staticmethod
     def _session_wire(session: SandboxSessionSpec) -> dict[str, object]:
@@ -196,15 +299,11 @@ class HttpSandboxRunner:
             output_files = tuple(
                 OutputFile(
                     filename=str(value["filename"]),
-                    content_type=str(
-                        value.get("content_type", "application/octet-stream")
-                    ),
+                    content_type=str(value.get("content_type", "application/octet-stream")),
                     data=_unb64(str(value["data_b64"])),
                 )
                 for value in raw_files
-                if isinstance(value, dict)
-                and "filename" in value
-                and "data_b64" in value
+                if isinstance(value, dict) and "filename" in value and "data_b64" in value
             )
         raw_exit = body.get("exit_code")
         raw_duration = body.get("duration_ms")
@@ -233,5 +332,8 @@ __all__ = [
     "ContainerFlags",
     "HttpSandboxRunner",
     "SandboxRunner",
+    "SandboxRunnerFailed",
+    "SandboxRunnerRejected",
+    "SandboxRunnerUnavailable",
     "build_container_flags",
 ]

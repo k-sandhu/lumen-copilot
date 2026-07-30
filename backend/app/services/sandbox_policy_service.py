@@ -39,6 +39,12 @@ from app.core.config import Settings
 from app.core.errors import ValidationError
 from app.db.repositories import AuditEventRepository, TenantSandboxPolicyRepository
 from app.domain.audit import AuditAction, AuditActor
+from app.domain.code_execution import (
+    SANDBOX_REASON_DEPLOY_DISABLED,
+    SANDBOX_REASON_POLICY_ABSENT,
+    SANDBOX_REASON_POLICY_UNREADABLE,
+    SANDBOX_REASON_TENANT_DISABLED,
+)
 from app.domain.entities import AuditOutcome, TenantSandboxPolicy
 from app.services.audit import AuditSink
 
@@ -87,6 +93,13 @@ class EffectiveSandboxPolicy:
     True, within the quotas, with egress/packages per this policy ∩ config ceiling.
     ``enabled`` is False when no per-tenant row exists (deny-by-default) OR the
     deploy-wide kill-switch (``SANDBOX_ENABLED``) is off — either alone denies.
+
+    ``disabled_reason`` (issue #502) says WHICH of those refused — the deploy
+    kill-switch, an absent tenant row, an explicitly disabled one, or a policy that
+    could not be read — because each needs a different person to fix it, and a run
+    blocked by one of them used to be indistinguishable from the others. It is
+    ``None`` exactly when ``enabled`` is True. Values are
+    ``domain.code_execution.SANDBOX_REASON_*``.
     """
 
     enabled: bool
@@ -98,6 +111,7 @@ class EffectiveSandboxPolicy:
     max_memory_mb: int
     daily_runtime_cap_s: int
     max_concurrency: int
+    disabled_reason: str | None = None
 
 
 def _config_ceiling(settings: Settings) -> tuple[int, int, int, int]:
@@ -301,21 +315,29 @@ class SandboxPolicyReader:
         per-tenant row has ``enabled=True``. No row / a read error ⇒ disabled (the run
         is denied before the runner). Caps are clamped to the config ceiling; the
         metadata IP is stripped from egress (never reachable, G4).
+
+        Every disabled outcome carries the ``disabled_reason`` that caused it
+        (issue #502). The deploy kill-switch is checked FIRST and reported first
+        because it **dominates**: while it is off, enabling the tenant policy would
+        change nothing, so pointing an admin at their own switch would be a wrong
+        instruction. (It also spares a pointless DB read on a deploy with code
+        execution turned off.)
         """
+        if not self._settings.sandbox_enabled:
+            return _disabled_effective(self._settings, SANDBOX_REASON_DEPLOY_DISABLED)
         try:
-            policy = await TenantSandboxPolicyRepository(
-                self._session, self._tenant_id
-            ).get()
+            policy = await TenantSandboxPolicyRepository(self._session, self._tenant_id).get()
         except Exception:  # noqa: BLE001 — a policy we can't read must never admit a run
             # Fail closed (INV-7): refuse rather than run on an unreadable policy.
-            return _disabled_effective(self._settings)
+            return _disabled_effective(self._settings, SANDBOX_REASON_POLICY_UNREADABLE)
         if policy is None:
             # Deny-by-default: no per-tenant policy ⇒ code execution disabled.
-            return _disabled_effective(self._settings)
+            return _disabled_effective(self._settings, SANDBOX_REASON_POLICY_ABSENT)
         runtime_ceil, memory_ceil, daily_ceil, conc_ceil = _config_ceiling(self._settings)
         return EffectiveSandboxPolicy(
-            # The deploy-wide kill-switch AND the per-tenant enable must BOTH be on.
-            enabled=self._settings.sandbox_enabled and policy.enabled,
+            # The deploy-wide kill-switch (checked above) AND the per-tenant enable
+            # must BOTH be on; only the per-tenant one can still refuse here.
+            enabled=policy.enabled,
             allowed_packages=policy.allowed_packages,
             denied_packages=policy.denied_packages,
             egress_allowed=policy.egress_allowed,
@@ -324,11 +346,16 @@ class SandboxPolicyReader:
             max_memory_mb=min(policy.max_memory_mb, memory_ceil),
             daily_runtime_cap_s=min(policy.daily_runtime_cap_s, daily_ceil),
             max_concurrency=min(policy.max_concurrency, conc_ceil),
+            disabled_reason=None if policy.enabled else SANDBOX_REASON_TENANT_DISABLED,
         )
 
 
-def _disabled_effective(settings: Settings) -> EffectiveSandboxPolicy:
-    """The deny-by-default effective policy: disabled, every cap the config ceiling."""
+def _disabled_effective(settings: Settings, reason: str) -> EffectiveSandboxPolicy:
+    """The deny-by-default effective policy: disabled, every cap the config ceiling.
+
+    ``reason`` is the ``SANDBOX_REASON_*`` that refused — required, so a new
+    disabled path cannot be added without saying which switch it is (#502).
+    """
     runtime_ceil, memory_ceil, daily_ceil, conc_ceil = _config_ceiling(settings)
     return EffectiveSandboxPolicy(
         enabled=False,
@@ -340,6 +367,7 @@ def _disabled_effective(settings: Settings) -> EffectiveSandboxPolicy:
         max_memory_mb=memory_ceil,
         daily_runtime_cap_s=daily_ceil,
         max_concurrency=conc_ceil,
+        disabled_reason=reason,
     )
 
 

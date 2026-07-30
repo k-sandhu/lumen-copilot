@@ -187,6 +187,45 @@ async def test_create_get_list_update_delete(client: AsyncClient, seeded: _Seede
     assert gone.status_code == 404
 
 
+# --- #505: run_python is grantable through the ordinary allow-list ----------
+
+
+async def test_run_python_is_grantable_in_the_tool_allowlist(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """The T2 code-execution tool round-trips through create AND update (#505).
+
+    Before #505 the only assistant carrying ``run_python`` had been seeded directly
+    into the database, which left it ambiguous whether the API would even accept the
+    name. It does: ``run_python`` is a real registry entry, so no server-side filter
+    drops it — the gap was purely that the builder UI never offered it. This pins
+    that, so a later "harden the allow-list" change cannot silently make the tool
+    ungrantable again. Governance is unaffected: the tenant tool policy and the
+    approval gate still decide whether an allowed tool may actually run.
+    """
+    token = await _login(client, seeded.alice_email)
+
+    created = await client.post(
+        "/api/v1/assistants",
+        headers=_auth(token),
+        json={"name": "Analyst", "toolAllowlist": ["run_python"]},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["toolAllowlist"] == ["run_python"]
+    assistant_id = created.json()["id"]
+
+    patched = await client.patch(
+        f"/api/v1/assistants/{assistant_id}",
+        headers=_auth(token),
+        json={"toolAllowlist": ["search_text", "run_python"]},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["toolAllowlist"] == ["search_text", "run_python"]
+
+    got = await client.get(f"/api/v1/assistants/{assistant_id}", headers=_auth(token))
+    assert got.json()["toolAllowlist"] == ["search_text", "run_python"]
+
+
 # --- AC-4: unknown tool → 422 ----------------------------------------------
 
 
@@ -339,13 +378,9 @@ async def test_start_chat_from_published_assistant(client: AsyncClient, seeded: 
     assert resp.json()["model"] == "openrouter/openai/gpt-5.5"
 
 
-async def test_start_chat_from_draft_assistant_is_422(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_start_chat_from_draft_assistant_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
-    created = await client.post(
-        "/api/v1/assistants", headers=_auth(token), json={"name": "Draft"}
-    )
+    created = await client.post("/api/v1/assistants", headers=_auth(token), json={"name": "Draft"})
     aid = created.json()["id"]
     resp = await client.post(
         "/api/v1/chat/sessions", headers=_auth(token), json={"assistant_id": aid}
@@ -389,7 +424,7 @@ class _TestHarnessGateway:
         api_key: object = None,
         api_base: object = None,
         cache_key: object = None,
-        ):  # noqa: ANN201 — async generator
+    ):  # noqa: ANN201 — async generator
         from app.domain.llm import StreamEvent
 
         yield StreamEvent(text="This is a preview answer.")
@@ -411,7 +446,13 @@ def _wire_test_harness(monkeypatch: pytest.MonkeyPatch, factory: object) -> None
 
     class _Retrieval:
         async def search_text(
-            self, *, principal, query, k, collection_ids=None, document_ids=None  # noqa: ANN001
+            self,
+            *,
+            principal,
+            query,
+            k,
+            collection_ids=None,
+            document_ids=None,  # noqa: ANN001
         ):
             return []
 
@@ -499,9 +540,7 @@ async def test_test_cross_tenant_assistant_is_404(
     assert resp.status_code == 404
 
 
-async def test_test_without_token_is_401(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_test_without_token_is_401(client: AsyncClient, seeded: _Seeded) -> None:
     """INV-4: an unauthenticated test request is 401."""
     resp = await client.post(f"/api/v1/assistants/{uuid.uuid4()}/test", json={"input": "x"})
     assert resp.status_code == 401
