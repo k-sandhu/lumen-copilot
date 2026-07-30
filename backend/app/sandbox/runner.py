@@ -10,7 +10,7 @@ from uuid import UUID
 
 import httpx
 
-from app.core.errors import DependencyError, ValidationError
+from app.core.errors import DependencyError
 from app.core.logging import get_logger
 from app.domain.code_execution import (
     SANDBOX_REASON_RUNNER_ERROR,
@@ -34,13 +34,19 @@ class SandboxRunnerUnavailable(DependencyError):
     sandbox_reason = SANDBOX_REASON_RUNNER_UNAVAILABLE
 
 
-class SandboxRunnerRejected(ValidationError):
+class SandboxRunnerRejected(DependencyError):
     """The runner answered and REFUSED the request (4xx) — so it is up (issue #502).
 
     A package it could not resolve or download (422), a rejected staged-input path
     (422), a session generation it no longer holds (409/404). Reporting these as
     "the runner is unreachable" sent an operator to check a service that was
     answering every request correctly.
+
+    Still a :class:`~app.core.errors.DependencyError` (→ 503) rather than a 422,
+    because the HTTP caller of the lifecycle endpoints sent a perfectly valid
+    request — it is the *downstream* service that refused, and the sandbox
+    endpoints' declared responses are 404/409/503. The distinction this class
+    exists for is ``sandbox_reason``, which is internal.
 
     The runner's own sentence is deliberately NOT carried into ``detail``: it names
     host-side facts ("the execution image is not present on the host daemon") and

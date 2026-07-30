@@ -161,6 +161,10 @@ async def test_a_runner_that_answers_4xx_is_not_reported_as_unreachable(
     assert refusal.value.sandbox_reason == SANDBOX_REASON_RUNNER_REJECTED
     assert refusal.value.sandbox_reason != SANDBOX_REASON_RUNNER_UNAVAILABLE
     assert not isinstance(refusal.value, SandboxRunnerUnavailable)
+    # Over HTTP it is still a 503: the lifecycle endpoints' caller sent a valid
+    # request and the sandbox contract declares 404/409/503, so the runner refusing
+    # must not surface as the caller's own validation error.
+    assert refusal.value.status == 503
     # The runner's own sentence names host-side facts and this error renders into an
     # HTTP problem body, so it is logged — never carried in ``detail``.
     assert detail not in (refusal.value.detail or "")
