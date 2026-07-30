@@ -875,9 +875,10 @@ async def test_the_bar_never_exceeds_what_the_model_is_allowed_to_write(
     completion could pass at all, leaving the session permanently unsummarisable. The
     bar is now fixed per turn-count, so enormous turns cannot move it.
     """
-    from app.tasks import summarize as task_module
-    from app.db import models as _models
     from sqlalchemy import update as _upd
+
+    from app.db import models as _models
+    from app.tasks import summarize as task_module
 
     # Make the covered turns enormous — the exact condition that broke the old rule.
     async with ctx.sessionmaker() as session:
