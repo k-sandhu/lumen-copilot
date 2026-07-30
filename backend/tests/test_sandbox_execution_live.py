@@ -356,8 +356,11 @@ async def test_the_image_on_the_host_really_ships_the_configured_manifest(
         for line in result.stdout.splitlines()
         if "==" in line
     }
+    # A custom manifest may legitimately carry a bare name: admission then treats any
+    # installed version as satisfying it, so presence is all that can be asserted for
+    # one. The shipped manifest is fully pinned (the offline guard requires ``==``).
     configured = {
-        _canonical(entry.split("==", 1)[0]): entry.split("==", 1)[1]
+        _canonical(entry.split("==", 1)[0]): (entry.split("==", 1)[1] if "==" in entry else None)
         for entry in Settings().sandbox_preinstalled_packages
     }
     assert configured, "the configured manifest is empty — nothing would be asserted"
@@ -366,7 +369,7 @@ async def test_the_image_on_the_host_really_ships_the_configured_manifest(
     wrong = {
         name: (version, installed[name])
         for name, version in configured.items()
-        if name in installed and installed[name] != version
+        if version is not None and name in installed and installed[name] != version
     }
     extra = set(installed) - set(configured) - _BASE_IMAGE_DISTRIBUTIONS
 
