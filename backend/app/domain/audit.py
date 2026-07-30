@@ -290,6 +290,34 @@ class AuditEnvelopeError(ValueError):
     """
 
 
+class AuditSourceOrigin(str, enum.Enum):
+    """Where an audited action came from (spec 0004 §2.4).
+
+    The typed companion to ``source_ip``, and the reason that field can finally be
+    honest. The envelope has always required a ``source_ip``, but a background task has
+    no client address — so callers passed a sentinel string, which the ``INET`` column
+    rejected, which rolled back the very action being audited (issue #546).
+
+    Recording the ORIGIN separately makes the contract stateable instead of
+    exception-ridden: every event says where it came from, and an event that claims a
+    client records that client's address.
+
+    * ``CLIENT`` — a real request from a peer whose address is known. ``source_ip`` is
+      set, and is the only case where it is.
+    * ``SYSTEM`` — background/scheduled work (Celery tasks, jobs). No client exists, so
+      ``source_ip`` is NULL by definition, not by accident.
+    * ``UNKNOWN`` — a request whose peer address could not be determined (an AF_UNIX
+      peer behind a socket-mode proxy makes ``request.client`` ``None``). Deliberately
+      distinct from ``SYSTEM``: "a person did this and we could not see from where" is
+      a different fact — and a different operational problem — from "the platform did
+      this".
+    """
+
+    CLIENT = "client"
+    SYSTEM = "system"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class AuditActor:
     """Who performed an audited action (spec 0004 §2.4 ``actor_id`` field).

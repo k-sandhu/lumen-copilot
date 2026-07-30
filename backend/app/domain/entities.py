@@ -1081,6 +1081,9 @@ class AuditEvent:
     resource_id: str | None
     outcome: AuditOutcome
     request_id: str | None
+    #: Where the action came from — client / system / unknown (#546). Required on
+    #: every event; `source_ip` is set exactly when this is `client`.
+    source_origin: str
     source_ip: str | None
     metadata: dict[str, object] = field(default_factory=dict)
     ts: datetime = field(default_factory=lambda: datetime.min)

@@ -19,9 +19,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.db import models
 from app.db.base import Base
 from app.db.repositories import AuditEventRepository
 from app.domain.audit import AuditAction, AuditActor, AuditEnvelopeError
@@ -320,7 +322,7 @@ async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
     # Nothing that is not an address reaches the column.
     assert event.source_ip is None
     # …but the trail keeps what the caller actually stated.
-    assert event.metadata["source_ip_declared"] == "system"
+    assert event.source_origin == "system"
 
 
 async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) -> None:
@@ -339,7 +341,8 @@ async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) 
             source_ip=address,
         )
         assert event.source_ip == address
-        # No sentinel key invented for a genuine address.
+        # A real client address means a `client` origin, and nothing in metadata.
+        assert event.source_origin == "client"
         assert "source_ip_declared" not in event.metadata
 
 
@@ -360,7 +363,7 @@ async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSes
     )
 
     assert event.metadata["covered_messages"] == 12
-    assert event.metadata["source_ip_declared"] == "system"
+    assert event.source_origin == "system"
 
 
 @pytest.mark.parametrize(
@@ -398,7 +401,7 @@ async def test_real_addresses_survive_in_every_form_a_client_can_present(
         source_ip=given,
     )
     assert event.source_ip == stored
-    assert "source_ip_declared" not in event.metadata
+    assert event.source_origin == "client"
 
 
 async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(
@@ -421,7 +424,7 @@ async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(
         metadata={"source_ip": "198.51.100.7"},
     )
     assert event.metadata["source_ip"] == "198.51.100.7"  # the caller's, untouched
-    assert event.metadata["source_ip_declared"] == "system"  # ours, alongside it
+    assert event.source_origin == "system"  # ours, alongside it
 
 
 async def test_the_request_path_sentinel_is_handled_too(session: AsyncSession) -> None:
@@ -440,5 +443,62 @@ async def test_the_request_path_sentinel_is_handled_too(session: AsyncSession) -
         request_id="req",
         source_ip="unknown",
     )
+    # `unknown` is deliberately NOT `system`: a person did this and we could not see
+    # from where, which is a different operational fact from "the platform did this".
     assert event.source_ip is None
-    assert event.metadata["source_ip_declared"] == "unknown"
+    assert event.source_origin == "unknown"
+
+
+async def test_an_unrecognised_non_address_is_recorded_as_unknown_not_system(
+    session: AsyncSession,
+) -> None:
+    """A misconfigured proxy must not masquerade as background work.
+
+    Coercing anything unparseable to `system` would hide a real operational problem
+    behind a legitimate-looking origin — and would let a client action be filed as a
+    platform action, which is exactly the confusion `source_origin` exists to remove.
+    """
+    sink = AuditSink(AuditEventRepository(session, uuid.uuid4()))
+    event = await sink.emit(
+        action=AuditAction.RETRIEVAL_QUERY,
+        actor=AuditActor.system(),
+        resource_type="document",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req",
+        source_ip="proxy-did-something-odd",
+    )
+    assert event.source_origin == "unknown"
+    assert event.source_ip is None
+
+
+async def test_the_database_refuses_a_pair_that_contradicts_itself(
+    session: AsyncSession,
+) -> None:
+    """The origin/address agreement is a constraint, not a convention.
+
+    `AuditEventRepository.record` cannot currently produce a contradictory pair, but
+    it is not the only thing that will ever write this table — a later writer, a
+    backfill, or a hand-run repair could. Pinning the rule in the schema means such a
+    write fails loudly at the boundary instead of quietly filing a person's action as
+    the platform's (or the reverse).
+    """
+    tenant_id = uuid.uuid4()
+    for origin, ip in (("client", None), ("system", "203.0.113.10")):
+        session.add(
+            models.AuditEvent(
+                tenant_id=tenant_id,
+                actor_id=None,
+                action=AuditAction.RETRIEVAL_QUERY.value,
+                resource_type="document",
+                resource_id=str(uuid.uuid4()),
+                outcome=AuditOutcome.ALLOWED.value,
+                request_id="req",
+                source_origin=origin,
+                source_ip=ip,
+                event_metadata={},
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.flush()
+        await session.rollback()

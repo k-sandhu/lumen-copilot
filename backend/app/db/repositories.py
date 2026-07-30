@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db import models
+from app.domain.audit import AuditSourceOrigin
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
     Artifact,
@@ -485,6 +486,7 @@ def _to_audit_event(row: models.AuditEvent) -> AuditEvent:
         resource_id=row.resource_id,
         outcome=AuditOutcome(row.outcome),
         request_id=row.request_id,
+        source_origin=row.source_origin,
         source_ip=row.source_ip,
         metadata=dict(row.event_metadata),
         ts=row.ts,
@@ -4287,39 +4289,42 @@ class AuditEventRepository(_TenantScopedRepository):
         source_ip: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> AuditEvent:
-        # `source_ip` is REQUIRED in the envelope (spec 0004 §2.4 — the sink refuses
-        # an empty one), but the column is `INET` on Postgres and a background task has
-        # no client IP to give. Callers therefore pass a sentinel — `"system"` — which
-        # Postgres rejects outright, and because the emit rides the caller's
-        # transaction, that rejection rolled back the ACTION the event was recording.
-        # It took the rolling summariser with it: `session_summaries` rows existed with
-        # evidence (written in the answer transaction) but never a summary or a
-        # coverage cursor, and `session.summarized` was never once written. SQLite
-        # cannot catch it — the `String(45)` variant accepts any text — so the offline
-        # suite stayed green while the feature was dead in every Postgres deployment.
+        # Every event records WHERE it came from (#546). The envelope has always
+        # required a source, but a background task has no client address — so callers
+        # passed a sentinel, `INET` rejected it, and because the emit rides the caller's
+        # transaction that rejection rolled back the ACTION being recorded. It took the
+        # rolling summariser with it: rows carried evidence (written in the answer
+        # transaction) but never a summary or a coverage cursor, and
+        # `session.summarized` was never once written. SQLite cannot catch that class at
+        # all — its `String(45)` variant accepts any text — so the offline suite stayed
+        # green while the feature was dead in every Postgres deployment.
         #
-        # The envelope contract is unchanged (a caller must still state something). The
-        # COLUMN takes an address or NULL, and a non-address sentinel is preserved in
-        # metadata so the trail loses nothing: `actor` already records that this was the
-        # system, and "no client IP" is the honest value when there was no client.
+        # `source_origin` makes the contract stateable instead of exception-ridden:
+        # every event says where it came from, and an address is recorded exactly when
+        # there was a client to have one. A CHECK constraint enforces the pair, so the
+        # invariant does not rest on this method alone.
         stored_ip, sentinel = _split_source_ip(source_ip)
-        if sentinel is not None:
-            if sentinel.lower() not in _KNOWN_SOURCE_IP_SENTINELS:
-                # Neither an address nor a sentinel we ship. Coerce anyway — an audit
-                # write must never crash the action it records — but say so, because
-                # silently NULLing every event is how a misconfigured proxy loses audit
-                # fidelity without anyone noticing.
+        if sentinel is None:
+            origin = AuditSourceOrigin.CLIENT
+        elif sentinel.lower() == AuditSourceOrigin.SYSTEM.value:
+            origin = AuditSourceOrigin.SYSTEM
+        else:
+            # `"unknown"` is what the request path sends when `request.client` is None
+            # (an AF_UNIX peer behind a socket-mode proxy). Anything ELSE is neither an
+            # address nor a sentinel we ship: still recorded as unknown — an audit write
+            # must never crash the action it records — but logged, because silently
+            # losing every address is how a misconfigured proxy destroys audit fidelity
+            # without anyone noticing.
+            origin = AuditSourceOrigin.UNKNOWN
+            if sentinel.lower() != AuditSourceOrigin.UNKNOWN.value:
                 log.warning(
                     "audit.source_ip_not_an_address",
                     action=action,
                     resource_type=resource_type,
                     value_length=len(sentinel),
                 )
-            # Namespaced so it can never collide with a caller's own metadata: an
-            # audit event may legitimately carry an upstream `source_ip` of its own,
-            # and this preserved envelope value is a different fact.
-            metadata = {**(metadata or {}), "source_ip_declared": sentinel}
         row = models.AuditEvent(
+            source_origin=origin.value,
             tenant_id=self._tenant_id,
             actor_id=actor_id,
             action=action,
