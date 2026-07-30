@@ -128,6 +128,27 @@ def test_execution_image_makes_matplotlib_work_headless() -> None:
     assert "font_manager" in body  # the build-time cache warm-up
 
 
+def test_execution_image_defaults_to_an_unprivileged_user() -> None:
+    """The image's own default uid must stay non-root (#506 review).
+
+    ADR-0020 deliberately overrides this at launch with ``--user 0:0`` — schema-pinned
+    as ``Literal["0:0"]`` on the wire — so this assertion is NOT about what a governed
+    run gets. It is about the fallback: the image's default is what a hand-run smoke
+    test, a future non-Docker launcher, or a CI job would use, and a refactor that
+    dropped ``USER`` would make the image root-by-default with no diff-time signal.
+    Both halves of the posture are asserted here so they cannot drift apart silently.
+    """
+    body = _dockerfile()
+
+    assert "\nUSER sandbox" in body, (
+        "sandbox_exec/Dockerfile must end with an unprivileged USER — the runner's "
+        "--user 0:0 override is the governed path, not the image's default"
+    )
+    # The comment explaining WHY root overrides it must travel with the line, so the
+    # next reader does not "fix" the apparent contradiction by deleting one of them.
+    assert "ADR-0020" in body
+
+
 # --- #504: an honest package story --------------------------------------------
 
 

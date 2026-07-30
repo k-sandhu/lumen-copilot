@@ -178,16 +178,20 @@ async def sandbox() -> AsyncIterator[_LiveSandbox]:
             )
         yield _LiveSandbox(runner=runner, spec=spec)
     finally:
+        # A cleanup failure MUST fail the run (#506 review). The container runs as uid 0
+        # on the host daemon, so silently leaking one is a worse outcome than a red
+        # suite. Raising here does NOT hide the test's own verdict — pytest reports a
+        # teardown error IN ADDITION to the test result, not instead of it (the earlier
+        # "printed, not raised" rationale was mistaken on that point).
+        container = f"lumen-sandbox-{spec.sandbox_session_id}-{spec.generation}"
         try:
             await runner.close_session(spec)
-        except Exception as exc:  # noqa: BLE001 — teardown must not mask a real failure
-            # Printed, not raised: an exception here would replace the test's own
-            # verdict. Named so a leaked container is findable with `docker ps -a`.
-            print(
-                f"\nWARNING: could not destroy sandbox container "
-                f"lumen-sandbox-{spec.sandbox_session_id}-{spec.generation} "
-                f"({type(exc).__name__}) — remove it by hand."
-            )
+        except Exception as exc:
+            raise AssertionError(
+                f"could not destroy sandbox container {container} "
+                f"({type(exc).__name__}: {exc}). It runs as root on the HOST daemon — "
+                f"remove it with: docker rm -f {container}"
+            ) from exc
 
 
 async def _run(sandbox: _LiveSandbox, code: str) -> RunResult:
@@ -476,6 +480,90 @@ async def test_outbound_network_from_the_sandbox_fails_closed(
     lines = result.stdout.splitlines()
     assert sum(1 for line in lines if line.startswith("denied ")) == 3
     assert lines[-1] == "all outbound attempts failed closed"
+
+
+@_live
+@pytest.mark.live
+async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
+    sandbox: _LiveSandbox,
+) -> None:
+    """The OTHER half of ADR-0020 §6 negative test 2, asserted from INSIDE the container.
+
+    §6 requires proving "UID 0 but no host mounts, socket, app secrets, or network".
+    Only the network half was ever checked against a real container; the rest was
+    asserted offline against the request value object — and the runner IGNORES those
+    wire fields (it hard-codes the confinement itself), so the offline test proves what
+    the app ASKS FOR, not what the container GOT. This closes that gap: if a future
+    change to the launch path adds a diagnostic bind mount or forwards a broader env,
+    the whole suite would otherwise stay green because nothing looks inside.
+
+    The env check is deliberately a SUBSET assertion against the curated allow-list plus
+    the image's own baked-in vars, not an equality check, so it fails on anything NEW
+    leaking in rather than breaking whenever the image adds a benign variable.
+    """
+    result = await _run(
+        sandbox,
+        """
+        import os
+
+        print("SOCKET", os.path.exists("/var/run/docker.sock"))
+
+        # A bind mount from the host shows up as a mountinfo line whose root is not "/"
+        # for a non-virtual filesystem. /workspace and /opt/mplconfig are image layers,
+        # not host mounts, so they must NOT appear here.
+        virtual = {
+            "proc", "sysfs", "tmpfs", "devpts", "mqueue",
+            "cgroup", "cgroup2", "shm", "overlay",
+        }
+        binds = []
+        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                sep = parts.index("-")
+                fstype = parts[sep + 1]
+                mount_root, mount_point = parts[3], parts[4]
+                if fstype in virtual:
+                    continue
+                if mount_root != "/":
+                    binds.append(f"{fstype}:{mount_root}->{mount_point}")
+        print("BINDS", ",".join(binds) if binds else "none")
+
+        print("ENVKEYS", ",".join(sorted(os.environ)))
+        """,
+    )
+
+    assert result.status is CodeRunStatus.SUCCEEDED, result.stderr
+    out = dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
+
+    # No Docker socket: the socket authority is confined to the runner (ADR-0020 §2).
+    assert out["SOCKET"] == "False", "the execution container can see the Docker socket"
+
+    # No host bind mounts: the wire schema caps `binds` at zero, and the engine passes
+    # volumes=None — this proves the container actually got that.
+    assert out["BINDS"] == "none", f"unexpected host bind mount(s): {out['BINDS']}"
+
+    # No app secrets: only the curated session env plus the run's output dir and
+    # whatever the execution image itself bakes in.
+    # `_session_env()` is a tuple of (key, value) PAIRS, not a mapping — take the keys.
+    allowed = {key for key, _ in SandboxSessionService._session_env()} | {
+        "LUMEN_OUTPUT_DIR",
+        # Baked into the execution image (sandbox_exec/Dockerfile) or set by Docker.
+        "PATH",
+        "HOSTNAME",
+        "PYTHON_VERSION",
+        "PYTHON_SHA256",
+        "GPG_KEY",
+        "MPLBACKEND",
+        "MPLCONFIGDIR",
+        "PYTHONUNBUFFERED",
+        "HOME",
+        "LANG",
+    }
+    leaked = sorted(set(out["ENVKEYS"].split(",")) - allowed)
+    assert not leaked, (
+        "the execution container received environment variables outside the curated "
+        f"set — an app secret or config leak would appear here: {leaked}"
+    )
 
 
 @_live
