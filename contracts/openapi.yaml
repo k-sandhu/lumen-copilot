@@ -846,6 +846,173 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /admin/groups:
+    get:
+      operationId: listGroups
+      summary: The tenant's groups (admin only).
+      description: >
+        Groups are the sharing primitive behind `group` grants (ADR-0022): a
+        grant to a group admits every member. Restricted to the `admin` role;
+        any other role receives **403** (INV-5). Tenant-scoped (INV-1). The
+        tenant's derived "All members" group is listed first and is read-only.
+      tags: [admin]
+      responses:
+        "200":
+          description: Every group in the tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createGroup
+      summary: Create a group (admin only).
+      description: >
+        Creates an empty group an admin can then populate. Names are trimmed and
+        unique per tenant **case-insensitively** - a duplicate is **409**, a
+        blank or over-long name is **422**. Audited as `group.created` (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupCreate" }
+      responses:
+        "201":
+          description: The created group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/groups/{groupId}:
+    parameters:
+      - { $ref: "#/components/parameters/GroupId" }
+    get:
+      operationId: getGroup
+      summary: One group (admin only).
+      description: >
+        A group in another tenant is **404**, never 403 (existence
+        non-disclosure, INV-1).
+      tags: [admin]
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: renameGroup
+      summary: Rename a group (admin only).
+      description: >
+        Renaming the derived "All members" group is refused **409**
+        (`system_group_immutable`) - its membership is derived, so it is not an
+        editable group (ADR-0022 section 3). Audited as `group.updated` (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupUpdate" }
+      responses:
+        "200":
+          description: The renamed group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      operationId: deleteGroup
+      summary: Delete a group (admin only).
+      description: >
+        Deletes the group, its membership, **and every grant naming it** - so
+        anything shared with the group stops being shared. `grants` carries no
+        foreign key on `principal_id` (spec 0004 section 2.2), so this cleanup is
+        explicit rather than a database cascade. Deleting the derived "All
+        members" group is refused **409**. Audited as `group.deleted` (INV-6).
+      tags: [admin]
+      responses:
+        "204": { description: Deleted (group + its membership + every grant naming it). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /admin/groups/{groupId}/members:
+    parameters:
+      - { $ref: "#/components/parameters/GroupId" }
+    get:
+      operationId: listGroupMembers
+      summary: The users explicitly in a group (admin only).
+      description: >
+        Returns the group's members ordered by email. The derived "All members"
+        group returns an **empty list**: its membership is not enumerated
+        because every user in the tenant belongs to it (ADR-0022 section 3) -
+        read `member_count: null` on the group to tell "everyone" from "empty".
+      tags: [admin]
+      responses:
+        "200":
+          description: The group's members.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupMemberList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: addGroupMember
+      summary: Add a user to a group (admin only).
+      description: >
+        Idempotent - adding an existing member succeeds and changes nothing. A
+        user in another tenant is **404**, never 403 (INV-1). Populating the
+        derived "All members" group is refused **409**. Audited as
+        `group.member_added` (INV-6). The new member's access widens on their
+        **next request**: membership is re-read per request and never cached in
+        a token (ADR-0022 section 7).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupMemberAdd" }
+      responses:
+        "204": { description: The user is a member of the group. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /admin/groups/{groupId}/members/{memberId}:
+    parameters:
+      - { $ref: "#/components/parameters/GroupId" }
+      - { $ref: "#/components/parameters/MemberId" }
+    delete:
+      operationId: removeGroupMember
+      summary: Remove a user from a group (admin only).
+      description: >
+        Idempotent - removing a non-member succeeds and changes nothing.
+        Revocation takes effect on that user's **next request** (ADR-0022
+        section 7), never at token expiry. Audited as `group.member_removed`
+        (INV-6).
+      tags: [admin]
+      responses:
+        "204": { description: The user is not a member of the group. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /admin/model-governance:
     get:
       operationId: getModelGovernance
@@ -2887,6 +3054,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     SavedSearchId:
       name: savedSearchId
       in: path
@@ -3634,6 +3806,11 @@ components:
         - retrieval.query
         - answer.generated
         - permission.denied
+        - group.created
+        - group.updated
+        - group.deleted
+        - group.member_added
+        - group.member_removed
         - action.requested
         - action.approved
         - action.executed
@@ -3743,6 +3920,88 @@ components:
           items: { $ref: "#/components/schemas/Member" }
         next_cursor:
           type: [string, "null"]
+
+    Group:
+      type: object
+      additionalProperties: false
+      description: >
+        A tenant-scoped set of users an admin manages (ADR-0022). A group confers
+        nothing on its own - it only makes a grant to that group apply to its
+        members; roles still decide what a user may *do*.
+      required: [id, name, kind, member_count, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 120 }
+        kind:
+          type: string
+          enum: [user, system]
+          description: >
+            `user` groups are created and populated by an admin. `system` is the
+            tenant's single "All members" group, which expresses tenant-wide
+            visibility: it cannot be renamed, deleted or populated, and its
+            membership is derived rather than stored (ADR-0022 section 3).
+        member_count:
+          type: [integer, "null"]
+          description: >
+            How many users are explicitly in the group, or **null** for the
+            `system` group - whose membership is derived, so it has nothing to
+            count and every user in the tenant belongs. `null` is not zero.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    GroupList:
+      type: object
+      additionalProperties: false
+      description: >
+        Every group in the tenant, system group first then by name. Not paginated
+        - a tenant has few groups.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Group" }
+
+    GroupCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: >
+            Trimmed before storage and unique per tenant case-insensitively
+            ("Tax Team" and "tax team" are the same group).
+
+    GroupUpdate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+
+    GroupMemberAdd:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: A user in the caller's tenant; anyone else is 404 (INV-1).
+
+    GroupMemberList:
+      type: object
+      additionalProperties: false
+      description: >
+        The users explicitly in a group, ordered by email. Empty for the `system`
+        group, whose membership is derived rather than enumerated.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
 
     ModelGovernanceEntry:
       type: object

@@ -3374,6 +3374,22 @@ class GroupRepository(_TenantScopedRepository):
         await self._session.flush()
         return True
 
+    async def member_counts(self) -> dict[UUID, int]:
+        """Explicit member counts for every group in the tenant, in ONE query.
+
+        The listing path needs a count per group; doing that per group is a
+        classic N+1 (and each call would re-read the group too). Groups with no
+        members are simply absent from the mapping — the caller defaults them to
+        zero. The system group never appears: it has no membership rows at all.
+        """
+        stmt = (
+            select(models.GroupMember.group_id, func.count())
+            .where(models.GroupMember.tenant_id == self._tenant_id)
+            .group_by(models.GroupMember.group_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return dict(rows)  # type: ignore[arg-type]
+
     async def list_member_ids(self, group_id: UUID) -> list[UUID]:
         """The user ids explicitly in ``group_id`` (empty for the system group)."""
         stmt = select(models.GroupMember.user_id).where(
