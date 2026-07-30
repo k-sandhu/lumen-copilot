@@ -26,6 +26,7 @@ swap in a blocked address (TOCTOU defense).
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -176,9 +177,15 @@ def _validate_url(url: str) -> tuple[str, str, str]:
     Returns ``(safe_ip, host, port)`` for pinning the connection. Runs the
     bounded syntactic checks (:func:`validate_url_syntactic`) and then — for a
     hostname — resolves it, rejecting the host if *any* resolved address is in a
-    blocked range. An IP-literal host needs no DNS (already range-checked). Used
-    only inside the connector's fetch path (the Celery worker), never the request
-    path. Raises :class:`UrlBlockedError` on any guard failure.
+    blocked range. An IP-literal host needs no DNS (already range-checked).
+    Raises :class:`UrlBlockedError` on any guard failure.
+
+    **Blocking** (``socket.getaddrinfo``): call it from a thread, never inline on
+    an event loop. :func:`fetch_url` does that for you — it is the only caller,
+    and it hops to a thread per redirect hop. Callers reach this guard from both
+    the Celery connector sync *and* the request-path web-search fetch leg
+    (``search_web/service.py``), so "it only runs in the worker" is not a safe
+    assumption to build on (#524).
     """
     host = validate_url_syntactic(url)
     parts = urlsplit(url)
@@ -275,7 +282,16 @@ async def fetch_url(
     current = url
     try:
         for _hop in range(max_redirects + 1):
-            safe_ip, host, port = _validate_url(current)
+            # Off the event loop: _validate_url resolves DNS through the blocking
+            # socket.getaddrinfo (net/egress.py), and this coroutine would
+            # otherwise run it inline — parking the loop for the whole lookup,
+            # once per redirect hop. That also serialised concurrent fetches
+            # before their first await, so callers that gather several pages got
+            # overlapping HTTP but strictly sequential DNS (#513 review, #524).
+            # DNS is blocking *I/O*, so a thread is the right home for it; the
+            # guard itself is unchanged — same resolve-all / reject-any / pinning,
+            # still re-run on every hop.
+            safe_ip, host, port = await asyncio.to_thread(_validate_url, current)
             pinned = _pin_url(current, safe_ip)
             parts = urlsplit(current)
             host_header = parts.netloc  # preserves the original host[:port] for routing

@@ -15,6 +15,9 @@ driven by an ``httpx.MockTransport`` so no real socket opens. Every block raises
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import httpx
 import pytest
 
@@ -345,3 +348,111 @@ async def test_outbound_request_defaults_to_descriptive_user_agent() -> None:
     await _fetch(handler)
     assert "LumenCopilot" in seen["ua"]
     assert "python-httpx" not in seen["ua"].lower()
+
+
+# --- DNS resolution must not run on the event loop (#524) --------------------
+#
+# ``_validate_url`` resolves through the blocking ``socket.getaddrinfo``. Awaited
+# inline, that parks the serving loop for the whole lookup, once per redirect hop
+# — and, because it happens before the coroutine's first await, it also serialises
+# concurrent fetches: gathering N pages produced overlapping HTTP but strictly
+# sequential DNS. The web-search fetch leg (``search_web/service.py``) calls
+# ``fetch_url`` from the chat runtime, so this is a request-path defect, not a
+# worker-only one.
+#
+# These drive the WHOLE REAL GUARD — ``fetch_url`` → ``_validate_url`` →
+# ``_resolve_safe_ip`` → ``resolve_safe_ip`` → ``socket.getaddrinfo`` — and stub
+# only that last blocking primitive. A probe that replaced the chokepoint itself
+# could not see this defect at all, which is precisely how it was missed.
+
+_DNS_STALL_SECONDS = 0.25
+_DNS_TICK_SECONDS = 0.01
+# Resolution on the loop yields a gap of >= _DNS_STALL_SECONDS; off the loop the
+# gaps stay at tick resolution.
+_DNS_MAX_GAP_SECONDS = 0.1
+
+
+class _ResolverProbe:
+    """A blocking ``getaddrinfo`` stand-in that records thread and concurrency."""
+
+    def __init__(self) -> None:
+        self.threads: set[int] = set()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def __call__(self, *_args: object, **_kwargs: object) -> list:
+        import socket
+        import threading
+
+        self.threads.add(threading.get_ident())
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            time.sleep(_DNS_STALL_SECONDS)
+        finally:
+            self.in_flight -= 1
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PUBLIC_IP, 0))]
+
+
+async def test_fetch_url_resolves_dns_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocking resolve happens on a worker thread, never the loop's own."""
+    import socket
+    import threading
+
+    probe = _ResolverProbe()
+    monkeypatch.setattr(socket, "getaddrinfo", probe)
+
+    result = await _fetch(_ok_html, url="http://dns-probe.example.com/page")
+
+    assert result.final_url == "http://dns-probe.example.com/page"
+    assert probe.threads and threading.get_ident() not in probe.threads
+
+
+async def test_fetch_url_does_not_stall_the_event_loop_during_dns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop keeps servicing other work while a host is being resolved."""
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", _ResolverProbe())
+
+    gaps: list[float] = []
+
+    async def _ticker() -> None:
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(_DNS_TICK_SECONDS)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    ticker = asyncio.create_task(_ticker())
+    try:
+        await asyncio.sleep(0)
+        await _fetch(_ok_html, url="http://dns-probe.example.com/page")
+    finally:
+        ticker.cancel()
+
+    # No tick at all means the loop never came back — the worst case, not a pass.
+    assert max(gaps, default=float("inf")) < _DNS_MAX_GAP_SECONDS
+
+
+async def test_concurrent_fetches_overlap_their_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gathered fetches resolve together, so the leg is not sum-of-DNS.
+
+    This is the assertion that makes the #513 concurrency claim true end to end:
+    with resolution inline, three gathered fetches resolved one after another and
+    the peak stayed at 1 however they were gathered.
+    """
+    import socket
+
+    probe = _ResolverProbe()
+    monkeypatch.setattr(socket, "getaddrinfo", probe)
+
+    urls = [f"http://host-{i}.example.com/page" for i in range(3)]
+    results = await asyncio.gather(*(_fetch(_ok_html, url=u) for u in urls))
+
+    assert [r.final_url for r in results] == urls
+    assert probe.max_in_flight == 3
