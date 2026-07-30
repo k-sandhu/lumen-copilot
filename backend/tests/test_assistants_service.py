@@ -32,6 +32,7 @@ from app.db.repositories import (
     AuditEventRepository,
     CollectionRepository,
     GrantRepository,
+    GroupRepository,
     McpServerRepository,
     SourceRepository,
     TenantRepository,
@@ -277,9 +278,7 @@ async def _register_mcp_server(
 async def test_assistant_may_allowlist_its_own_mcp_tool(
     session: AsyncSession, world: _World
 ) -> None:
-    tool_name = await _register_mcp_server(
-        session, tenant_id=world.tenant_a, owner_id=world.alice
-    )
+    tool_name = await _register_mcp_server(session, tenant_id=world.tenant_a, owner_id=world.alice)
     svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
     assistant = await svc.create(name="MCP-enabled", tool_allowlist=(tool_name,))
     assert assistant.tool_allowlist == (tool_name,)
@@ -293,22 +292,16 @@ async def test_bogus_mcp_tool_name_is_rejected(session: AsyncSession, world: _Wo
     assert exc.value.code == "unknown_tool"
 
 
-async def test_cross_owner_mcp_tool_name_is_rejected(
-    session: AsyncSession, world: _World
-) -> None:
+async def test_cross_owner_mcp_tool_name_is_rejected(session: AsyncSession, world: _World) -> None:
     # Bob (same tenant) registers a server; Alice cannot name Bob's tool (INV-2).
-    bobs_tool = await _register_mcp_server(
-        session, tenant_id=world.tenant_a, owner_id=world.bob
-    )
+    bobs_tool = await _register_mcp_server(session, tenant_id=world.tenant_a, owner_id=world.bob)
     svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
     with pytest.raises(ValidationError) as exc:
         await svc.create(name="Steal Bob's tool", tool_allowlist=(bobs_tool,))
     assert exc.value.code == "unknown_tool"
 
 
-async def test_cross_tenant_mcp_tool_name_is_rejected(
-    session: AsyncSession, world: _World
-) -> None:
+async def test_cross_tenant_mcp_tool_name_is_rejected(session: AsyncSession, world: _World) -> None:
     # Carol (tenant B) registers a server; Alice (tenant A) cannot name it (INV-1).
     carols_tool = await _register_mcp_server(
         session, tenant_id=world.tenant_b, owner_id=world.carol
@@ -336,6 +329,39 @@ async def test_scope_unowned_collection_is_422(session: AsyncSession, world: _Wo
     with pytest.raises(ValidationError) as exc:
         await svc.create(name="Scoped", knowledge_scope=scope)
     assert exc.value.code == "scope_collection_forbidden"
+
+
+async def test_scope_group_granted_collection_is_accepted(
+    session: AsyncSession, world: _World
+) -> None:
+    """A group grant must widen assistant scoping exactly as it widens retrieval.
+
+    ADR-0022 §5: a grant to a group admits every member. If scope validation
+    resolved only the caller's ``user`` grants, a collection alice can read in
+    chat would be rejected here as ``scope_collection_forbidden`` — two
+    permission checks disagreeing, which reads as a bug and is the kind of
+    divergence a defaulted ``group_ids`` parameter introduces silently.
+    """
+    bob_coll = await CollectionRepository(session, world.tenant_a).create(
+        owner_id=world.bob, name="bob-shared"
+    )
+    groups = GroupRepository(session, world.tenant_a)
+    group = await groups.create(name="Tax Team", created_by=world.bob)
+    await groups.add_member(group_id=group.id, user_id=world.alice, added_by=world.bob)
+    await GrantRepository(session, world.tenant_a).create(
+        resource_type=GrantResourceType.COLLECTION,
+        resource_id=bob_coll.id,
+        principal_type=GrantPrincipalType.GROUP,
+        principal_id=group.id,
+        role=GrantRole.VIEWER,
+        granted_by=world.bob,
+    )
+    await session.commit()
+
+    svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    scope = KnowledgeScope(collection_ids=(bob_coll.id,))
+    assistant = await svc.create(name="Scoped", knowledge_scope=scope)
+    assert assistant is not None
 
 
 async def test_scope_owned_collection_is_accepted(session: AsyncSession, world: _World) -> None:
@@ -416,9 +442,7 @@ async def test_tenant_admin_may_manage_others(session: AsyncSession, world: _Wor
     assistant = await alice_svc.create(name="Alice's")
     await session.commit()
     # An admin in the same tenant may manage it (owner-or-admin rule).
-    admin_svc = _service(
-        session, tenant_id=world.tenant_a, owner_id=world.bob, roles=(Role.ADMIN,)
-    )
+    admin_svc = _service(session, tenant_id=world.tenant_a, owner_id=world.bob, roles=(Role.ADMIN,))
     got = await admin_svc.get(assistant.id)
     assert got.id == assistant.id
 

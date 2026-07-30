@@ -46,7 +46,7 @@ from app.domain.entities import (
 )
 from app.domain.llm import Embedding
 from app.retrieval import RetrievalService
-from app.retrieval.permissions import AllowSet
+from app.search import SearchAllowFilter
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
 from app.services.groups_service import GroupsService
@@ -60,8 +60,8 @@ pytestmark = pytest.mark.asyncio
 class _FakeGateway:
     """Deterministic embedder — retrieval here is exercised relationally."""
 
-    async def embed(self, texts: list[str]) -> list[Embedding]:
-        return [Embedding(values=[0.1] * 1024) for _ in texts]
+    async def embed(self, texts: list[str], **_: object) -> list[Embedding]:
+        return [Embedding(vector=[0.1] * 1024) for _ in texts]
 
 
 def _principal(user_id: uuid.UUID, tenant_id: uuid.UUID) -> Principal:
@@ -361,14 +361,37 @@ async def test_role_principal_is_still_rejected(
 # --- the two homes of the rule agree --------------------------------------------
 
 
-async def test_sql_and_engine_filters_resolve_the_same_group_grants(
+class _RecordingStore:
+    """A stand-in OpenSearch store that captures the allow-filter it is handed.
+
+    The point is to observe what ``RetrievalService`` actually sends to the
+    engine. Returning no hits is fine — the assertion is about the filter, and
+    the service short-circuits on an empty result without touching Postgres.
+    """
+
+    def __init__(self) -> None:
+        self.allow: SearchAllowFilter | None = None
+
+    async def ensure_index(self) -> None:
+        return None
+
+    async def hybrid_search(self, *, allow: SearchAllowFilter, **_: object) -> list[object]:
+        self.allow = allow
+        return []
+
+
+async def test_group_grant_reaches_the_engine_filter_not_just_sql(
     session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
-    """The SQL predicate and the engine mirror must admit the same collection.
+    """The SQL predicate and the ENGINE mirror must admit the same collection.
 
     ``_document_permitted`` and ``SearchAllowFilter`` are the only two places the
-    rule lives (ADR-0019 §2, widened by ADR-0022 §5); this pins that a group
-    grant reaches *both* — the engine via resolved id-sets, SQL via the EXISTS.
+    rule lives (ADR-0019 §2, widened by ADR-0022 §5), and they are easy to let
+    drift because only one of them is exercised by a relational test. This drives
+    the real ``RetrievalService.search`` path with a recording store and asserts
+    the group-granted collection reaches the **engine filter** — so dropping
+    ``group_ids=allow_set.group_ids`` from ``_allow_filter`` fails here, which a
+    ``list_documents``-only assertion would not catch.
     """
     tenant_a, _ = two_tenants
     owner = await _make_user(session, tenant_a, "owner@x.test")
@@ -388,21 +411,46 @@ async def test_sql_and_engine_filters_resolve_the_same_group_grants(
         principal_type=GrantPrincipalType.GROUP,
     )
 
-    group_ids = await groups.group_ids_for_user(member)
-    allow_set = AllowSet.for_user(tenant_id=tenant_a, user_id=member, group_ids=group_ids)
+    store = _RecordingStore()
+    svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
+    await svc.search(principal=_principal(member, tenant_a), query="anything", k=5)
 
-    # Engine side: the group grant resolves into the collection id-set.
-    _docs, colls = await GrantRepository(session, tenant_a).granted_resource_ids(
-        member, group_ids=group_ids
-    )
-    assert coll in colls
-
-    # SQL side: the same document is admitted by the predicate.
+    assert store.allow is not None, "the engine must have been queried"
+    # The engine leg: the group-granted collection is in the resolved id-set.
+    assert coll in store.allow.granted_collection_ids
+    # ...and the SQL leg admits the same document.
     seen = await RetrievalService(session, gateway=_FakeGateway()).list_documents(
         principal=_principal(member, tenant_a)
     )
     assert doc in {m.document_id for m in seen}
-    assert allow_set.group_ids == group_ids
+
+
+async def test_engine_filter_excludes_a_non_member(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """The negative half: a non-member's engine filter carries no group grant."""
+    tenant_a, _ = two_tenants
+    owner = await _make_user(session, tenant_a, "owner@x.test")
+    outsider = await _make_user(session, tenant_a, "outsider@x.test")
+    coll, _doc = await _make_document(
+        session, tenant_id=tenant_a, owner_id=owner, filename="shared.txt"
+    )
+    group = await GroupRepository(session, tenant_a).create(name="Tax Team", created_by=owner)
+    await _grants_service(
+        session, tenant_id=tenant_a, owner_id=owner, roles=(Role.MEMBER,)
+    ).create_grant(
+        resource_type=GrantResourceType.COLLECTION,
+        resource_id=coll,
+        principal_id=group.id,
+        principal_type=GrantPrincipalType.GROUP,
+    )
+
+    store = _RecordingStore()
+    svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
+    await svc.search(principal=_principal(outsider, tenant_a), query="anything", k=5)
+
+    assert store.allow is not None
+    assert coll not in store.allow.granted_collection_ids
 
 
 async def test_empty_group_set_degrades_to_user_only_grants(

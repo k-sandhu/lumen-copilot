@@ -3336,29 +3336,47 @@ class GroupRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalars().one_or_none()
         if row is not None:
             return _to_group(row)
-        return await self.create(name=SYSTEM_GROUP_NAME, created_by=None, kind=GroupKind.SYSTEM)
+
+        # Insert conflict-ignoring, then re-read. A plain INSERT would abort the
+        # whole transaction on the partial unique index when two first-time
+        # requests for the same tenant race, surfacing as a 500 on an ordinary
+        # GET. DO NOTHING lets the loser fall through to the winner's row.
+        values = {
+            "id": uuid_mod.uuid4(),
+            "tenant_id": self._tenant_id,
+            "name": SYSTEM_GROUP_NAME,
+            "kind": GroupKind.SYSTEM.value,
+            "created_by": None,
+        }
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        await self._session.execute(insert(models.Group).values(**values).on_conflict_do_nothing())
+        await self._session.flush()
+        return _to_group((await self._session.execute(stmt)).scalars().one())
 
     async def add_member(self, *, group_id: UUID, user_id: UUID, added_by: UUID | None) -> bool:
         """Add a user to a group. Idempotent — ``False`` if already a member."""
-        existing = await self._session.execute(
-            select(models.GroupMember.id).where(
-                models.GroupMember.tenant_id == self._tenant_id,
-                models.GroupMember.group_id == group_id,
-                models.GroupMember.user_id == user_id,
-            )
-        )
-        if existing.scalars().one_or_none() is not None:
-            return False
-        self._session.add(
-            models.GroupMember(
-                tenant_id=self._tenant_id,
-                group_id=group_id,
-                user_id=user_id,
-                added_by=added_by,
-            )
+        # Conflict-ignoring insert rather than check-then-add: two concurrent
+        # "add the same user" requests would both see no row, and the loser's
+        # unique violation on (group_id, user_id) would abort the transaction —
+        # a 500 where the contract promises an idempotent 204. The rowcount says
+        # whether THIS request inserted, so only the winner emits the audit.
+        values = {
+            "id": uuid_mod.uuid4(),
+            "tenant_id": self._tenant_id,
+            "group_id": group_id,
+            "user_id": user_id,
+            "added_by": added_by,
+        }
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        result = await self._session.execute(
+            insert(models.GroupMember)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["group_id", "user_id"])
         )
         await self._session.flush()
-        return True
+        return bool(result.rowcount)
 
     async def remove_member(self, *, group_id: UUID, user_id: UUID) -> bool:
         """Remove a user from a group; ``False`` if they were not a member."""

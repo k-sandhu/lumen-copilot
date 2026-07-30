@@ -33,7 +33,10 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
     every source add / sync / delete (``source.*``), and CC-1 / issue #18 (explicit
     ACL grants, spec 0004 §2.2) audits every share grant / revoke
     (``permission.granted`` / ``permission.revoked``); the per-tenant secrets vault
-    (issue #209) audits every credential create / access / delete (``secret.*``).
+    (issue #209) audits every credential create / access / delete (``secret.*``);
+    ADR-0022 §2 (the group access model) audits every group create / rename /
+    delete and every membership change (``group.*``) — a change to *who can see
+    what* has to be provable after the fact.
     """
     assert {a.value for a in AuditAction} == {
         "auth.login",
@@ -57,6 +60,11 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         # Explicit ACL grants (CC-1 / issue #18, spec 0004 §2.2) — additive.
         "permission.granted",
         "permission.revoked",
+        "group.created",
+        "group.updated",
+        "group.deleted",
+        "group.member_added",
+        "group.member_removed",
         # Admin per-tenant settings write (issue #148) — additive; the first
         # /admin write, a reversible T1 action audited like every consequential
         # action (mission filter #4 "auditable").
