@@ -14,6 +14,7 @@ calls to satisfy the "auditable" mission filter.
 
 from __future__ import annotations
 
+import pathlib
 import uuid
 from collections.abc import AsyncIterator
 
@@ -25,7 +26,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import models
 from app.db.base import Base
-from app.db.repositories import AuditEventRepository
+from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor, AuditEnvelopeError
 from app.domain.entities import AuditOutcome
 from app.services.audit import AuditSink
@@ -290,7 +291,7 @@ def test_sink_has_no_update_or_delete_method() -> None:
 # --- the `source_ip` sentinel: why background audit writes used to roll back ---
 
 
-async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
+async def test_a_background_sentinel_becomes_a_system_origin_not_an_inet_value(
     session: AsyncSession,
 ) -> None:
     """A background task's sentinel must not be handed to an ``INET`` column.
@@ -303,8 +304,8 @@ async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
     transaction) but never a summary or a coverage cursor, and `session.summarized` was
     never written once.
 
-    The sentinel is preserved in metadata rather than dropped: the trail still records
-    what the caller stated, and `actor` already says it was the system.
+    The fact the sentinel was carrying — "no client did this" — is not dropped. It
+    moves to `source_origin`, where it is typed, queryable, and constrained.
     """
     tenant_id = uuid.uuid4()
     sink = AuditSink(AuditEventRepository(session, tenant_id))
@@ -319,9 +320,9 @@ async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
         source_ip="system",
     )
 
-    # Nothing that is not an address reaches the column.
+    # Nothing that is not an address reaches the column…
     assert event.source_ip is None
-    # …but the trail keeps what the caller actually stated.
+    # …and the fact it stood for is recorded in its own right.
     assert event.source_origin == "system"
 
 
@@ -483,11 +484,11 @@ async def test_the_database_refuses_a_pair_that_contradicts_itself(
 ) -> None:
     """The origin/address agreement is a constraint, not a convention.
 
-    `AuditEventRepository.record` cannot currently produce a contradictory pair, but
-    it is not the only thing that will ever write this table — a later writer, a
-    backfill, or a hand-run repair could. Pinning the rule in the schema means such a
-    write fails loudly at the boundary instead of quietly filing a person's action as
-    the platform's (or the reverse).
+    The test above proves `record` no longer produces a contradictory pair — it did
+    once, for every caller that passed no address at all. But `record` is not the only
+    thing that will ever write this table: a later writer, a backfill, or a hand-run
+    repair could. Pinning the rule in the schema means such a write fails loudly at the
+    boundary instead of quietly filing a person's action as the platform's.
     """
     tenant_id = uuid.uuid4()
     for origin, ip in (("client", None), ("system", "203.0.113.10")):
@@ -508,3 +509,66 @@ async def test_the_database_refuses_a_pair_that_contradicts_itself(
         with pytest.raises(IntegrityError):
             await session.flush()
         await session.rollback()
+
+
+@pytest.mark.parametrize(
+    "absent",
+    [None, "", "   "],
+    ids=["none", "empty", "whitespace"],
+)
+async def test_no_address_at_all_is_unknown_and_not_a_contradictory_client(
+    session: AsyncSession, absent: str | None
+) -> None:
+    """The regression that round 2 caught: absent is not the same as "a client".
+
+    `record(source_ip=None)` is not hypothetical — `/auth/login`, `/auth/refresh` and
+    `/auth/logout` call the repository DIRECTLY (bypassing the sink, and so bypassing
+    the envelope's non-empty check), passing `request.client.host if request.client
+    else ...`. `request.client` is None whenever uvicorn is bound to a UNIX socket
+    behind nginx, which is the same AF_UNIX topology `unknown` was introduced for.
+
+    The first version of this change inferred the origin from "no sentinel was
+    returned", which absent input satisfies just as a real address does — so it wrote
+    `client` with a NULL address, the one pair the CHECK constraint forbids. On a
+    socket-bound deployment that would have aborted the login transaction the audit
+    write was recording, and nobody could sign in: the exact failure this whole change
+    exists to remove, relocated from Celery to the front door.
+
+    No existing test could catch it, because httpx's ASGI transport always populates
+    `scope["client"]` — so the suite never once exercised the branch production takes.
+    """
+    # Deliberately NOT through `AuditSink.emit`: the envelope refuses an empty
+    # `source_ip`, so the sink would mask this. `AuthService` calls the repository
+    # directly — that is the unguarded path production actually takes, and the reason
+    # this survived a round of review.
+    repo = AuditEventRepository(session, (await TenantRepository(session).create(name="Acme")).id)
+    event = await repo.record(
+        actor_id=None,
+        action=AuditAction.AUTH_LOGIN.value,
+        resource_type="session",
+        resource_id=str(uuid.uuid4()),
+        outcome=AuditOutcome.ALLOWED,
+        request_id="req",
+        source_ip=absent,
+    )
+    # `unknown`, because something asked for this — we just could not see from where.
+    assert event.source_origin == "unknown"
+    assert event.source_ip is None
+    # And it actually reaches the table: the constraint is satisfied, not merely dodged.
+    await session.flush()
+
+
+async def test_the_auth_routes_no_longer_send_a_bare_none(session: AsyncSession) -> None:
+    """Defence in depth: fix the writer AND stop the outlier caller.
+
+    `record` now handles a missing address correctly, so this is belt-and-braces — but
+    `auth.py` was the ONLY router passing `None` where the other fourteen pass
+    `"unknown"`, and that inconsistency is what routed production down an untested
+    branch. Pinned as source text because the alternative (spinning up a socket-bound
+    server) tests the transport rather than the decision.
+    """
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "auth.py"
+    ).read_text(encoding="utf-8")
+    assert "request.client else None" not in source
+    assert source.count('request.client else "unknown"') == 3

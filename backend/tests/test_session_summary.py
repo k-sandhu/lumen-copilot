@@ -958,3 +958,46 @@ async def test_a_genuine_summary_is_still_accepted(
     async with ctx.sessionmaker() as session:
         row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None and row.covers_through_message_id == ctx.message_ids[9]
+
+
+class _EmptyGateway(_GarbageGateway):
+    """A route that returns nothing at all — a truncated stream, a filtered response."""
+
+    payload = "   "
+
+
+async def test_an_empty_completion_is_as_expensive_as_a_refusal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit beside the quality gate had the same hole, and round 2 found it.
+
+    `_record_summary_spend` was wired to the implausible-summary branch alone. An empty
+    completion returned bare one line earlier: the prompt tokens were still paid, the
+    cursor still did not advance, so the same batch was re-sent on every answer — the
+    identical invisible-spend-plus-forever-retry the refusal path exists to close, left
+    open on the adjacent branch. A fix that covers one exit and not its neighbour is not
+    a fix; it just moves where the money disappears.
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _EmptyGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_empty_summary"
+
+    async with ctx.sessionmaker() as session:
+        usage = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert usage and usage[-1].total_tokens == 70, "an empty completion was billed to nobody"
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        refusals = [
+            e for e in recent if e.action == "session.summarized" and e.metadata.get("refused")
+        ]
+        assert refusals, "the empty completion was invisible in the audit trail"
+        assert refusals[0].outcome == "error"
+        assert "empty" in refusals[0].metadata["refused"]
+        # And the turns it failed to summarise are still riding verbatim.
+        summary = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
+            ctx.session_id
+        )
+        assert summary is None or summary.covers_through_message_id is None

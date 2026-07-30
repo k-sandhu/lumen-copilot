@@ -222,6 +222,42 @@ _SUMMARY_MULTI_TURN_MIN_CHARS = 32
 _MULTI_TURN_THRESHOLD = 4
 
 
+async def _refuse_summary(
+    session: AsyncSession,
+    tenant_id: UUID,
+    session_id: UUID,
+    completion: Completion,
+    route: ModelRoute,
+    *,
+    covered: int,
+    reason: str,
+) -> None:
+    """Record the spend and audit the refusal for a summary we are NOT keeping.
+
+    Every non-advancing exit needs this, not just the quality gate. The completion was
+    really paid for, and because the cursor does not advance the SAME batch is rebuilt
+    and re-sent on the next answer — so a tenant pinned to a junk route pays a full
+    summariser prompt per answer, forever. A structlog line does not cover it: spec
+    0004 §2.4 explicitly separates ops telemetry from the product audit trail, and
+    ADR-0016 §2.6 requires no invisible spend.
+
+    Round 2 found the first version of this wired to the quality gate ALONE, leaving
+    the two empty-completion exits beside it silently free — the same hole, one line
+    over.
+    """
+    await _record_summary_spend(session, tenant_id, session_id, completion, route)
+    await AuditSink(AuditEventRepository(session, tenant_id)).emit(
+        action=AuditAction.SESSION_SUMMARIZED,
+        actor=AuditActor.system(),
+        resource_type="session",
+        resource_id=str(session_id),
+        outcome=AuditOutcome.ERROR,
+        request_id="summarize-task",
+        source_ip="system",
+        metadata={"covered_messages": covered, "refused": reason, "model": route.model},
+    )
+
+
 async def _record_summary_spend(
     session: AsyncSession,
     tenant_id: UUID,
@@ -407,6 +443,15 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         )
         summary_text = completion.content.strip()
         if not summary_text:
+            await _refuse_summary(
+                session,
+                tenant_id,
+                session_id,
+                completion,
+                route,
+                covered=len(to_cover),
+                reason="the model returned an empty completion",
+            )
             return "skipped_empty_summary"
         boundary = to_cover[-1]
         # Names the summary may mention (#446 finding 1): the covered turns'
@@ -424,6 +469,15 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # guidance; this windowed match is the deterministic backstop.
         summary_text = _redact_cited_snippets(summary_text, batch_snippets)
         if not summary_text.strip():
+            await _refuse_summary(
+                session,
+                tenant_id,
+                session_id,
+                completion,
+                route,
+                covered=len(to_cover),
+                reason="nothing survived redaction (the completion was only cited text)",
+            )
             return "skipped_empty_summary"
         # QUALITY gate, AFTER the leak guard so redaction always wins. Accepting a
         # bad completion is not a no-op: the upsert below advances the coverage
@@ -449,20 +503,14 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             # tenant pinned to a junk route pays a full summariser prompt per answer,
             # forever, with nothing in `llm_usage` or `audit_events` to find it by
             # (ADR-0016 §2.6: no invisible spend).
-            await _record_summary_spend(session, tenant_id, session_id, completion, route)
-            await AuditSink(AuditEventRepository(session, tenant_id)).emit(
-                action=AuditAction.SESSION_SUMMARIZED,
-                actor=AuditActor.system(),
-                resource_type="session",
-                resource_id=str(session_id),
-                outcome=AuditOutcome.ERROR,
-                request_id="summarize-task",
-                source_ip="system",
-                metadata={
-                    "covered_messages": len(to_cover),
-                    "refused": implausible,
-                    "model": route.model,
-                },
+            await _refuse_summary(
+                session,
+                tenant_id,
+                session_id,
+                completion,
+                route,
+                covered=len(to_cover),
+                reason=implausible,
             )
             return "skipped_implausible_summary"
         accepted, updated = await summaries.upsert_summary(
@@ -473,7 +521,10 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             mentioned_documents=mentioned,
         )
         if not accepted:
-            # A racing task already advanced further — nothing to audit.
+            # A racing task already advanced further, so this is not an error and gets
+            # no `outcome=ERROR` event — but the completion was still paid for, and an
+            # unrecorded token spend is invisible spend whoever won the race.
+            await _record_summary_spend(session, tenant_id, session_id, completion, route)
             return "skipped_stale_coverage"
         # INV-6: the summarization is an audited write of conversational state
         # (counts + version only — never the summary text in metadata).
