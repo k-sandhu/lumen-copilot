@@ -42,6 +42,11 @@ _FIXTURE_URL = f"https://{_FIXTURE_HOST}/mcp"
 _PUBLIC_IP = "93.184.216.34"
 
 
+async def _throttled() -> bool:
+    """An always-throttling rate-limit check (awaitable, #527)."""
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _stub_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve the fixture host to a PUBLIC IP so the SSRF guard admits the connect.
@@ -291,7 +296,7 @@ async def test_rate_limit_refuses_when_window_exhausted() -> None:
             connect_timeout_seconds=5.0,
             call_timeout_seconds=5.0,
             user_agent="LumenCopilot-Test/1",
-            rate_limit=lambda: False,  # always throttle
+            rate_limit=_throttled,  # always throttle
             inner_transport=fixture.inner_transport,
         )
         result = await client.call_tool(_config(), "echo", {"text": "x"})

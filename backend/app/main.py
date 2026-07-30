@@ -37,6 +37,7 @@ from app.db.session import dispose_engine
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
 from app.search import aclose_search_store
+from app.tasks.rate_limit import aclose_async_rate_limit_pools
 
 log = get_logger(__name__)
 
@@ -103,6 +104,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Ordered after the answer drain so a producer still finishing its terminal
     # envelope is not publishing into a closed client.
     await aclose_backplane()
+    # Same rule again for the per-tenant rate limiter's pooled async client
+    # (#527): created lazily on the serving loop by the first request-path
+    # admission check, and process-wide rather than owned by any one limiter
+    # instance, so the lifespan is what closes it.
+    await aclose_async_rate_limit_pools()
     await dispose_engine()
     log.info("shutdown.complete")
 

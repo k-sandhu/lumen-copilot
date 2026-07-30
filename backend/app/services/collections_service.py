@@ -198,7 +198,14 @@ class CollectionsService:
         has_more = len(rows) > page_size
         page = rows[:page_size]
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
-        items = [await self._view(c) for c in page]
+        # One grouped COUNT for the whole page (#526) — see the same change in
+        # ``document_service``. An empty collection is absent from the mapping
+        # and defaults to 0, exactly as the single-id count returns.
+        document_counts = await self._repo.count_documents_for([c.id for c in page])
+        items = [
+            CollectionView(collection=c, document_count=document_counts.get(c.id, 0))
+            for c in page
+        ]
         return CollectionPage(items=items, next_cursor=next_cursor)
 
     async def get(self, collection_id: UUID) -> CollectionView | None:

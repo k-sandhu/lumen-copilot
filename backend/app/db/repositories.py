@@ -1222,6 +1222,28 @@ class CollectionRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def count_documents_for(self, collection_ids: Sequence[UUID]) -> dict[UUID, int]:
+        """Document counts per collection, batched (one GROUP BY — no N+1, #526).
+
+        The list projection needs a ``document_count`` for every row; resolved
+        one id at a time that is a serial aggregate per collection in the page.
+        Tenant-scoped (INV-1). An empty collection is simply **absent**, and the
+        caller defaults to ``0`` — the same answer :meth:`count_documents` gives.
+        The single-id form stays for the one-collection paths.
+        """
+        if not collection_ids:
+            return {}
+        stmt = (
+            select(models.Document.collection_id, func.count())
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.collection_id.in_(list(collection_ids)),
+            )
+            .group_by(models.Document.collection_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: int(row[1]) for row in rows}
+
     async def update(
         self,
         collection_id: UUID,
@@ -1937,6 +1959,30 @@ class DocumentRepository(_TenantScopedRepository):
             )
         )
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def count_chunks_for(self, document_ids: Sequence[UUID]) -> dict[UUID, int]:
+        """Chunk counts per document, batched (one GROUP BY — no N+1, #526).
+
+        The list projection needs a ``chunk_count`` for every row; resolved one
+        id at a time that is a serial aggregate over ``chunks`` — the largest
+        table — per document in the page. Tenant-scoped (INV-1). A document with
+        no chunks is simply **absent**, and the caller defaults to ``0`` — the
+        same answer :meth:`count_chunks` gives, since a document only gains rows
+        once ingestion (#21) runs. The single-id form stays for the one-document
+        paths.
+        """
+        if not document_ids:
+            return {}
+        stmt = (
+            select(models.Chunk.document_id, func.count())
+            .where(
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Chunk.document_id.in_(list(document_ids)),
+            )
+            .group_by(models.Chunk.document_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {row[0]: int(row[1]) for row in rows}
 
     async def count_by_storage_key(self, storage_key: str) -> int:
         """Count this tenant's documents backed by ``storage_key``.

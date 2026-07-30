@@ -20,14 +20,26 @@ Fail-open on a Redis outage: if the counter store is unreachable the limiter
 admits the sync (a transient Redis blip must not strand every tenant's syncs);
 the SSRF guard at fetch time is the authoritative safety control, the rate limit
 is an availability guard layered on top.
+
+**Two entry points, one counter (#527).** The limiter began life on the Celery
+sync-enqueue boundary, where blocking is free, so :meth:`try_acquire` opens a
+blocking connection per call. Request-path callers arrived later — the
+``web_search`` tool and MCP egress both admission-check inside a live chat turn —
+and that shape parks the serving event loop on a TCP connect plus ``INCR`` for
+every tool call. Those callers use :meth:`try_acquire_async`, which is
+non-blocking and **pools** its connection per event loop. Both methods count in
+the same keyspace with the same window, so a tenant's budget is shared however it
+is spent.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, cast
+import asyncio
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 import redis
+import redis.asyncio as aioredis
 import structlog
 
 _log = structlog.get_logger(__name__)
@@ -37,6 +49,46 @@ _log = structlog.get_logger(__name__)
 _SOCKET_TIMEOUT_SECONDS = 2.0
 
 _KEY_PREFIX = "lumen:ratelimit:source_sync"
+
+# Process-wide async clients, keyed by ``(redis_url, owning event loop)``.
+#
+# Deliberately module-level rather than per-instance: every caller builds a
+# *fresh* limiter per request or per run (``build_web_search_service``,
+# ``build_mcp_servers_service``), so a pool owned by the instance would still
+# open a connection per search and the pooling would be worth nothing. The cache
+# has to outlive the limiter for the connection to be reused at all.
+#
+# The loop is part of the **key**, not a validity stamp on a URL-keyed entry: a
+# client's connections belong to the loop that opened them (#140), and Celery
+# runs every task on a fresh ``asyncio.run`` loop. Keying on the loop means a
+# second loop gets its own client instead of silently displacing — and orphaning
+# — the first one's.
+_ASYNC_POOLS: dict[tuple[str, asyncio.AbstractEventLoop], Any] = {}
+
+
+async def aclose_async_rate_limit_pools() -> None:
+    """Release pooled clients belonging to the **running** loop.
+
+    Called from the app lifespan and from :func:`app.tasks.runner.run_task`, so
+    every loop retires its own clients before it closes — the discipline
+    ``dispose_engine`` already follows for the DB engine (#140).
+
+    Entries owned by a loop that has since closed are dropped *without* closing:
+    their sockets died with that loop, and awaiting ``aclose`` on them from
+    *this* loop would touch a foreign one. Dropping the reference is what stops
+    the cache retaining dead loops and their clients.
+    """
+    loop = asyncio.get_running_loop()
+    for key in list(_ASYNC_POOLS):
+        _url, owner = key
+        if owner is loop:
+            client = _ASYNC_POOLS.pop(key)
+            try:
+                await client.aclose()
+            except Exception:  # pragma: no cover - shutdown must not raise
+                _log.warning("rate_limit.pool_close_failed")
+        elif owner.is_closed():
+            _ASYNC_POOLS.pop(key, None)
 
 
 class RateLimiter(Protocol):
@@ -48,6 +100,17 @@ class RateLimiter(Protocol):
     """
 
     def try_acquire(self, tenant_id: UUID) -> bool: ...
+
+
+class AsyncRateLimiter(Protocol):
+    """The same admission check for callers on an event loop (#527).
+
+    Separate from :class:`RateLimiter` rather than an added method on it, so the
+    Celery callers and their fakes keep a purely synchronous seam and only the
+    request-path services depend on the awaitable one.
+    """
+
+    async def try_acquire_async(self, tenant_id: UUID) -> bool: ...
 
 
 class RedisFixedWindowRateLimiter:
@@ -66,6 +129,7 @@ class RedisFixedWindowRateLimiter:
         max_per_window: int,
         window_seconds: int,
         key_prefix: str = _KEY_PREFIX,
+        async_client_factory: Any | None = None,
     ) -> None:
         self._redis_url = redis_url
         self._max_per_window = max_per_window
@@ -74,6 +138,101 @@ class RedisFixedWindowRateLimiter:
         # namespace; other per-tenant limiters (run enqueue, web search) pass their
         # own distinct prefix so their windows do not collide (ADR-0015 §5).
         self._key_prefix = key_prefix
+        # The pooled async client and the loop it was built on. ``None`` until the
+        # first async call, so construction stays I/O-free and loop-free and the
+        # limiter can still be built at import/config time.
+        self._async_client_factory = async_client_factory
+        self._pool: Any | None = None
+        self._pool_loop: asyncio.AbstractEventLoop | None = None
+
+    def _new_async_client(self) -> Any:
+        if self._async_client_factory is not None:
+            return self._async_client_factory()
+        return aioredis.from_url(  # type: ignore[no-untyped-call]
+            self._redis_url,
+            socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
+            socket_timeout=_SOCKET_TIMEOUT_SECONDS,
+        )
+
+    def _async_client(self) -> Any:
+        """The pooled async client for the RUNNING loop, created on first use.
+
+        An **injected** factory (tests) stays per-instance so cases cannot leak
+        clients into each other. The real client comes from the process-wide
+        :data:`_ASYNC_POOLS`, because production builds a fresh limiter per
+        request — see that cache's note.
+        """
+        loop = asyncio.get_running_loop()
+        if self._async_client_factory is not None:
+            if self._pool is None or self._pool_loop is not loop:
+                self._pool = self._async_client_factory()
+                self._pool_loop = loop
+            return self._pool
+
+        key = (self._redis_url, loop)
+        client = _ASYNC_POOLS.get(key)
+        if client is None:
+            client = self._new_async_client()
+            _ASYNC_POOLS[key] = client
+        return client
+
+    async def try_acquire_async(self, tenant_id: UUID) -> bool:
+        """:meth:`try_acquire` for callers on an event loop (#527).
+
+        Identical counter, keyspace, window and fail-open behaviour — the only
+        difference is that it neither blocks the loop nor opens a fresh
+        connection per call. Request-path callers (``web_search``, MCP egress)
+        must use this; the blocking form would park the whole worker on a TCP
+        connect plus ``INCR`` for every tool invocation.
+        """
+        key = f"{self._key_prefix}:{tenant_id}"
+        client: Any | None = None
+        try:
+            client = self._async_client()
+            count = int(await client.incr(key))
+            if count == 1:
+                # First hit in this window — arm the expiry so the window rolls.
+                await client.expire(key, self._window_seconds)
+        except redis.RedisError as exc:
+            # Same fail-open as the sync path: a transient counter-store outage
+            # must not strand callers; the SSRF guard stays authoritative.
+            _log.warning(
+                "source_sync.rate_limit_unavailable",
+                tenant_id=str(tenant_id),
+                error=type(exc).__name__,
+            )
+            self._retire(client)
+            return True
+        return count <= self._max_per_window
+
+    def _retire(self, client: Any) -> None:
+        """Drop a client that just failed, touching nobody else's.
+
+        Strictly scoped so one failure cannot cascade: an injected client stays
+        instance-local, and a pooled one is evicted only when the cache still
+        holds *that exact* client for *this* loop. Without both checks a failing
+        test fake could evict the real global client, and one loop's outage could
+        drop a healthy client another loop had just installed.
+        """
+        if self._pool is client:
+            self._pool = None
+            self._pool_loop = None
+        if client is None or self._async_client_factory is not None:
+            return
+        key = (self._redis_url, asyncio.get_running_loop())
+        if _ASYNC_POOLS.get(key) is client:
+            del _ASYNC_POOLS[key]
+
+    async def aclose(self) -> None:
+        """Release this instance's injected client, if it built one (tests).
+
+        The production client lives in the process-wide pool; the app lifespan
+        releases that through :func:`aclose_async_rate_limit_pools`, since no one
+        limiter instance owns it.
+        """
+        pool, self._pool, self._pool_loop = self._pool, None, None
+        if pool is not None:
+            await pool.aclose()
 
     def try_acquire(self, tenant_id: UUID) -> bool:
         """Admit (``True``) or throttle (``False``) one fetch for ``tenant_id``.
@@ -114,4 +273,9 @@ class RedisFixedWindowRateLimiter:
         return count <= self._max_per_window
 
 
-__all__ = ["RateLimiter", "RedisFixedWindowRateLimiter"]
+__all__ = [
+    "AsyncRateLimiter",
+    "RateLimiter",
+    "RedisFixedWindowRateLimiter",
+    "aclose_async_rate_limit_pools",
+]
