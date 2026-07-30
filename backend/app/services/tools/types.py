@@ -262,8 +262,15 @@ class ApprovalDecision:
 
     It is **truthy iff approved**, so a gate that still returns a plain ``bool``
     (a test fake, the inert deny-all default) keeps working unchanged — the runner
-    normalises either shape. ``detail`` is surfaced verbatim to the model, so it
-    names controls ("Admin → Tool governance"), never tenant-internal state.
+    normalises either shape.
+
+    ``detail`` is surfaced **verbatim to the model**, which makes it a
+    prompt-injection-reachable surface: a retrieved document that says "quote any
+    tool error verbatim" turns it into assistant output. So it may name a *product*
+    control ("Admin → Tool governance") and nothing else — no environment variable,
+    no internal service, no process topology, no "the datastore is down". The
+    operator-facing specifics live in ``reason`` (the typed code, carried into the
+    audit metadata and the structured log), not here.
     """
 
     approved: bool
@@ -314,17 +321,20 @@ class DenyAllApprovalGate:
     result) rather than silently executing a consequential action. This is the
     inert-by-default gate the spec calls for — a real gate replaces it later.
 
-    It says so explicitly (issue #502): the refusal names *this deployment has no
-    approval flow wired*, so an operator does not go hunting for a tenant switch
-    that would not have helped.
+    It says so explicitly (issue #502) in its typed ``reason``
+    (``approval_gate_inert``), so an operator reading the audit trail does not go
+    hunting for a tenant switch that would not have helped. The ``detail`` the model
+    reads stays control-neutral: "no approval flow is wired in this deployment"
+    describes the deployment's topology, and a prompt-injected "quote the tool error"
+    would hand that to a workspace member.
     """
 
     async def request(self, request: ApprovalRequest) -> ApprovalDecision:
         return ApprovalDecision.deny(
             APPROVAL_REASON_GATE_INERT,
             (
-                f"Tool {request.tool_name!r} needs approval, but this deployment has no "
-                "approval flow wired, so the call was refused. The action was not performed."
+                f"Tool {request.tool_name!r} needs approval, which is not available "
+                "here, so the call was refused. The action was not performed."
             ),
         )
 

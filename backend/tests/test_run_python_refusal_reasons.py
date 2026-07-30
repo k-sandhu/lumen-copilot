@@ -10,6 +10,14 @@ DISTINCT, typed, actionable reason that reaches
   ``reason_code`` metadata),
 * (iii) a structured log (asserted at the audit/reason-code level here).
 
+Surfaces (i) and (ii) get **different sentences**. (ii) is behind an operator
+boundary and names the exact control; (i) is prompt-injection-reachable — a
+retrieved document that says "quote any tool error verbatim" turns it into
+assistant output — so it names a product control at most, never an environment
+variable, an internal service, process topology, or a datastore outage. The
+``Disclosure`` section at the bottom asserts that over every model-visible refusal
+this module can produce.
+
 The four gates:
 
 1. the **tenant tool policy** (``services/tools/gate.py``) — absent row, disabled,
@@ -71,7 +79,13 @@ from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 from app.services.audit import AuditSink
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import ApprovalRequest, ToolContext, ToolDefinition
+from app.services.tools.types import (
+    ApprovalRequest,
+    DenyAllApprovalGate,
+    ToolContext,
+    ToolDefinition,
+)
+from tests._disclosure import assert_control_neutral
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -374,8 +388,13 @@ async def test_deploy_kill_switch_names_sandbox_enabled(world: _World) -> None:
 
     assert status is CodeRunStatus.DENIED
     assert metadata["reason_code"] == SANDBOX_REASON_DEPLOY_DISABLED
-    # Names the exact switch an operator flips (a deploy env var, not an admin toggle).
-    assert "SANDBOX_ENABLED" in stderr
+    # The AUDIT names the exact switch an operator flips (a deploy env var, not an
+    # admin toggle) …
+    assert "SANDBOX_ENABLED" in str(metadata["reason"])
+    # … and the model-visible stderr does not: it is the tool reply, so a
+    # prompt-injected "quote the tool error" must not recite the kill-switch.
+    assert "SANDBOX_ENABLED" not in stderr
+    assert_control_neutral(stderr, where="code_runs.stderr (deploy kill-switch)")
 
 
 async def test_absent_tenant_sandbox_policy_names_the_workspace_policy(
@@ -387,7 +406,11 @@ async def test_absent_tenant_sandbox_policy_names_the_workspace_policy(
     assert status is CodeRunStatus.DENIED
     assert metadata["reason_code"] == SANDBOX_REASON_POLICY_ABSENT
     assert "SANDBOX_ENABLED" not in stderr  # NOT the deploy switch's fault
-    assert "sandbox" in stderr.lower()
+    # The model-visible line names the product control an admin uses, and only that.
+    assert "admin" in stderr.lower()
+    assert_control_neutral(stderr, where="code_runs.stderr (absent workspace policy)")
+    # The operator sentence stays specific about which policy row is missing.
+    assert "sandbox policy" in str(metadata["reason"]).lower()
 
 
 async def test_disabled_tenant_sandbox_policy_is_distinct_from_an_absent_one(
@@ -413,11 +436,16 @@ async def test_unreachable_runner_names_the_runner_not_a_policy(world: _World) -
     )
     status, stderr, metadata = await _refuse(world, runner=runner)
 
-    # An unreachable dependency is a FAILED run (not a policy denial) — but it must
-    # say WHICH dependency, so nobody hunts for a policy switch that is already on.
+    # An unreachable dependency is a FAILED run (not a policy denial) — but the
+    # AUDIT must say WHICH dependency, so nobody hunts for a policy switch that is
+    # already on.
     assert status is CodeRunStatus.FAILED
     assert metadata["reason_code"] == SANDBOX_REASON_RUNNER_UNAVAILABLE
-    assert "unreachable" in stderr.lower()
+    assert "sandbox-runner" in str(metadata["reason"])
+    # The model, meanwhile, learns only that the sandbox is unavailable — naming the
+    # internal service AND that it is down is a live topology signal.
+    assert "sandbox-runner" not in stderr
+    assert_control_neutral(stderr, where="code_runs.stderr (runner unreachable)")
 
 
 async def test_the_four_gates_give_pairwise_distinct_reasons(world: _World) -> None:
@@ -438,3 +466,100 @@ async def test_the_four_gates_give_pairwise_distinct_reasons(world: _World) -> N
     }
     assert len(tool_policy) == 4
     assert reasons.isdisjoint(tool_policy - {APPROVAL_REASON_APPROVAL_UNAVAILABLE})
+
+
+# ---------------------------------------------------------------------------
+# Disclosure — what the MODEL is allowed to be told (issue #502)
+# ---------------------------------------------------------------------------
+
+
+async def test_no_approval_gate_detail_discloses_deployment_infrastructure(
+    world: _World,
+) -> None:
+    """Every ``ApprovalDecision.detail`` is fed verbatim to the model — so scan them all.
+
+    Covers all four :class:`PolicyApprovalGate` outcomes plus the inert
+    :class:`DenyAllApprovalGate`. The unreadable-policy branch used to say "Retry
+    once the policy store is reachable" (a live datastore-outage signal) and the
+    inert gate used to say "this deployment has no approval flow wired" (process
+    topology); both are reachable by a prompt-injected "quote the tool error".
+    """
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+    details: dict[str, str] = {}
+
+    # (a) no admin row at all.
+    absent = await gate.request(_approval_request(world))
+    details[APPROVAL_REASON_POLICY_ABSENT] = absent.detail or ""
+
+    # (b) an explicitly disabled row.
+    policies = TenantToolPolicyRepository(world.session, world.tenant_id)
+    await policies.upsert(
+        tool_name="run_python", enabled=False, requires_approval=True, updated_by=world.user_id
+    )
+    await world.session.commit()
+    disabled = await gate.request(_approval_request(world))
+    details[APPROVAL_REASON_POLICY_DISABLED] = disabled.detail or ""
+
+    # (c) enabled but still flagged "requires approval" (#500).
+    await policies.upsert(
+        tool_name="run_python", enabled=True, requires_approval=True, updated_by=world.user_id
+    )
+    await world.session.commit()
+    unavailable = await gate.request(_approval_request(world))
+    details[APPROVAL_REASON_APPROVAL_UNAVAILABLE] = unavailable.detail or ""
+
+    # (d) the policy could not be read at all (fail-closed).
+
+    class _BoomSession:
+        async def execute(self, *_: Any, **__: Any) -> Any:
+            raise RuntimeError("db is down")
+
+    unreadable = await PolicyApprovalGate(
+        _BoomSession(),  # type: ignore[arg-type]
+        tenant_id=world.tenant_id,
+    ).request(_approval_request(world))
+    details[APPROVAL_REASON_POLICY_UNREADABLE] = unreadable.detail or ""
+
+    # (e) the inert default gate.
+    inert = await DenyAllApprovalGate().request(_approval_request(world))
+    details["approval_gate_inert"] = inert.detail or ""
+
+    assert len(details) == 5
+    for reason, detail in details.items():
+        assert detail, f"gate {reason} produced no model-facing detail at all"
+        assert_control_neutral(detail, where=f"ApprovalDecision.detail ({reason})")
+
+
+async def test_every_sandbox_refusal_stderr_is_control_neutral(world: _World) -> None:
+    """The same scan over the real ``code_runs.stderr`` of each sandbox gate.
+
+    ``stderr`` is what ``run_python`` renders into the tool reply, so this is the
+    end-to-end form of the rule the message table asserts in
+    ``tests/test_code_execution_messages.py``.
+    """
+    seen: list[str] = []
+
+    # Gate 2 — the deploy kill-switch.
+    await _enable_tenant_sandbox(world)
+    await world.session.commit()
+    _, deploy_stderr, _ = await _refuse(world, deploy_enabled=False)
+    seen.append(deploy_stderr)
+
+    # Gate 4 — the runner is not there.
+    unreachable = _FakeRunner(
+        ensure_raises=DependencyError(
+            "sandbox runner unavailable", code="sandbox_runner_unavailable"
+        )
+    )
+    _, runner_stderr, _ = await _refuse(world, runner=unreachable)
+    seen.append(runner_stderr)
+
+    # Gate 3b — the workspace policy says no.
+    await _enable_tenant_sandbox(world, enabled=False)
+    await world.session.commit()
+    _, tenant_stderr, _ = await _refuse(world)
+    seen.append(tenant_stderr)
+
+    assert all(seen), "a refusal with an empty stderr tells the model nothing"
+    for value in seen:
+        assert_control_neutral(value, where="code_runs.stderr")

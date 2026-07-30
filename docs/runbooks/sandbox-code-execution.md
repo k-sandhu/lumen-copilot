@@ -16,18 +16,29 @@
 
 ## 0. The four independent gates
 
-A blocked run is always one of these. They are checked in this order and each is
-reported by its own name in the run's `stderr` (issue #502):
+A blocked run is always one of these. They are checked in this order, and each one
+records a distinct **`reason_code`** (issue #502):
 
-| # | Gate | Where | Symptom when it refuses |
+| # | Gate | Where | `reason_code` |
 |---|---|---|---|
-| 1 | `SANDBOX_ENABLED` — the deploy kill-switch | `.env`, needs an API + worker restart | "turned off for this deployment" |
-| 2 | Tenant sandbox policy `enabled` | Admin → Code execution | "no sandbox policy" / "switched off in this workspace" |
-| 3 | Tool policy for `run_python` | Admin → Tools; the assistant's allow-list (builder → *Tools*) | the tool is never offered to the model |
-| 4 | `sandbox-runner` reachable | compose `sandbox` profile | "the code sandbox service is unreachable" |
+| 1 | `SANDBOX_ENABLED` — the deploy kill-switch | `.env`, needs an API + worker restart | `sandbox_disabled_deploy` |
+| 2 | Tenant sandbox policy `enabled` | Admin → Code execution | `sandbox_policy_absent` / `sandbox_disabled_tenant` |
+| 3 | Tool policy for `run_python` | Admin → Tools; the assistant's allow-list (builder → *Tools*) | `tool_policy_absent` / `tool_policy_disabled` / `approval_required_unavailable` (the tool is simply never offered when the allow-list omits it) |
+| 4 | `sandbox-runner` reachable | compose `sandbox` profile | `sandbox_runner_unavailable` |
 
 Gate 4 also covers **a missing execution image**: the runner cannot launch what is
 not on the host daemon. Build it first (§1).
+
+> **Read the `reason_code`, not the run's `stderr`.** A refusal is written twice, on
+> purpose. The run's `stderr` is the tool reply the *model* reads and the user sees
+> in the transcript, so it is deliberately control-neutral — "Code execution is
+> turned off for this deployment. Ask an operator to enable it." It names no
+> environment variable, no internal service, and no restart step, because a
+> retrieved document can instruct the assistant to quote a tool error verbatim.
+> The operator sentence — the one that names `SANDBOX_ENABLED` or `sandbox-runner` —
+> goes to the structured log (`sandbox.run_denied` / `sandbox.session_start_failed`
+> / `sandbox.run_failed`, field `reason_code`) and to `audit_events.metadata`
+> (`reason_code` + `reason`). §5 shows the query.
 
 ## 1. Build the execution image (do this BEFORE enabling)
 
@@ -223,11 +234,20 @@ docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
 ```
 
 - `status=succeeded` with your output in `stdout` → all four gates are open.
-- `status=denied` → read `stderr`; it names the gate (§0).
-- `status=failed` with "the code sandbox service is unreachable" → the runner is
-  down, or the execution image is missing from the host daemon (§1). The runner
-  answers `503 sandbox execution image is not present on the host daemon` for the
-  second case, and never pulls the image to fix it for you.
+- `status=denied` or `status=failed` → the run's `stderr` is the model-facing line
+  and is deliberately non-specific (§0). The gate that refused is in the audit row:
+
+```bash
+docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
+  "select action, metadata->>'reason_code', metadata->>'reason'
+     from audit_events where resource_type = 'code_run'
+     order by created_at desc limit 5;"
+```
+
+- `reason_code=sandbox_runner_unavailable` → the runner is down, or the execution
+  image is missing from the host daemon (§1). The runner answers
+  `503 sandbox execution image is not present on the host daemon` for the second
+  case, and never pulls the image to fix it for you.
 - `status=succeeded` but a file you expected is missing, with *"Only part of the
   output directory was collected"* in `stderr` → the run wrote more than
   `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB). Collection is budgeted because the

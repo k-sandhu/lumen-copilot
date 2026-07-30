@@ -30,7 +30,11 @@ need four different fixes:
   must never read as "disabled": the admin *did* enable the tool.
 * Any error reading the policy (a DB failure) ⇒ **denied**
   (``tool_policy_unreadable``). The gate never lets a consequential action through
-  on a policy it could not read (fail-closed, INV-7).
+  on a policy it could not read (fail-closed, INV-7). The typed reason records the
+  fault for the operator; the ``detail`` the model reads says only "try again
+  shortly", because "the policy store is unreachable" is a live infrastructure
+  signal and every ``detail`` here is prompt-injection-reachable (see
+  ``domain/code_execution`` for the same split on the sandbox side).
 * An admin row with ``enabled=true AND requires_approval=false`` ⇒ **allowed** (the
   admin pre-approved it for the tenant).
 
@@ -92,8 +96,8 @@ class PolicyApprovalGate:
                 APPROVAL_REASON_POLICY_UNREADABLE,
                 (
                     f"Tool {tool!r} could not be checked against this workspace's tool "
-                    "policy, so it was refused rather than run unchecked. Retry once the "
-                    "policy store is reachable."
+                    "policy, so it was refused rather than run unchecked. Try again "
+                    "shortly."
                 ),
             )
         # Deny-by-default: no admin override ⇒ the tool's built-in default (a

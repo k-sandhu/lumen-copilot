@@ -29,6 +29,7 @@ from app.domain.code_execution import (
     SANDBOX_REASON_SESSION_REQUIRED,
     SANDBOX_REASON_TENANT_DISABLED,
     sandbox_reason_message,
+    sandbox_reason_public_message,
 )
 from app.domain.entities import (
     ArtifactProducedBy,
@@ -52,6 +53,24 @@ class PackagePolicyError(ValidationError):
     """A requested package is malformed or not admitted by the tenant policy."""
 
     code = "sandbox_package_denied"
+
+
+class SandboxDisabledError(ConflictError):
+    """Code execution is off — carrying WHICH switch said so (issue #502).
+
+    A plain :class:`~app.core.errors.ConflictError` loses the reason the policy
+    reader resolved, which matters twice: the HTTP surface renders only the public
+    ``detail``, and the execution path re-checks enablement a second time (inside
+    ``SandboxSessionService.ensure``) where a policy flipped mid-run would otherwise
+    be classified as an unexplained crash. ``sandbox_reason`` is the typed code
+    ``_failure_reason`` reads back out.
+    """
+
+    code = "code_execution_disabled"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(sandbox_reason_public_message(reason), code=self.code)
+        self.sandbox_reason = reason
 
 
 def _failure_reason(exc: BaseException) -> str:
@@ -397,20 +416,21 @@ class SandboxSessionService:
             raise NotFoundError("Chat session not found.")
 
     async def _require_enabled(self) -> None:
-        """Refuse a lifecycle action when code execution is off — saying which switch.
+        """Refuse a lifecycle action when code execution is off — carrying the reason.
 
         The error CODE stays ``code_execution_disabled`` (a frozen contract value);
-        issue #502 only makes the human ``detail`` specific, so the admin console
-        surfaces the deploy kill-switch and the tenant policy as different problems.
+        issue #502 adds the typed ``reason``, which is what an operator surface reads.
+        The ``detail`` is the **public** sentence: this error renders into an HTTP
+        problem body for any workspace member, so it may not name the deploy
+        kill-switch or the process topology (see ``domain/code_execution``).
         """
         policy = await SandboxPolicyReader(
             self._session, tenant_id=self._tenant_id, settings=self._settings
         ).resolve()
         if not policy.enabled:
-            raise ConflictError(
-                sandbox_reason_message(policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED),
-                code="code_execution_disabled",
-            )
+            reason = policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED
+            log.warning("sandbox.lifecycle_denied", reason_code=reason)
+            raise SandboxDisabledError(reason)
 
     def _spec(self, value: SandboxSession) -> SandboxSessionSpec:
         return SandboxSessionSpec(
@@ -504,12 +524,15 @@ class SandboxService:
         reason: str | None = None
         packages: tuple[str, ...] = ()
         denial: str | None = None
+        # Overrides the reason's stock operator sentence in the audit when the
+        # refusal knows something more specific (which package, and why).
+        operator_detail: str | None = None
         if not policy.enabled:
             reason = policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED
-            denial = sandbox_reason_message(reason)
+            denial = sandbox_reason_public_message(reason)
         elif run.session_id is None:
             reason = SANDBOX_REASON_SESSION_REQUIRED
-            denial = sandbox_reason_message(reason)
+            denial = sandbox_reason_public_message(reason)
         else:
             try:
                 # ``packages`` is what the runner must INSTALL — the requested
@@ -524,7 +547,12 @@ class SandboxService:
                 )
             except PackagePolicyError as exc:
                 reason = SANDBOX_REASON_PACKAGE_DENIED
-                denial = exc.detail or "A requested package is not allowed."
+                # The package refusal names the offending distribution and the
+                # allow-list that admits it — tenant product detail, not deployment
+                # infrastructure — so it is safe for the model AND is the most
+                # useful thing an operator can read (#504).
+                denial = exc.detail or sandbox_reason_public_message(reason)
+                operator_detail = denial
         if denial is not None:
             log.warning(
                 "sandbox.run_denied",
@@ -535,8 +563,9 @@ class SandboxService:
                 run.id,
                 status=CodeRunStatus.DENIED,
                 finished_at=datetime.now(UTC),
-                # The model-facing reply is this row's stderr, so the actionable
-                # sentence reaches the model and the transcript verbatim.
+                # This row's stderr IS the model-facing reply, so it carries the
+                # control-neutral sentence only. The operator sentence goes to the
+                # log line above and the audit metadata below (issue #502).
                 stderr=denial,
                 duration_ms=0,
             )
@@ -545,7 +574,11 @@ class SandboxService:
                 AuditAction.CODE_RUN_DENIED,
                 run.id,
                 AuditOutcome.DENIED,
-                {"reason": denial, "reason_code": reason},
+                {
+                    "reason": operator_detail
+                    or sandbox_reason_message(reason or SANDBOX_REASON_RUN_ERROR),
+                    "reason_code": reason,
+                },
             )
             return CodeRunStatus.DENIED
 
@@ -711,14 +744,16 @@ class SandboxService:
 
         An unreachable ``sandbox-runner`` is a **dependency** fault, not a policy
         denial, so the run stays ``failed`` — but it must say so, or an operator
-        whose four policy switches are all green has nothing left to look at.
+        whose four policy switches are all green has nothing left to look at. The
+        run's ``stderr`` is the model-facing reply, so it gets the control-neutral
+        sentence; the operator sentence rides in the audit metadata beside the code.
         """
         finished_at = datetime.now(UTC)
         terminal = await runs.mark_terminal(
             code_run_id,
             status=CodeRunStatus.FAILED,
             finished_at=finished_at,
-            stderr=sandbox_reason_message(reason),
+            stderr=sandbox_reason_public_message(reason),
             duration_ms=int((finished_at - started_at).total_seconds() * 1000),
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
@@ -727,7 +762,11 @@ class SandboxService:
             AuditAction.CODE_RUN_FINISHED,
             code_run_id,
             AuditOutcome.ERROR,
-            {"status": effective_status.value, "reason_code": reason},
+            {
+                "status": effective_status.value,
+                "reason_code": reason,
+                "reason": sandbox_reason_message(reason),
+            },
         )
         return effective_status
 

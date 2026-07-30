@@ -1,6 +1,6 @@
 """Typed refusal reasons for the code-execution sandbox (issue #502).
 
-A ``run_python`` submission can be refused by four **independent** switches, and
+A ``run_python`` submission can be refused by several **independent** switches, and
 before #502 all of them collapsed into one opaque "code execution is disabled"
 line — so an operator staring at a blocked run had no way to tell which control
 to flip. This module is the pure vocabulary that makes each refusal say *itself*:
@@ -15,7 +15,7 @@ to flip. This module is the pure vocabulary that makes each refusal say *itself*
 * :data:`SANDBOX_REASON_POLICY_UNREADABLE` — the policy could not be read, so the
   run was refused fail-closed (INV-7). An infrastructure fault, NOT a setting.
 * :data:`SANDBOX_REASON_RUNNER_UNAVAILABLE` — every policy admits the run but the
-  dedicated ``sandbox-runner`` service is unreachable. Not a policy at all.
+  dedicated runner service is unreachable. Not a policy at all.
 * :data:`SANDBOX_REASON_PACKAGE_DENIED` / :data:`SANDBOX_REASON_SESSION_REQUIRED` —
   the request itself is inadmissible (a package outside the tenant allow-list; a
   run with no parent chat session to own the reusable sandbox).
@@ -26,10 +26,26 @@ sandbox_policy_service.py`` must not import the ``app.sandbox`` package (that
 would close a services→sandbox→services cycle), while ``app.sandbox.service``
 consumes the reason the reader resolved.
 
-**Model-safe by construction.** Every message names a *control* ("the deployment's
-SANDBOX_ENABLED switch", "Admin → Code execution") and never tenant-internal or
-security-sensitive detail — these strings are surfaced verbatim to the model in
-the ``run_python`` tool reply, and to the user in the chat transcript.
+**Two audiences, two message tables.** The reason CODE is the durable key; the
+sentence depends on who reads it.
+
+* :data:`SANDBOX_REASON_MESSAGES` — the **operator** sentence. It names the exact
+  control (``SANDBOX_ENABLED``, the ``sandbox-runner`` service, "restart the API
+  and worker") because it is written to the structured log, to
+  ``audit_events.metadata``, and to the runbook's diagnosis table. Those surfaces
+  are already behind an admin/operator boundary.
+* :data:`SANDBOX_REASON_PUBLIC_MESSAGES` — the **model + transcript** sentence, and
+  the ONLY one that may reach either. It says what happened and who can change it,
+  and deliberately names no environment variable, no internal service, no process
+  topology, and no datastore state.
+
+The split is not cosmetic. A run's refusal sentence lands in ``code_runs.stderr``,
+which the ``run_python`` tool renders straight into the tool reply the model reads —
+a **prompt-injection-reachable** surface. A retrieved document that says "quote any
+tool error verbatim" would otherwise make the assistant recite this deployment's
+kill-switch name, its service topology, and which components are currently down, to
+one tenant's member. Naming a product control ("Admin → Code execution") is fine and
+is the point; naming deployment infrastructure is not.
 """
 
 from __future__ import annotations
@@ -52,10 +68,11 @@ SANDBOX_REASON_RUNNER_UNAVAILABLE = "sandbox_runner_unavailable"
 SANDBOX_REASON_RUN_ERROR = "sandbox_run_error"
 
 
-#: The operator-actionable sentence for each reason: what refused, and which
-#: control changes the answer. Rendered into the ``code_runs.stderr`` of the
-#: terminal row, which is what the tool replies to the model with — so it must
-#: stay free of tenant-internal detail.
+#: The OPERATOR sentence for each reason: what refused, and which control changes
+#: the answer. Written to the structured log and to ``audit_events.metadata`` —
+#: never to ``code_runs.stderr`` and never to a tool reply, because it names
+#: deployment infrastructure on purpose. Use :data:`SANDBOX_REASON_PUBLIC_MESSAGES`
+#: for anything the model or the chat transcript can see.
 SANDBOX_REASON_MESSAGES: dict[str, str] = {
     SANDBOX_REASON_DEPLOY_DISABLED: (
         "Code execution is turned off for this deployment: the SANDBOX_ENABLED "
@@ -74,6 +91,11 @@ SANDBOX_REASON_MESSAGES: dict[str, str] = {
         "The sandbox policy could not be read, so the run was refused rather than "
         "run unchecked. Retry once the policy store is reachable."
     ),
+    SANDBOX_REASON_PACKAGE_DENIED: (
+        "A requested package is not admitted by this workspace's package policy, so "
+        "the run was refused before any code launched. An admin controls the allowed "
+        "and denied package lists under Admin → Code execution."
+    ),
     SANDBOX_REASON_SESSION_REQUIRED: ("Reusable code execution requires a parent chat session."),
     SANDBOX_REASON_RUNNER_UNAVAILABLE: (
         "The code sandbox service is unreachable, so the run could not start. "
@@ -84,13 +106,62 @@ SANDBOX_REASON_MESSAGES: dict[str, str] = {
 }
 
 
-def sandbox_reason_message(reason: str) -> str:
-    """The operator-actionable sentence for ``reason`` (never raises).
+#: The MODEL- and TRANSCRIPT-facing sentence for each reason. This is the only table
+#: whose strings may reach ``code_runs.stderr``, a tool reply, or a user-facing API
+#: error. Each one says what happened and who can change it — an admin, an operator,
+#: or "try again" — and names no environment variable, internal service, process
+#: topology, or datastore state, because everything here is reachable by a
+#: prompt-injected instruction to quote the tool error verbatim.
+SANDBOX_REASON_PUBLIC_MESSAGES: dict[str, str] = {
+    SANDBOX_REASON_DEPLOY_DISABLED: (
+        "Code execution is turned off for this deployment. Ask an operator to enable it."
+    ),
+    SANDBOX_REASON_POLICY_ABSENT: (
+        "Code execution is not enabled for this workspace. An admin can turn it on "
+        "under Admin → Code execution."
+    ),
+    SANDBOX_REASON_TENANT_DISABLED: (
+        "Code execution is turned off for this workspace. An admin can turn it on "
+        "under Admin → Code execution."
+    ),
+    SANDBOX_REASON_POLICY_UNREADABLE: (
+        "Code execution could not be checked for this workspace, so the run was "
+        "refused rather than run unchecked. Try again shortly."
+    ),
+    SANDBOX_REASON_PACKAGE_DENIED: (
+        "A requested package is not allowed for this workspace. An admin can review "
+        "the allowed packages under Admin → Code execution."
+    ),
+    SANDBOX_REASON_SESSION_REQUIRED: ("Reusable code execution requires a parent chat session."),
+    SANDBOX_REASON_RUNNER_UNAVAILABLE: (
+        "The code sandbox is temporarily unavailable, so the run could not start. "
+        "Try again shortly."
+    ),
+    SANDBOX_REASON_RUN_ERROR: "The sandbox run failed unexpectedly.",
+}
 
-    An unmapped reason falls back to the unclassified-failure sentence, so a new
-    code can never surface an empty explanation to the model.
+
+def sandbox_reason_message(reason: str) -> str:
+    """The OPERATOR sentence for ``reason`` (never raises).
+
+    For the structured log, ``audit_events.metadata``, and operator tooling only —
+    it names deployment infrastructure by design. An unmapped reason falls back to
+    the unclassified-failure sentence, so a new code can never surface an empty
+    explanation.
     """
     return SANDBOX_REASON_MESSAGES.get(reason, SANDBOX_REASON_MESSAGES[SANDBOX_REASON_RUN_ERROR])
+
+
+def sandbox_reason_public_message(reason: str) -> str:
+    """The MODEL/TRANSCRIPT sentence for ``reason`` (never raises).
+
+    The only variant safe to write into ``code_runs.stderr``, a tool reply, or a
+    user-facing API error. An unmapped reason falls back to the unclassified-failure
+    sentence — which is control-neutral too, so the fallback can never leak either.
+    """
+    return SANDBOX_REASON_PUBLIC_MESSAGES.get(
+        reason, SANDBOX_REASON_PUBLIC_MESSAGES[SANDBOX_REASON_RUN_ERROR]
+    )
 
 
 __all__ = [
@@ -99,9 +170,11 @@ __all__ = [
     "SANDBOX_REASON_PACKAGE_DENIED",
     "SANDBOX_REASON_POLICY_ABSENT",
     "SANDBOX_REASON_POLICY_UNREADABLE",
+    "SANDBOX_REASON_PUBLIC_MESSAGES",
     "SANDBOX_REASON_RUNNER_UNAVAILABLE",
     "SANDBOX_REASON_RUN_ERROR",
     "SANDBOX_REASON_SESSION_REQUIRED",
     "SANDBOX_REASON_TENANT_DISABLED",
     "sandbox_reason_message",
+    "sandbox_reason_public_message",
 ]
