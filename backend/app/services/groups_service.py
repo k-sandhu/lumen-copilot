@@ -36,9 +36,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
-from app.db.repositories import GroupRepository, UserRepository
+from app.db.repositories import SYSTEM_GROUP_NAME, GroupRepository, UserRepository
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Group, Role
+from app.domain.entities import AuditOutcome, Group, Role, User
 from app.services.audit import AuditSink
 
 # A group name is a human label an admin types; keep it bounded and non-blank so
@@ -99,6 +99,21 @@ class GroupsService:
             )
         return cleaned
 
+    @staticmethod
+    def _reject_reserved_name(name: str) -> None:
+        """Keep the system group's name reservable (ADR-0022 §3).
+
+        Names are unique per tenant case-insensitively, so a user group called
+        "All members" would occupy the name the derived group needs — and
+        because that group is created lazily, the squat would block it
+        **permanently** for that tenant. Refused up front instead.
+        """
+        if name.casefold() == SYSTEM_GROUP_NAME.casefold():
+            raise ConflictError(
+                f"{SYSTEM_GROUP_NAME!r} is reserved for the tenant-wide group.",
+                code="group_name_reserved",
+            )
+
     async def _get_or_404(self, group_id: UUID) -> Group:
         """Load a group in this tenant, or 404 (never 403 — INV-1)."""
         group = await self._groups.get(group_id)
@@ -135,6 +150,23 @@ class GroupsService:
         self._require_admin()
         return await self._groups.list_all()
 
+    async def list_groups_with_counts(self) -> list[tuple[Group, int | None]]:
+        """Every group paired with its explicit member count — two queries total.
+
+        ``None`` marks the derived system group (see :meth:`member_count`); a
+        user group with no members is ``0``. Pairing the count here keeps the
+        listing route free of per-group round trips.
+        """
+        self._require_admin()
+        # Materialize the tenant's "All members" group on first admin view.
+        # ADR-0022 §3 chose lazy creation over provisioning-time creation so
+        # existing tenants need no back-fill; without a caller the group would
+        # never exist and tenant-wide visibility would have nothing to target.
+        await self._groups.ensure_system_group()
+        groups = await self._groups.list_all()
+        counts = await self._groups.member_counts()
+        return [(g, None if g.is_system else counts.get(g.id, 0)) for g in groups]
+
     async def get_group(self, group_id: UUID) -> Group:
         self._require_admin()
         return await self._get_or_404(group_id)
@@ -143,6 +175,7 @@ class GroupsService:
         """Create a user group. Duplicate name (case-insensitive) → 409."""
         self._require_admin()
         cleaned = self._clean_name(name)
+        self._reject_reserved_name(cleaned)
         if await self._groups.get_by_name(cleaned) is not None:
             raise ConflictError(
                 f"A group named {cleaned!r} already exists.", code="group_name_taken"
@@ -161,12 +194,18 @@ class GroupsService:
         group = await self._get_or_404(group_id)
         self._reject_if_system(group)
         cleaned = self._clean_name(name)
+        self._reject_reserved_name(cleaned)
         existing = await self._groups.get_by_name(cleaned)
         if existing is not None and existing.id != group_id:
             raise ConflictError(
                 f"A group named {cleaned!r} already exists.", code="group_name_taken"
             )
-        renamed = await self._groups.rename(group_id, name=cleaned)
+        try:
+            renamed = await self._groups.rename(group_id, name=cleaned)
+        except IntegrityError as exc:  # concurrent rename lost the unique race
+            raise ConflictError(
+                f"A group named {cleaned!r} already exists.", code="group_name_taken"
+            ) from exc
         if renamed is None:  # pragma: no cover — _get_or_404 already proved it exists
             raise NotFoundError("Group not found.")
         await self._emit(
@@ -200,6 +239,33 @@ class GroupsService:
         self._require_admin()
         await self._get_or_404(group_id)
         return await self._groups.list_member_ids(group_id)
+
+    async def list_members(self, group_id: UUID) -> list[User]:
+        """The group's members as users, ordered by email — the roster the API returns.
+
+        Resolving ids to users belongs here rather than in the router (a router
+        holds no business logic, ADR-0004) and lets the admin console show who is
+        in a group without a second round trip per member. A membership row whose
+        user has since been deleted resolves to ``None`` and is skipped rather
+        than yielding a half-populated entry.
+        """
+        member_ids = await self.list_member_ids(group_id)
+        members = [await self._users.get(uid) for uid in member_ids]
+        return sorted((u for u in members if u is not None), key=lambda u: u.email)
+
+    async def member_count(self, group_id: UUID) -> int | None:
+        """How many users are explicitly in a group, or ``None`` for the system group.
+
+        ``None`` is not "zero": the system group's membership is derived, so it
+        has no rows to count and every user in the tenant belongs (ADR-0022 §3).
+        The distinction is carried into the API so the console can render
+        "everyone" rather than an empty group.
+        """
+        self._require_admin()
+        group = await self._get_or_404(group_id)
+        if group.is_system:
+            return None
+        return len(await self._groups.list_member_ids(group_id))
 
     async def add_member(self, group_id: UUID, *, user_id: UUID) -> None:
         """Add a user to a group. Idempotent; a foreign-tenant user is 404."""
