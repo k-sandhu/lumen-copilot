@@ -519,10 +519,23 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
 
         print("SOCKET", os.path.exists("/var/run/docker.sock"))
 
-        # Judge by mount POINT. Everything under /proc, /sys and /dev is kernel/virtual
-        # and expected; "/" is the image rootfs. ANY other mount point is something the
-        # launcher attached, whatever its filesystem type — which is what we want to see.
-        expected_prefixes = ("/proc", "/sys", "/dev")
+        # Judge by mount POINT, and require the EXPECTED filesystem type under each
+        # virtual prefix. Blanket-ignoring everything under /proc, /sys and /dev would
+        # let `volumes={"/": {"bind": "/dev/host"}}` expose the host root while this test
+        # stayed green — a bind of "/" also has mount root "/", so a root check alone
+        # cannot see it either. A real /dev is devtmpfs/tmpfs; a host bind mounted there
+        # reports ext4/overlay/xfs, so the fstype is what gives it away.
+        virtual = {
+            # tmpfs under /proc is Docker MASKING a sensitive path (/proc/kcore,
+            # /proc/keys, /proc/acpi, /proc/scsi, /proc/timer_list …) — hardening, not a
+            # leak, and those masks carry no host data. A host bind would still report
+            # ext4/overlay/xfs, so allowing tmpfs here keeps the check meaningful.
+            "/proc": {"proc", "tmpfs"},
+            "/sys": {"sysfs", "securityfs", "cgroup", "cgroup2", "tmpfs", "bpf",
+                     "debugfs", "tracefs", "pstore", "efivarfs", "fusectl",
+                     "configfs", "selinuxfs"},
+            "/dev": {"devtmpfs", "tmpfs", "devpts", "mqueue", "proc"},
+        }
         mounts = []
         with open("/proc/self/mountinfo", encoding="utf-8") as fh:
             for line in fh:
@@ -530,7 +543,15 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
                 sep = parts.index("-")
                 fstype = parts[sep + 1]
                 mount_root, mount_point = parts[3], parts[4]
-                if mount_point == "/" or mount_point.startswith(expected_prefixes):
+                if mount_point == "/":
+                    continue
+                prefix = next(
+                    (p for p in virtual if mount_point == p or mount_point.startswith(p + "/")),
+                    None,
+                )
+                # Expected virtual mount carrying an expected filesystem: skip. Anything
+                # else — including a host bind hiding under /dev — is reported.
+                if prefix is not None and fstype in virtual[prefix]:
                     continue
                 mounts.append(f"{mount_point}|{mount_root}|{fstype}")
         print("MOUNTS", ",".join(sorted(mounts)) if mounts else "none")

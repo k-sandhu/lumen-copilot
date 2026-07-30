@@ -310,7 +310,7 @@ class DockerSandboxEngine:
 
         # Preconditions of LAUNCH, checked before anything is created.
         self._require_agreed_runtime(request.container.runtime)
-        self._require_local_image(request.image)
+        launch_ref = self._require_local_image(request.image)
         labels = {
             _MANAGED_LABEL: "true",
             _SESSION_LABEL: str(session_id),
@@ -318,7 +318,7 @@ class DockerSandboxEngine:
             _OUTPUT_CAP_LABEL: str(self._effective_output_cap(request.container.output_bytes_cap)),
         }
         return self._client.containers.run(
-            request.image,
+            launch_ref,
             command=_IDLE_COMMAND,
             detach=True,
             name=f"lumen-sandbox-{session_id}-{request.generation}",
@@ -467,8 +467,8 @@ class DockerSandboxEngine:
                 status_code=409,
             )
 
-    def _require_local_image(self, image: str) -> None:
-        """Launch only an image the host daemon ALREADY has — never trigger a pull.
+    def _require_local_image(self, image: str) -> str:
+        """Resolve an image the host daemon ALREADY has, and return its immutable id.
 
         docker-py's ``ContainerCollection.run`` catches ``ImageNotFound`` and pulls
         before retrying (docker 7.1.0, ``containers.py``). Relying on that, a typo'd or
@@ -480,13 +480,23 @@ class DockerSandboxEngine:
 
         A daemon that cannot answer at all lands here too: that is fail-closed by
         design — no session, no execution.
+
+        Returning the resolved **id** closes the remaining TOCTOU window. Checking
+        the reference here and then handing ``containers.run`` the same *reference*
+        leaves a gap: if the image is pruned in between, docker-py's ImageNotFound
+        arm pulls it after all. A local id (``sha256:…``) is not a pullable
+        reference, so the same arm fails instead of fetching — and the container is
+        launched from the exact bytes just verified, not from whatever the tag points
+        at a moment later.
         """
         try:
-            self._client.images.get(image)
+            resolved = self._client.images.get(image)
         except Exception as exc:
             raise RunnerError(
                 "sandbox execution image is not present on the host daemon", status_code=503
             ) from exc
+        image_id = getattr(resolved, "id", None)
+        return image_id if isinstance(image_id, str) and image_id else image
 
     def _containers(self, session_id: UUID) -> list[Any]:
         return list(
