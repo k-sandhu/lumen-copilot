@@ -31,11 +31,11 @@ from app.auth import (
     InvalidTokenError,
     MintedAccessToken,
     Principal,
-    dummy_verify,
+    dummy_verify_async,
     generate_refresh_token,
     hash_refresh_token,
     mint_access_token,
-    verify_password,
+    verify_password_async,
 )
 from app.core.config import Settings
 from app.core.errors import ForbiddenError
@@ -120,13 +120,17 @@ class AuthService:
         user = await UserLookupRepository(self._session).find_by_email(email)
         if user is None:
             # Burn a verify's worth of CPU so timing does not reveal non-existence.
-            dummy_verify()
+            # Off the event loop (#512): this path needs no account, so leaving it
+            # inline lets any caller park the worker with invented addresses.
+            await dummy_verify_async()
             await self._record_login_failed(
                 email=email, request_id=request_id, source_ip=source_ip, tenant_id=None
             )
             raise InvalidCredentialsError()
 
-        if not verify_password(user.password_hash, password):
+        # Argon2id is CPU-hard by design — verified on a thread so a login does
+        # not stall every other request in this worker (#512).
+        if not await verify_password_async(user.password_hash, password):
             # Still under the bypass GUC: the failed-login audit row is written
             # for the resolved user's tenant; re-scope so it lands under exactly
             # that tenant (defense in depth) before the audit write.

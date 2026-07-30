@@ -8,6 +8,8 @@ a missing/expired/tampered/wrong-issuer token must fail closed → ``InvalidToke
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from app.auth import (
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
+    hashing,
     mint_access_token,
     verify_access_token,
     verify_password,
@@ -70,6 +73,169 @@ def test_verify_password_rejects_wrong_and_malformed() -> None:
 def test_dummy_verify_does_not_raise() -> None:
     # The no-such-user timing path must complete silently.
     dummy_verify()
+
+
+# --- Off-loop verification (#512) ------------------------------------------
+#
+# Argon2id is deliberately CPU- and memory-hard, and the unknown-user path burns
+# the *same* cost by design (timing uniformity, above). Run inline on the event
+# loop, that cost parks the whole worker for the duration of every login attempt
+# — including attempts for accounts that do not exist. The async wrappers hand
+# the work to a thread (Argon2 releases the GIL in its C extension), so these
+# tests pin **where** the work runs, not merely that it returns the right answer.
+
+
+async def test_verify_password_async_matches_the_sync_result() -> None:
+    # Same answers as verify_password: the thread hop changes latency ownership,
+    # never the verdict.
+    h = hash_password("correct horse battery staple")
+    assert await hashing.verify_password_async(h, "correct horse battery staple") is True
+    assert await hashing.verify_password_async(h, "nope") is False
+    # A malformed stored hash still returns False and never raises.
+    assert await hashing.verify_password_async("not-a-real-hash", "pw") is False
+
+
+async def test_verify_password_async_runs_off_the_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Argon2 work lands on a worker thread, never the loop's own."""
+    ran_on: list[int] = []
+
+    def _record(password_hash: str, password: str) -> bool:  # noqa: ARG001
+        ran_on.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(hashing, "verify_password", _record)
+    assert await hashing.verify_password_async("hash", "pw") is True
+    assert ran_on == [ran_on[0]] and ran_on[0] != threading.get_ident()
+
+
+async def test_dummy_verify_async_still_pays_the_cost_off_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unknown-user path keeps burning a verify — just not on the loop.
+
+    Delegation is the load-bearing assertion: skipping the work would make the
+    no-such-user path cheap and reintroduce the account-existence timing oracle
+    that :func:`dummy_verify` exists to close (spec 0004 §2.3).
+    """
+    ran_on: list[int] = []
+
+    def _record() -> None:
+        ran_on.append(threading.get_ident())
+
+    monkeypatch.setattr(hashing, "dummy_verify", _record)
+    await hashing.dummy_verify_async()
+    assert ran_on == [ran_on[0]] and ran_on[0] != threading.get_ident()
+
+
+async def test_verification_concurrency_is_bounded_by_a_dedicated_pool() -> None:
+    """Concurrent verifies are capped, and never run on the shared default executor.
+
+    Argon2id is memory-hard, so verifications in flight are a memory budget: on
+    the shared ``asyncio.to_thread`` executor an unauthenticated login burst
+    could both multiply that budget without limit and starve every other
+    ``to_thread`` caller. This pins the ceiling and the isolation (review round 1,
+    finding 2).
+    """
+    cap = hashing._MAX_CONCURRENT_VERIFICATIONS
+    assert 2 <= cap <= 8  # a memory ceiling, not an unbounded pool
+
+    in_flight = 0
+    peak = 0
+    threads: set[str] = set()
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def _blocking_verify(password_hash: str, password: str) -> bool:  # noqa: ARG001
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            threads.add(threading.current_thread().name)
+        # Hold every worker until the pool is provably saturated, so `peak`
+        # reflects the pool's real ceiling rather than how fast verifies retire.
+        release.wait(timeout=5.0)
+        with lock:
+            in_flight -= 1
+        return True
+
+    original = hashing.verify_password
+    hashing.verify_password = _blocking_verify  # type: ignore[assignment]
+    try:
+        # Ask for more than the cap; the surplus must queue, not run.
+        tasks = [
+            asyncio.create_task(hashing.verify_password_async("h", "pw")) for _ in range(cap + 4)
+        ]
+        # Let the pool fill, then let everyone go.
+        await asyncio.sleep(0.2)
+        observed_peak = peak
+        release.set()
+        assert all(await asyncio.gather(*tasks))
+    finally:
+        release.set()
+        hashing.verify_password = original  # type: ignore[assignment]
+
+    assert observed_peak == cap
+    # Its own named threads — not the shared default executor's.
+    assert threads and all(name.startswith("argon2-verify") for name in threads)
+
+
+async def test_both_login_paths_share_one_verification_queue() -> None:
+    """The known-user and unknown-user paths must contend for the SAME workers.
+
+    Routing them to separate executors would give them independent saturation
+    behaviour and reintroduce, under load, the account-existence timing signal
+    that ``dummy_verify`` exists to close (spec 0004 §2.3).
+
+    Asserting on thread-name prefixes is not enough — two separate pools sharing
+    a prefix would pass that (review round 2, finding 2). Instead this saturates
+    the pool with ``cap`` known-user verifies and then shows an unknown-user
+    verify cannot start until one of them retires: only a shared queue can
+    produce that back-pressure.
+    """
+    cap = hashing._MAX_CONCURRENT_VERIFICATIONS
+
+    saturated = threading.Barrier(cap + 1, timeout=5.0)
+    hold = threading.Event()
+    dummy_started = threading.Event()
+
+    def _blocking_verify(*_args: object) -> bool:
+        saturated.wait()  # every worker is now occupied
+        hold.wait(timeout=5.0)
+        return True
+
+    def _dummy() -> None:
+        dummy_started.set()
+
+    original_verify = hashing.verify_password
+    original_dummy = hashing.dummy_verify
+    hashing.verify_password = _blocking_verify  # type: ignore[assignment]
+    hashing.dummy_verify = _dummy  # type: ignore[assignment]
+    try:
+        verifies = [
+            asyncio.create_task(hashing.verify_password_async("h", "pw")) for _ in range(cap)
+        ]
+        # Wait until all `cap` workers are parked inside a verify.
+        await asyncio.to_thread(saturated.wait)
+
+        dummy = asyncio.create_task(hashing.dummy_verify_async())
+        await asyncio.sleep(0.2)
+        # The unknown-user path is queued behind the same busy workers.
+        blocked_while_saturated = not dummy_started.is_set()
+
+        hold.set()
+        await asyncio.gather(*verifies, dummy)
+    finally:
+        hold.set()
+        hashing.verify_password = original_verify  # type: ignore[assignment]
+        hashing.dummy_verify = original_dummy  # type: ignore[assignment]
+
+    assert blocked_while_saturated, (
+        "the unknown-user path ran while the pool was saturated by known-user "
+        "verifies — the two paths are not sharing one queue"
+    )
+    assert dummy_started.is_set()  # it did run once a worker freed up
 
 
 # --- Refresh tokens (opaque; hashed at rest) -------------------------------

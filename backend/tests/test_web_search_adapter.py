@@ -16,15 +16,19 @@ result-page fetch is driven by another, so no real socket opens. Asserts:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime
 
 import httpx
 import pytest
 
+from app.connectors.base import ConnectorError
+from app.connectors.web.fetch import FetchResult, UrlBlockedError
 from app.domain.web_search import WebSearchResult
 from app.search_web.client import (
     SearxngClient,
+    WebSearchRateLimited,
     WebSearchUnavailable,
     map_searxng_results,
 )
@@ -317,3 +321,222 @@ async def test_result_page_fetch_success_attaches_passage(
     results = await service.search("python")
     assert results[0].fetched_passage is not None
     assert "Extracted body text." in results[0].fetched_passage
+
+
+# --- Fetch-leg concurrency (#513) -------------------------------------------
+#
+# The top-N result pages are independent egress calls to different untrusted
+# third-party hosts: no shared state, no ordering dependency. Fetched one after
+# another the leg costs the SUM of the pages, and since these are arbitrary
+# internet hosts, slow and dead ones are the norm — with the default 10 s
+# per-fetch budget, three dead hosts serialize into ~30 s inside a live chat
+# turn. Fetched together it costs about the slowest single page.
+#
+# The probe replaces the SSRF chokepoint (`fetch_url`) with a fake that records
+# how many fetches are in flight at once. Every fake fetch parks on the same
+# asyncio.Event, so a serial loop can never exceed one in flight, while a
+# concurrent one necessarily reaches all three before any completes. That makes
+# the assertion structural rather than a timing race.
+
+
+class _FetchProbe:
+    """Records peak in-flight fetches; releases only once ``expected`` arrive."""
+
+    def __init__(self, expected: int) -> None:
+        self._expected = expected
+        self._all_arrived = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.urls: list[str] = []
+
+    async def fetch(self, url: str, **_kw: object) -> FetchResult:
+        self.urls.append(url)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        if self.in_flight >= self._expected:
+            self._all_arrived.set()
+        try:
+            # A serial implementation never sets the event, so it times out here
+            # and the peak stays at 1 — the failure this test exists to catch.
+            await asyncio.wait_for(self._all_arrived.wait(), timeout=_PROBE_TIMEOUT)
+        except TimeoutError:
+            pass
+        finally:
+            self.in_flight -= 1
+        return FetchResult(
+            url=url,
+            final_url=url,
+            content_type="text/html",
+            text=f"<html><body><p>body of {url}</p></body></html>",
+        )
+
+
+_PROBE_TIMEOUT = 2.0
+
+
+def _probe_service(fetch_top_n: int, results: tuple[WebSearchResult, ...]) -> WebSearchService:
+    return WebSearchService(
+        tenant_id=uuid.uuid4(),
+        client=_FakeClient(results),
+        rate_limiter=_AlwaysAllow(),
+        default_k=5,
+        max_k=10,
+        fetch_top_n=fetch_top_n,
+        user_agent="LumenTest/1",
+    )
+
+
+_THREE_RESULTS = (
+    WebSearchResult(title="a", url="https://a.example/", snippet="alpha"),
+    WebSearchResult(title="b", url="https://b.example/", snippet="beta"),
+    WebSearchResult(title="c", url="https://c.example/", snippet="gamma"),
+)
+
+
+async def test_result_page_fetches_run_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All ``fetch_top_n`` pages are in flight together, not one after another."""
+    probe = _FetchProbe(expected=3)
+    monkeypatch.setattr("app.search_web.service.fetch_url", probe.fetch)
+
+    results = await _probe_service(3, _THREE_RESULTS).search("python")
+
+    assert probe.max_in_flight == 3
+    assert len(results) == 3
+
+
+async def test_concurrent_fetches_preserve_provider_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Results keep the provider's order however the fetches interleave.
+
+    Concurrency must not become a reordering: the ranking is the provider's, and
+    a citation's position is part of what the model is grounding on.
+    """
+    probe = _FetchProbe(expected=3)
+    monkeypatch.setattr("app.search_web.service.fetch_url", probe.fetch)
+
+    results = await _probe_service(3, _THREE_RESULTS).search("python")
+
+    assert [r.url for r in results] == [
+        "https://a.example/",
+        "https://b.example/",
+        "https://c.example/",
+    ]
+    # Each passage is the one extracted from that result's own page — the
+    # gather's results are zipped back to the right rows, not shifted.
+    for result in results:
+        assert result.fetched_passage is not None
+        assert f"body of {result.url}" in result.fetched_passage
+
+
+async def test_only_the_top_n_are_fetched_when_more_results_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap still bounds egress; the tail keeps its snippet and no passage."""
+    probe = _FetchProbe(expected=2)
+    monkeypatch.setattr("app.search_web.service.fetch_url", probe.fetch)
+
+    results = await _probe_service(2, _THREE_RESULTS).search("python")
+
+    assert probe.max_in_flight == 2
+    assert sorted(probe.urls) == ["https://a.example/", "https://b.example/"]
+    assert results[2].fetched_passage is None
+    assert results[2].snippet == "gamma"
+
+
+@pytest.mark.parametrize("failure", [UrlBlockedError("blocked"), ConnectorError("unreachable")])
+async def test_one_failing_page_is_skipped_without_failing_the_search(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """Per-page failure isolation survives concurrency (ADR-0014 §4).
+
+    Gathering raises the first exception by default; the middle page failing must
+    still leave the other two enriched and the search successful, exactly as the
+    serial loop's per-page try/except did.
+    """
+    probe = _FetchProbe(expected=3)
+    real_fetch = probe.fetch
+
+    async def _fetch(url: str, **kw: object) -> FetchResult:
+        if url == "https://b.example/":
+            # Keep the peak-concurrency accounting honest: this page still
+            # occupies a slot, it just ends in a refusal.
+            probe.in_flight += 1
+            probe.max_in_flight = max(probe.max_in_flight, probe.in_flight)
+            probe.in_flight -= 1
+            raise failure
+        return await real_fetch(url, **kw)
+
+    monkeypatch.setattr("app.search_web.service.fetch_url", _fetch)
+
+    # Only two pages ever park on the event, so let the probe release on two.
+    probe._expected = 2  # noqa: SLF001
+
+    results = await _probe_service(3, _THREE_RESULTS).search("python")
+
+    assert [r.url for r in results] == [
+        "https://a.example/",
+        "https://b.example/",
+        "https://c.example/",
+    ]
+    # The blocked/unreachable page is skipped: no passage, snippet retained.
+    assert results[1].fetched_passage is None
+    assert results[1].snippet == "beta"
+    # Its neighbours are unaffected.
+    assert results[0].fetched_passage is not None
+    assert results[2].fetched_passage is not None
+
+
+async def test_rate_limit_still_precedes_every_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A throttled tenant runs no fetches at all — admission stays ahead of egress."""
+    probe = _FetchProbe(expected=3)
+    monkeypatch.setattr("app.search_web.service.fetch_url", probe.fetch)
+
+    service = WebSearchService(
+        tenant_id=uuid.uuid4(),
+        client=_FakeClient(_THREE_RESULTS),
+        rate_limiter=_AlwaysDeny(),
+        default_k=5,
+        max_k=10,
+        fetch_top_n=3,
+        user_agent="LumenTest/1",
+    )
+    with pytest.raises(WebSearchRateLimited):
+        await service.search("python")
+    assert probe.urls == []
+
+
+async def test_unexpected_fetch_failure_retires_siblings_before_closing_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure the chokepoint does not absorb must not strand its siblings.
+
+    ``_fetch_passage`` swallows the two documented failure classes, so anything
+    else propagates out of the gather. The serial loop simply never started the
+    remaining fetches; a bare gather leaves them running while the ``async with``
+    closes the shared client underneath them. Retiring them keeps the two shapes
+    equivalent — nothing is still touching the client when it closes.
+    """
+    started: list[str] = []
+    retired: list[str] = []
+    never_set = asyncio.Event()
+
+    async def _fetch(url: str, **_kw: object) -> FetchResult:
+        started.append(url)
+        if url == "https://a.example/":
+            raise RuntimeError("transport blew up in a way the guard does not model")
+        try:
+            await never_set.wait()  # parks until cancelled
+            raise AssertionError("unreachable")
+        finally:
+            retired.append(url)
+
+    monkeypatch.setattr("app.search_web.service.fetch_url", _fetch)
+
+    with pytest.raises(RuntimeError):
+        await _probe_service(3, _THREE_RESULTS).search("python")
+
+    # Every sibling that started has been driven to completion (cancelled), so
+    # the client closed with no fetch still in flight.
+    assert set(started) == {r.url for r in _THREE_RESULTS}
+    assert set(retired) == {"https://b.example/", "https://c.example/"}

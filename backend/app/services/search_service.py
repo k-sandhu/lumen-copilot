@@ -391,26 +391,23 @@ class SearchService:
         """
         pattern = _term_pattern(query)
         results: list[SearchResultData] = []
-        # Cache the per-document lookups so repeated passages from one document
-        # cost one query, not one per chunk.
-        doc_cache: dict[UUID, tuple[UUID, datetime] | None] = {}
+        # One query for the whole page (#514). A page routinely spans many
+        # documents, and looking each up in turn put a serialized round-trip on
+        # the critical path per distinct document — after retrieval had already
+        # finished. The batch also collapses repeated chunks of one document,
+        # which is what the previous per-document cache was for.
+        documents = await self._documents.get_many(p.document_id for p in passages)
         for passage in passages:
-            meta = doc_cache.get(passage.document_id)
-            if passage.document_id not in doc_cache:
-                document = await self._documents.get(passage.document_id)
-                # The repository is tenant-scoped (INV-1), so a cross-tenant or
-                # missing document yields no metadata and is dropped. Ownership is
-                # NOT re-asserted: the chokepoint already permitted this passage by
-                # ownership OR grant, and re-narrowing to ownership would wrongly
-                # drop a grant-visible document (the INV-2 authority is the
-                # chokepoint, not this enrichment step).
-                meta = (
-                    (document.owner_id, document.updated_at) if document is not None else None
-                )
-                doc_cache[passage.document_id] = meta
-            if meta is None:
+            # The repository is tenant-scoped (INV-1), so a cross-tenant or
+            # missing document is absent from the batch and its passage is
+            # dropped. Ownership is NOT re-asserted: the chokepoint already
+            # permitted this passage by ownership OR grant, and re-narrowing to
+            # ownership would wrongly drop a grant-visible document (the INV-2
+            # authority is the chokepoint, not this enrichment step).
+            document = documents.get(passage.document_id)
+            if document is None:
                 continue
-            owner_id, last_indexed = meta
+            owner_id, last_indexed = document.owner_id, document.updated_at
             snippet = passage.text
             results.append(
                 SearchResultData(

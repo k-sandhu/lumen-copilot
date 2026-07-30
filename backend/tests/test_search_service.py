@@ -24,11 +24,14 @@ from __future__ import annotations
 import os
 import socket
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -688,6 +691,176 @@ async def test_search_emits_one_audit_event(session: AsyncSession) -> None:
     assert ev.metadata["hit_count"] == 1
     assert str(doc) in ev.metadata["document_ids"]  # type: ignore[operator]
     assert "budget" not in str(ev.metadata)
+
+
+# --- Enrichment query shape (#514) ------------------------------------------
+#
+# Every result needs its document's owner + freshness, which the retrieval domain
+# type does not carry. Looked up one document at a time that is a serialized
+# round-trip per distinct document, on the critical path, after retrieval has
+# already finished — linear in page breadth. These tests assert the *shape* of
+# the SQL the page issues, not just its output, because the output was already
+# correct when it was slow.
+
+
+@contextmanager
+def _document_selects() -> Iterator[list[str]]:
+    """Collect every SELECT against ``documents`` issued while the block runs."""
+    seen: list[str] = []
+
+    def _record(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.split()).lower()
+        if normalized.startswith("select") and "from documents" in normalized:
+            seen.append(normalized)
+
+    event.listen(Engine, "before_cursor_execute", _record)
+    try:
+        yield seen
+    finally:
+        event.remove(Engine, "before_cursor_execute", _record)
+
+
+async def _seed_page_of_documents(
+    session: AsyncSession, *, tenant_id: uuid.UUID, count: int
+) -> tuple[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID]]]:
+    """Seed ``count`` single-chunk documents for one owner; return (user, [(doc, chunk)])."""
+    owner: uuid.UUID | None = None
+    pairs: list[tuple[uuid.UUID, uuid.UUID]] = []
+    for index in range(count):
+        user, doc, chunk_ids = await _seed_document(
+            session,
+            tenant_id=tenant_id,
+            email=f"user{index}@x.test",
+            filename=f"doc-{index}.txt",
+            chunk_texts=[f"budget line {index}"],
+        )
+        owner = owner or user
+        pairs.append((doc, chunk_ids[0]))
+    assert owner is not None
+    return owner, pairs
+
+
+async def test_enrichment_issues_one_document_query_for_the_whole_page(
+    session: AsyncSession,
+) -> None:
+    """A page spanning many documents costs one query, not one per document."""
+    tenant = (await TenantRepository(session).create(name="T")).id
+    owner, pairs = await _seed_page_of_documents(session, tenant_id=tenant, count=5)
+    retrieval = _FakeRetrieval(
+        [
+            _passage(chunk_id=chunk, document_id=doc, name=f"doc-{i}.txt", text=f"budget line {i}")
+            for i, (doc, chunk) in enumerate(pairs)
+        ]
+    )
+    svc = _service(
+        session,
+        principal=_principal(owner, tenant),
+        retrieval=retrieval,
+        gateway=_DisabledGateway(),
+    )
+
+    with _document_selects() as statements:
+        page = await svc.search(query="budget")
+
+    assert len(page.results) == 5
+    assert len(statements) == 1
+
+
+async def test_enrichment_preserves_ranked_order_and_per_document_metadata(
+    session: AsyncSession,
+) -> None:
+    """Batching must not reshuffle the page or cross-wire owners onto rows."""
+    tenant = (await TenantRepository(session).create(name="T")).id
+    owner, pairs = await _seed_page_of_documents(session, tenant_id=tenant, count=4)
+    retrieval = _FakeRetrieval(
+        [
+            _passage(chunk_id=chunk, document_id=doc, name=f"doc-{i}.txt", text=f"budget line {i}")
+            for i, (doc, chunk) in enumerate(pairs)
+        ]
+    )
+    svc = _service(
+        session,
+        principal=_principal(owner, tenant),
+        retrieval=retrieval,
+        gateway=_DisabledGateway(),
+    )
+
+    page = await svc.search(query="budget")
+
+    # Ranked order is the chokepoint's; enrichment only decorates it.
+    assert [r.document_id for r in page.results] == [doc for doc, _ in pairs]
+    # Each row carries its *own* document's title, not a neighbour's.
+    assert [r.title for r in page.results] == [f"doc-{i}.txt" for i in range(4)]
+
+
+async def test_repeated_chunks_of_one_document_still_collapse_to_one_row_set(
+    session: AsyncSession,
+) -> None:
+    """Many passages from one document must not re-query it per chunk."""
+    tenant = (await TenantRepository(session).create(name="T")).id
+    user, doc, chunk_ids = await _seed_document(
+        session,
+        tenant_id=tenant,
+        email="a@x.test",
+        filename="long.txt",
+        chunk_texts=["budget one", "budget two", "budget three"],
+    )
+    retrieval = _FakeRetrieval(
+        [
+            _passage(chunk_id=chunk, document_id=doc, name="long.txt", text=f"budget {i}")
+            for i, chunk in enumerate(chunk_ids)
+        ]
+    )
+    svc = _service(
+        session, principal=_principal(user, tenant), retrieval=retrieval, gateway=_DisabledGateway()
+    )
+
+    with _document_selects() as statements:
+        page = await svc.search(query="budget")
+
+    assert len(page.results) == 3
+    assert len(statements) == 1
+
+
+async def test_batched_enrichment_still_drops_unreadable_documents(
+    session: AsyncSession,
+) -> None:
+    """A partial batch behaves like a per-id miss: drop that row, keep the rest.
+
+    The batch returns only the rows the tenant scope admits (INV-1), so a passage
+    whose document is gone must still be dropped rather than surfaced with a
+    guessed owner — and it must not take its neighbours down with it.
+    """
+    tenant = (await TenantRepository(session).create(name="T")).id
+    owner, pairs = await _seed_page_of_documents(session, tenant_id=tenant, count=2)
+    missing_doc = uuid.uuid4()
+    retrieval = _FakeRetrieval(
+        [
+            _passage(chunk_id=pairs[0][1], document_id=pairs[0][0], name="doc-0.txt", text="a"),
+            _passage(chunk_id=uuid.uuid4(), document_id=missing_doc, name="ghost.txt", text="b"),
+            _passage(chunk_id=pairs[1][1], document_id=pairs[1][0], name="doc-1.txt", text="c"),
+        ]
+    )
+    svc = _service(
+        session,
+        principal=_principal(owner, tenant),
+        retrieval=retrieval,
+        gateway=_DisabledGateway(),
+    )
+
+    with _document_selects() as statements:
+        page = await svc.search(query="budget")
+
+    assert [r.document_id for r in page.results] == [pairs[0][0], pairs[1][0]]
+    assert missing_doc not in {r.document_id for r in page.results}
+    assert len(statements) == 1
 
 
 # --- Live INV-1/INV-2 through the real chokepoint (Postgres-gated) ----------

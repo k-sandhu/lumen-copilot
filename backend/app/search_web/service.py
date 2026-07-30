@@ -20,10 +20,19 @@ extracted so the model can ground on passage-level text (INV-3 — only the fetc
 passage is cite-worthy). A page that is SSRF-blocked, unreachable, or non-2xx is
 **skipped** (its ``fetched_passage`` stays ``None``, the snippet still stands) —
 one hostile result never fails the whole search.
+
+Those top-N pages are fetched **concurrently** (#513). They are independent
+requests to different untrusted hosts, so fetching them in sequence costs the sum
+of the pages rather than the slowest one — and since these are arbitrary internet
+hosts, slow and dead ones are normal: at the default per-fetch timeout, three
+unreachable hosts serialize into ~30 s inside a live chat turn. ``fetch_top_n``
+is itself the concurrency bound (a small configured cap), and every fetch still
+goes through the one SSRF chokepoint.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from uuid import UUID
 
@@ -88,8 +97,10 @@ class WebSearchService:
         Order: (1) admission-check the per-tenant window (ADR-0014 §3) — an
         exhausted window raises :class:`WebSearchRateLimited`; (2) query the
         provider (top-``k``); (3) fetch + extract the top ``fetch_top_n`` result
-        pages through the SSRF chokepoint, attaching the extracted passage to each
-        (a blocked/failed page is skipped, snippet retained).
+        pages **concurrently** through the SSRF chokepoint, attaching the
+        extracted passage to each (a blocked/failed page is skipped, snippet
+        retained). The returned tuple keeps the provider's ranking regardless of
+        the order the pages happen to come back in.
 
         Raises:
             WebSearchRateLimited: the tenant's window is exhausted (throttled).
@@ -108,18 +119,35 @@ class WebSearchService:
             return results
 
         # (3) Result-page fetch leg — the untrusted leg, ALWAYS through the one
-        # SSRF chokepoint. Enrich the top N; a blocked/failed page is skipped.
-        enriched: list[WebSearchResult] = []
+        # SSRF chokepoint. Enrich the top N together; a blocked/failed page is
+        # skipped. ``_fetch_passage`` absorbs each page's own failure and returns
+        # None, so no one hostile or dead result can abort the gather and take
+        # the whole search down with it (ADR-0014 §4).
+        fetched, rest = results[: self._fetch_top_n], results[self._fetch_top_n :]
         async with httpx.AsyncClient(follow_redirects=False) as fetch_client:
-            for index, result in enumerate(results):
-                if index >= self._fetch_top_n:
-                    enriched.append(result)
-                    continue
-                passage = await self._fetch_passage(result.url, client=fetch_client)
-                enriched.append(
-                    result if passage is None else replace(result, fetched_passage=passage)
-                )
-        return tuple(enriched)
+            tasks = [
+                asyncio.create_task(self._fetch_passage(r.url, client=fetch_client))
+                for r in fetched
+            ]
+            try:
+                passages = await asyncio.gather(*tasks)
+            except BaseException:
+                # A failure ``_fetch_passage`` does not absorb (or cancellation of
+                # this search) would otherwise leave siblings running while the
+                # ``async with`` closes the client out from under them. Retire
+                # them here so the shared client only closes once nothing is
+                # using it — the serial loop never left a fetch in flight either.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+        # Zip strictly back onto the rows they came from: gather preserves the
+        # argument order, so ranking survives whatever order the pages returned in.
+        enriched = [
+            result if passage is None else replace(result, fetched_passage=passage)
+            for result, passage in zip(fetched, passages, strict=True)
+        ]
+        return (*enriched, *rest)
 
     async def _fetch_passage(
         self, url: str, *, client: httpx.AsyncClient
