@@ -283,3 +283,81 @@ def test_sink_has_no_update_or_delete_method() -> None:
     assert "emit" in names
     assert "update" not in names
     assert "delete" not in names
+
+
+# --- the `source_ip` sentinel: why background audit writes used to roll back ---
+
+
+async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
+    session: AsyncSession,
+) -> None:
+    """A background task's sentinel must not be handed to an ``INET`` column.
+
+    The envelope requires a non-empty ``source_ip`` (spec 0004 §2.4), so a Celery task
+    with no client address passes ``"system"``. The column is ``INET`` on Postgres,
+    which rejects that — and because the emit rides the CALLER's transaction, the
+    rejection rolled back the action being recorded. That is what killed the rolling
+    summariser: `session_summaries` rows carried evidence (written in the answer
+    transaction) but never a summary or a coverage cursor, and `session.summarized` was
+    never written once.
+
+    The sentinel is preserved in metadata rather than dropped: the trail still records
+    what the caller stated, and `actor` already says it was the system.
+    """
+    tenant_id = uuid.uuid4()
+    sink = AuditSink(AuditEventRepository(session, tenant_id))
+
+    event = await sink.emit(
+        action=AuditAction.SESSION_SUMMARIZED,
+        actor=AuditActor.system(),
+        resource_type="chat_session",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="celery-summarize",
+        source_ip="system",
+    )
+
+    # Nothing that is not an address reaches the column.
+    assert event.source_ip is None
+    # …but the trail keeps what the caller actually stated.
+    assert event.metadata["source_ip"] == "system"
+
+
+async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) -> None:
+    """The request path must be unaffected — a real IP still lands in the column."""
+    tenant_id = uuid.uuid4()
+    sink = AuditSink(AuditEventRepository(session, tenant_id))
+
+    for address in ("203.0.113.10", "2001:db8::1"):
+        event = await sink.emit(
+            action=AuditAction.RETRIEVAL_QUERY,
+            actor=AuditActor.system(),
+            resource_type="document",
+            outcome=AuditOutcome.ALLOWED,
+            resource_id=str(uuid.uuid4()),
+            request_id="req-1",
+            source_ip=address,
+        )
+        assert event.source_ip == address
+        # No sentinel key invented for a genuine address.
+        assert "source_ip" not in event.metadata
+
+
+async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSession) -> None:
+    """Preserving the sentinel must not drop what the caller was already recording."""
+    tenant_id = uuid.uuid4()
+    sink = AuditSink(AuditEventRepository(session, tenant_id))
+
+    event = await sink.emit(
+        action=AuditAction.RETRIEVAL_QUERY,
+        actor=AuditActor.system(),
+        resource_type="chat_session",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="celery-1",
+        source_ip="system",
+        metadata={"covered_messages": 12},
+    )
+
+    assert event.metadata["covered_messages"] == 12
+    assert event.metadata["source_ip"] == "system"

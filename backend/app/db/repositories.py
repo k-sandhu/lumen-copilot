@@ -21,6 +21,7 @@ touches several repositories commits atomically.
 
 from __future__ import annotations
 
+import ipaddress
 import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -4191,6 +4192,33 @@ class TenantAutonomyPolicyRepository(_TenantScopedRepository):
         return _to_tenant_autonomy_policy(row)
 
 
+def _split_source_ip(value: str | None) -> tuple[str | None, str | None]:
+    """Split an envelope ``source_ip`` into (column value, preserved sentinel).
+
+    The audit envelope requires a non-empty ``source_ip`` (spec 0004 §2.4), but the
+    column is ``INET`` on Postgres and a background task has no client address. A
+    caller therefore passes a sentinel such as ``"system"``. Postgres rejects that,
+    and since the audit write rides the caller's transaction the rejection rolled the
+    ACTION back too.
+
+    Returns the address to store (or ``None`` when there is no real one) and the
+    original sentinel to preserve in metadata, so the trail records what was stated
+    without asking ``INET`` to hold something that is not an address. An IPv4/IPv6
+    literal — with or without a prefix, since ``INET`` accepts CIDR — is stored as
+    given; anything else is treated as a sentinel.
+    """
+    if value is None:
+        return None, None
+    text = value.strip()
+    if not text:
+        return None, None
+    try:
+        ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        return None, text
+    return text, None
+
+
 class AuditEventRepository(_TenantScopedRepository):
     """Append-only product-audit log within one tenant (spec 0004 §2.4).
 
@@ -4212,6 +4240,24 @@ class AuditEventRepository(_TenantScopedRepository):
         source_ip: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> AuditEvent:
+        # `source_ip` is REQUIRED in the envelope (spec 0004 §2.4 — the sink refuses
+        # an empty one), but the column is `INET` on Postgres and a background task has
+        # no client IP to give. Callers therefore pass a sentinel — `"system"` — which
+        # Postgres rejects outright, and because the emit rides the caller's
+        # transaction, that rejection rolled back the ACTION the event was recording.
+        # It took the rolling summariser with it: `session_summaries` rows existed with
+        # evidence (written in the answer transaction) but never a summary or a
+        # coverage cursor, and `session.summarized` was never once written. SQLite
+        # cannot catch it — the `String(45)` variant accepts any text — so the offline
+        # suite stayed green while the feature was dead in every Postgres deployment.
+        #
+        # The envelope contract is unchanged (a caller must still state something). The
+        # COLUMN takes an address or NULL, and a non-address sentinel is preserved in
+        # metadata so the trail loses nothing: `actor` already records that this was the
+        # system, and "no client IP" is the honest value when there was no client.
+        stored_ip, sentinel = _split_source_ip(source_ip)
+        if sentinel is not None:
+            metadata = {**(metadata or {}), "source_ip": sentinel}
         row = models.AuditEvent(
             tenant_id=self._tenant_id,
             actor_id=actor_id,
@@ -4220,7 +4266,7 @@ class AuditEventRepository(_TenantScopedRepository):
             resource_id=resource_id,
             outcome=outcome.value,
             request_id=request_id,
-            source_ip=source_ip,
+            source_ip=stored_ip,
             event_metadata=metadata or {},
         )
         self._session.add(row)
