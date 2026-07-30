@@ -123,16 +123,28 @@ def _payload(run: SandboxRun) -> dict[str, Any]:
 _SUMMARY_REASON_BUDGET = 160
 
 
-def _reason_line(run: SandboxRun) -> str:
-    """The first line of a refused run's ``stderr`` — its typed, actionable reason.
+def _trace_reason(run: SandboxRun) -> str:
+    """The typed reason to record in the ``tool_invocations`` row (issue #502).
 
-    The sandbox admission path writes exactly one operator-actionable sentence
-    into ``stderr`` when it refuses (``domain.code_execution``, issue #502). Lifting
-    it into the tool's ``summary`` puts the *specific* gate into the
-    ``tool_invocations`` row, so the trace distinguishes "the deploy switch is off"
-    from "this workspace never enabled it" instead of showing four identical
-    "code run denied" lines.
+    Prefers the run's own ``reason_code`` — the stable
+    ``domain.code_execution.SANDBOX_REASON_*`` the admission/execution path
+    resolved — so the trace distinguishes "the deploy switch is off" from "this
+    workspace never enabled it" from "the runner refused the request" instead of
+    showing identical "code run denied" lines.
+
+    The ``stderr`` fallback exists only for a **denied** run, and only because a
+    denial is the one status whose admission path writes exactly one typed sentence
+    there. It used to fire for every non-success terminal, which meant an explicitly
+    cancelled (``killed``) run and a ``failed`` one had an arbitrary stderr fragment
+    promoted into the durable ``result_summary`` — and for a ``failed`` run that
+    fragment is model- or user-authored (a ``print(x, file=sys.stderr)`` landed
+    verbatim in the trace row). The model still sees the full stderr tail in
+    ``content``; only the trace line is disciplined.
     """
+    if run.reason_code:
+        return run.reason_code[:_SUMMARY_REASON_BUDGET]
+    if run.status is not CodeRunStatus.DENIED:
+        return ""
     first = run.stderr.strip().splitlines()[0] if run.stderr.strip() else ""
     return first[:_SUMMARY_REASON_BUDGET]
 
@@ -206,17 +218,19 @@ async def _run_python(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
 
     # Every non-success terminal (denied / historical timeout / killed / failed) is an ok=False
     # result the model can recover from — fix the code and re-run within the budget.
-    reason = _reason_line(run)
+    reason = _trace_reason(run)
     return ToolHandlerResult(
         content=_rendered(run),
         ok=False,
         error=_error_for(run.status),
-        # Carry the refusal's own sentence into the trace row (issue #502) so a
+        # Carry the refusal's typed reason into the trace row (issue #502) so a
         # blocked run says WHICH gate refused, not just that one did.
         summary=(
             f"code run {run.status.value}: {reason}" if reason else f"code run {run.status.value}"
         ),
         payload=_payload(run),
+        # …and into the audit metadata, beside the frozen ``code_execution_denied``.
+        denied_reason=run.reason_code,
     )
 
 

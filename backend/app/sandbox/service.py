@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -71,6 +72,25 @@ class SandboxDisabledError(ConflictError):
     def __init__(self, reason: str) -> None:
         super().__init__(sandbox_reason_public_message(reason), code=self.code)
         self.sandbox_reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOutcome:
+    """A finished code run's terminal status PLUS the typed reason behind it (#502).
+
+    ``CodeRunStatus`` alone cannot say which of the gates refused, and the reason is
+    not a column on ``code_runs`` — the refusal's *prose* is (as ``stderr``), which
+    is why the chat seam used to re-derive the reason by string-slicing that
+    sentence. Returning the code directly is what lets ``run_python`` put the stable
+    ``sandbox_disabled_deploy`` / ``sandbox_runner_rejected`` / … into the durable
+    ``tool_invocations`` row and the audit metadata.
+
+    ``reason_code`` is ``None`` for a run that reached its terminal on its own
+    merits: a success, a non-zero exit, an explicit cancel.
+    """
+
+    status: CodeRunStatus
+    reason_code: str | None = None
 
 
 def _failure_reason(exc: BaseException) -> str:
@@ -515,13 +535,29 @@ class SandboxService:
         *,
         inputs: tuple[StagedInput, ...] = (),
     ) -> CodeRunStatus:
+        """Execute the run and return only its terminal status.
+
+        The Celery task's contract (``tasks/run_sandbox.py`` returns the status in
+        its JSON result). Callers that need to know WHY a run ended where it did —
+        the chat seam, which puts it in the ``tool_invocations`` trace — call
+        :meth:`execute_outcome` instead.
+        """
+        return (await self.execute_outcome(session, code_run_id, inputs=inputs)).status
+
+    async def execute_outcome(
+        self,
+        session: AsyncSession,
+        code_run_id: UUID,
+        *,
+        inputs: tuple[StagedInput, ...] = (),
+    ) -> ExecutionOutcome:
         runs = CodeRunRepository(session, self._tenant_id)
         audit = AuditSink(AuditEventRepository(session, self._tenant_id))
         run = await runs.get(code_run_id)
         if run is None:
-            return CodeRunStatus.FAILED
+            return ExecutionOutcome(CodeRunStatus.FAILED)
         if run.status is not CodeRunStatus.QUEUED:
-            return run.status
+            return ExecutionOutcome(run.status)
 
         # Every refusal below names the switch that refused (issue #502): the
         # deploy kill-switch, the tenant sandbox policy (absent vs disabled), an
@@ -611,9 +647,9 @@ class SandboxService:
             sandbox_generation=sandbox.generation,
         )
         if running is None:
-            return CodeRunStatus.FAILED
+            return ExecutionOutcome(CodeRunStatus.FAILED)
         if running.status is not CodeRunStatus.RUNNING:
-            return running.status
+            return ExecutionOutcome(running.status)
         await self._audit_run(
             audit,
             AuditAction.CODE_RUN_STARTED,
@@ -681,7 +717,7 @@ class SandboxService:
                 "artifact_count": len(artifact_ids),
             },
         )
-        return effective_status
+        return ExecutionOutcome(effective_status)
 
     async def _capture_outputs(
         self,
@@ -737,7 +773,7 @@ class SandboxService:
         reason: str,
         denial: str | None = None,
         operator_detail: str | None = None,
-    ) -> CodeRunStatus:
+    ) -> ExecutionOutcome:
         """Write the ``denied`` terminal for a policy refusal, saying WHICH (#502).
 
         The single writer for both enablement checks, so a policy that flips
@@ -769,7 +805,7 @@ class SandboxService:
                 "reason_code": reason,
             },
         )
-        return CodeRunStatus.DENIED
+        return ExecutionOutcome(CodeRunStatus.DENIED, reason)
 
     async def _finalize_failure(
         self,
@@ -779,7 +815,7 @@ class SandboxService:
         started_at: datetime,
         *,
         reason: str = SANDBOX_REASON_RUN_ERROR,
-    ) -> CodeRunStatus:
+    ) -> ExecutionOutcome:
         """Terminate a run that could not complete, saying WHAT could not (#502).
 
         An unreachable ``sandbox-runner`` is a **dependency** fault, not a policy
@@ -808,7 +844,7 @@ class SandboxService:
                 "reason": sandbox_reason_message(reason),
             },
         )
-        return effective_status
+        return ExecutionOutcome(effective_status, reason)
 
     async def _audit_run(
         self,
@@ -845,8 +881,10 @@ class SandboxReadService:
 
 
 __all__ = [
+    "ExecutionOutcome",
     "PackagePolicyError",
     "SandboxReadService",
+    "SandboxDisabledError",
     "SandboxService",
     "SandboxSessionService",
     "validate_requested_packages",

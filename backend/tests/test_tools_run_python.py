@@ -39,6 +39,10 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
+from app.domain.code_execution import (
+    SANDBOX_REASON_DEPLOY_DISABLED,
+    SANDBOX_REASON_RUNNER_UNAVAILABLE,
+)
 from app.domain.entities import AuditEvent, CodeRunStatus, Role
 from app.domain.llm import ToolCall
 from app.domain.tools import (
@@ -56,9 +60,21 @@ from app.services.tools.impls.run_python import (
     _run_python,
 )
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import SandboxRun, ToolContext
+from app.services.tools.types import (
+    ApprovalDecision,
+    ApprovalRequest,
+    SandboxRun,
+    ToolContext,
+)
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
+
+
+class _AlwaysApprove:
+    """A pre-approving gate — the T2 governance path is asserted elsewhere here."""
+
+    async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+        return ApprovalDecision.allow()
 
 
 # --- A fake sandbox seam ----------------------------------------------------
@@ -76,9 +92,7 @@ class _FakeSandbox:
         self._run = run
         self.calls: list[dict[str, object]] = []
 
-    async def submit(
-        self, *, code: str, packages: tuple[str, ...] = ()
-    ) -> SandboxRun:
+    async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> SandboxRun:
         self.calls.append({"code": code, "packages": packages})
         return self._run
 
@@ -90,6 +104,7 @@ def _run(
     stdout: str = "",
     stderr: str = "",
     artifact_ids: tuple[uuid.UUID, ...] = (),
+    reason_code: str | None = None,
 ) -> SandboxRun:
     return SandboxRun(
         code_run_id=uuid.uuid4(),
@@ -99,6 +114,7 @@ def _run(
         stdout=stdout,
         stderr=stderr,
         artifact_ids=artifact_ids,
+        reason_code=reason_code,
     )
 
 
@@ -189,9 +205,7 @@ async def test_success_returns_status_artifacts_and_run_id(world: _World) -> Non
 
 async def test_package_requirements_are_forwarded(world: _World) -> None:
     sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED))
-    await _run_python(
-        {"code": "x=1", "packages": ["numpy==2.1.0"]}, world.context(sandbox)
-    )
+    await _run_python({"code": "x=1", "packages": ["numpy==2.1.0"]}, world.context(sandbox))
     assert sandbox.calls[0]["packages"] == ("numpy==2.1.0",)
 
 
@@ -241,6 +255,118 @@ async def test_failed_terminal_is_ok_false(world: _World) -> None:
     assert "Traceback" in result.content
 
 
+# ---------------------------------------------------------------------------
+# The trace row carries the TYPED reason, and only for the status that has one.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_sandbox_denial_carries_its_typed_reason_code(world: _World) -> None:
+    """Issue #502 (B2) — the durable trace must distinguish the sandbox gates.
+
+    An approval denial persists ``approval denied: <typed reason>``; a sandbox
+    denial persisted only the generic ``code_execution_denied`` plus a truncated
+    prose fragment, so the one thing #502 exists to record was missing from the
+    durable row.
+    """
+    sandbox = _FakeSandbox(
+        _run(
+            CodeRunStatus.DENIED,
+            exit_code=None,
+            stderr="Code execution is turned off for this deployment.",
+            reason_code=SANDBOX_REASON_DEPLOY_DISABLED,
+        )
+    )
+    result = await _run_python({"code": "print(1)"}, world.context(sandbox))
+
+    assert result.ok is False
+    assert result.error == ERROR_CODE_EXECUTION_DENIED  # the frozen code is unchanged
+    assert result.summary is not None
+    assert SANDBOX_REASON_DEPLOY_DISABLED in result.summary
+    # …and the typed code rides its own field into the audit metadata.
+    assert result.denied_reason == SANDBOX_REASON_DEPLOY_DISABLED
+
+
+async def test_a_killed_run_does_not_lift_its_stderr_into_the_trace(world: _World) -> None:
+    """Issue #502 (B6) — only a DENIED admission writes a typed sentence to stderr.
+
+    The reason lift fired for EVERY non-success terminal, so an explicitly
+    cancelled run and a failed one both had an arbitrary stderr fragment promoted
+    into ``result_summary``. For a ``failed`` run that fragment is model-authored:
+    ``print(secret, file=sys.stderr)`` landed verbatim in the trace row.
+    """
+    killed = _FakeSandbox(
+        _run(CodeRunStatus.KILLED, exit_code=None, stderr="Code execution was cancelled.")
+    )
+    killed_result = await _run_python({"code": "while True: pass"}, world.context(killed))
+    assert killed_result.summary == "code run killed"
+    assert killed_result.denied_reason is None
+
+    failed = _FakeSandbox(
+        _run(CodeRunStatus.FAILED, exit_code=1, stderr="tenant-secret-42\nTraceback…")
+    )
+    failed_result = await _run_python({"code": "raise ValueError"}, world.context(failed))
+    assert failed_result.summary == "code run failed"
+    assert "tenant-secret-42" not in (failed_result.summary or "")
+    # The model still sees the stderr tail in ``content`` — it needs it to recover.
+    assert "Traceback" in failed_result.content
+
+
+async def test_a_typed_failure_reason_still_reaches_the_trace(world: _World) -> None:
+    """B6 gates the STDERR lift, not the typed code: a failure with one keeps it."""
+    sandbox = _FakeSandbox(
+        _run(
+            CodeRunStatus.FAILED,
+            exit_code=None,
+            stderr="The code sandbox is temporarily unavailable.",
+            reason_code=SANDBOX_REASON_RUNNER_UNAVAILABLE,
+        )
+    )
+    result = await _run_python({"code": "print(1)"}, world.context(sandbox))
+    assert result.summary == f"code run failed: {SANDBOX_REASON_RUNNER_UNAVAILABLE}"
+    assert result.denied_reason == SANDBOX_REASON_RUNNER_UNAVAILABLE
+
+
+async def test_a_sandbox_denial_reason_reaches_the_durable_invocation_row(
+    world: _World,
+) -> None:
+    """End-to-end through the governed runner: the trace row + the audit metadata."""
+    sandbox = _FakeSandbox(
+        _run(
+            CodeRunStatus.DENIED,
+            exit_code=None,
+            stderr="Code execution is turned off for this deployment.",
+            reason_code=SANDBOX_REASON_DEPLOY_DISABLED,
+        )
+    )
+    session_id = uuid.uuid4()
+    runner = ToolRunner(
+        allowed=frozenset({RUN_PYTHON_TOOL_NAME}),
+        invocations=ToolInvocationRepository(world.session, world.tenant_id),
+        audit=AuditSink(AuditEventRepository(world.session, world.tenant_id)),
+        actor=AuditActor.user(world.user_id),
+        request_id="req-1",
+        source_ip="203.0.113.7",
+        session_id=session_id,
+        gate=_AlwaysApprove(),
+    )
+    result = await runner.run(
+        call=ToolCall(id="c1", name=RUN_PYTHON_TOOL_NAME, arguments={"code": "print(1)"}),
+        context=world.context(sandbox),
+    )
+    await world.session.commit()
+
+    assert result.ok is False
+    rows = await ToolInvocationRepository(world.session, world.tenant_id).list_for_session(
+        session_id
+    )
+    assert any(
+        r.result_summary is not None and SANDBOX_REASON_DEPLOY_DISABLED in r.result_summary
+        for r in rows
+    ), [r.result_summary for r in rows]
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
+    assert any(e.metadata.get("denied_reason") == SANDBOX_REASON_DEPLOY_DISABLED for e in events)
+
+
 async def test_empty_code_is_ok_false_before_seam(world: _World) -> None:
     sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED))
     result = await _run_python({"code": "   "}, world.context(sandbox))
@@ -288,9 +414,7 @@ async def test_unapproved_run_python_is_not_executed_but_audited(world: _World) 
     """INV-7: a T2 run_python call the default gate denies never touches the seam."""
     sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED))
     session_id = uuid.uuid4()
-    runner = _tool_runner(
-        world, allowed=frozenset({RUN_PYTHON_TOOL_NAME}), session_id=session_id
-    )
+    runner = _tool_runner(world, allowed=frozenset({RUN_PYTHON_TOOL_NAME}), session_id=session_id)
     call = ToolCall(id="c1", name=RUN_PYTHON_TOOL_NAME, arguments={"code": "print(1)"})
 
     result = await runner.run(
@@ -332,9 +456,7 @@ async def test_approved_run_python_executes_through_gate(world: _World) -> None:
             return True
 
     artifact_id = uuid.uuid4()
-    sandbox = _FakeSandbox(
-        _run(CodeRunStatus.SUCCEEDED, stdout="ok", artifact_ids=(artifact_id,))
-    )
+    sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED, stdout="ok", artifact_ids=(artifact_id,)))
     runner = ToolRunner(
         allowed=frozenset({RUN_PYTHON_TOOL_NAME}),
         invocations=ToolInvocationRepository(world.session, world.tenant_id),

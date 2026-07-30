@@ -556,8 +556,11 @@ class ToolRunner:
 
         ``denied_reason`` (issue #502) is the typed sub-reason behind a
         governance denial — the specific switch that refused, carried into the
-        audit metadata so an operator can tell the gates apart after the fact.
+        audit metadata so an operator can tell the gates apart after the fact. It
+        comes from the approval gate when the runner itself refused, and from the
+        result when the handler relayed a refusal from below it (a sandbox gate).
         """
+        reason = denied_reason or result.denied_reason
         metadata = {
             "tool": call.name,
             "call_id": call.id,
@@ -565,7 +568,7 @@ class ToolRunner:
             "ok": result.ok,
             "ordinal": ordinal,
             **({"error": result.error} if result.error else {}),
-            **({"denied_reason": denied_reason} if denied_reason else {}),
+            **({"denied_reason": reason} if reason else {}),
         }
         async with self._persist_gate:
             await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)
@@ -626,6 +629,9 @@ def _complete(call: ToolCall, body: ToolHandlerResult, duration_ms: int) -> Tool
             content=body.content,
             summary=body.summary,
             duration_ms=duration_ms,
+            # A refusal the handler is only RELAYING (a sandbox gate that refused
+            # below it) carries its typed reason up to the audit (issue #502).
+            denied_reason=body.denied_reason,
         )
     return ToolResult(
         call_id=call.id,

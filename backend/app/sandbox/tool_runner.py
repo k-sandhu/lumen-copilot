@@ -155,7 +155,13 @@ class ChatSandboxToolRunner:
                 # → terminal, capturing stdout/stderr/exit/artifacts and auditing every
                 # transition. It commits running state before the unbounded runner call
                 # and never raises for a run concern (a crash becomes ``failed``).
-                await service.execute(session, run_id)
+                #
+                # ``execute_outcome`` (not ``execute``) because the typed
+                # ``reason_code`` is NOT a column on ``code_runs`` — only the refusal's
+                # prose is, as ``stderr``. Reading it from the outcome is what lets the
+                # tool put the stable code in the ``tool_invocations`` row instead of a
+                # truncated sentence (issue #502).
+                outcome = await service.execute_outcome(session, run_id)
                 terminal = await code_runs.get(run_id)
                 await session.commit()
             except Exception:
@@ -173,12 +179,13 @@ class ChatSandboxToolRunner:
                 stderr="",
                 sandbox_session_id=None,
                 sandbox_generation=None,
+                reason_code=outcome.reason_code,
             )
             await self._emit_result(summary)
             return summary
 
         await self._stream_output(terminal)
-        summary = _to_summary(terminal)
+        summary = _to_summary(terminal, reason_code=outcome.reason_code)
         await self._emit_result(summary)
         return summary
 
@@ -236,8 +243,13 @@ class ChatSandboxToolRunner:
         )
 
 
-def _to_summary(run: CodeRun) -> SandboxRun:
-    """Project a terminal ``code_run`` record into the tool-facing summary."""
+def _to_summary(run: CodeRun, *, reason_code: str | None = None) -> SandboxRun:
+    """Project a terminal ``code_run`` record into the tool-facing summary.
+
+    ``reason_code`` rides alongside the row rather than out of it: the durable row
+    stores only the refusal's model-facing prose, while the typed code comes from
+    the execution outcome (issue #502).
+    """
     return SandboxRun(
         code_run_id=run.id,
         status=run.status,
@@ -248,6 +260,7 @@ def _to_summary(run: CodeRun) -> SandboxRun:
         artifact_ids=tuple(run.artifact_ids),
         sandbox_session_id=run.sandbox_session_id,
         sandbox_generation=run.sandbox_generation,
+        reason_code=reason_code,
     )
 
 

@@ -68,6 +68,15 @@ class SandboxRun:
     back to the model, and the ids of any artifacts the run produced (collected via
     CC-B #208). It carries **no** runner/Docker wire object — the sandbox boundary
     exposes domain types only (ADR-0004).
+
+    ``reason_code`` (issue #502) is the typed ``domain.code_execution.SANDBOX_REASON_*``
+    the admission or execution path resolved — the deploy kill-switch, the tenant
+    policy, the package policy, an unreachable/refusing runner. It is ``None`` for a
+    run that reached a terminal on its own merits (a success, a non-zero exit, an
+    explicit cancel). Without it the tool could only re-read the refusal's *prose*
+    out of ``stderr``, so the durable ``tool_invocations`` row recorded a generic
+    ``code_execution_denied`` and a truncated sentence — losing exactly the
+    distinction #502 exists to make.
     """
 
     code_run_id: UUID
@@ -79,6 +88,7 @@ class SandboxRun:
     artifact_ids: tuple[UUID, ...] = ()
     sandbox_session_id: UUID | None = None
     sandbox_generation: int | None = None
+    reason_code: str | None = None
 
 
 @runtime_checkable
