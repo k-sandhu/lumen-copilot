@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import mimetypes
 import os
@@ -37,6 +38,11 @@ _KNOWN_RUNTIMES = ("runc", "runsc")
 #: and the OOM killer removes code execution for every tenant. A session may request
 #: LESS (the backend sends ``SANDBOX_OUTPUT_BYTES_CAP``); nothing may request more.
 _OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
+#: Hard ceiling on collected output FILES per execution. The byte budget alone does
+#: not bound this: a tar member costs ~1 KiB on the wire, so 32 MiB admits ~32k
+#: members, and each one becomes an object-store PUT + an artifacts row + an audit
+#: event in the caller's transaction. Generous for a chat turn, fatal as a fan-out.
+_MAX_OUTPUT_MEMBERS = 64
 
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
@@ -325,7 +331,10 @@ class DockerSandboxEngine:
 
         code_path = f"{run_root}/main.py"
         self._put_bytes(container, code_path, request.code.encode("utf-8"))
-        env = {"LUMEN_OUTPUT_DIR": output_dir, **request.env}
+        # The engine's own path wins: it is what `_collect_outputs` reads from, so a
+        # caller-supplied value could otherwise tell the model to write somewhere
+        # collection never looks (silent zero-artifact success).
+        env = {**request.env, "LUMEN_OUTPUT_DIR": output_dir}
         started = time.monotonic()
         try:
             outcome = container.exec_run(
@@ -571,7 +580,11 @@ class DockerSandboxEngine:
         try:
             stream, _ = container.get_archive(output_dir)
         except Exception:
-            return [], False
+            # Report this as PARTIAL, not clean. Returning ``False`` here claimed a
+            # successful empty collection, so a transient daemon error (or model code
+            # that removed its own output dir) surfaced as "succeeded, no artifacts"
+            # with nothing anywhere saying output was lost.
+            return [], True
         reader = _BudgetedReader(stream, byte_budget)
         files: list[dict[str, object]] = []
         truncated = False
@@ -580,6 +593,13 @@ class DockerSandboxEngine:
                 for member in tar:
                     if not member.isfile():
                         continue
+                    # A member costs only ~1 KiB on the wire (512-byte header + one
+                    # data block), so a BYTE budget alone admits tens of thousands of
+                    # them — and every one becomes an object-store PUT, an artifacts
+                    # row and an audit event downstream. Bound the COUNT too.
+                    if len(files) >= _MAX_OUTPUT_MEMBERS:
+                        truncated = True
+                        break
                     extracted = tar.extractfile(member)
                     if extracted is None:
                         continue
@@ -600,6 +620,18 @@ class DockerSandboxEngine:
             # A tar cut short by the budget raises where the next header should be;
             # the members already read whole are still good.
             truncated = True
+        finally:
+            # ALWAYS release the docker stream. On the truncation path we stop pulling
+            # from it, and docker-py deliberately disables the socket read timeout on
+            # `get_archive`, so an abandoned generator leaves the daemon's tar writer
+            # blocked on a socket nobody reads and the pooled connection never
+            # reclaimed — until GC happens to collect it. The previous
+            # ``b"".join(stream)`` always drained, so this leak arrived WITH the byte
+            # budget; closing here is what makes the budget safe rather than a trade.
+            close = getattr(stream, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
         return files, truncated or reader.exhausted
 
 

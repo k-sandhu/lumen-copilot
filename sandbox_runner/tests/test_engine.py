@@ -54,6 +54,16 @@ class _Container:
         self.commands: list[list[str]] = []
         self.archive_chunk_size = 256
         self.archive_chunks_yielded = 0
+        #: Set when the archive generator is CLOSED explicitly (GeneratorExit),
+        #: i.e. the consumer released it instead of abandoning it mid-stream.
+        self.archive_stream_closed = False
+        #: A HELD reference to the generator. Without this the test cannot tell an
+        #: explicit ``close()`` from CPython reclaiming the abandoned generator the
+        #: instant ``_collect_outputs`` returns — refcounting fires GeneratorExit
+        #: either way, which made the first version of that assertion vacuous.
+        #: Holding it here reproduces the real hazard: docker-py's response is kept
+        #: alive by the connection pool, so only a deliberate close releases it.
+        self.archive_stream: Iterator[bytes] | None = None
         self.archive_chunks_total = 0
 
     def reload(self) -> None:
@@ -117,11 +127,16 @@ class _Container:
         self.archive_chunks_yielded = 0
 
         def _stream() -> Iterator[bytes]:
-            for chunk in chunks:
-                self.archive_chunks_yielded += 1
-                yield chunk
+            try:
+                for chunk in chunks:
+                    self.archive_chunks_yielded += 1
+                    yield chunk
+            except GeneratorExit:
+                self.archive_stream_closed = True
+                raise
 
-        return _stream(), {}
+        self.archive_stream = _stream()
+        return self.archive_stream, {}
 
 
 class _ImageNotFound(Exception):
@@ -591,6 +606,35 @@ def test_output_collection_stops_at_the_byte_budget_and_says_so() -> None:
     assert "exceeded" in str(result["stderr"])
     assert container.archive_chunks_yielded < container.archive_chunks_total
     assert container.archive_chunks_yielded * container.archive_chunk_size <= 2_000 + 256
+
+
+def test_the_archive_stream_is_released_when_the_budget_stops_reading() -> None:
+    """A budget that stops reading must also CLOSE the docker stream.
+
+    This is the regression the byte budget itself introduced. The code it replaced
+    (``b"".join(stream)``) always drained the archive to completion, so the response was
+    always finished with. Streaming stops early — and docker-py deliberately DISABLES
+    the socket read timeout on ``get_archive``, so an abandoned generator leaves the
+    daemon's tar writer blocked on a socket nobody reads, with the pooled connection
+    reclaimed only whenever GC happens to get to it. Every truncated collection would
+    burn a daemon connection.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure(output_bytes_cap=2_000))
+    container = client.containers.values[0]
+    container.output_files = [(f"file{index}.bin", 800) for index in range(6)]
+
+    result = _execute(engine, session_id)
+
+    # Truncation really happened (otherwise this would pass vacuously on a short tar).
+    assert container.archive_chunks_yielded < container.archive_chunks_total
+    assert "exceeded" in str(result["stderr"])
+    assert container.archive_stream_closed, (
+        "the archive stream was abandoned rather than closed — the daemon-side writer "
+        "stays blocked with no read timeout and the connection is never reclaimed"
+    )
 
 
 def test_a_partially_read_file_is_dropped_rather_than_delivered_corrupt() -> None:

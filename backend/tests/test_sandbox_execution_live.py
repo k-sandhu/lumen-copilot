@@ -497,9 +497,20 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
     change to the launch path adds a diagnostic bind mount or forwards a broader env,
     the whole suite would otherwise stay green because nothing looks inside.
 
-    The env check is deliberately a SUBSET assertion against the curated allow-list plus
-    the image's own baked-in vars, not an equality check, so it fails on anything NEW
-    leaking in rather than breaking whenever the image adds a benign variable.
+    Two things this deliberately gets right, both learned the hard way:
+
+    * **Mounts are judged by mount POINT, not filesystem type.** An earlier cut skipped
+      every ``tmpfs``/``overlay`` line before looking at the root, which would have made
+      it blind to the exact leak class it exists to catch — Docker and Kubernetes inject
+      secrets as tmpfs mounts. Every container also legitimately carries three
+      daemon-managed config binds (``/etc/resolv.conf``, ``/etc/hostname``, ``/etc/hosts``)
+      whose source lives under the daemon's own ``containers/<id>/`` directory; those are
+      named explicitly and their provenance asserted, rather than being filtered by a
+      broad rule that would hide a real bind alongside them.
+    * **The env check is a SUBSET assertion**, so it fails on anything NEW appearing
+      rather than breaking whenever the image adds a benign variable — plus an explicit
+      check that no app-config/secret name is present, which is the property ADR-0020 §6
+      actually asks for and which does not silently rot as the image changes.
     """
     result = await _run(
         sandbox,
@@ -508,25 +519,21 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
 
         print("SOCKET", os.path.exists("/var/run/docker.sock"))
 
-        # A bind mount from the host shows up as a mountinfo line whose root is not "/"
-        # for a non-virtual filesystem. /workspace and /opt/mplconfig are image layers,
-        # not host mounts, so they must NOT appear here.
-        virtual = {
-            "proc", "sysfs", "tmpfs", "devpts", "mqueue",
-            "cgroup", "cgroup2", "shm", "overlay",
-        }
-        binds = []
+        # Judge by mount POINT. Everything under /proc, /sys and /dev is kernel/virtual
+        # and expected; "/" is the image rootfs. ANY other mount point is something the
+        # launcher attached, whatever its filesystem type — which is what we want to see.
+        expected_prefixes = ("/proc", "/sys", "/dev")
+        mounts = []
         with open("/proc/self/mountinfo", encoding="utf-8") as fh:
             for line in fh:
                 parts = line.split()
                 sep = parts.index("-")
                 fstype = parts[sep + 1]
                 mount_root, mount_point = parts[3], parts[4]
-                if fstype in virtual:
+                if mount_point == "/" or mount_point.startswith(expected_prefixes):
                     continue
-                if mount_root != "/":
-                    binds.append(f"{fstype}:{mount_root}->{mount_point}")
-        print("BINDS", ",".join(binds) if binds else "none")
+                mounts.append(f"{mount_point}|{mount_root}|{fstype}")
+        print("MOUNTS", ",".join(sorted(mounts)) if mounts else "none")
 
         print("ENVKEYS", ",".join(sorted(os.environ)))
         """,
@@ -538,32 +545,88 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
     # No Docker socket: the socket authority is confined to the runner (ADR-0020 §2).
     assert out["SOCKET"] == "False", "the execution container can see the Docker socket"
 
-    # No host bind mounts: the wire schema caps `binds` at zero, and the engine passes
-    # volumes=None — this proves the container actually got that.
-    assert out["BINDS"] == "none", f"unexpected host bind mount(s): {out['BINDS']}"
+    # The ONLY mounts outside /proc, /sys, /dev may be the ones the DAEMON itself
+    # attaches to every container. A `--volume`, a secret tmpfs, or a socket mount would
+    # all show up here. Each is verified to come from a daemon-owned source path below,
+    # so an arbitrary host path wearing a familiar name does not slip through.
+    #
+    # This list was assembled by RUNNING the test, not by reasoning about it: the three
+    # /etc files come from `containers/<id>/`, and /usr/sbin/docker-init comes from
+    # `--init` (source `/usr/libexec/docker/docker-init`, fstype overlay). Two successive
+    # guesses at "what Docker mounts" were both wrong, which is the whole argument for
+    # this file existing.
+    _DAEMON_CONFIG_BINDS = {
+        "/etc/resolv.conf",
+        "/etc/hostname",
+        "/etc/hosts",
+        "/usr/sbin/docker-init",
+    }
+    _DAEMON_SOURCE_MARKERS = ("/containers/", "/libexec/docker/")
+    entries = [] if out["MOUNTS"] == "none" else out["MOUNTS"].split(",")
+    seen = {}
+    for entry in entries:
+        point, root, fstype = entry.split("|")
+        seen[point] = (root, fstype)
+    unexpected = sorted(set(seen) - _DAEMON_CONFIG_BINDS)
+    assert not unexpected, (
+        "the execution container has mount point(s) the launcher must not attach — "
+        f"a host bind, secret or socket would appear here: "
+        f"{ {p: seen[p] for p in unexpected} }"
+    )
+    # …and each must genuinely come from a daemon-owned source, not an arbitrary host
+    # path that happens to be mounted at a familiar point.
+    for point in sorted(set(seen) & _DAEMON_CONFIG_BINDS):
+        root = seen[point][0]
+        assert any(marker in root for marker in _DAEMON_SOURCE_MARKERS), (
+            f"{point} is bound from {root!r}, which is not a daemon-owned path "
+            f"({' or '.join(_DAEMON_SOURCE_MARKERS)}) — that is a host bind"
+        )
 
-    # No app secrets: only the curated session env plus the run's output dir and
-    # whatever the execution image itself bakes in.
-    # `_session_env()` is a tuple of (key, value) PAIRS, not a mapping — take the keys.
-    allowed = {key for key, _ in SandboxSessionService._session_env()} | {
-        "LUMEN_OUTPUT_DIR",
-        # Baked into the execution image (sandbox_exec/Dockerfile) or set by Docker.
+    # No app secrets. `_session_env()` is a tuple of (key, value) PAIRS, not a mapping.
+    baked = {
+        # Verified against `docker image inspect lumen-sandbox-exec` Config.Env, so this
+        # list is ground truth rather than a guess: python's base image vars plus the
+        # pip/matplotlib settings sandbox_exec/Dockerfile bakes in.
         "PATH",
-        "HOSTNAME",
+        "LANG",
+        "GPG_KEY",
         "PYTHON_VERSION",
         "PYTHON_SHA256",
-        "GPG_KEY",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PIP_NO_CACHE_DIR",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
         "MPLBACKEND",
         "MPLCONFIGDIR",
-        "PYTHONUNBUFFERED",
-        "HOME",
-        "LANG",
+        "HOSTNAME",  # set by Docker per container
     }
-    leaked = sorted(set(out["ENVKEYS"].split(",")) - allowed)
+    allowed = (
+        {key for key, _ in SandboxSessionService._session_env()}
+        | baked
+        | {
+            "LUMEN_OUTPUT_DIR",
+        }
+    )
+    present = set(out["ENVKEYS"].split(","))
+    leaked = sorted(present - allowed)
     assert not leaked, (
         "the execution container received environment variables outside the curated "
         f"set — an app secret or config leak would appear here: {leaked}"
     )
+    # Belt and braces: the property §6 actually names, stated directly so it cannot rot
+    # as the image's benign vars change.
+    forbidden_fragments = (
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "API_KEY",
+        "DATABASE",
+        "REDIS",
+        "S3_",
+        "DSN",
+    )
+    smells = sorted(k for k in present if any(f in k.upper() for f in forbidden_fragments))
+    assert not smells, f"credential-shaped variables reached the sandbox: {smells}"
 
 
 @_live
