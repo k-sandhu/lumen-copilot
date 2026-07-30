@@ -8,6 +8,7 @@ a missing/expired/tampered/wrong-issuer token must fail closed → ``InvalidToke
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from app.auth import (
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
+    hashing,
     mint_access_token,
     verify_access_token,
     verify_password,
@@ -70,6 +72,60 @@ def test_verify_password_rejects_wrong_and_malformed() -> None:
 def test_dummy_verify_does_not_raise() -> None:
     # The no-such-user timing path must complete silently.
     dummy_verify()
+
+
+# --- Off-loop verification (#512) ------------------------------------------
+#
+# Argon2id is deliberately CPU- and memory-hard, and the unknown-user path burns
+# the *same* cost by design (timing uniformity, above). Run inline on the event
+# loop, that cost parks the whole worker for the duration of every login attempt
+# — including attempts for accounts that do not exist. The async wrappers hand
+# the work to a thread (Argon2 releases the GIL in its C extension), so these
+# tests pin **where** the work runs, not merely that it returns the right answer.
+
+
+async def test_verify_password_async_matches_the_sync_result() -> None:
+    # Same answers as verify_password: the thread hop changes latency ownership,
+    # never the verdict.
+    h = hash_password("correct horse battery staple")
+    assert await hashing.verify_password_async(h, "correct horse battery staple") is True
+    assert await hashing.verify_password_async(h, "nope") is False
+    # A malformed stored hash still returns False and never raises.
+    assert await hashing.verify_password_async("not-a-real-hash", "pw") is False
+
+
+async def test_verify_password_async_runs_off_the_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Argon2 work lands on a worker thread, never the loop's own."""
+    ran_on: list[int] = []
+
+    def _record(password_hash: str, password: str) -> bool:  # noqa: ARG001
+        ran_on.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(hashing, "verify_password", _record)
+    assert await hashing.verify_password_async("hash", "pw") is True
+    assert ran_on == [ran_on[0]] and ran_on[0] != threading.get_ident()
+
+
+async def test_dummy_verify_async_still_pays_the_cost_off_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unknown-user path keeps burning a verify — just not on the loop.
+
+    Delegation is the load-bearing assertion: skipping the work would make the
+    no-such-user path cheap and reintroduce the account-existence timing oracle
+    that :func:`dummy_verify` exists to close (spec 0004 §2.3).
+    """
+    ran_on: list[int] = []
+
+    def _record() -> None:
+        ran_on.append(threading.get_ident())
+
+    monkeypatch.setattr(hashing, "dummy_verify", _record)
+    await hashing.dummy_verify_async()
+    assert ran_on == [ran_on[0]] and ran_on[0] != threading.get_ident()
 
 
 # --- Refresh tokens (opaque; hashed at rest) -------------------------------

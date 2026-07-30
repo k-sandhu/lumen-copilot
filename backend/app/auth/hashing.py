@@ -10,9 +10,18 @@ and an unknown user must be indistinguishable to the caller (no account-existenc
 disclosure, spec 0004 §2.3 / contract login 401). The service layer pairs this
 with a dummy-verify on the no-user path; this module just never reveals *why* a
 verify failed beyond a bool.
+
+Async callers use the ``*_async`` wrappers, never the sync primitives (#512):
+Argon2id is deliberately CPU- and memory-hard, so a verify on the event loop
+parks the whole worker for its duration. The wrappers hand the work to a thread
+— sound here because the cost is spent inside argon2-cffi's C extension, which
+releases the GIL. Sync callers off the request path (the ``seed`` CLI, tests)
+keep using the primitives directly.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import (
@@ -60,3 +69,24 @@ def dummy_verify() -> None:
         _hasher.verify(_DUMMY_HASH, "wrong")
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         pass
+
+
+async def verify_password_async(password_hash: str, password: str) -> bool:
+    """:func:`verify_password` off the event loop — the async caller's entry point.
+
+    Identical verdict and identical uniform-failure behaviour; only *where* the
+    CPU is spent changes. Callers still wait the full verify, but the loop stays
+    free to serve every other request meanwhile (#512).
+    """
+    return await asyncio.to_thread(verify_password, password_hash, password)
+
+
+async def dummy_verify_async() -> None:
+    """:func:`dummy_verify` off the event loop (#512).
+
+    Still burns a full verify — the cost *is* the point (spec 0004 §2.3), and it
+    is what makes the unauthenticated no-such-user path as expensive as a real
+    login. Moving it to a thread is therefore not an optimisation to skip: it is
+    what stops that path from being a way to park the worker.
+    """
+    await asyncio.to_thread(dummy_verify)

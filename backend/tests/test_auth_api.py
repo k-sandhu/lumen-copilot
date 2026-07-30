@@ -17,18 +17,20 @@ created from the ORM metadata. A dev user is seeded with an Argon2id hash, then:
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Iterator
 
 import pytest
 import pytest_asyncio
 from fastapi import Depends, FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, require_roles
-from app.auth import Principal, hash_password
+from app.auth import Principal, hash_password, hashing
 from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
@@ -263,3 +265,100 @@ def test_require_roles_admits_correct_role() -> None:
     gate = require_roles(Role.ADMIN, Role.SECURITY)
     admin = Principal(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), roles=(Role.ADMIN,))
     assert gate(admin) is admin
+
+
+# --- Perf: a login must not park the worker (#512) -------------------------
+#
+# Argon2id verification is CPU-hard by design. Run inline on the event loop it
+# serves nothing else for its whole duration, so an unauthenticated login flood
+# stalls every other request in the process.
+#
+# The probe is a 10 ms ticker coroutine racing the login, and the assertion is on
+# the **longest gap** between its wakeups — not on a tick count. A login awaits
+# the database several times either way, so a count accumulates enough ticks
+# around the stall to pass even when the loop *was* parked; the longest gap
+# isolates exactly the unresponsive stretch this issue is about.
+#
+# The stall is injected at ``hashing._hasher`` — the one Argon2 object *both*
+# ``verify_password`` and ``dummy_verify`` funnel through. Patching there (rather
+# than either wrapper) keeps the probe independent of how the module routes work
+# to a thread, so the test measures loop residency and not an implementation
+# detail. A fixed stall also keeps it fast and deterministic; real Argon2 timing
+# would be neither.
+
+_STALL_SECONDS = 0.3
+_TICK_SECONDS = 0.01
+# Verification on the loop produces a gap of >= _STALL_SECONDS; off the loop the
+# gaps stay at tick resolution. 0.1 s sits an order of magnitude above Windows
+# timer jitter and 3x below the stall, so the two regimes cannot be confused.
+_MAX_GAP_SECONDS = 0.1
+
+
+class _StallingHasher:
+    """The real hasher plus a fixed stall — same verdicts, deliberate cost."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def verify(self, password_hash: str, password: str) -> bool:
+        time.sleep(_STALL_SECONDS)
+        # Delegate so mismatches still raise exactly what the wrappers catch.
+        verified: bool = self._inner.verify(password_hash, password)  # type: ignore[attr-defined]
+        return verified
+
+
+async def _longest_loop_gap_during(awaitable: Awaitable[Response]) -> tuple[Response, float]:
+    """Await ``awaitable``; return it with the longest event-loop stall observed."""
+    gaps: list[float] = []
+
+    async def _ticker() -> None:
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(_TICK_SECONDS)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    ticker = asyncio.create_task(_ticker())
+    try:
+        await asyncio.sleep(0)  # let the ticker reach its first await
+        result = await awaitable
+    finally:
+        ticker.cancel()
+    # No tick at all means the loop never came back — the worst case, not a pass.
+    return result, max(gaps, default=float("inf"))
+
+
+async def test_login_does_not_stall_the_event_loop(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-user verify runs off the loop, so concurrent work keeps running."""
+    monkeypatch.setattr(hashing, "_hasher", _StallingHasher(hashing._hasher))
+
+    resp, longest_gap = await _longest_loop_gap_during(
+        client.post("/api/v1/auth/login", json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD})
+    )
+    # Unchanged outcome: the thread hop moves cost, never the verdict.
+    assert resp.status_code == 200
+    assert longest_gap < _MAX_GAP_SECONDS
+
+
+async def test_unknown_account_login_does_not_stall_the_event_loop(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-such-user path is the reachable one — it needs no valid account.
+
+    ``dummy_verify`` burns a real verify's CPU so login timing cannot reveal
+    whether an email exists (spec 0004 §2.3). That makes the *unauthenticated*
+    path exactly as expensive as the authenticated one, so it must be off the
+    loop too — otherwise anyone can stall the worker with invented addresses.
+    """
+    monkeypatch.setattr(hashing, "_hasher", _StallingHasher(hashing._hasher))
+
+    resp, longest_gap = await _longest_loop_gap_during(
+        client.post("/api/v1/auth/login", json={"email": "ghost@acme.test", "password": "x"})
+    )
+    # Still the same generic 401 — no observable outcome changes.
+    assert resp.status_code == 401
+    assert resp.json().get("detail", "") == "Invalid email or password."
+    assert longest_gap < _MAX_GAP_SECONDS

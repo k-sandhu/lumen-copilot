@@ -14,7 +14,13 @@ behind this same surface (the adapter rule); callers never change.
 from __future__ import annotations
 
 from app.auth.errors import InvalidCredentialsError, InvalidTokenError
-from app.auth.hashing import dummy_verify, hash_password, verify_password
+from app.auth.hashing import (
+    dummy_verify,
+    dummy_verify_async,
+    hash_password,
+    verify_password,
+    verify_password_async,
+)
 from app.auth.principal import Principal
 from app.auth.tokens import (
     MintedAccessToken,
@@ -30,10 +36,12 @@ __all__ = [
     "MintedAccessToken",
     "Principal",
     "dummy_verify",
+    "dummy_verify_async",
     "generate_refresh_token",
     "hash_password",
     "hash_refresh_token",
     "mint_access_token",
     "verify_access_token",
     "verify_password",
+    "verify_password_async",
 ]
