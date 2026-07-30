@@ -48,7 +48,7 @@ from app.search_web.client import (
     WebSearchClient,
     WebSearchRateLimited,
 )
-from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
+from app.tasks.rate_limit import AsyncRateLimiter, RedisFixedWindowRateLimiter
 
 # How much extracted passage text to keep per fetched page. Bounds the cite-worthy
 # body handed back so the tool result stays compact (the tool trims further for
@@ -70,7 +70,7 @@ class WebSearchService:
         *,
         tenant_id: UUID,
         client: WebSearchClient,
-        rate_limiter: RateLimiter,
+        rate_limiter: AsyncRateLimiter,
         default_k: int,
         max_k: int,
         fetch_top_n: int,
@@ -110,7 +110,9 @@ class WebSearchService:
         # (1) Per-tenant admission (ADR-0014 §3). Counts the search *before* any
         # outbound request so a throttled tenant makes neither the query nor any
         # result-page fetch. Fail-open on a Redis outage lives inside the limiter.
-        if not self._rate_limiter.try_acquire(self._tenant_id):
+        # Awaited, not called: this runs inside a live chat turn, and the sync
+        # form would park the serving loop on a connect + INCR per tool call (#527).
+        if not await self._rate_limiter.try_acquire_async(self._tenant_id):
             raise WebSearchRateLimited("web search rate limit exceeded for this tenant")
 
         # (2) Query leg — trusted internal hop to our own SearXNG.

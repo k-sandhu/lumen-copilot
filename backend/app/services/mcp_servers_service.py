@@ -78,7 +78,7 @@ from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
 from app.services.tools.mcp_bridge import tools_for_servers
 from app.services.tools.types import ToolDefinition
-from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
+from app.tasks.rate_limit import AsyncRateLimiter, RedisFixedWindowRateLimiter
 
 log = get_logger(__name__)
 
@@ -241,7 +241,7 @@ class McpServersService:
         roles: tuple[Role, ...],
         secrets: SecretsService,
         client_factory: McpClientFactory,
-        rate_limiter: RateLimiter,
+        rate_limiter: AsyncRateLimiter,
         user_agent: str,
         audit: AuditSink,
         request_id: str,
@@ -395,9 +395,14 @@ class McpServersService:
             )
         )
 
-    def _tenant_rate_limit(self) -> bool:
-        """The adapter's zero-arg rate-limit predicate, bound to this tenant's window."""
-        return self._rate_limiter.try_acquire(self._tenant_id)
+    async def _tenant_rate_limit(self) -> bool:
+        """The adapter's zero-arg rate-limit predicate, bound to this tenant's window.
+
+        Awaitable because it is evaluated inside ``McpClient.connect`` on the
+        serving event loop; the blocking form parked the worker on a fresh
+        Redis connect for every MCP call (#527).
+        """
+        return await self._rate_limiter.try_acquire_async(self._tenant_id)
 
     async def _store_auth(self, server_id: UUID, auth: McpAuthInput) -> tuple[UUID, str]:
         """Store the write-only credential via CC-C; return ``(secret_id, hint)``.
@@ -810,7 +815,7 @@ def build_mcp_servers_service(
     request_id: str,
     source_ip: str,
     client_factory: McpClientFactory | None = None,
-    rate_limiter: RateLimiter | None = None,
+    rate_limiter: AsyncRateLimiter | None = None,
 ) -> McpServersService:
     """Assemble a :class:`McpServersService` from settings (the production wiring).
 

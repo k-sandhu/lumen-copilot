@@ -40,14 +40,14 @@ _PUBLIC_IP = "93.184.216.34"
 class _AlwaysAllow:
     """A rate limiter that admits every search (the happy-path fake)."""
 
-    def try_acquire(self, tenant_id: uuid.UUID) -> bool:  # noqa: ARG002
+    async def try_acquire_async(self, tenant_id: uuid.UUID) -> bool:  # noqa: ARG002
         return True
 
 
 class _AlwaysDeny:
     """A rate limiter whose window is exhausted — every search is throttled."""
 
-    def try_acquire(self, tenant_id: uuid.UUID) -> bool:  # noqa: ARG002
+    async def try_acquire_async(self, tenant_id: uuid.UUID) -> bool:  # noqa: ARG002
         return False
 
 

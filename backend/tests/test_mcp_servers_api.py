@@ -76,6 +76,11 @@ _DOWN_URL = f"https://{_FIXTURE_HOST}/not-an-mcp-endpoint"
 _BEARER_SECRET = "super-secret-token-value-1234"
 
 
+async def _admit_all() -> bool:
+    """An always-admitting rate-limit check (awaitable, #527)."""
+    return True
+
+
 class _Seeded:
     def __init__(self, *, tenant_a: uuid.UUID, tenant_b: uuid.UUID) -> None:
         self.tenant_a = tenant_a
@@ -147,7 +152,7 @@ class _FakeLimiter:
     def __init__(self) -> None:
         self.calls: list[uuid.UUID] = []
 
-    def try_acquire(self, tenant_id: uuid.UUID) -> bool:
+    async def try_acquire_async(self, tenant_id: uuid.UUID) -> bool:
         self.calls.append(tenant_id)
         return True
 
@@ -602,7 +607,7 @@ async def test_transport_client_factory_binds_the_inner_transport() -> None:
                 user_agent="test/1",
                 allowed_transports=frozenset(),
                 endpoint_allowlist=frozenset(),
-                rate_limit=lambda: True,
+                rate_limit=_admit_all,
             )
         )
         assert client._inner_transport is fx.inner_transport  # noqa: SLF001

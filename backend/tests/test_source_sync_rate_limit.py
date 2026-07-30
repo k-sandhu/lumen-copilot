@@ -17,6 +17,7 @@ broker publish is a recording stub (no broker).
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import uuid
 
@@ -241,3 +242,181 @@ def test_enqueue_throttled_defers_with_backoff(
     assert len(captured_publish) == 1  # still enqueued (not dropped)
     assert captured_publish[0]["args"] == (str(tenant), str(source))
     assert captured_publish[0]["countdown"] == 30  # deferred with backoff
+
+
+# --- The async, pooled entry point (#527) -----------------------------------
+#
+# The limiter began on the Celery sync-enqueue boundary, where blocking is free.
+# The request-path callers that arrived later — the ``web_search`` tool and MCP
+# egress — admission-check inside a live chat turn, where the sync form parks the
+# serving loop on a fresh TCP connect plus INCR for every tool call. These pin
+# that the async form is semantically identical, pools its connection, and stays
+# off the loop.
+
+
+class _FakeAsyncRedis:
+    """In-memory async stand-in; counts how many clients were constructed."""
+
+    built = 0
+    store: dict[str, int] = {}
+    expired: dict[str, int] = {}
+
+    def __init__(self, *, fail: bool = False) -> None:
+        _FakeAsyncRedis.built += 1
+        self._fail = fail
+        self.closed = False
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.built = 0
+        cls.store = {}
+        cls.expired = {}
+
+    async def incr(self, key: str) -> int:
+        if self._fail:
+            raise redis.RedisError("counter store unreachable")
+        _FakeAsyncRedis.store[key] = _FakeAsyncRedis.store.get(key, 0) + 1
+        return _FakeAsyncRedis.store[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        _FakeAsyncRedis.expired[key] = seconds
+        return True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _async_limiter(*, max_per_window: int = 3, fail: bool = False) -> RedisFixedWindowRateLimiter:
+    return RedisFixedWindowRateLimiter(
+        "redis://localhost:6379/0",
+        max_per_window=max_per_window,
+        window_seconds=60,
+        async_client_factory=lambda: _FakeAsyncRedis(fail=fail),
+    )
+
+
+async def test_async_limiter_matches_the_sync_window_semantics() -> None:
+    """Same budget, same window arming, same per-tenant isolation."""
+    _FakeAsyncRedis.reset()
+    limiter = _async_limiter(max_per_window=3)
+    tenant, other = uuid.uuid4(), uuid.uuid4()
+
+    assert [await limiter.try_acquire_async(tenant) for _ in range(3)] == [True, True, True]
+    assert await limiter.try_acquire_async(tenant) is False  # window exhausted
+    assert await limiter.try_acquire_async(tenant) is False  # stays throttled
+    # A different tenant's budget is untouched.
+    assert await limiter.try_acquire_async(other) is True
+    # The TTL is armed once, on the first hit of each tenant's window.
+    assert _FakeAsyncRedis.expired == {
+        f"lumen:ratelimit:source_sync:{tenant}": 60,
+        f"lumen:ratelimit:source_sync:{other}": 60,
+    }
+
+
+async def test_async_limiter_reuses_one_pooled_client_across_calls() -> None:
+    """The point of the async path: one connection, not one per admission check.
+
+    The sync form opens a client per call (see ``_FakeRedis``' docstring); on the
+    chat path that is a TCP connect per tool invocation.
+    """
+    _FakeAsyncRedis.reset()
+    limiter = _async_limiter()
+    tenant = uuid.uuid4()
+
+    for _ in range(5):
+        await limiter.try_acquire_async(tenant)
+
+    assert _FakeAsyncRedis.built == 1
+
+
+async def test_async_limiter_fails_open_and_drops_the_dead_client() -> None:
+    """A counter-store outage admits (as the sync path does) and does not pin a bad client."""
+    _FakeAsyncRedis.reset()
+    limiter = _async_limiter(fail=True)
+
+    assert await limiter.try_acquire_async(uuid.uuid4()) is True
+    assert await limiter.try_acquire_async(uuid.uuid4()) is True
+    # Each failure retires the pooled client rather than reusing a broken one.
+    assert _FakeAsyncRedis.built == 2
+
+
+def test_async_limiter_rebuilds_its_client_for_a_new_event_loop() -> None:
+    """A client built on a dead loop is never handed out (the #140 failure mode).
+
+    Celery runs each task on a fresh loop, so a limiter that cached one client
+    forever would hand a warm worker connections belonging to a closed loop.
+
+    Deliberately a *sync* test: it drives two independent loops itself, which it
+    could not do from inside one (``asyncio_mode = "auto"``).
+    """
+    _FakeAsyncRedis.reset()
+    limiter = _async_limiter()
+
+    async def _use() -> None:
+        await limiter.try_acquire_async(uuid.uuid4())
+
+    asyncio.run(_use())
+    asyncio.run(_use())  # a second, independent loop
+
+    assert _FakeAsyncRedis.built == 2
+
+
+async def test_async_limiter_aclose_releases_the_pool() -> None:
+    """Shutdown releases the pooled client, and a later call rebuilds."""
+    _FakeAsyncRedis.reset()
+    limiter = _async_limiter()
+    await limiter.try_acquire_async(uuid.uuid4())
+    pooled = limiter._pool  # noqa: SLF001 - asserting the lifecycle it owns
+
+    await limiter.aclose()
+
+    assert pooled.closed is True
+    assert limiter._pool is None  # noqa: SLF001
+    await limiter.try_acquire_async(uuid.uuid4())
+    assert _FakeAsyncRedis.built == 2
+
+
+async def test_separate_limiter_instances_share_one_process_wide_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The property that makes the pooling worth anything in production.
+
+    ``build_web_search_service`` / ``build_mcp_servers_service`` construct a
+    **fresh** limiter per request, so a pool owned by the instance would still
+    open a connection per search. This drives the real (non-injected) path with
+    ``aioredis.from_url`` stubbed, and asserts a second limiter for the same URL
+    reuses the first one's client.
+    """
+    import app.tasks.rate_limit as rl
+
+    built: list[_FakeAsyncRedis] = []
+
+    def _from_url(_url: str, **_kwargs: object) -> _FakeAsyncRedis:
+        client = _FakeAsyncRedis()
+        built.append(client)
+        return client
+
+    _FakeAsyncRedis.reset()
+    monkeypatch.setattr(rl.aioredis, "from_url", _from_url)
+    monkeypatch.setattr(rl, "_ASYNC_POOLS", {})
+
+    def _fresh() -> RedisFixedWindowRateLimiter:
+        return RedisFixedWindowRateLimiter(
+            "redis://localhost:6379/0", max_per_window=100, window_seconds=60
+        )
+
+    await _fresh().try_acquire_async(uuid.uuid4())
+    await _fresh().try_acquire_async(uuid.uuid4())
+    await _fresh().try_acquire_async(uuid.uuid4())
+
+    assert len(built) == 1
+
+    # A different Redis URL is a different pool entry, not a silently shared one.
+    other = RedisFixedWindowRateLimiter(
+        "redis://elsewhere:6379/1", max_per_window=100, window_seconds=60
+    )
+    await other.try_acquire_async(uuid.uuid4())
+    assert len(built) == 2
+
+    await rl.aclose_async_rate_limit_pools()
+    assert all(c.closed for c in built)

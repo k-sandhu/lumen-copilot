@@ -567,7 +567,7 @@ class _FakeLimiter:
     def __init__(self) -> None:
         self.calls: list[uuid.UUID] = []
 
-    def try_acquire(self, tenant_id: uuid.UUID) -> bool:
+    async def try_acquire_async(self, tenant_id: uuid.UUID) -> bool:
         self.calls.append(tenant_id)
         return True
 

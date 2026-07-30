@@ -29,7 +29,7 @@ structured logs key only off the log-safe server ``slug``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from functools import partial
@@ -66,7 +66,9 @@ _log = structlog.get_logger(__name__)
 # (``RateLimiter.try_acquire`` with the MCP keyspace + window, ADR-0012 §4); tests
 # pass a lambda. Kept a bare ``Callable`` so the adapter needs no Redis import and
 # the SSRF guard stays the authoritative safety control if none is wired.
-RateLimitCheck = Callable[[], bool]
+# Awaitable: the check runs inside ``connect``, on the serving event loop, so a
+# blocking implementation would park the whole worker per MCP call (#527).
+RateLimitCheck = Callable[[], Awaitable[bool]]
 
 
 class McpSession:
@@ -249,7 +251,7 @@ class McpClient:
                 f"transport {server.transport.value!r} is not enabled",
             )
         self._enforce_allowlist(server)
-        self._enforce_rate_limit(server)
+        await self._enforce_rate_limit(server)
 
         headers = await self._resolve_auth_headers(server)
 
@@ -362,11 +364,11 @@ class McpClient:
                 f"host {host!r} is not on the MCP endpoint allowlist",
             )
 
-    def _enforce_rate_limit(self, server: McpServerConfig) -> None:
+    async def _enforce_rate_limit(self, server: McpServerConfig) -> None:
         """Refuse a connect that exceeds the per-tenant MCP egress window (if wired)."""
         if self._rate_limit is None:
             return
-        if not self._rate_limit():
+        if not await self._rate_limit():
             raise McpConnectionFailed(
                 MCP_ERROR_RATE_LIMITED,
                 f"MCP egress rate limit exceeded for {server.slug!r}",
