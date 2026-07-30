@@ -76,11 +76,19 @@ class SandboxDisabledError(ConflictError):
 def _failure_reason(exc: BaseException) -> str:
     """Classify a crash on the execution path into a typed reason (issue #502).
 
-    A :class:`~app.core.errors.DependencyError` is the runner boundary saying it
-    could not be reached (``sandbox/runner.py`` raises exactly that for any
-    transport fault), which is the ONE failure an operator can act on directly —
-    so it gets its own reason instead of the generic "failed unexpectedly".
+    An exception that already knows its own reason says so on ``sandbox_reason``:
+    the three runner outcomes (unreachable / refused the request / failed the
+    request — ``sandbox/runner.py``) and a policy that flipped between this path's
+    two enablement checks (:class:`SandboxDisabledError`). Collapsing all of those
+    into one code is exactly what #502 exists to stop, so the typed reason wins.
+
+    A bare :class:`~app.core.errors.DependencyError` from anywhere else is still
+    read as the runner being unreachable — that is the only dependency this path
+    has — and everything else is the honest "failed unexpectedly".
     """
+    reason = getattr(exc, "sandbox_reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
     if isinstance(exc, DependencyError):
         return SANDBOX_REASON_RUNNER_UNAVAILABLE
     return SANDBOX_REASON_RUN_ERROR
@@ -554,33 +562,14 @@ class SandboxService:
                 denial = exc.detail or sandbox_reason_public_message(reason)
                 operator_detail = denial
         if denial is not None:
-            log.warning(
-                "sandbox.run_denied",
-                code_run_id=str(run.id),
-                reason_code=reason,
-            )
-            await runs.mark_terminal(
-                run.id,
-                status=CodeRunStatus.DENIED,
-                finished_at=datetime.now(UTC),
-                # This row's stderr IS the model-facing reply, so it carries the
-                # control-neutral sentence only. The operator sentence goes to the
-                # log line above and the audit metadata below (issue #502).
-                stderr=denial,
-                duration_ms=0,
-            )
-            await self._audit_run(
+            return await self._finalize_denial(
+                runs,
                 audit,
-                AuditAction.CODE_RUN_DENIED,
                 run.id,
-                AuditOutcome.DENIED,
-                {
-                    "reason": operator_detail
-                    or sandbox_reason_message(reason or SANDBOX_REASON_RUN_ERROR),
-                    "reason_code": reason,
-                },
+                reason=reason or SANDBOX_REASON_RUN_ERROR,
+                denial=denial,
+                operator_detail=operator_detail,
             )
-            return CodeRunStatus.DENIED
 
         lifecycle = SandboxSessionService(
             session,
@@ -595,6 +584,14 @@ class SandboxService:
         started_at = datetime.now(UTC)
         try:
             sandbox = await lifecycle.ensure(run.session_id)
+        except SandboxDisabledError as exc:
+            # ``ensure`` re-checks enablement, so an admin (or the deploy switch)
+            # can turn code execution off between the admission check above and
+            # this one. That is still a POLICY refusal and must land exactly where
+            # it would have landed a millisecond earlier — a ``denied`` terminal
+            # carrying the policy's own reason code — instead of a ``failed`` run
+            # blamed on an unclassified crash (issue #502).
+            return await self._finalize_denial(runs, audit, run.id, reason=exc.sandbox_reason)
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
             log.error(
                 "sandbox.session_start_failed",
@@ -730,6 +727,49 @@ class SandboxService:
                 continue
             ids.append(artifact.id)
         return ids
+
+    async def _finalize_denial(
+        self,
+        runs: CodeRunRepository,
+        audit: AuditSink,
+        code_run_id: UUID,
+        *,
+        reason: str,
+        denial: str | None = None,
+        operator_detail: str | None = None,
+    ) -> CodeRunStatus:
+        """Write the ``denied`` terminal for a policy refusal, saying WHICH (#502).
+
+        The single writer for both enablement checks, so a policy that flips
+        mid-admission produces the same terminal, the same audit action and the
+        same ``reason_code`` as one that was already off.
+
+        ``denial`` is the model-facing sentence (defaults to the reason's public
+        one); ``operator_detail`` overrides the reason's stock operator sentence
+        when the refusal knows something more specific (which package, and why).
+        """
+        log.warning("sandbox.run_denied", code_run_id=str(code_run_id), reason_code=reason)
+        await runs.mark_terminal(
+            code_run_id,
+            status=CodeRunStatus.DENIED,
+            finished_at=datetime.now(UTC),
+            # This row's stderr IS the model-facing reply, so it carries the
+            # control-neutral sentence only. The operator sentence goes to the log
+            # line above and the audit metadata below (issue #502).
+            stderr=denial if denial is not None else sandbox_reason_public_message(reason),
+            duration_ms=0,
+        )
+        await self._audit_run(
+            audit,
+            AuditAction.CODE_RUN_DENIED,
+            code_run_id,
+            AuditOutcome.DENIED,
+            {
+                "reason": operator_detail or sandbox_reason_message(reason),
+                "reason_code": reason,
+            },
+        )
+        return CodeRunStatus.DENIED
 
     async def _finalize_failure(
         self,

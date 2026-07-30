@@ -10,9 +10,63 @@ from uuid import UUID
 
 import httpx
 
-from app.core.errors import DependencyError
+from app.core.errors import DependencyError, ValidationError
+from app.core.logging import get_logger
+from app.domain.code_execution import (
+    SANDBOX_REASON_RUNNER_ERROR,
+    SANDBOX_REASON_RUNNER_REJECTED,
+    SANDBOX_REASON_RUNNER_UNAVAILABLE,
+)
 from app.domain.entities import CodeRunStatus, ResourceUsage
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
+
+log = get_logger(__name__)
+
+
+class SandboxRunnerUnavailable(DependencyError):
+    """Nothing answered: a refused connection, a DNS failure, a transport fault.
+
+    The ONLY case that is honestly "unreachable" — the one an operator fixes by
+    starting the service.
+    """
+
+    code = "sandbox_runner_unavailable"
+    sandbox_reason = SANDBOX_REASON_RUNNER_UNAVAILABLE
+
+
+class SandboxRunnerRejected(ValidationError):
+    """The runner answered and REFUSED the request (4xx) — so it is up (issue #502).
+
+    A package it could not resolve or download (422), a rejected staged-input path
+    (422), a session generation it no longer holds (409/404). Reporting these as
+    "the runner is unreachable" sent an operator to check a service that was
+    answering every request correctly.
+
+    The runner's own sentence is deliberately NOT carried into ``detail``: it names
+    host-side facts ("the execution image is not present on the host daemon") and
+    this error renders into an HTTP problem body on the lifecycle endpoints. It is
+    logged instead.
+    """
+
+    code = "sandbox_runner_rejected"
+    sandbox_reason = SANDBOX_REASON_RUNNER_REJECTED
+
+
+class SandboxRunnerFailed(DependencyError):
+    """The runner answered with an internal error (5xx) — reachable, but broken.
+
+    Distinct from :class:`SandboxRunnerUnavailable` because the remedy differs: the
+    service is up, so the next place to look is its own log and the execution image
+    on the host daemon, not whether the container is running.
+    """
+
+    code = "sandbox_runner_error"
+    sandbox_reason = SANDBOX_REASON_RUNNER_ERROR
+
+
+#: How much of the runner's own refusal sentence to put in the operator log. It is
+#: runner-authored, never model-authored, but a bound keeps one log line bounded.
+_RUNNER_DETAIL_BUDGET = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,12 +215,36 @@ class HttpSandboxRunner:
         try:
             async with self._client() as client:
                 response = await client.request(method, path, json=json, params=params)
-                response.raise_for_status()
-                return response
         except (httpx.HTTPError, KeyError, ValueError) as exc:
-            raise DependencyError(
-                "sandbox runner unavailable", code="sandbox_runner_unavailable"
-            ) from exc
+            # Nothing answered. This — and only this — is "unreachable" (#502).
+            raise SandboxRunnerUnavailable("sandbox runner unavailable") from exc
+        if response.is_success:
+            return response
+        # The runner ANSWERED. Preserve which way it said no, or the one failure an
+        # operator can act on directly becomes indistinguishable from a bad package.
+        detail = self._answer_detail(response)
+        log.warning(
+            "sandbox.runner_refused",
+            method=method,
+            path=path,
+            status_code=response.status_code,
+            # Runner-authored (its RunnerError text), never model-authored, and this
+            # is the operator surface — so the specific sentence lives here.
+            runner_detail=detail,
+        )
+        if response.is_client_error:
+            raise SandboxRunnerRejected("the sandbox runner refused the request")
+        raise SandboxRunnerFailed("the sandbox runner failed the request")
+
+    @staticmethod
+    def _answer_detail(response: httpx.Response) -> str:
+        """The runner's own refusal sentence, bounded — for the operator log only."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        raw = body.get("detail") if isinstance(body, dict) else None
+        return str(raw if raw is not None else response.text)[:_RUNNER_DETAIL_BUDGET]
 
     @staticmethod
     def _session_wire(session: SandboxSessionSpec) -> dict[str, object]:
@@ -199,15 +277,11 @@ class HttpSandboxRunner:
             output_files = tuple(
                 OutputFile(
                     filename=str(value["filename"]),
-                    content_type=str(
-                        value.get("content_type", "application/octet-stream")
-                    ),
+                    content_type=str(value.get("content_type", "application/octet-stream")),
                     data=_unb64(str(value["data_b64"])),
                 )
                 for value in raw_files
-                if isinstance(value, dict)
-                and "filename" in value
-                and "data_b64" in value
+                if isinstance(value, dict) and "filename" in value and "data_b64" in value
             )
         raw_exit = body.get("exit_code")
         raw_duration = body.get("duration_ms")
@@ -236,5 +310,8 @@ __all__ = [
     "ContainerFlags",
     "HttpSandboxRunner",
     "SandboxRunner",
+    "SandboxRunnerFailed",
+    "SandboxRunnerRejected",
+    "SandboxRunnerUnavailable",
     "build_container_flags",
 ]

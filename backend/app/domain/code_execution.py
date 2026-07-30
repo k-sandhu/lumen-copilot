@@ -14,8 +14,15 @@ to flip. This module is the pure vocabulary that makes each refusal say *itself*
   admin actions fix them, so they are different reasons.
 * :data:`SANDBOX_REASON_POLICY_UNREADABLE` — the policy could not be read, so the
   run was refused fail-closed (INV-7). An infrastructure fault, NOT a setting.
-* :data:`SANDBOX_REASON_RUNNER_UNAVAILABLE` — every policy admits the run but the
-  dedicated runner service is unreachable. Not a policy at all.
+* :data:`SANDBOX_REASON_RUNNER_UNAVAILABLE` / :data:`SANDBOX_REASON_RUNNER_REJECTED`
+  / :data:`SANDBOX_REASON_RUNNER_ERROR` — every policy admits the run but the
+  dedicated runner service could not carry it out. Three reasons, not one, because
+  they need three different actions: nothing answered at all (start it), it
+  answered by *refusing* the request (a package it could not download, an invalid
+  requirement, a generation it no longer holds — read the rejected request), or it
+  answered with an internal failure (its own log, and whether the execution image
+  is on the host daemon). Collapsing these into "unreachable" sent an operator to
+  check a service that was answering fine.
 * :data:`SANDBOX_REASON_PACKAGE_DENIED` / :data:`SANDBOX_REASON_SESSION_REQUIRED` —
   the request itself is inadmissible (a package outside the tenant allow-list; a
   run with no parent chat session to own the reusable sandbox).
@@ -64,6 +71,12 @@ SANDBOX_REASON_PACKAGE_DENIED = "sandbox_package_denied"
 SANDBOX_REASON_SESSION_REQUIRED = "sandbox_session_required"
 #: The dedicated runner service is unreachable (a dependency fault, not a policy).
 SANDBOX_REASON_RUNNER_UNAVAILABLE = "sandbox_runner_unavailable"
+#: The runner ANSWERED and refused the request (4xx) — an unresolvable package
+#: requirement, a rejected staged path, a generation it no longer holds. It is up.
+SANDBOX_REASON_RUNNER_REJECTED = "sandbox_runner_rejected"
+#: The runner ANSWERED with an internal failure (5xx) — reachable, but it could not
+#: carry the run out (e.g. the execution image is missing from the host daemon).
+SANDBOX_REASON_RUNNER_ERROR = "sandbox_runner_error"
 #: The run crashed for an unclassified reason inside the sandbox path.
 SANDBOX_REASON_RUN_ERROR = "sandbox_run_error"
 
@@ -102,6 +115,18 @@ SANDBOX_REASON_MESSAGES: dict[str, str] = {
         "Every policy already permits it — an operator must check that the "
         "sandbox-runner service is running and reachable."
     ),
+    SANDBOX_REASON_RUNNER_REJECTED: (
+        "The sandbox-runner service answered and REFUSED the request (4xx): a package "
+        "requirement it could not resolve or download, a rejected staged input path, "
+        "or a session generation it no longer holds. The service is up — its log has "
+        "the rejected request."
+    ),
+    SANDBOX_REASON_RUNNER_ERROR: (
+        "The sandbox-runner service answered with an internal error (5xx): it is "
+        "reachable but could not carry the run out. Check its log, and that the "
+        "execution image named by SANDBOX_IMAGE is present on the host daemon — the "
+        "runner never pulls it."
+    ),
     SANDBOX_REASON_RUN_ERROR: "The sandbox run failed unexpectedly.",
 }
 
@@ -137,6 +162,11 @@ SANDBOX_REASON_PUBLIC_MESSAGES: dict[str, str] = {
         "The code sandbox is temporarily unavailable, so the run could not start. "
         "Try again shortly."
     ),
+    SANDBOX_REASON_RUNNER_REJECTED: (
+        "The code sandbox could not prepare this run. Try again without extra "
+        "packages, or with different ones."
+    ),
+    SANDBOX_REASON_RUNNER_ERROR: ("The code sandbox could not run this code. Try again shortly."),
     SANDBOX_REASON_RUN_ERROR: "The sandbox run failed unexpectedly.",
 }
 
@@ -171,6 +201,8 @@ __all__ = [
     "SANDBOX_REASON_POLICY_ABSENT",
     "SANDBOX_REASON_POLICY_UNREADABLE",
     "SANDBOX_REASON_PUBLIC_MESSAGES",
+    "SANDBOX_REASON_RUNNER_ERROR",
+    "SANDBOX_REASON_RUNNER_REJECTED",
     "SANDBOX_REASON_RUNNER_UNAVAILABLE",
     "SANDBOX_REASON_RUN_ERROR",
     "SANDBOX_REASON_SESSION_REQUIRED",

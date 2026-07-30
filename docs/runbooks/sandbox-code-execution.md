@@ -24,10 +24,19 @@ records a distinct **`reason_code`** (issue #502):
 | 1 | `SANDBOX_ENABLED` — the deploy kill-switch | `.env`, needs an API + worker restart | `sandbox_disabled_deploy` |
 | 2 | Tenant sandbox policy `enabled` | Admin → Code execution | `sandbox_policy_absent` / `sandbox_disabled_tenant` |
 | 3 | Tool policy for `run_python` | Admin → Tools; the assistant's allow-list (builder → *Tools*) | `tool_policy_absent` / `tool_policy_disabled` / `approval_required_unavailable` (the tool is simply never offered when the allow-list omits it) |
-| 4 | `sandbox-runner` reachable | compose `sandbox` profile | `sandbox_runner_unavailable` |
+| 4 | `sandbox-runner` reachable | compose `sandbox` profile | `sandbox_runner_unavailable` (nothing answered) / `sandbox_runner_rejected` (it answered 4xx) / `sandbox_runner_error` (it answered 5xx) |
 
-Gate 4 also covers **a missing execution image**: the runner cannot launch what is
-not on the host daemon. Build it first (§1).
+Gate 4's three codes are three different jobs, so do not read any of them as "the
+runner is down":
+
+- `sandbox_runner_unavailable` — nothing answered. Start the service (§4).
+- `sandbox_runner_rejected` — it answered and refused: a package it could not
+  download, an invalid requirement, a session generation it no longer holds. The
+  service is fine; `docker logs lumen-copilot-sandbox-runner-1` has the rejected
+  request (`sandbox.runner_refused` on the backend side carries the status code).
+- `sandbox_runner_error` — it answered 5xx. Usually **a missing execution image**:
+  the runner cannot launch what is not on the host daemon, and never pulls it.
+  Build it first (§1).
 
 > **Read the `reason_code`, not the run's `stderr`.** A refusal is written twice, on
 > purpose. The run's `stderr` is the tool reply the *model* reads and the user sees
@@ -244,10 +253,11 @@ docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
      order by created_at desc limit 5;"
 ```
 
-- `reason_code=sandbox_runner_unavailable` → the runner is down, or the execution
+- `reason_code=sandbox_runner_unavailable` → nothing answered: the runner is down.
+- `reason_code=sandbox_runner_error` → it answered 5xx; most often the execution
   image is missing from the host daemon (§1). The runner answers
-  `503 sandbox execution image is not present on the host daemon` for the second
-  case, and never pulls the image to fix it for you.
+  `503 sandbox execution image is not present on the host daemon` for that case,
+  and never pulls the image to fix it for you.
 - `status=succeeded` but a file you expected is missing, with *"Only part of the
   output directory was collected"* in `stderr` → the run wrote more than
   `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB). Collection is budgeted because the

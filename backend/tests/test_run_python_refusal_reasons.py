@@ -60,6 +60,9 @@ from app.domain.audit import AuditActor
 from app.domain.code_execution import (
     SANDBOX_REASON_DEPLOY_DISABLED,
     SANDBOX_REASON_POLICY_ABSENT,
+    SANDBOX_REASON_RUN_ERROR,
+    SANDBOX_REASON_RUNNER_ERROR,
+    SANDBOX_REASON_RUNNER_REJECTED,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
     SANDBOX_REASON_TENANT_DISABLED,
 )
@@ -74,9 +77,11 @@ from app.domain.tools import (
     RiskTier,
     ToolHandlerResult,
 )
+from app.sandbox.runner import SandboxRunnerFailed, SandboxRunnerRejected
 from app.sandbox.service import SandboxService
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 from app.services.audit import AuditSink
+from app.services.sandbox_policy_service import EffectiveSandboxPolicy, SandboxPolicyReader
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
@@ -466,6 +471,116 @@ async def test_the_four_gates_give_pairwise_distinct_reasons(world: _World) -> N
     }
     assert len(tool_policy) == 4
     assert reasons.isdisjoint(tool_policy - {APPROVAL_REASON_APPROVAL_UNAVAILABLE})
+
+
+async def test_a_runner_that_refuses_the_request_is_not_reported_as_unreachable(
+    world: _World,
+) -> None:
+    """Gate 4, split — the runner ANSWERED. "Unreachable" would send the wrong operator.
+
+    A failed package download / an invalid requirement / a stale generation are
+    4xx answers from a running service (``sandbox/runner.py`` now raises
+    :class:`SandboxRunnerRejected`), and a reachable-but-broken runner answers 5xx.
+    Both used to reach the audit trail as ``sandbox_runner_unavailable``.
+    """
+    await _enable_tenant_sandbox(world)
+    await world.session.commit()
+    rejected = _FakeRunner(
+        ensure_raises=SandboxRunnerRejected("the sandbox runner refused the request")
+    )
+    status, stderr, metadata = await _refuse(world, runner=rejected)
+
+    assert status is CodeRunStatus.FAILED
+    assert metadata["reason_code"] == SANDBOX_REASON_RUNNER_REJECTED
+    assert metadata["reason_code"] != SANDBOX_REASON_RUNNER_UNAVAILABLE
+    assert_control_neutral(stderr, where="code_runs.stderr (runner rejected)")
+
+
+async def test_a_runner_that_fails_internally_is_its_own_reason(world: _World) -> None:
+    """…and a 5xx is distinct again: the service is up, its own log is next."""
+    await _enable_tenant_sandbox(world)
+    await world.session.commit()
+    broken = _FakeRunner(ensure_raises=SandboxRunnerFailed("the sandbox runner failed"))
+    status, stderr, metadata = await _refuse(world, runner=broken)
+
+    assert status is CodeRunStatus.FAILED
+    assert metadata["reason_code"] == SANDBOX_REASON_RUNNER_ERROR
+    assert_control_neutral(stderr, where="code_runs.stderr (runner failed)")
+
+
+async def test_a_policy_flip_between_the_two_checks_keeps_the_policy_reason(
+    world: _World,
+) -> None:
+    """The execution path checks enablement TWICE; the second must say the same thing.
+
+    ``SandboxService.execute`` admits the run, then ``SandboxSessionService.ensure``
+    re-reads the policy before allocating a container. An admin turning code
+    execution off in between used to land as a ``failed`` run reason-coded
+    ``sandbox_run_error`` — the generic crash bucket — for what is plainly the
+    tenant policy refusing. Same gate, same terminal, same reason code.
+    """
+    await _enable_tenant_sandbox(world)
+    await world.session.commit()
+
+    run = await CodeRunRepository(world.session, world.tenant_id).create(
+        owner_id=world.user_id,
+        session_id=world.chat_id,
+        code="print(1)",
+        requested_packages=(),
+    )
+    runner = _FakeRunner()
+    service = SandboxService(
+        tenant_id=world.tenant_id,
+        owner_id=world.user_id,
+        runner=runner,  # type: ignore[arg-type]
+        object_store=_FakeStore(),  # type: ignore[arg-type]
+        settings=sandbox_settings(),
+    )
+
+    # Flip the workspace policy off in the window between the two checks: the first
+    # read is the one inside ``execute``, the second the one inside ``ensure``.
+    reads = 0
+    original = SandboxPolicyReader.resolve
+
+    async def _flip_after_first_read(self: SandboxPolicyReader) -> EffectiveSandboxPolicy:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            return EffectiveSandboxPolicy(
+                enabled=False,
+                disabled_reason=SANDBOX_REASON_TENANT_DISABLED,
+                allowed_packages=(),
+                denied_packages=(),
+                egress_allowed=False,
+                egress_allowlist=(),
+                max_runtime_s=30,
+                max_memory_mb=512,
+                daily_runtime_cap_s=3600,
+                max_concurrency=2,
+            )
+        return await original(self)
+
+    SandboxPolicyReader.resolve = _flip_after_first_read  # type: ignore[method-assign]
+    try:
+        status = await service.execute(world.session, run.id)
+    finally:
+        SandboxPolicyReader.resolve = original  # type: ignore[method-assign]
+
+    assert reads >= 2, "the second enablement check never ran — the test proves nothing"
+    # It is a POLICY refusal, so it lands where the first check would have put it …
+    assert status is CodeRunStatus.DENIED
+    # …refused before any container was allocated, exactly like the first check.
+    assert runner.ensured == []
+    assert runner.executions == []
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
+    terminal = next(e for e in events if e.action in {"code_run.denied", "code_run.finished"})
+    assert terminal.action == "code_run.denied"
+    # … carrying the policy's own reason, not the generic crash bucket.
+    assert terminal.metadata["reason_code"] == SANDBOX_REASON_TENANT_DISABLED
+    assert terminal.metadata["reason_code"] != SANDBOX_REASON_RUN_ERROR
+    persisted = await CodeRunRepository(world.session, world.tenant_id).get(run.id)
+    assert persisted is not None
+    assert_control_neutral(persisted.stderr, where="code_runs.stderr (mid-run policy flip)")
 
 
 # ---------------------------------------------------------------------------
