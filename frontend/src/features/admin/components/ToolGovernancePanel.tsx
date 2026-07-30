@@ -109,20 +109,37 @@ function ToolRow({
       </td>
       <td className="px-4 py-3">
         {canRequireApproval ? (
-          <ToggleSwitch
-            checked={tool.requires_approval}
-            disabled={saving}
-            label={`${
-              tool.requires_approval ? 'Pre-approve' : 'Require approval for'
-            } ${tool.tool_name}`}
-            onToggle={() =>
-              onSet({
-                tool_name: tool.tool_name,
-                enabled: tool.enabled,
-                requires_approval: !tool.requires_approval,
-              })
-            }
-          />
+          <>
+            <ToggleSwitch
+              checked={tool.requires_approval}
+              disabled={saving}
+              label={`${
+                tool.requires_approval ? 'Pre-approve' : 'Require approval for'
+              } ${tool.tool_name}`}
+              onToggle={() =>
+                onSet({
+                  tool_name: tool.tool_name,
+                  enabled: tool.enabled,
+                  requires_approval: !tool.requires_approval,
+                })
+              }
+            />
+            {/*
+              Issue #500: there is no in-session approver anywhere in the product yet
+              (the gate refuses rather than prompting — `services/tools/gate.py`), so
+              leaving this ON does NOT mean "ask me": it refuses every call, for every
+              user in the tenant, until an admin clears it. Saying so AT THE CONTROL is
+              the point — the admin deciding now is the actor who gets misled, not the
+              operator who reads the refusal hours later. Remove this warning when the
+              interactive approval flow (#501) ships.
+            */}
+            {tool.requires_approval ? (
+              <p className="mt-1 max-w-[22rem] text-xs text-warning" role="note">
+                No approver exists yet, so this <strong>refuses every call</strong> for the whole
+                tenant. Clear it to pre-approve the tool.
+              </p>
+            ) : null}
+          </>
         ) : (
           <span className="text-xs text-foreground-muted">n/a</span>
         )}
@@ -182,11 +199,7 @@ export function ToolGovernancePanel() {
   const [toast, setToast] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null);
   const tools = query.data?.items ?? [];
 
-  const handleSet = (next: {
-    tool_name: string;
-    enabled: boolean;
-    requires_approval: boolean;
-  }) => {
+  const handleSet = (next: { tool_name: string; enabled: boolean; requires_approval: boolean }) => {
     setToast(null);
     mutation.mutate(next, {
       onSuccess: () => setToast({ kind: 'ok', message: `Updated ${next.tool_name}.` }),

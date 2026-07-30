@@ -132,7 +132,15 @@ function ToolRow({
             <span id={labelId} className="text-sm">
               {tool.label}
             </span>
-            {tool.riskTier !== 'T0' ? <RiskTierBadge tier={tool.riskTier} /> : null}
+            {!tool.catalogued ? (
+              // No authoritative tier for an uncatalogued grant — say "unknown" rather
+              // than render a `T0` badge we cannot stand behind (#505 review).
+              <span className="rounded bg-surface-muted px-1.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-wide text-foreground-muted">
+                risk unknown
+              </span>
+            ) : tool.riskTier !== 'T0' ? (
+              <RiskTierBadge tier={tool.riskTier} />
+            ) : null}
           </span>
           <span id={descId} className="block">
             <span className="block text-xs text-foreground-muted">{tool.description}</span>
@@ -141,7 +149,15 @@ function ToolRow({
                 Side-effecting: this tool acts, it does not just read.
               </span>
             ) : null}
-            {unavailable ? (
+            {!tool.catalogued ? (
+              // NOT the admin-disabled copy: no admin turned this off. It is simply
+              // absent from the catalogue (retired from the registry, or an `mcp:*`
+              // grant the catalogue does not enumerate).
+              <span className="mt-0.5 block text-xs text-foreground-muted">
+                Not in this tenant’s catalogue — its governance cannot be shown here. It stays
+                granted unless you untick it.
+              </span>
+            ) : unavailable ? (
               <span className="mt-0.5 block text-xs text-danger">
                 Unavailable — an admin has turned this tool off for your tenant.
               </span>

@@ -66,9 +66,32 @@ describe('ToolGovernancePanel', () => {
     expect(screen.getByLabelText(/risk tier T0/i)).toBeInTheDocument();
     // A write-tier tool exposes an enable AND an approval toggle.
     expect(screen.getByRole('switch', { name: /disable run_python/i })).toBeInTheDocument();
-    expect(
-      screen.getByRole('switch', { name: /pre-approve run_python/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /pre-approve run_python/i })).toBeInTheDocument();
+  });
+
+  // Issue #500: with no in-session approver anywhere in the product, leaving
+  // "requires approval" ON does not mean "ask me" — it refuses every call for the whole
+  // tenant. The admin deciding AT THIS CONTROL is the person who gets misled, so the
+  // warning has to live here and not only in the eventual runtime refusal.
+  it('warns that a tool left requiring approval is refused for the whole tenant', async () => {
+    getToolPolicy.mockResolvedValue(POLICY);
+    renderWithQuery(<ToolGovernancePanel />);
+
+    await screen.findByText('run_python');
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent(/refuses every call/i);
+    expect(note).toHaveTextContent(/whole tenant/i);
+  });
+
+  it('does not warn about a tool that is already pre-approved', async () => {
+    getToolPolicy.mockResolvedValue({
+      items: [{ ...POLICY.items[1], requires_approval: false }],
+    } as ToolPolicy);
+    renderWithQuery(<ToolGovernancePanel />);
+
+    await screen.findByText('run_python');
+    // Nothing to warn about: the tool is enabled and pre-approved, so it can run.
+    expect(screen.queryByRole('note')).not.toBeInTheDocument();
   });
 
   it('offers no approval control for a read-only (T0) tool', async () => {

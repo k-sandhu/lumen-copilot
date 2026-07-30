@@ -34,6 +34,16 @@ export interface ToolOption {
   enabled: boolean;
   /** True when an invocation is still approval-gated for this tenant. */
   requiresApproval: boolean;
+  /**
+   * False for a name already in the allow-list that the catalogue does not describe
+   * (a retired registry tool, or an `mcp:*` tool granted elsewhere — those are
+   * validated server-side against the tenant's MCP servers, so they are LEGITIMATE
+   * grants, not junk). Such a row has NO authoritative governance metadata, so the
+   * other fields on it are placeholders and must not be presented as facts: it gets
+   * its own conservative copy rather than borrowing the admin-disabled or T0
+   * read-only presentation, either of which would state something untrue.
+   */
+  catalogued: boolean;
 }
 
 /**
@@ -67,6 +77,7 @@ export function toToolOption(entry: ToolCatalogEntry): ToolOption {
     readOnly: entry.read_only,
     enabled: entry.enabled,
     requiresApproval: entry.requires_approval,
+    catalogued: true,
   };
 }
 
@@ -86,11 +97,20 @@ export function toToolOptions(entries: ToolCatalogEntry[], selected: string[]): 
       name,
       label: toolLabel(name),
       description:
-        'Already granted, but not in this tenant’s tool catalogue. Untick it to remove it.',
+        'Already granted, but not described by this tenant’s tool catalogue. Its risk and' +
+        ' governance are unknown here, so it is shown conservatively.',
+      // Placeholders ONLY — `catalogued: false` is what the renderer branches on.
+      // Deliberately NOT `T0` + `readOnly: true` + `enabled: false`: that trio made an
+      // `mcp:*` grant render as a harmless read-only tool that "an admin turned off"
+      // (no admin did), suppressing the side-effecting warning on a component whose
+      // contract is "governance is displayed, never bypassed". `readOnly: false` keeps
+      // the conservative side-effecting copy; `enabled: true` keeps the row unlocked so
+      // a still-granted tool can be re-ticked after an accidental untick.
       riskTier: 'T0',
-      readOnly: true,
-      enabled: false,
+      readOnly: false,
+      enabled: true,
       requiresApproval: false,
+      catalogued: false,
     }));
   return [...options, ...orphans];
 }
