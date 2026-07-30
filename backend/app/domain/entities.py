@@ -617,6 +617,62 @@ class User:
     email_attested_by: UUID | None = None
 
 
+class GroupKind(str, enum.Enum):
+    """Whether a group is admin-authored or the tenant's derived one (ADR-0022 §3).
+
+    ``USER`` groups are created, named, populated and deleted by an admin.
+    ``SYSTEM`` is the single per-tenant "All members" group that expresses
+    tenant-wide visibility: it cannot be renamed, deleted or explicitly
+    populated, and it has **no membership rows** — every user in the tenant
+    belongs to it by derivation. Materializing that membership would need a
+    back-fill plus a user-creation hook, and a missed hook silently denies
+    access; a derived membership cannot drift.
+    """
+
+    USER = "user"
+    SYSTEM = "system"
+
+
+@dataclass(frozen=True, slots=True)
+class Group:
+    """A tenant-scoped set of users an admin manages (ADR-0022 §1).
+
+    A group confers nothing by itself — it only makes a ``grants`` row whose
+    ``principal_type`` is :attr:`GrantPrincipalType.GROUP` apply to its members.
+    :class:`Role` still decides what a user may *do*; a group only widens what
+    they may *see*.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    name: str
+    kind: GroupKind
+    created_at: datetime
+    updated_at: datetime
+    created_by: UUID | None = None
+
+    @property
+    def is_system(self) -> bool:
+        """True for the tenant's derived "All members" group (immutable)."""
+        return self.kind is GroupKind.SYSTEM
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMember:
+    """One user's membership of one :class:`Group` (ADR-0022 §1).
+
+    Only ever exists for :attr:`GroupKind.USER` groups — the system group's
+    membership is derived, never stored.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    group_id: UUID
+    user_id: UUID
+    added_at: datetime
+    added_by: UUID | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RefreshToken:
     """A rotating, revocable refresh-token record (spec 0004 §2.3).

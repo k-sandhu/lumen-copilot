@@ -71,9 +71,18 @@ class AllowSet:
     # principal. Gates ONLY the `acl_enforced` branch of the mode-split
     # predicate; the owner/grant legs never apply there (exclusive modes).
     acl_principals: frozenset[str] = frozenset()
+    # The requester's GROUP principals (ADR-0022 §5): the ids of the groups they
+    # belong to, including their tenant's derived "All members" group. Widens
+    # ONLY the grant leg — a grant row with `principal_type='group'` and a
+    # `principal_id` in this set admits the resource. Empty (the default) means
+    # "no group principals", which narrows the allow-set to ownership plus the
+    # requester's own user grants: absent membership is denial, never a wildcard.
+    group_ids: frozenset[UUID] = frozenset()
 
     @classmethod
-    def for_principal(cls, principal: Principal) -> AllowSet:
+    def for_principal(
+        cls, principal: Principal, *, group_ids: frozenset[UUID] = frozenset()
+    ) -> AllowSet:
         """Compute the allow-set for ``principal`` (own + granted + mirrored-ACL identity).
 
         Always includes the principal's own ``user_id`` as both the in-set owner
@@ -85,13 +94,28 @@ class AllowSet:
         The mirrored-principal identity (ADR-0019 §2) is derived from the same
         token-bound principal: ``user:<user_id>`` (a source ACL entry mapped to
         this exact Lumen user admits them) plus ``tenant`` (an ``anyone``-shared
-        source item is tenant-wide). Group principals are a recorded follow-up;
-        they widen this same set without any caller changing.
+        source item is tenant-wide).
+
+        ``group_ids`` (ADR-0022) is the requester's group membership, resolved
+        per request by ``GroupRepository.group_ids_for_user`` and passed in
+        rather than derived here so this stays pure. It is **optional and
+        defaults to empty**: a caller that has not resolved membership yet gets
+        the pre-ADR-0022 allow-set, which is narrower — the default fails closed.
         """
-        return cls.for_user(tenant_id=principal.tenant_id, user_id=principal.user_id)
+        return cls.for_user(
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            group_ids=group_ids,
+        )
 
     @classmethod
-    def for_user(cls, *, tenant_id: UUID, user_id: UUID) -> AllowSet:
+    def for_user(
+        cls,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        group_ids: frozenset[UUID] = frozenset(),
+    ) -> AllowSet:
         """The same allow-set from an already-resolved tenant/user pair.
 
         :meth:`for_principal` is the request-path entry point; services that
@@ -106,6 +130,7 @@ class AllowSet:
             owner_ids=frozenset({user_id}),
             grant_principal_id=user_id,
             acl_principals=frozenset({f"user:{user_id}", "tenant"}),
+            group_ids=group_ids,
         )
 
     def permits_owner(self, owner_id: UUID) -> bool:

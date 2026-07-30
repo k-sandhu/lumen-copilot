@@ -684,22 +684,22 @@ async def test_grant_to_nonexistent_user_is_404_with_no_row(
     assert AuditAction.PERMISSION_GRANTED.value not in actions
 
 
-@pytest.mark.parametrize(
-    "principal_type",
-    [GrantPrincipalType.GROUP, GrantPrincipalType.ROLE],
-)
+@pytest.mark.parametrize("principal_type", [GrantPrincipalType.ROLE])
 async def test_grant_with_unsupported_principal_type_is_rejected_no_row(
     session: AsyncSession,
     two_tenants: tuple[uuid.UUID, uuid.UUID],
     principal_type: GrantPrincipalType,
 ) -> None:
-    """INV-8: a ``group``/``role`` grant is rejected at the boundary (422), no row.
+    """INV-8: a ``role`` grant is rejected at the boundary (422), no row.
 
-    The MVP supports ``user`` grants only (spec 0004 §2.2). A ``group``/``role``
-    principal — which the retrieval filter never honors — is refused with a
+    ``role`` remains unsupported (ADR-0022 §4): nothing needs it yet, and
+    admitting it unreviewed would widen INV-2 for free. It is refused with a
     :class:`ValidationError` (422) before anything is persisted, and **no grant
     row** is written. (A denied audit is not emitted: this is malformed input, not
     an access denial.)
+
+    ``group`` used to be rejected here too; since ADR-0022 it is supported, and
+    its own admit/exclude/tenant-scoping guarantees live in ``test_groups.py``.
     """
     tenant_a, _ = two_tenants
     user_a = await _make_user(session, tenant_a, "a@x.test")

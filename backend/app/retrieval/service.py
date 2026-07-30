@@ -50,7 +50,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
-from app.db.repositories import GrantRepository
+from app.db.repositories import GrantRepository, GroupRepository
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import queries
@@ -89,6 +89,10 @@ class RetrievalService:
         self._session = session
         self._gateway = gateway
         self._store = store
+        # Group membership resolved once per service instance (ADR-0022 §5).
+        # The service is built per request, so this never outlives the request
+        # and cannot make a group removal lag — see _resolve_allow_set.
+        self._allow_set_cache: dict[UUID, AllowSet] = {}
 
     def _search_store(self) -> OpenSearchStore:
         """The engine client — injected (tests) or the app-process default.
@@ -98,17 +102,38 @@ class RetrievalService:
         """
         return self._store if self._store is not None else get_search_store()
 
+    async def _resolve_allow_set(self, principal: Principal) -> AllowSet:
+        """The requester's allow-set, with their group principals resolved (ADR-0022 §5).
+
+        Group membership needs a read, so it cannot come from the pure
+        :meth:`AllowSet.for_principal`; it is resolved here — the one place the
+        retrieval chokepoint builds an allow-set — and memoized for this request
+        only. A user in no groups gets an empty set, which narrows the allow-set
+        to ownership plus their own user grants (fail closed).
+        """
+        cached = self._allow_set_cache.get(principal.user_id)
+        if cached is not None:
+            return cached
+        group_ids = await GroupRepository(self._session, principal.tenant_id).group_ids_for_user(
+            principal.user_id
+        )
+        allow_set = AllowSet.for_principal(principal, group_ids=group_ids)
+        self._allow_set_cache[principal.user_id] = allow_set
+        return allow_set
+
     async def _allow_filter(self, allow_set: AllowSet) -> SearchAllowFilter:
         """Build the engine-side INV-1/INV-2 filter for this request.
 
         The SQL grant ``EXISTS`` becomes resolved id-sets (ADR-0010 §4): the
-        requester's ``user``-principal grants are read from the tenant-scoped
-        ``grants`` table **per request**, so a revoked grant vanishes from the
-        very next query — deny-by-default is preserved on the engine path.
+        requester's ``user``- **and** ``group``-principal grants (ADR-0022 §5)
+        are read from the tenant-scoped ``grants`` table **per request**, so a
+        revoked grant — or a removal from the group that carried it — vanishes
+        from the very next query; deny-by-default is preserved on the engine
+        path exactly as it is in SQL.
         """
         granted_docs, granted_colls = await GrantRepository(
             self._session, allow_set.tenant_id
-        ).granted_resource_ids(allow_set.grant_principal_id)
+        ).granted_resource_ids(allow_set.grant_principal_id, group_ids=allow_set.group_ids)
         return SearchAllowFilter(
             tenant_id=allow_set.tenant_id,
             owner_ids=allow_set.owner_ids,
@@ -166,7 +191,7 @@ class RetrievalService:
         k = _clamp_k(k)
         if not query.strip():
             return []
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         allow = await self._allow_filter(allow_set)
 
         # Embed the query (the only model call; the gateway returns a domain
@@ -270,7 +295,7 @@ class RetrievalService:
         """
         if not name_or_query.strip():
             return []
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         hits = await queries.document_search(
             self._session,
             allow_set=allow_set,
@@ -308,7 +333,7 @@ class RetrievalService:
         :class:`DocumentMatch` ids feed :meth:`get_document`. A principal with no
         owned/granted documents yields ``[]`` (never another user's or tenant's).
         """
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         rows = await queries.list_documents(
             self._session,
             allow_set=allow_set,
@@ -339,7 +364,7 @@ class RetrievalService:
         """
         if not document_ids:
             return {}
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         stmt = queries.permitted_document_names(
             allow_set=allow_set, document_ids=list(document_ids)
         )
@@ -358,7 +383,7 @@ class RetrievalService:
         """
         if not chunk_ids:
             return {}
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         stmt = queries.valid_chunk_pairs(tenant_id=allow_set.tenant_id, chunk_ids=list(chunk_ids))
         rows = (await self._session.execute(stmt)).all()
         return {row[0]: row[1] for row in rows}
@@ -385,7 +410,7 @@ class RetrievalService:
         (existence non-disclosure, INV-2; never reveals a foreign document
         exists).
         """
-        allow_set = AllowSet.for_principal(principal)
+        allow_set = await self._resolve_allow_set(principal)
         row = await queries.load_document_text(
             self._session, allow_set=allow_set, document_id=document_id
         )

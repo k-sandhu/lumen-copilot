@@ -108,17 +108,39 @@ def _grant_exists(allow_set: AllowSet) -> ColumnElement[bool]:
       ``resource_id = documents.collection_id``) — a collection grant **cascades**
       to its documents.
 
+    The grant may be to either of the requester's principal kinds (ADR-0022 §5):
+
+    * their ``user`` principal (``principal_id = grant_principal_id``), or
+    * any ``group`` principal they carry (``principal_id IN allow_set.group_ids``)
+      — the group's members all see what the group was granted. An empty
+      ``group_ids`` renders no group leg at all, so the predicate degrades to the
+      pre-ADR-0022 user-only rule rather than matching every group.
+
     Tenant-scoped on the grant row too, so a grant minted in another tenant can
     never widen this filter (a cross-tenant grant is invisible). Deletion of the
-    grant row (revoke) makes this ``EXISTS`` false again — the document is excluded
-    once more, deny-by-default.
+    grant row (revoke), or removal from the group, makes this ``EXISTS`` false
+    again — the document is excluded once more, deny-by-default. Membership is
+    re-read per request (ADR-0022 §7), so a removal takes effect immediately
+    rather than when a token expires.
     """
+    principal_match = [
+        and_(
+            models.Grant.principal_type == "user",
+            models.Grant.principal_id == allow_set.grant_principal_id,
+        )
+    ]
+    if allow_set.group_ids:
+        principal_match.append(
+            and_(
+                models.Grant.principal_type == "group",
+                models.Grant.principal_id.in_(allow_set.group_ids),
+            )
+        )
     return (
         select(models.Grant.id)
         .where(
             models.Grant.tenant_id == allow_set.tenant_id,
-            models.Grant.principal_type == "user",
-            models.Grant.principal_id == allow_set.grant_principal_id,
+            or_(*principal_match),
             or_(
                 and_(
                     models.Grant.resource_type == "document",
