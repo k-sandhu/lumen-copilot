@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from lumen_sandbox_runner.engine import (
+    _DISTRIBUTION_NAME,
     _OUTPUT_BYTES_CEILING,
     _OUTPUT_CAP_LABEL,
     DockerSandboxEngine,
@@ -48,6 +49,9 @@ class _Container:
         # archive is handed back in small chunks so a test can observe how much of
         # a model-controlled stream the engine was willing to read.
         self.output_files: list[tuple[str, int]] = []
+        # Every argv the engine ran inside the container, so a test can assert on the
+        # exact command line rather than only on the order things happened in.
+        self.commands: list[list[str]] = []
         self.archive_chunk_size = 256
         self.archive_chunks_yielded = 0
         self.archive_chunks_total = 0
@@ -65,6 +69,7 @@ class _Container:
 
     def exec_run(self, command: list[str], **kwargs: object) -> object:
         del kwargs
+        self.commands.append(list(command))
         if command[:4] == ["python", "-m", "pip", "install"]:
             self.events.append("pip-install")
         elif command and command[0] == "python":
@@ -337,6 +342,111 @@ def test_packages_install_before_tenant_inputs_and_execution() -> None:
     assert container.events.index("wheelhouse") < container.events.index("pip-install")
     assert container.events.index("pip-install") < container.events.index("input")
     assert container.events.index("input") < container.events.index("python")
+
+
+# --- No requirement may reach pip as an OPTION (C4) ---------------------------
+#
+# Two layers already reject an option-shaped "package": the backend's admission path
+# and this engine's own PEP-508 parse (a requirement must start with a letter or
+# digit, so `--index-url=…` cannot parse). Both reject only what they are handed, and
+# neither is a property of the argv. The argv now states the property itself: an
+# end-of-options separator before the package list, so anything after it is a
+# positional requirement even if it is spelled like a flag.
+
+
+def test_an_option_shaped_requirement_is_refused_before_any_download() -> None:
+    """The negative case that had no test: `--index-url=…` as a "package".
+
+    A redirected index is the whole ballgame for a supply-chain attack — it decides
+    which bytes get installed and executed as contained root. Refused with 422, and
+    the downloader is never called, so nothing is fetched from anywhere.
+    """
+    client = _Client()
+    downloads: list[tuple[str, ...]] = []
+
+    def download(packages: tuple[str, ...], destination: Path) -> None:  # pragma: no cover
+        del destination
+        downloads.append(packages)
+
+    engine = DockerSandboxEngine(client, package_downloader=download)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+
+    for hostile in (
+        "--index-url=http://evil.invalid/simple",
+        "--extra-index-url=http://evil.invalid/simple",
+        "-r/etc/passwd",
+        "--trusted-host=evil.invalid",
+    ):
+        with pytest.raises(RunnerError) as refusal:
+            engine.execute_existing(
+                session_id,
+                ExecuteRequest(
+                    generation=1, execution_id=uuid4(), code="print(1)", packages=[hostile]
+                ),
+            )
+        assert refusal.value.status_code == 422
+
+    assert downloads == []
+
+
+def test_the_wheelhouse_install_argv_ends_option_parsing_before_the_packages() -> None:
+    """`pip install … -- <pkgs>`: the separator is in the argv, not just in the docs."""
+    client = _Client()
+
+    def download(packages: tuple[str, ...], destination: Path) -> None:
+        del packages
+        (destination / "numpy.whl").write_bytes(b"wheel")
+
+    engine = DockerSandboxEngine(client, package_downloader=download)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+    container = client.containers.values[0]
+    engine.execute_existing(
+        session_id,
+        ExecuteRequest(
+            generation=1, execution_id=uuid4(), code="print(1)", packages=["numpy==2.1.0"]
+        ),
+    )
+
+    installs = [
+        value for value in container.commands if value[:4] == ["python", "-m", "pip", "install"]
+    ]
+    assert installs, container.commands
+    assert installs[0][-2:] == ["--", "numpy==2.1.0"]
+
+
+def test_the_download_argv_ends_option_parsing_before_the_packages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same separator on the fetch side, which is the one that reaches the index."""
+    captured: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        del kwargs
+        captured.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("lumen_sandbox_runner.engine.subprocess.run", fake_run)
+
+    DockerSandboxEngine._download_binary_packages(("numpy==2.1.0", "pandas"), Path("."))
+
+    assert captured, "the downloader never ran"
+    command = captured[0]
+    assert command[-3:] == ["--", "numpy==2.1.0", "pandas"]
+    assert "--only-binary=:all:" in command
+
+
+def test_the_distribution_name_pattern_admits_real_names_and_nothing_option_shaped() -> None:
+    """The asserted property: a parsed requirement's name is a name, never a flag."""
+    assert all(
+        _DISTRIBUTION_NAME.fullmatch(name)
+        for name in ("numpy", "python-dateutil", "et_xmlfile", "zope.interface", "Pillow", "s3")
+    )
+    assert not any(
+        _DISTRIBUTION_NAME.fullmatch(name)
+        for name in ("--index-url", "-r", "-numpy", ".hidden", "numpy pandas", "")
+    )
 
 
 def test_same_session_executions_serialize_and_duplicate_is_cached() -> None:

@@ -6,6 +6,7 @@ import base64
 import io
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -40,6 +41,21 @@ _OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
 _OUTPUT_CAP_LABEL = "com.lumen.sandbox.output-cap"
+
+#: A PEP-503 distribution name and nothing else. Asserted on the parsed name of every
+#: requirement before it reaches a pip argv. It is defence in depth, deliberately: a
+#: leading dash cannot survive ``Requirement()`` (PEP-508 requires a letter or digit
+#: first), and the backend's admission layer parses the same string before this one
+#: ever sees it. Both of those reject only what they are handed; this asserts the
+#: property the argv actually depends on, so a future ``packaging`` relaxation cannot
+#: quietly turn a "package name" into a pip option.
+_DISTRIBUTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+#: The end-of-options separator. Everything after it is a positional argument, so pip
+#: reads it as a requirement even if it is spelled like a flag (verified against the
+#: shipped pip: ``pip download -- --index-url=…`` reports an *invalid requirement*,
+#: while the same argv without the separator consumes it as an option).
+_END_OF_OPTIONS = "--"
 
 
 class RunnerError(RuntimeError):
@@ -275,6 +291,7 @@ class DockerSandboxEngine:
                     "--no-index",
                     "--find-links",
                     f"{run_root}/wheelhouse",
+                    _END_OF_OPTIONS,
                     *packages,
                 ],
             )
@@ -428,10 +445,22 @@ class DockerSandboxEngine:
                 raise RunnerError("invalid package requirement", status_code=422) from exc
             if parsed.url is not None:
                 raise RunnerError("direct URL packages are not permitted", status_code=422)
+            if not _DISTRIBUTION_NAME.fullmatch(parsed.name):
+                raise RunnerError("invalid package distribution name", status_code=422)
         return packages
 
     @staticmethod
     def _download_binary_packages(packages: tuple[str, ...], destination: Path) -> None:
+        """Fetch binary wheels for admitted requirements.
+
+        **This is the unverified half of the supply chain, and it is worth naming.**
+        The fetch goes to the DEFAULT PUBLIC index with no ``--require-hashes``, no
+        ``--index-url`` pin and no lockfile: ADR-0013 §3 conditions install-based
+        expansion on "an admin-allowlisted, hash-pinned internal mirror", and that
+        mirror is not implemented. An allow-list grant therefore trusts whatever PyPI
+        serves at that moment. A locked-down deploy is expected to withhold this
+        service's outbound network and live on the execution image's manifest.
+        """
         command = [
             sys.executable,
             "-m",
@@ -440,6 +469,7 @@ class DockerSandboxEngine:
             "--only-binary=:all:",
             "--dest",
             os.fspath(destination),
+            _END_OF_OPTIONS,
             *packages,
         ]
         try:
