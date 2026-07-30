@@ -75,10 +75,10 @@ image must exist **there** before code execution is enabled.
 docker compose --profile sandbox build sandbox-exec-image
 
 # Equivalent without compose:
-docker build -t lumen-sandbox-exec:0.1.0 ./sandbox_exec
+docker build -t lumen-sandbox-exec:0.1.1 ./sandbox_exec
 
 # Confirm the host daemon has it (this is the daemon the runner drives):
-docker image inspect lumen-sandbox-exec:0.1.0 --format '{{.Id}}'
+docker image inspect lumen-sandbox-exec:0.1.1 --format '{{.Id}}'
 ```
 
 ### Pin the reference the runner launches (not just the base layer)
@@ -89,9 +89,9 @@ resolves to **at launch**, so that value is validated at boot:
 
 | `SANDBOX_IMAGE` | `ENVIRONMENT=local` | anything else, `SANDBOX_ENABLED=true` |
 |---|---|---|
-| `lumen-sandbox-exec:0.1.0` | accepted (trust-on-first-build) | **refused** — needs a digest |
+| `lumen-sandbox-exec:0.1.1` | accepted (trust-on-first-build) | **refused** — needs a digest |
 | `lumen-sandbox-exec@sha256:<64 hex>` | accepted | accepted |
-| `lumen-sandbox-exec:0.1.0@sha256:<64 hex>` | accepted | accepted |
+| `lumen-sandbox-exec:0.1.1@sha256:<64 hex>` | accepted | accepted |
 | `lumen-sandbox-exec:latest` | **refused** | **refused** |
 | `lumen-sandbox-exec` (bare name) | **refused** | **refused** |
 
@@ -107,7 +107,7 @@ yourself before enabling code execution:
 
 ```bash
 # Get the digest of the pushed image, then pin and pre-pull it on the sandbox host:
-docker image inspect <registry>/lumen-sandbox-exec:0.1.0 --format '{{index .RepoDigests 0}}'
+docker image inspect <registry>/lumen-sandbox-exec:0.1.1 --format '{{index .RepoDigests 0}}'
 docker pull <registry>/lumen-sandbox-exec@sha256:<64 hex>   # on the host the runner drives
 ```
 
@@ -117,7 +117,7 @@ dropped, no network — and confirm headless matplotlib really works:
 ```bash
 docker run --rm --network none --cap-drop ALL \
   --security-opt no-new-privileges:true --user 0:0 \
-  lumen-sandbox-exec:0.1.0 python -c \
+  lumen-sandbox-exec:0.1.1 python -c \
   "import matplotlib; matplotlib.use('Agg'); import pandas as pd, numpy as np, matplotlib.pyplot as plt; \
    df = pd.DataFrame({'x': np.arange(10), 'y': np.arange(10) ** 2}); \
    df.plot(x='x', y='y').figure.savefig('/workspace/chart.png'); print('ok', df.y.sum())"
@@ -141,7 +141,7 @@ docker run --rm --network none --cap-drop ALL \
 ```bash
 # .env
 SANDBOX_ENABLED=true
-# SANDBOX_IMAGE=lumen-sandbox-exec:0.1.0   # the default; must be tag- or digest-pinned
+# SANDBOX_IMAGE=lumen-sandbox-exec:0.1.1   # the default; must be tag- or digest-pinned
 #                                          # (digest REQUIRED outside ENVIRONMENT=local)
 # SANDBOX_RUNTIME=runsc                    # REQUIRED outside ENVIRONMENT=local (gVisor)
 
@@ -206,16 +206,46 @@ transitive dependencies (`pillow`, `fonttools`, `contourpy`, `cycler`, `kiwisolv
 `run_python(packages=["pandas"])` — even though a new tenant's `allowed_packages`
 list is **empty**. That list governs *installs*, and something already in the image
 needs none (issue #504). `Settings.sandbox_preinstalled_packages` mirrors the
-manifest, and `backend/tests/test_sandbox_exec_image.py` fails if the two drift, so
-the config cannot quietly disagree with the image.
+manifest, and `backend/tests/test_sandbox_exec_image.py` fails if the two drift.
+
+Read that guard for exactly what it is, because this runbook previously overstated it:
+it compares **config to `requirements.txt`** — two files in the repository — and never
+looks at the image. `SANDBOX_IMAGE` is a mutable tag, so a stale or retagged build
+passes it while admission skips the install for a distribution that is not in the
+container, and the run then fails on `ModuleNotFoundError`. The check that catches that
+needs a real container and lives in the live suite (§6). Outside local dev the digest
+pin is what stops the tag drifting in the first place.
+
+To override the manifest for a custom image, use the comma form — the field takes a
+comma-separated list of `name==version` pins, e.g.
+`SANDBOX_PREINSTALLED_PACKAGES=numpy==2.5.1,pandas==3.0.5`. An **empty** value means
+"this image ships nothing" and refuses every `packages=[...]` request, so leave the
+variable unset unless you really are running a custom image. (Until this PR the
+documented comma form could not be set from the environment at all: any value —
+including the empty one shipped commented in `.env.example` — raised `SettingsError`
+and took the API *and* the worker down at boot.)
 
 **Anything else is a real install, and it needs two things:**
 
 1. the distribution on the tenant's `allowed_packages` list (Admin → Code
-   execution) — deny entries always win, including over a pre-installed package;
+   execution) — deny entries always win **for a direct request** (ADR-0020 §3);
 2. **outbound network from the `sandbox-runner` service**, which downloads binary
    wheels into its own temp directory and copies them into the offline container
    (ADR-0020 §3).
+
+> **`allowed_packages = ["*"]` is allow-all.** ADR-0020 §3 defines `*` as the explicit
+> allow-all grant, so with it the *model* picks any public distribution name it likes
+> and the runner fetches it. That is a deliberate escape hatch, not a default — a new
+> tenant's list is empty. Grant named distributions unless you mean "anything on PyPI".
+
+> **Deny is only applied to the names a request asks for directly.** The check runs on
+> top-level requested distributions (`backend/app/sandbox/service.py`), while the
+> install stage runs `pip install --no-index --find-links <wheelhouse>` over a
+> wheelhouse `pip download` resolved **with** dependencies. So a **denied distribution
+> can still be installed as a transitive dependency of an allowed one**, and the audit
+> row records only the top-level name that was asked for. Denying a distribution stops
+> it being *requested*, not being *pulled in*. If it must not be present at all, keep it
+> out of the allowed set's dependency closure — or build a custom execution image.
 
 **The limitation, stated plainly.** Model-authored code **never** gets a network
 route — the execution container is created with `--network none`, always. The
@@ -230,6 +260,71 @@ One honest wrinkle: denying a pre-installed package (e.g. `matplotlib`) refuses 
 `packages=["matplotlib"]` *request*, but the distribution is still importable
 because it is baked into the image. To make it genuinely unavailable, build and
 pin a custom execution image without it.
+
+### The wheels are unverified, from the public PyPI
+
+**ADR-0013 §3 conditions install-based expansion on "an admin-allowlisted,
+hash-pinned internal mirror". That mirror is not implemented.** What the runner
+actually runs is `pip download --only-binary=:all: --dest <tmp> -- <packages>` against
+the **default public index**: no `--require-hashes`, no `--index-url` pin, no lockfile.
+
+So the residual risk, stated rather than implied: an `allowed_packages` grant trusts
+whatever PyPI serves at the moment of the fetch. A compromised or typosquatted release
+of an allow-listed distribution is installed and imported as **root inside the execution
+container** — contained (no network, no mounts, no socket, no capabilities, and gVisor
+outside local dev), but root. Installation happens *before* tenant bytes are staged
+(ADR-0020 §3), so the installer itself never sees them; the installed code does, on
+every later execution in that session. And the fetch is repeated per execution with no
+lockfile, so nothing makes two turns in one chat agree on which build they got.
+
+What contains it today, all of it deliberate:
+
+- the tenant allow-list, which is **empty by default** — no grant, no fetch;
+- the pre-installed manifest, which needs no index at all;
+- `--only-binary=:all:`, so no `setup.py` executes in the **runner** (the socket
+  holder) during resolution;
+- withholding the runner's outbound network entirely, which is the intended
+  locked-down posture and makes the pre-installed stack the whole story.
+
+A hash-pinned internal mirror remains the right fix and is **not** in this PR.
+
+### What this does NOT bound
+
+The egress limitation above is not the only one, and this runbook used to name only
+that. ADR-0020's Consequences section is explicit, and it belongs here too:
+
+**By default the execution container has no CPU, memory, PID or disk bound.** One
+`run_python` call can allocate until the host is out of RAM, spin every core, fork-bomb,
+or fill `/var/lib/docker` — there is no automatic timeout either, because ADR-0020
+replaced ADR-0013's wall clock with explicit cancel/reset. That is a deliberate sponsor
+decision in exchange for reusable sessions, and it is the design's **largest residual
+operational risk**. Recovery is `POST /chat/sessions/{id}/sandbox/reset` (or cancel),
+and `docker stats` / `docker system df` are where you see it happening.
+
+A deploy that will not accept that can bound the session container:
+
+```bash
+# .env — off by default; ADR-0020's posture is unbounded
+SANDBOX_SESSION_LIMITS_ENABLED=true
+SANDBOX_MEMORY_BYTES=536870912   # --memory   on the session container
+SANDBOX_PIDS_LIMIT=128           # --pids-limit
+SANDBOX_CPUS=1.0                 # --cpus
+docker compose restart backend worker
+```
+
+These bound a **long-lived session**, not one run (ADR-0020 §4): the container persists
+across turns, so a memory bound that is comfortable for one analysis turn can still kill
+a later turn in the same chat. Existing sandboxes keep the bounds they were created
+with — **reset** a chat's sandbox to re-create it. There is still no wall clock: nothing
+enforces one, so nothing pretends to.
+
+**And the `sandbox-runner` service itself has full outbound internet.** Compose gives
+it the default bridge network (it needs one to reach PyPI at all), and it is the process
+holding the Docker socket. Nothing in this repository restricts where it can connect.
+The "intended locked-down posture" described above is a posture the **operator** creates
+— an egress policy on that service, or a network with no route out — not something the
+default compose file gives you. Model-authored code is unaffected either way: its
+container is always `--network none`.
 
 ## 5. Verify a real run
 
@@ -305,6 +400,7 @@ What it covers, all against the live runner:
 |---|---|
 | stdlib | exact stdout, `exit_code=0`, empty stderr, a measured duration |
 | pandas + numpy | the ADR-0013 §3 stack computes (#503) |
+| image manifest | the distributions **installed in the container** match `SANDBOX_PREINSTALLED_PACKAGES` at exactly the configured versions. The offline drift guard compares two files in this repository and never looks at the image; `SANDBOX_IMAGE` is a mutable tag, so a stale or retagged build passes it while admission skips installs for packages that are not there — and the run then dies on `ModuleNotFoundError`. This is the only check that catches it. |
 | control-plane absence | `fastapi` / the Docker SDK are **not** importable — proof the run is in `lumen-sandbox-exec`, not `lumen-sandbox-runner` (#503) |
 | matplotlib | backend is `Agg`, no font-cache warning on stderr, and the rendered PNG comes back through output collection |
 | **negative** — egress | a raw IP, a DNS name and the metadata IP all fail closed (`--network none`, ADR-0013 §5 G2–G4) |
@@ -330,8 +426,24 @@ offline tests; §5 remains the end-to-end check through chat.
 ## 7. Bump the execution image
 
 1. Edit `sandbox_exec/requirements.txt` (keep every entry a `==` pin).
-2. Bump the tag in `docker-compose.yml` (`sandbox-exec-image`) and the
-   `SANDBOX_IMAGE` default in `backend/app/core/config.py`.
-3. Mirror the manifest into `_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES` in the same
+2. **Re-resolve the base digest.** A digest pin freezes the Debian userland too, so a
+   stale pin is months of unpatched libc/openssl in the image that parses tenant
+   spreadsheets as (contained) root. Do this on *every* bump, not only when the Python
+   version changes:
+
+   ```bash
+   docker pull python:3.12-slim-bookworm
+   docker image inspect python:3.12-slim-bookworm --format '{{index .RepoDigests 0}}'
+   ```
+
+   Put the resolved `name:tag@sha256:…` on the `FROM` line and record the date in the
+   comment above it and in `requirements.txt`.
+3. Bump the tag in `docker-compose.yml` (`sandbox-exec-image`) and the
+   `SANDBOX_IMAGE` default in `backend/app/core/config.py`. Bump it for a base-digest
+   change too: leaving one tag meaning two different images is exactly the mutable-tag
+   hazard the boot validators exist to prevent.
+4. Mirror the manifest into `_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES` in the same
    file — the drift test fails until you do.
-4. Rebuild (§1), then **reset** existing chat sandboxes so they pick it up.
+5. Rebuild (§1), then **reset** existing chat sandboxes so they pick it up. Re-run the
+   live suite (§6): it asserts that the image on the host really ships the configured
+   pins at the configured versions, which is the one check that catches a stale build.

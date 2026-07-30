@@ -179,3 +179,23 @@ Additive audit events record `sandbox_session.created`, `.reset`, `.closed`, and
 - Package supply-chain risk remains even without sandbox egress. Admin package policy,
   binary-only downloads, pinned requirements where practical, and the audit trail are
   the initial controls; hash-locked organisation mirrors are a future hardening option.
+
+**Amendment (PR #507 review, 2026-07-30) — the unbounded posture stays the default, but
+it is now configurable, and two of the controls above are weaker than they read.**
+
+- *Bounds.* "No automatic protection against … resource monopolisation" remains the
+  shipped default and the sponsor decision stands. What was not decided is that the
+  runner's wire schema typed `cpus`/`memory_bytes`/`pids_limit` as `None`, so a deploy
+  that *wanted* a bound could not ask for one. Those fields now accept a positive value
+  which the engine applies as `--cpus`/`--memory`/`--pids-limit`, and
+  `SANDBOX_SESSION_LIMITS_ENABLED` (default **off**) is how a deploy opts in. Absent, the
+  container is created exactly as before. They bound a long-lived session rather than one
+  run, so a bound that suits one turn can still stop a later turn in the same chat. There
+  is still **no wall clock**: nothing enforces one, so the field stays unsettable.
+- *Supply chain.* "Binary-only downloads … and the audit trail" understates the exposure.
+  §3's install path fetches from the **default public PyPI with no hash pinning and no
+  index pin** — ADR-0013 §3's "admin-allowlisted, hash-pinned internal mirror" is not
+  implemented (see the matching amendment there). And the audit row records only the
+  **top-level** requested name, while the wheelhouse is resolved with dependencies, so a
+  *denied* distribution can still be installed as a transitive dependency of an allowed
+  one and nothing in the trail names it.
