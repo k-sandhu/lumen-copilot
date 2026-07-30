@@ -3279,6 +3279,10 @@ class GroupRepository(_TenantScopedRepository):
             return None
         row.name = name.strip()
         await self._session.flush()
+        # ``updated_at`` carries ``onupdate``, so the UPDATE expires it; refresh
+        # before mapping or reading it would attempt lazy IO outside the async
+        # greenlet (the same pattern the other updating repositories use).
+        await self._session.refresh(row)
         return _to_group(row)
 
     async def delete(self, group_id: UUID) -> bool:
@@ -3317,8 +3321,12 @@ class GroupRepository(_TenantScopedRepository):
         await self._session.flush()
         return True
 
-    async def ensure_system_group(self) -> Group:
+    async def ensure_system_group(self) -> tuple[Group, bool]:
         """Get-or-create the tenant's derived "All members" group (ADR-0022 §3).
+
+        Returns ``(group, created_here)``. ``created_here`` is True only for the
+        transaction that actually inserted, so the caller can audit the creation
+        exactly once (INV-6) without a concurrent loser double-recording it.
 
         Idempotent: a partial unique index allows at most one per tenant, so a
         concurrent create loses the race and re-reads. The group is created
@@ -3331,30 +3339,51 @@ class GroupRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalars().one_or_none()
         if row is not None:
-            return _to_group(row)
-        return await self.create(name=SYSTEM_GROUP_NAME, created_by=None, kind=GroupKind.SYSTEM)
+            return _to_group(row), False
+
+        # Insert conflict-ignoring, then re-read. A plain INSERT would abort the
+        # whole transaction on the partial unique index when two first-time
+        # requests for the same tenant race, surfacing as a 500 on an ordinary
+        # GET. DO NOTHING lets the loser fall through to the winner's row.
+        values = {
+            "id": uuid_mod.uuid4(),
+            "tenant_id": self._tenant_id,
+            "name": SYSTEM_GROUP_NAME,
+            "kind": GroupKind.SYSTEM.value,
+            "created_by": None,
+        }
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        result = await self._session.execute(
+            insert(models.Group).values(**values).on_conflict_do_nothing()
+        )
+        await self._session.flush()
+        created = bool(result.rowcount)
+        return _to_group((await self._session.execute(stmt)).scalars().one()), created
 
     async def add_member(self, *, group_id: UUID, user_id: UUID, added_by: UUID | None) -> bool:
         """Add a user to a group. Idempotent — ``False`` if already a member."""
-        existing = await self._session.execute(
-            select(models.GroupMember.id).where(
-                models.GroupMember.tenant_id == self._tenant_id,
-                models.GroupMember.group_id == group_id,
-                models.GroupMember.user_id == user_id,
-            )
-        )
-        if existing.scalars().one_or_none() is not None:
-            return False
-        self._session.add(
-            models.GroupMember(
-                tenant_id=self._tenant_id,
-                group_id=group_id,
-                user_id=user_id,
-                added_by=added_by,
-            )
+        # Conflict-ignoring insert rather than check-then-add: two concurrent
+        # "add the same user" requests would both see no row, and the loser's
+        # unique violation on (group_id, user_id) would abort the transaction —
+        # a 500 where the contract promises an idempotent 204. The rowcount says
+        # whether THIS request inserted, so only the winner emits the audit.
+        values = {
+            "id": uuid_mod.uuid4(),
+            "tenant_id": self._tenant_id,
+            "group_id": group_id,
+            "user_id": user_id,
+            "added_by": added_by,
+        }
+        dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        result = await self._session.execute(
+            insert(models.GroupMember)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["group_id", "user_id"])
         )
         await self._session.flush()
-        return True
+        return bool(result.rowcount)
 
     async def remove_member(self, *, group_id: UUID, user_id: UUID) -> bool:
         """Remove a user from a group; ``False`` if they were not a member."""
@@ -3370,6 +3399,22 @@ class GroupRepository(_TenantScopedRepository):
         await self._session.flush()
         return True
 
+    async def member_counts(self) -> dict[UUID, int]:
+        """Explicit member counts for every group in the tenant, in ONE query.
+
+        The listing path needs a count per group; doing that per group is a
+        classic N+1 (and each call would re-read the group too). Groups with no
+        members are simply absent from the mapping — the caller defaults them to
+        zero. The system group never appears: it has no membership rows at all.
+        """
+        stmt = (
+            select(models.GroupMember.group_id, func.count())
+            .where(models.GroupMember.tenant_id == self._tenant_id)
+            .group_by(models.GroupMember.group_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return dict(rows)  # type: ignore[arg-type]
+
     async def list_member_ids(self, group_id: UUID) -> list[UUID]:
         """The user ids explicitly in ``group_id`` (empty for the system group)."""
         stmt = select(models.GroupMember.user_id).where(
@@ -3377,6 +3422,26 @@ class GroupRepository(_TenantScopedRepository):
             models.GroupMember.group_id == group_id,
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_members(self, group_id: UUID) -> list[User]:
+        """The group's members as users, ordered by email — ONE joined query.
+
+        Resolving ids then fetching each user is an unbounded N+1 on an
+        unpaginated endpoint; a group with thousands of members would issue
+        thousands of sequential reads. Tenant-scoped on both sides (INV-1).
+        """
+        stmt = (
+            select(models.User)
+            .join(models.GroupMember, models.GroupMember.user_id == models.User.id)
+            .where(
+                models.GroupMember.tenant_id == self._tenant_id,
+                models.GroupMember.group_id == group_id,
+                models.User.tenant_id == self._tenant_id,
+            )
+            .order_by(func.lower(models.User.email))
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_user(r) for r in rows]
 
     async def group_ids_for_user(self, user_id: UUID) -> frozenset[UUID]:
         """The group principals ``user_id`` carries — the allow-set hot path.

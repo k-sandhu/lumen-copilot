@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -433,3 +434,31 @@ def test_audit_router_is_auto_discovered() -> None:
 
     discovered: Sequence[str] = discover_router_modules()
     assert "app.api.v1.audit" in discovered
+
+
+def test_contract_audit_enum_declares_the_group_actions() -> None:
+    """``AuditEventType`` must admit the ``group.*`` actions (ADR-0022).
+
+    ``GET /audit?type=`` is typed by the contract's **closed** enum, so an action
+    the backend emits but the contract omits is unfilterable, and a generated
+    client would reject the value outright. Nothing enforced this, which is how
+    the ``group.*`` actions were first added to ``AuditAction`` without reaching
+    the contract.
+
+    Scoped deliberately to the group actions: the contract currently declares 19
+    of the 84 values ``AuditAction`` can emit, and closing that pre-existing gap
+    means deciding, per feature, which events are client-filterable — tracked
+    separately rather than guessed at here.
+    """
+    import yaml
+
+    from app.domain.audit import AuditAction
+
+    contract = Path(__file__).resolve().parents[2] / "contracts" / "openapi.yaml"
+    spec = yaml.safe_load(contract.read_text(encoding="utf-8"))
+    declared = set(spec["components"]["schemas"]["AuditEventType"]["enum"])
+    group_actions = {a.value for a in AuditAction if a.value.startswith("group.")}
+
+    assert group_actions, "the group.* audit actions must exist on AuditAction"
+    missing = sorted(group_actions - declared)
+    assert missing == [], f"emitted but absent from the contract enum: {missing}"
