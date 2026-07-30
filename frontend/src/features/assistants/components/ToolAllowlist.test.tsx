@@ -38,7 +38,6 @@ function entry(overrides: Partial<ToolCatalogEntry> = {}): ToolCatalogEntry {
     read_only: true,
     enabled: true,
     requires_approval: false,
-    is_default: true,
     ...overrides,
   };
 }
@@ -104,7 +103,7 @@ describe('ToolAllowlist — selecting run_python (#505)', () => {
 describe('ToolAllowlist — tenant policy is reflected honestly', () => {
   it('shows an admin-disabled tool as unavailable and refuses to select it', async () => {
     listTools.mockResolvedValue({
-      items: [entry(), { ...RUN_PYTHON, enabled: false, is_default: false }],
+      items: [entry(), { ...RUN_PYTHON, enabled: false }],
     });
     const onChange = renderPicker([]);
 
@@ -120,7 +119,7 @@ describe('ToolAllowlist — tenant policy is reflected honestly', () => {
 
   it('still lets an already-granted, now-unavailable tool be REMOVED', async () => {
     listTools.mockResolvedValue({
-      items: [entry(), { ...RUN_PYTHON, enabled: false, is_default: false }],
+      items: [entry(), { ...RUN_PYTHON, enabled: false }],
     });
     const onChange = renderPicker(['run_python']);
 

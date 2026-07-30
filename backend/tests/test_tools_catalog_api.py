@@ -10,7 +10,7 @@ and had to be seeded straight into the database.
 ``GET /tools`` is the **read-only, member-safe** projection of the same per-tenant
 policy: every registered tool with its static registry metadata (``description`` /
 ``risk_tier`` / ``read_only``) plus the effective per-tenant governance flags
-(``enabled`` / ``requires_approval`` / ``is_default``). It grants nothing and writes
+(``enabled`` / ``requires_approval``). It grants nothing and writes
 nothing — the tool policy gate, the autonomy seam and the assistant allow-list
 validation are all unchanged; this endpoint only lets the UI *tell the truth* about
 them.
@@ -20,7 +20,7 @@ Covered here, end-to-end against the real FastAPI app over offline SQLite:
 * a **non-admin member** can read the catalogue (the builder's caller), and
   ``run_python`` is present as T2 / not read-only / ``requires_approval`` by default;
 * a read-only retrieval tool is T0 and never gated;
-* an admin's **disable** override is reflected (``enabled=false``, ``is_default``
+* an admin's **disable** override is reflected (``enabled=false``
   false) so the builder can show it as unavailable rather than offering a control
   that silently fails;
 * tenant isolation (INV-1): tenant A's override never colours tenant B's catalogue;
@@ -200,7 +200,10 @@ async def test_member_reads_catalogue_with_run_python_and_its_risk_tier(
     # Deny-by-default until an admin pre-approves it (no override seeded here).
     assert run_python["requires_approval"] is True
     assert run_python["enabled"] is True
-    assert run_python["is_default"] is True
+    # Minimum disclosure (#505 review): `is_default` is governance PROVENANCE with no
+    # consumer in the builder, and this read is open to every tenant member — so it is
+    # deliberately absent here and stays on the admin-only surface.
+    assert "is_default" not in run_python
     # A human-readable summary for the checkbox, straight from the registry.
     assert isinstance(run_python["description"], str) and run_python["description"]
 
@@ -228,7 +231,7 @@ async def test_catalogue_reflects_an_admin_disable_override(
     assert resp.status_code == 200, resp.text
     run_python = _entry(resp.json(), "run_python")
     assert run_python["enabled"] is False
-    assert run_python["is_default"] is False
+    assert "is_default" not in run_python
 
 
 async def test_catalogue_is_tenant_scoped(
@@ -249,7 +252,8 @@ async def test_catalogue_is_tenant_scoped(
     assert resp.status_code == 200, resp.text
     run_python = _entry(resp.json(), "run_python")
     assert run_python["enabled"] is True
-    assert run_python["is_default"] is True
+    # Tenant A's override coloured nothing here: B still sees the registry default.
+    assert run_python["requires_approval"] is True
 
 
 async def test_catalogue_body_validates_against_the_openapi_contract(

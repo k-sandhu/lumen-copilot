@@ -733,7 +733,10 @@ export interface ToolCatalogEntry {
   read_only: boolean;
   enabled: boolean;
   requires_approval: boolean;
-  is_default: boolean;
+  // No `is_default`: it records whether an admin ever overrode the row — governance
+  // provenance with no consumer in the builder — and this endpoint is readable by every
+  // tenant MEMBER, unlike the admin-only policy surface it stays on (#505 review,
+  // minimum disclosure for a widened audience).
 }
 
 /** 200 from GET /tools — every registered tool, ordered by `tool_name`. */

@@ -3936,8 +3936,7 @@ components:
         `T0` is side-effecting and must be presented as such; `enabled: false` means
         the tenant's admin has switched the tool off, so it must be shown as
         unavailable rather than offered as a selectable control.
-      required:
-        [tool_name, description, risk_tier, read_only, enabled, requires_approval, is_default]
+      required: [tool_name, description, risk_tier, read_only, enabled, requires_approval]
       properties:
         tool_name:
           type: string
@@ -3958,9 +3957,11 @@ components:
             Whether an invocation is still approval-gated for this tenant. Selecting
             such a tool is allowed (it is a configuration-time grant), but the UI must
             say so: the run-time gate, not the allow-list, decides execution.
-        is_default:
-          type: boolean
-          description: True when no per-tenant admin override exists (built-in defaults in force).
+        # NOTE: `is_default` is deliberately NOT on this schema. It records whether an
+        # admin has ever overridden the row — governance provenance with no consumer in
+        # the builder, and this read is available to every tenant MEMBER. Minimum
+        # disclosure for a widened audience; it stays on the admin-only
+        # `ToolPolicyEntry`.
 
     ToolCatalog:
       type: object

@@ -76,7 +76,6 @@ const toolCatalog: ToolCatalogEntry[] = [
     read_only: true,
     enabled: true,
     requires_approval: false,
-    is_default: true,
   },
   {
     tool_name: 'run_python',
@@ -85,7 +84,6 @@ const toolCatalog: ToolCatalogEntry[] = [
     read_only: false,
     enabled: true,
     requires_approval: true,
-    is_default: true,
   },
 ];
 
@@ -266,7 +264,7 @@ describe('AssistantEditor — granting run_python (#505)', () => {
       if (url.includes('/tools')) {
         return Promise.resolve(
           json({
-            items: [toolCatalog[0], { ...toolCatalog[1], enabled: false, is_default: false }],
+            items: [toolCatalog[0], { ...toolCatalog[1], enabled: false }],
           }),
         );
       }

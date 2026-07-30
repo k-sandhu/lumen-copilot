@@ -49,7 +49,6 @@ class ToolCatalogEntryResponse(BaseModel):
     read_only: bool
     enabled: bool
     requires_approval: bool
-    is_default: bool
 
 
 class ToolCatalogResponse(BaseModel):
@@ -71,7 +70,6 @@ def _to_wire(entries: list[ToolPolicyEntryView]) -> ToolCatalogResponse:
                 read_only=entry.read_only,
                 enabled=entry.enabled,
                 requires_approval=entry.requires_approval,
-                is_default=entry.is_default,
             )
             for entry in entries
         ]
