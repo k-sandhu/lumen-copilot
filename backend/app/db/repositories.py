@@ -4195,15 +4195,6 @@ class TenantAutonomyPolicyRepository(_TenantScopedRepository):
         return _to_tenant_autonomy_policy(row)
 
 
-#: The sentinels the app itself is known to send when there is no client address:
-#: background tasks pass ``"system"``, and the request path passes ``"unknown"`` when
-#: ``request.client`` is ``None`` (an AF_UNIX peer behind a socket-mode proxy). These
-#: are EXPECTED and coerced quietly. Anything else non-address is coerced too — never
-#: crash an audited action — but logged, because a value that is neither an address nor
-#: a known sentinel means a misconfigured proxy silently losing audit fidelity.
-_KNOWN_SOURCE_IP_SENTINELS = frozenset({"system", "unknown"})
-
-
 log = get_logger(__name__)
 
 
