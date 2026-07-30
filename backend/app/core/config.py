@@ -15,9 +15,10 @@ from __future__ import annotations
 import json
 import re
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as _APP_VERSION
 from app.domain.models import ModelTier
@@ -1171,7 +1172,20 @@ class Settings(BaseSettings):
     # fetch anything — the offline-correct answer. Anything NOT here is a genuine
     # install: it needs the admin allow-list AND the runner's own outbound network.
     # Override only when running a custom execution image (comma-separated pins).
-    sandbox_preinstalled_packages: tuple[str, ...] = Field(
+    #
+    # ``NoDecode`` is load-bearing, not decoration. ``pydantic-settings`` JSON-decodes
+    # a complex-typed field's env value inside ``EnvSettingsSource`` — BEFORE any
+    # validator runs — so the ``mode="before"`` splitter below was dead code for env
+    # input and every documented comma form raised ``SettingsError`` at import. The
+    # empty form shipped on the commented ``.env.example`` line was the worst case: an
+    # operator who copied the file and uncommented that line broke BOTH the API and
+    # the worker at boot. ``NoDecode`` hands the raw string to the validator instead,
+    # which is what makes the documented form actually work.
+    #
+    # An explicitly EMPTY value therefore now means what it says — "this image ships
+    # nothing" — and refuses every ``packages=[...]`` request rather than crashing the
+    # process. Leave the variable UNSET unless you run a custom execution image.
+    sandbox_preinstalled_packages: Annotated[tuple[str, ...], NoDecode] = Field(
         default=_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES,
         alias="SANDBOX_PREINSTALLED_PACKAGES",
     )

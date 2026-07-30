@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config import Settings
 from tests._sandbox_helpers import sandbox_settings
 
 
@@ -151,3 +152,81 @@ def test_disabled_sandbox_outside_local_still_boots_on_the_tag_default() -> None
 
     assert settings.sandbox_enabled is False
     assert settings.sandbox_image == "lumen-sandbox-exec:0.1.0"
+
+
+# --- The pre-installed manifest must be settable from the ENVIRONMENT ---------
+#
+# Not a style point. ``pydantic-settings`` JSON-decodes a complex-typed field's env
+# value inside ``EnvSettingsSource``, BEFORE field validators run, so the
+# ``mode="before"`` comma splitter never saw env input: every documented form raised
+# ``SettingsError``. The empty form was the shipped one — ``.env.example`` carried a
+# commented ``SANDBOX_PREINSTALLED_PACKAGES=``, and an operator who copied the file and
+# uncommented that line broke the API *and* the worker at boot. These tests go through
+# real environment variables (``sandbox_settings(**kwargs)`` uses the INIT source and
+# cannot reproduce the defect).
+
+_ENV_BOOT_MINIMUM = {
+    "DATABASE_URL": "sqlite+aiosqlite://",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "CELERY_BROKER_URL": "redis://localhost:6379/1",
+    "CELERY_RESULT_BACKEND": "redis://localhost:6379/2",
+    "S3_ENDPOINT_URL": "http://localhost:9000",
+    "S3_ACCESS_KEY": "lumen",
+    "S3_SECRET_KEY": "lumen_local_dev_secret",
+    "S3_BUCKET": "b",
+    "OPENROUTER_API_KEY": "",
+    "SANDBOX_ENABLED": "true",
+}
+
+
+def _settings_from_env(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
+    """Construct ``Settings`` from the ENV source alone (``.env`` deliberately off)."""
+    for key, value in {**_ENV_BOOT_MINIMUM, **env}.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_preinstalled_manifest_parses_the_documented_comma_form_from_the_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The form the config docstring, ``.env.example`` and the runbook all document."""
+    settings = _settings_from_env(
+        monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="numpy==1.0, pandas==2.0"
+    )
+
+    assert settings.sandbox_preinstalled_packages == ("numpy==1.0", "pandas==2.0")
+
+
+def test_a_single_pin_from_the_env_is_not_mistaken_for_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One entry has no comma at all — the JSON decoder choked on this too."""
+    settings = _settings_from_env(monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="numpy==1.0")
+
+    assert settings.sandbox_preinstalled_packages == ("numpy==1.0",)
+
+
+def test_an_empty_manifest_value_boots_instead_of_killing_the_api_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact regression: the empty assignment must not be a boot failure.
+
+    It now means what it reads as — "this image ships nothing" — so every
+    ``packages=[...]`` request is refused. That is fail-closed and recoverable; a
+    ``SettingsError`` at import was neither.
+    """
+    settings = _settings_from_env(monkeypatch, SANDBOX_PREINSTALLED_PACKAGES="")
+
+    assert settings.sandbox_preinstalled_packages == ()
+
+
+def test_unset_manifest_keeps_the_shipped_image_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent the variable, config still mirrors ``sandbox_exec/requirements.txt``."""
+    from app.core.config import _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES
+
+    monkeypatch.delenv("SANDBOX_PREINSTALLED_PACKAGES", raising=False)
+    settings = _settings_from_env(monkeypatch)
+
+    assert settings.sandbox_preinstalled_packages == _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES

@@ -57,6 +57,7 @@ pointed at a forwarded port.
 from __future__ import annotations
 
 import os
+import re
 import textwrap
 import uuid
 from collections.abc import AsyncIterator
@@ -304,6 +305,82 @@ async def test_execution_image_is_not_the_runner_control_plane_image(
         "docker False",
         "pandas True",
     ]
+
+
+#: Distributions the base ``python:*-slim`` image contributes on its own. They are not
+#: part of the curated manifest and must not be asserted as drift — but the set is
+#: deliberately tiny and explicit, so an image that ships anything ELSE unexpected
+#: fails this test rather than passing under a wildcard.
+_BASE_IMAGE_DISTRIBUTIONS = frozenset({"pip", "setuptools", "wheel"})
+
+
+def _canonical(name: str) -> str:
+    """PEP-503 name normalisation — ``et_xmlfile`` and ``et-xmlfile`` are one name."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+@_live
+@pytest.mark.live
+async def test_the_image_on_the_host_really_ships_the_configured_manifest(
+    sandbox: _LiveSandbox,
+) -> None:
+    """The axis the offline drift guard cannot reach: what is actually INSTALLED.
+
+    ``tests/test_sandbox_exec_image.py`` proves that
+    ``Settings.sandbox_preinstalled_packages`` equals ``sandbox_exec/requirements.txt``
+    — two files in this repository. Neither of them is the image. ``SANDBOX_IMAGE`` is
+    a **mutable tag**, so a stale build, a retag, or a hand-built image passes that
+    guard while package admission cheerfully skips the install for a distribution that
+    is not in the container. The consequence is not a policy hole but a broken
+    capability: ``run_python(packages=["pandas"])`` is admitted with nothing to
+    install, and the run dies on ``ModuleNotFoundError``.
+
+    So this asserts the pair that matters — every configured pin present at **exactly**
+    the configured version, inside the container that a chat turn would run in — and
+    that the image ships nothing beyond the manifest except the base image's own
+    packaging tools.
+    """
+    result = await _run(
+        sandbox,
+        """
+        import importlib.metadata as metadata
+
+        for distribution in metadata.distributions():
+            print(f"{distribution.metadata['Name']}=={distribution.version}")
+        """,
+    )
+
+    assert result.status is CodeRunStatus.SUCCEEDED, result.stderr
+    installed = {
+        _canonical(line.split("==", 1)[0]): line.split("==", 1)[1]
+        for line in result.stdout.splitlines()
+        if "==" in line
+    }
+    configured = {
+        _canonical(entry.split("==", 1)[0]): entry.split("==", 1)[1]
+        for entry in Settings().sandbox_preinstalled_packages
+    }
+    assert configured, "the configured manifest is empty — nothing would be asserted"
+
+    missing = {name: version for name, version in configured.items() if name not in installed}
+    wrong = {
+        name: (version, installed[name])
+        for name, version in configured.items()
+        if name in installed and installed[name] != version
+    }
+    extra = set(installed) - set(configured) - _BASE_IMAGE_DISTRIBUTIONS
+
+    assert not missing, (
+        "the running execution image does not contain distributions the admission path "
+        f"treats as pre-installed (so their requests are admitted with no install and "
+        f"then fail at import): {sorted(missing)} — rebuild it ({_BUILD_COMMAND}) and, "
+        "outside local dev, pin SANDBOX_IMAGE by digest so a tag cannot drift"
+    )
+    assert not wrong, f"configured version != installed version (configured, installed): {wrong}"
+    assert not extra, (
+        f"the image ships distributions the manifest does not declare: {sorted(extra)} — "
+        "sandbox_exec/requirements.txt is meant to be the exhaustive closure"
+    )
 
 
 # --- (3) headless matplotlib --------------------------------------------------

@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.core.config import _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES, Settings
 from app.sandbox.service import PackagePolicyError, validate_requested_packages
 from tests._sandbox_helpers import sandbox_settings
 
@@ -137,8 +138,24 @@ def test_preinstalled_setting_matches_the_image_manifest_exactly() -> None:
     in the image, no install needed". If the image gains or drops a distribution
     without this list following, a request either fails at import time or is
     refused for a package that is right there — so the two are asserted equal.
+
+    Asserted against the **shipped constant**, not ``Settings``. Reading it through
+    ``sandbox_settings()`` meant reading the ambient environment (and ``.env``), so an
+    operator override on the machine running the suite silently replaced the value
+    under test: the guard would then confirm that the *ambient* value matched the
+    manifest and say nothing about what the repository ships. The constant is the
+    only value a checkout can be held to.
+
+    **Scope, so this is not mistaken for more than it is.** Both sides here are files
+    in this repository — the guard proves config and the build input agree, never that
+    the image ON THE HOST contains them. ``SANDBOX_IMAGE`` is a mutable tag, so a
+    stale or retagged image passes this happily while package admission skips installs
+    for distributions that are not there. That axis needs a real container and is
+    asserted in ``tests/test_sandbox_execution_live.py``.
     """
-    assert sandbox_settings().sandbox_preinstalled_packages == _manifest()
+    assert _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES == _manifest()
+    # The field's default is the constant, so config cannot drift from it either.
+    assert Settings.model_fields["sandbox_preinstalled_packages"].default == _manifest()
 
 
 def test_prebaked_package_is_admitted_with_no_install_on_an_empty_allow_list() -> None:
