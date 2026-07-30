@@ -50,7 +50,7 @@ _SOCKET_TIMEOUT_SECONDS = 2.0
 
 _KEY_PREFIX = "lumen:ratelimit:source_sync"
 
-# Process-wide async clients, one per ``(redis_url, running loop)``.
+# Process-wide async clients, keyed by ``(redis_url, owning event loop)``.
 #
 # Deliberately module-level rather than per-instance: every caller builds a
 # *fresh* limiter per request or per run (``build_web_search_service``,
@@ -58,23 +58,37 @@ _KEY_PREFIX = "lumen:ratelimit:source_sync"
 # open a connection per search and the pooling would be worth nothing. The cache
 # has to outlive the limiter for the connection to be reused at all.
 #
-# Keyed on the running loop for the reason the backplane is (#487): a client
-# whose connections were opened on a now-dead loop must never be handed out —
-# the #140 "attached to a different loop" failure. A stale entry is dropped, not
-# closed; its sockets died with its loop, and awaiting its close from *this* loop
-# would touch a foreign one.
-_ASYNC_POOLS: dict[str, tuple[Any, asyncio.AbstractEventLoop]] = {}
+# The loop is part of the **key**, not a validity stamp on a URL-keyed entry: a
+# client's connections belong to the loop that opened them (#140), and Celery
+# runs every task on a fresh ``asyncio.run`` loop. Keying on the loop means a
+# second loop gets its own client instead of silently displacing — and orphaning
+# — the first one's.
+_ASYNC_POOLS: dict[tuple[str, asyncio.AbstractEventLoop], Any] = {}
 
 
 async def aclose_async_rate_limit_pools() -> None:
-    """Release every pooled async client (app lifespan shutdown)."""
-    pools = list(_ASYNC_POOLS.values())
-    _ASYNC_POOLS.clear()
-    for client, _loop in pools:
-        try:
-            await client.aclose()
-        except Exception:  # pragma: no cover - shutdown must not raise
-            _log.warning("rate_limit.pool_close_failed")
+    """Release pooled clients belonging to the **running** loop.
+
+    Called from the app lifespan and from :func:`app.tasks.runner.run_task`, so
+    every loop retires its own clients before it closes — the discipline
+    ``dispose_engine`` already follows for the DB engine (#140).
+
+    Entries owned by a loop that has since closed are dropped *without* closing:
+    their sockets died with that loop, and awaiting ``aclose`` on them from
+    *this* loop would touch a foreign one. Dropping the reference is what stops
+    the cache retaining dead loops and their clients.
+    """
+    loop = asyncio.get_running_loop()
+    for key in list(_ASYNC_POOLS):
+        _url, owner = key
+        if owner is loop:
+            client = _ASYNC_POOLS.pop(key)
+            try:
+                await client.aclose()
+            except Exception:  # pragma: no cover - shutdown must not raise
+                _log.warning("rate_limit.pool_close_failed")
+        elif owner.is_closed():
+            _ASYNC_POOLS.pop(key, None)
 
 
 class RateLimiter(Protocol):
@@ -155,11 +169,11 @@ class RedisFixedWindowRateLimiter:
                 self._pool_loop = loop
             return self._pool
 
-        cached = _ASYNC_POOLS.get(self._redis_url)
-        if cached is not None and cached[1] is loop:
-            return cached[0]
-        client = self._new_async_client()
-        _ASYNC_POOLS[self._redis_url] = (client, loop)
+        key = (self._redis_url, loop)
+        client = _ASYNC_POOLS.get(key)
+        if client is None:
+            client = self._new_async_client()
+            _ASYNC_POOLS[key] = client
         return client
 
     async def try_acquire_async(self, tenant_id: UUID) -> bool:
@@ -172,6 +186,7 @@ class RedisFixedWindowRateLimiter:
         connect plus ``INCR`` for every tool invocation.
         """
         key = f"{self._key_prefix}:{tenant_id}"
+        client: Any | None = None
         try:
             client = self._async_client()
             count = int(await client.incr(key))
@@ -186,13 +201,27 @@ class RedisFixedWindowRateLimiter:
                 tenant_id=str(tenant_id),
                 error=type(exc).__name__,
             )
-            # Retire the pooled client so the next call rebuilds rather than
-            # reusing a connection that just failed.
-            self._pool = None
-            self._pool_loop = None
-            _ASYNC_POOLS.pop(self._redis_url, None)
+            self._retire(client)
             return True
         return count <= self._max_per_window
+
+    def _retire(self, client: Any) -> None:
+        """Drop a client that just failed, touching nobody else's.
+
+        Strictly scoped so one failure cannot cascade: an injected client stays
+        instance-local, and a pooled one is evicted only when the cache still
+        holds *that exact* client for *this* loop. Without both checks a failing
+        test fake could evict the real global client, and one loop's outage could
+        drop a healthy client another loop had just installed.
+        """
+        if self._pool is client:
+            self._pool = None
+            self._pool_loop = None
+        if client is None or self._async_client_factory is not None:
+            return
+        key = (self._redis_url, asyncio.get_running_loop())
+        if _ASYNC_POOLS.get(key) is client:
+            del _ASYNC_POOLS[key]
 
     async def aclose(self) -> None:
         """Release this instance's injected client, if it built one (tests).

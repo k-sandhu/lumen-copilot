@@ -340,25 +340,118 @@ async def test_async_limiter_fails_open_and_drops_the_dead_client() -> None:
     assert _FakeAsyncRedis.built == 2
 
 
-def test_async_limiter_rebuilds_its_client_for_a_new_event_loop() -> None:
-    """A client built on a dead loop is never handed out (the #140 failure mode).
+def _pooled_limiter(url: str = "redis://localhost:6379/0") -> RedisFixedWindowRateLimiter:
+    """A limiter on the real (non-injected) pooled path."""
+    return RedisFixedWindowRateLimiter(url, max_per_window=100, window_seconds=60)
 
-    Celery runs each task on a fresh loop, so a limiter that cached one client
-    forever would hand a warm worker connections belonging to a closed loop.
 
-    Deliberately a *sync* test: it drives two independent loops itself, which it
-    could not do from inside one (``asyncio_mode = "auto"``).
-    """
+def _patch_pooled(monkeypatch: pytest.MonkeyPatch) -> list[_FakeAsyncRedis]:
+    """Stub ``aioredis.from_url`` and start from an empty process-wide cache."""
+    import app.tasks.rate_limit as rl
+
+    built: list[_FakeAsyncRedis] = []
+
+    def _from_url(_url: str, **_kwargs: object) -> _FakeAsyncRedis:
+        client = _FakeAsyncRedis()
+        built.append(client)
+        return client
+
     _FakeAsyncRedis.reset()
-    limiter = _async_limiter()
+    monkeypatch.setattr(rl.aioredis, "from_url", _from_url)
+    monkeypatch.setattr(rl, "_ASYNC_POOLS", {})
+    return built
 
-    async def _use() -> None:
-        await limiter.try_acquire_async(uuid.uuid4())
 
-    asyncio.run(_use())
-    asyncio.run(_use())  # a second, independent loop
+def test_a_second_event_loop_gets_its_own_client_instead_of_displacing_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop must be part of the cache KEY, not a stamp on a URL-keyed entry.
 
-    assert _FakeAsyncRedis.built == 2
+    Celery runs every task on a fresh ``asyncio.run`` loop. Keyed by URL alone,
+    the second loop overwrites the first loop's entry — dropping the reference
+    without closing it, so a live connection is orphaned per task. Keyed by
+    ``(url, loop)``, each loop gets its own entry and nothing is displaced.
+
+    Deliberately does NOT close the pools inside the loops: cleanup would tidy up
+    either way and hide the difference. This is the keying itself.
+
+    Sync test because it owns both loops (``asyncio_mode = "auto"``).
+    """
+    import app.tasks.rate_limit as rl
+
+    built = _patch_pooled(monkeypatch)
+
+    async def _task() -> None:
+        await _pooled_limiter().try_acquire_async(uuid.uuid4())
+
+    asyncio.run(_task())
+    asyncio.run(_task())
+
+    assert len(built) == 2
+    # Two live entries — a URL-keyed cache would hold one, having silently
+    # orphaned the first loop's still-open client.
+    assert len(rl._ASYNC_POOLS) == 2
+    assert not any(client.closed for client in built)
+
+
+def test_aclose_closes_this_loops_clients_and_drops_dead_loop_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup is per-loop: close ours, drop strays, never await a foreign loop.
+
+    A client's connections belong to the loop that opened them (#140), so
+    awaiting ``aclose`` on another loop's client is exactly the bug this cache
+    exists to avoid. A dead loop's entry is therefore dropped, not closed — and
+    dropping it is what stops the cache retaining dead loops forever.
+    """
+    import app.tasks.rate_limit as rl
+
+    built = _patch_pooled(monkeypatch)
+
+    async def _leaky_task() -> None:
+        # A task that ends without cleanup (a crash, say) leaves its entry behind.
+        await _pooled_limiter().try_acquire_async(uuid.uuid4())
+
+    asyncio.run(_leaky_task())
+    stranded = built[0]
+    assert len(rl._ASYNC_POOLS) == 1
+
+    async def _tidy_task() -> None:
+        await _pooled_limiter().try_acquire_async(uuid.uuid4())
+        await rl.aclose_async_rate_limit_pools()
+
+    asyncio.run(_tidy_task())
+    mine = built[1]
+
+    assert mine.closed is True  # closed by the loop that owned it
+    assert stranded.closed is False  # never awaited from a foreign loop
+    assert rl._ASYNC_POOLS == {}  # ...but its entry is gone, so nothing is retained
+
+
+def test_separate_limiter_instances_on_one_loop_share_a_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The property that makes the pooling worth anything in production.
+
+    ``build_web_search_service`` / ``build_mcp_servers_service`` construct a
+    **fresh** limiter per request, so a pool owned by the instance would still
+    open a connection per search.
+    """
+    import app.tasks.rate_limit as rl
+
+    built = _patch_pooled(monkeypatch)
+
+    async def _requests() -> None:
+        for _ in range(3):
+            await _pooled_limiter().try_acquire_async(uuid.uuid4())
+        assert len(built) == 1
+        # A different Redis URL is its own entry, not a silently shared one.
+        await _pooled_limiter("redis://elsewhere:6379/1").try_acquire_async(uuid.uuid4())
+        assert len(built) == 2
+        await rl.aclose_async_rate_limit_pools()
+
+    asyncio.run(_requests())
+    assert all(client.closed for client in built)
 
 
 async def test_async_limiter_aclose_releases_the_pool() -> None:
@@ -376,47 +469,36 @@ async def test_async_limiter_aclose_releases_the_pool() -> None:
     assert _FakeAsyncRedis.built == 2
 
 
-async def test_separate_limiter_instances_share_one_process_wide_client(
+async def test_a_failing_injected_client_never_evicts_the_global_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The property that makes the pooling worth anything in production.
+    """Retirement is scoped to the client that failed (review finding 2).
 
-    ``build_web_search_service`` / ``build_mcp_servers_service`` construct a
-    **fresh** limiter per request, so a pool owned by the instance would still
-    open a connection per search. This drives the real (non-injected) path with
-    ``aioredis.from_url`` stubbed, and asserts a second limiter for the same URL
-    reuses the first one's client.
+    An injected fake is instance-local by contract; if its failure popped the
+    URL from the shared cache it would drop a healthy production client that
+    happens to share that URL.
     """
     import app.tasks.rate_limit as rl
 
-    built: list[_FakeAsyncRedis] = []
-
-    def _from_url(_url: str, **_kwargs: object) -> _FakeAsyncRedis:
-        client = _FakeAsyncRedis()
-        built.append(client)
-        return client
-
     _FakeAsyncRedis.reset()
-    monkeypatch.setattr(rl.aioredis, "from_url", _from_url)
+    url = "redis://localhost:6379/0"
+    monkeypatch.setattr(rl.aioredis, "from_url", lambda *_a, **_kw: _FakeAsyncRedis())
     monkeypatch.setattr(rl, "_ASYNC_POOLS", {})
 
-    def _fresh() -> RedisFixedWindowRateLimiter:
-        return RedisFixedWindowRateLimiter(
-            "redis://localhost:6379/0", max_per_window=100, window_seconds=60
-        )
+    healthy = RedisFixedWindowRateLimiter(url, max_per_window=100, window_seconds=60)
+    await healthy.try_acquire_async(uuid.uuid4())
+    pooled_key = (url, asyncio.get_running_loop())
+    assert pooled_key in rl._ASYNC_POOLS
+    installed = rl._ASYNC_POOLS[pooled_key]
 
-    await _fresh().try_acquire_async(uuid.uuid4())
-    await _fresh().try_acquire_async(uuid.uuid4())
-    await _fresh().try_acquire_async(uuid.uuid4())
-
-    assert len(built) == 1
-
-    # A different Redis URL is a different pool entry, not a silently shared one.
-    other = RedisFixedWindowRateLimiter(
-        "redis://elsewhere:6379/1", max_per_window=100, window_seconds=60
+    # A separate limiter on the same URL whose injected client always fails.
+    failing = RedisFixedWindowRateLimiter(
+        url,
+        max_per_window=100,
+        window_seconds=60,
+        async_client_factory=lambda: _FakeAsyncRedis(fail=True),
     )
-    await other.try_acquire_async(uuid.uuid4())
-    assert len(built) == 2
+    assert await failing.try_acquire_async(uuid.uuid4()) is True  # fails open
 
-    await rl.aclose_async_rate_limit_pools()
-    assert all(c.closed for c in built)
+    # The shared client is untouched — same object, still pooled.
+    assert rl._ASYNC_POOLS.get(pooled_key) is installed

@@ -46,5 +46,14 @@ def run_task(coro: Coroutine[object, object, _T]) -> _T:
             return await coro
         finally:
             await dispose_engine()
+            # Same rule for the rate limiter's pooled Redis client (#527): a
+            # headless tool run (MCP / web search) can open one on this loop, and
+            # a client left behind would be orphaned when the loop closes — the
+            # #140 shape, one resource over. Imported here, not at module scope:
+            # ``app.tasks.rate_limit`` is inside the package whose ``__init__``
+            # imports the task modules, so a top-level import is a cycle.
+            from app.tasks.rate_limit import aclose_async_rate_limit_pools
+
+            await aclose_async_rate_limit_pools()
 
     return asyncio.run(_runner())
