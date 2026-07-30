@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -59,6 +59,8 @@ from app.domain.entities import (
     GrantPrincipalType,
     GrantResourceType,
     GrantRole,
+    Group,
+    GroupKind,
     KnowledgeMode,
     KnowledgeScope,
     LlmProvider,
@@ -349,6 +351,23 @@ def _to_grant(row: models.Grant) -> Grant:
         role=GrantRole(row.role),
         granted_by=row.granted_by,
         created_at=row.created_at,
+    )
+
+
+# The tenant's derived "All members" group (ADR-0022 §3). The name is a label
+# for the admin UI — the group is identified by ``kind='system'``, never by name.
+SYSTEM_GROUP_NAME = "All members"
+
+
+def _to_group(row: models.Group) -> Group:
+    return Group(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        name=row.name,
+        kind=GroupKind(row.kind),
+        created_by=row.created_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -3090,21 +3109,39 @@ class GrantRepository(_TenantScopedRepository):
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def granted_resource_ids(
-        self, principal_id: UUID
+        self, principal_id: UUID, *, group_ids: frozenset[UUID] = frozenset()
     ) -> tuple[frozenset[UUID], frozenset[UUID]]:
-        """The ``(document_ids, collection_ids)`` granted to a ``user`` principal.
+        """The ``(document_ids, collection_ids)`` granted to this requester.
 
         The resolved-id-set form of the SQL grant ``EXISTS`` (ADR-0010 §4): the
         retrieval chokepoint resolves the requester's grants per request and
         folds them into the engine's :class:`~app.search.filters.SearchAllowFilter`.
-        Tenant-scoped (INV-1 — a cross-tenant grant never widens the filter) and
-        ``user``-principal only (the MVP grant kind, spec 0004 §2.2). A revoked
-        grant (row deleted) vanishes from the sets — deny-by-default restored.
+        Tenant-scoped (INV-1 — a cross-tenant grant never widens the filter). A
+        revoked grant (row deleted) vanishes from the sets — deny-by-default
+        restored.
+
+        Covers both of the requester's principal kinds so the engine mirror and
+        ``retrieval.queries._grant_exists`` admit exactly the same rows: their
+        ``user`` principal, plus every ``group`` principal in ``group_ids``
+        (ADR-0022 §5). ``group_ids`` defaults to empty, which emits no group
+        term at all — the pre-ADR-0022 behaviour, and the fail-closed default.
         """
+        principal_match = [
+            and_(
+                models.Grant.principal_type == GrantPrincipalType.USER.value,
+                models.Grant.principal_id == principal_id,
+            )
+        ]
+        if group_ids:
+            principal_match.append(
+                and_(
+                    models.Grant.principal_type == GrantPrincipalType.GROUP.value,
+                    models.Grant.principal_id.in_(group_ids),
+                )
+            )
         stmt = select(models.Grant.resource_type, models.Grant.resource_id).where(
             models.Grant.tenant_id == self._tenant_id,
-            models.Grant.principal_type == GrantPrincipalType.USER.value,
-            models.Grant.principal_id == principal_id,
+            or_(*principal_match),
         )
         documents: set[UUID] = set()
         collections: set[UUID] = set()
@@ -3178,6 +3215,196 @@ class GrantRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_grant(r) for r in rows]
+
+
+class GroupRepository(_TenantScopedRepository):
+    """Groups and their membership within one tenant (ADR-0022, INV-1).
+
+    The persistence seam behind ``group`` grants. Every method is tenant-scoped,
+    so a group minted in tenant A is invisible to a tenant-B repository and can
+    never widen that tenant's allow-set (asserted by the negative tests).
+    Authorization (admin-only management) lives one layer up in
+    :class:`~app.services.groups_service.GroupsService`. Writes are flushed, not
+    committed — the caller owns the transaction boundary.
+    """
+
+    async def create(
+        self, *, name: str, created_by: UUID | None, kind: GroupKind = GroupKind.USER
+    ) -> Group:
+        """Persist a group. Raises ``IntegrityError`` on a duplicate name."""
+        row = models.Group(
+            tenant_id=self._tenant_id,
+            name=name.strip(),
+            kind=kind.value,
+            created_by=created_by,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_group(row)
+
+    async def get(self, group_id: UUID) -> Group | None:
+        """One group by id, tenant-scoped (a foreign tenant's id reads as ``None``)."""
+        row = await self._get_row(group_id)
+        return None if row is None else _to_group(row)
+
+    async def _get_row(self, group_id: UUID) -> models.Group | None:
+        stmt = select(models.Group).where(
+            models.Group.tenant_id == self._tenant_id,
+            models.Group.id == group_id,
+        )
+        return (await self._session.execute(stmt)).scalars().one_or_none()
+
+    async def get_by_name(self, name: str) -> Group | None:
+        """One group by case-insensitive name (mirrors the unique index)."""
+        stmt = select(models.Group).where(
+            models.Group.tenant_id == self._tenant_id,
+            func.lower(models.Group.name) == name.strip().lower(),
+        )
+        row = (await self._session.execute(stmt)).scalars().one_or_none()
+        return None if row is None else _to_group(row)
+
+    async def list_all(self) -> list[Group]:
+        """Every group in the tenant, system group first, then by name."""
+        stmt = select(models.Group).where(models.Group.tenant_id == self._tenant_id)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return sorted(
+            (_to_group(r) for r in rows),
+            key=lambda g: (g.kind is not GroupKind.SYSTEM, g.name.lower()),
+        )
+
+    async def rename(self, group_id: UUID, *, name: str) -> Group | None:
+        """Rename a group; ``None`` if it does not exist in this tenant."""
+        row = await self._get_row(group_id)
+        if row is None:
+            return None
+        row.name = name.strip()
+        await self._session.flush()
+        return _to_group(row)
+
+    async def delete(self, group_id: UUID) -> bool:
+        """Delete a group with its membership and its grants; ``False`` if absent.
+
+        Both cleanups are **explicit rather than delegated to the database**, and
+        for different reasons:
+
+        * ``grants.principal_id`` carries **no FK by design** (the principal
+          namespace spans tables — spec 0004 §2.2), so nothing in the schema
+          would ever remove a grant naming this group. Left behind it is a
+          dangling row that keeps claiming a dead principal; deleting it here is
+          what makes ADR-0022 §7's "deleting the group cascades its grants" true.
+        * ``group_members`` *does* have an ``ON DELETE CASCADE``, but relying on
+          it alone would make the outcome depend on the engine enforcing foreign
+          keys (SQLite does not, unless ``PRAGMA foreign_keys=ON``). Deleting the
+          rows explicitly makes the behaviour identical everywhere it runs.
+        """
+        row = await self._get_row(group_id)
+        if row is None:
+            return False
+        await self._session.execute(
+            delete(models.GroupMember).where(
+                models.GroupMember.tenant_id == self._tenant_id,
+                models.GroupMember.group_id == group_id,
+            )
+        )
+        await self._session.execute(
+            delete(models.Grant).where(
+                models.Grant.tenant_id == self._tenant_id,
+                models.Grant.principal_type == GrantPrincipalType.GROUP.value,
+                models.Grant.principal_id == group_id,
+            )
+        )
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def ensure_system_group(self) -> Group:
+        """Get-or-create the tenant's derived "All members" group (ADR-0022 §3).
+
+        Idempotent: a partial unique index allows at most one per tenant, so a
+        concurrent create loses the race and re-reads. The group is created
+        lazily on first use rather than at tenant provisioning, so existing
+        tenants need no back-fill.
+        """
+        stmt = select(models.Group).where(
+            models.Group.tenant_id == self._tenant_id,
+            models.Group.kind == GroupKind.SYSTEM.value,
+        )
+        row = (await self._session.execute(stmt)).scalars().one_or_none()
+        if row is not None:
+            return _to_group(row)
+        return await self.create(name=SYSTEM_GROUP_NAME, created_by=None, kind=GroupKind.SYSTEM)
+
+    async def add_member(self, *, group_id: UUID, user_id: UUID, added_by: UUID | None) -> bool:
+        """Add a user to a group. Idempotent — ``False`` if already a member."""
+        existing = await self._session.execute(
+            select(models.GroupMember.id).where(
+                models.GroupMember.tenant_id == self._tenant_id,
+                models.GroupMember.group_id == group_id,
+                models.GroupMember.user_id == user_id,
+            )
+        )
+        if existing.scalars().one_or_none() is not None:
+            return False
+        self._session.add(
+            models.GroupMember(
+                tenant_id=self._tenant_id,
+                group_id=group_id,
+                user_id=user_id,
+                added_by=added_by,
+            )
+        )
+        await self._session.flush()
+        return True
+
+    async def remove_member(self, *, group_id: UUID, user_id: UUID) -> bool:
+        """Remove a user from a group; ``False`` if they were not a member."""
+        stmt = select(models.GroupMember).where(
+            models.GroupMember.tenant_id == self._tenant_id,
+            models.GroupMember.group_id == group_id,
+            models.GroupMember.user_id == user_id,
+        )
+        row = (await self._session.execute(stmt)).scalars().one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def list_member_ids(self, group_id: UUID) -> list[UUID]:
+        """The user ids explicitly in ``group_id`` (empty for the system group)."""
+        stmt = select(models.GroupMember.user_id).where(
+            models.GroupMember.tenant_id == self._tenant_id,
+            models.GroupMember.group_id == group_id,
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def group_ids_for_user(self, user_id: UUID) -> frozenset[UUID]:
+        """The group principals ``user_id`` carries — the allow-set hot path.
+
+        Returns the user's **explicit** memberships plus the tenant's system
+        group id when one exists (ADR-0022 §3: tenant-wide membership is derived,
+        so there are no rows to read for it). Read once per request and never
+        cached on the principal or in the token — that is precisely what makes a
+        removal take effect on the next request (ADR-0022 §7).
+
+        Returns an empty set for a user with no groups; an empty set narrows the
+        allow-set to ownership plus user grants, i.e. it fails closed.
+        """
+        stmt = select(models.GroupMember.group_id).where(
+            models.GroupMember.tenant_id == self._tenant_id,
+            models.GroupMember.user_id == user_id,
+        )
+        explicit = set((await self._session.execute(stmt)).scalars().all())
+        system = await self._session.execute(
+            select(models.Group.id).where(
+                models.Group.tenant_id == self._tenant_id,
+                models.Group.kind == GroupKind.SYSTEM.value,
+            )
+        )
+        system_id = system.scalars().one_or_none()
+        if system_id is not None:
+            explicit.add(system_id)
+        return frozenset(explicit)
 
 
 class SecretRepository(_TenantScopedRepository):

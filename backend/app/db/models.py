@@ -754,6 +754,105 @@ class Grant(TenantScopedMixin, Base):
     )
 
 
+class Group(TenantScopedMixin, TimestampMixin, Base):
+    """A tenant-scoped set of users an admin manages (ADR-0022 §1).
+
+    A group confers **nothing on its own**: it only makes a ``grants`` row whose
+    ``principal_type='group'`` apply to its members. That keeps groups out of the
+    RBAC story entirely — :class:`~app.domain.entities.Role` still decides what a
+    user may *do*; a group only widens what they may *see*.
+
+    ``kind='system'`` marks the per-tenant "All members" group that expresses
+    tenant-wide visibility. It cannot be renamed, deleted, or explicitly
+    populated, and it has **no** :class:`GroupMember` rows: membership is derived
+    (ADR-0022 §3), because materializing it would need a back-fill plus a
+    user-creation hook, and a missed hook silently denies access. A partial
+    unique index (migration ``0041``) allows at most one per tenant.
+
+    ``UNIQUE(tenant_id, lower(name))`` makes a name a per-tenant singleton
+    case-insensitively — "Tax Team" and "tax team" are one group, which is what
+    an admin typing into a box expects. Tenant-scoped like every table (INV-1);
+    ``0041`` also puts it under the RLS backstop.
+    """
+
+    __tablename__ = "groups"
+    __table_args__ = (
+        # Case-insensitive per-tenant uniqueness, and at most one system group
+        # per tenant — both expressed exactly as migration 0041 creates them so
+        # the registry and the migration cannot drift.
+        Index(
+            "uq_groups_tenant_name_lower",
+            "tenant_id",
+            text("lower(name)"),
+            unique=True,
+        ),
+        Index(
+            "uq_groups_tenant_system",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("kind = 'system'"),
+            sqlite_where=text("kind = 'system'"),
+        ),
+        CheckConstraint("kind in ('user', 'system')", name="ck_groups_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class GroupMember(TenantScopedMixin, Base):
+    """One user's membership of one group (ADR-0022 §1).
+
+    No ``TimestampMixin``/``updated_at``: a membership is added then removed,
+    never re-described. ``tenant_id`` is denormalized so the table is
+    tenant-scoped like every other and carries the identical RLS policy (INV-1)
+    without a join.
+
+    Both FKs cascade on delete — removing a group drops its membership, removing
+    a user drops them from every group — so a deleted principal can never leave
+    a dangling row that widens someone's allow-set. ``UNIQUE(group_id, user_id)``
+    makes adding a member idempotent.
+
+    The ``(tenant_id, user_id)`` index serves the hot path: the retrieval
+    allow-set reads "which groups is this requester in?" once per request.
+    Membership is deliberately **not** cached on the principal or in the token —
+    that is what makes revocation take effect on the next request (ADR-0022 §7).
+    """
+
+    __tablename__ = "group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_group_members_group_user"),
+        Index("ix_group_members_tenant_user", "tenant_id", "user_id"),
+        Index("ix_group_members_group", "group_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("groups.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    added_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Secret(TenantScopedMixin, TimestampMixin, Base):
     """An encrypted per-tenant credential — the secrets vault row (issue #209).
 

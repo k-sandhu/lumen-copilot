@@ -60,7 +60,12 @@ from app.core.errors import (
     UnsupportedMediaTypeError,
     ValidationError,
 )
-from app.db.repositories import ChunkRepository, CollectionRepository, DocumentRepository
+from app.db.repositories import (
+    ChunkRepository,
+    CollectionRepository,
+    DocumentRepository,
+    GroupRepository,
+)
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Document, DocumentStatus
 from app.retrieval.permissions import AllowSet
@@ -246,9 +251,13 @@ class DocumentService:
         self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._groups = GroupRepository(session, tenant_id)
         # The requester's read allow-set — the SAME object retrieval keys its
         # permission predicate off (ADR-0019 §2 mode split, spec 0004 §2.2).
-        self._allow_set = AllowSet.for_user(tenant_id=tenant_id, user_id=owner_id)
+        # Resolved lazily because the group half needs a read (ADR-0022 §5);
+        # memoized for this service instance, which is per-request, so a group
+        # removal still takes effect on the next request.
+        self._allow_set_cache: AllowSet | None = None
         self._store = object_store
         self._audit = audit
         self._request_id = request_id
@@ -257,6 +266,19 @@ class DocumentService:
         self._max_upload_bytes = max_upload_bytes
 
     # --- internal helpers ---------------------------------------------------
+
+    async def _resolve_allow_set(self) -> AllowSet:
+        """The requester's read allow-set, including their group principals.
+
+        A user in no groups resolves to an empty group set, which narrows the
+        allow-set to ownership plus their own user grants — fail closed.
+        """
+        if self._allow_set_cache is None:
+            group_ids = await self._groups.group_ids_for_user(self._owner_id)
+            self._allow_set_cache = AllowSet.for_user(
+                tenant_id=self._tenant_id, user_id=self._owner_id, group_ids=group_ids
+            )
+        return self._allow_set_cache
 
     def _owns(self, document: Document) -> bool:
         """Deny-by-default ownership check (spec 0004 §2.2, INV-2)."""
@@ -287,7 +309,7 @@ class DocumentService:
         three to 404 at the router.
         """
         return await get_permitted_document(
-            self._session, allow_set=self._allow_set, document_id=document_id
+            self._session, allow_set=await self._resolve_allow_set(), document_id=document_id
         )
 
     async def _owned(self, document_id: UUID) -> Document | None:
@@ -487,7 +509,9 @@ class DocumentService:
         page = rows[:page_size]
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
         permitted = await permitted_document_ids(
-            self._session, allow_set=self._allow_set, document_ids=[d.id for d in page]
+            self._session,
+            allow_set=await self._resolve_allow_set(),
+            document_ids=[d.id for d in page],
         )
         visible = [d for d in page if d.id in permitted]
         # One grouped COUNT for the whole page (#526). Resolved per row this was

@@ -82,6 +82,11 @@ _ALL_TABLES = _MVP_TABLES | {
     "run_deliveries",
     # 0032, issue #409 — per-answer token & cache usage accounting.
     "llm_usage",
+    # 0041, ADR-0022 — group principals behind grants (spec 0004 §2.2's
+    # `group`/`role` follow-up). `grants` needed no migration: `principal_type`
+    # was modelled wide from the start.
+    "groups",
+    "group_members",
 }
 
 
@@ -122,7 +127,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0040_gdrive_acl"]
+    assert list(script.get_heads()) == ["0041_groups"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"

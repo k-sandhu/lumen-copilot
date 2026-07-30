@@ -24,15 +24,14 @@ foreign/unauthorized resource exists). A denied attempt emits a
 **Grantee validation (the only guard — spec 0004 §2.2).** The ``grants`` table
 deliberately carries **no FK on ``principal_id``** (the principal namespace is
 modelled to grow to ``group``/``role``), so ``create_grant`` is the single place
-that proves the grantee is real. The MVP issues **``user`` grants only**: any other
-``principal_type`` is rejected at the boundary as a 422
+that proves the grantee is real. Supported principals are ``user`` and — since
+ADR-0022 — ``group``; ``role`` is still rejected at the boundary as a 422
 :class:`~app.core.errors.ValidationError` (no grant, no success audit). The grantee
-user is then looked up through the **tenant-scoped** :class:`UserRepository`, so an
-unknown id and a foreign-tenant user are indistinguishable — both raise 404 (after
-a ``permission.denied`` audit), never 403. Without this an owner could mint a grant
-that crosses the tenant boundary or that the retrieval filter (which admits only an
-in-tenant ``user`` principal) can never honor — reporting a success that does
-nothing.
+(user *or* group) is looked up through the matching **tenant-scoped** repository,
+so an unknown id and a foreign-tenant one are indistinguishable — both raise 404
+(after a ``permission.denied`` audit), never 403. Without this an owner could mint
+a grant that crosses the tenant boundary or that the retrieval filter can never
+honor — reporting a success that does nothing.
 
 The ``tenant_id`` and the granting ``owner_id`` come from the resolved principal
 (``auth/``), never from request input (spec 0004 §2.3). The caller owns the
@@ -51,6 +50,7 @@ from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
     GrantRepository,
+    GroupRepository,
     UserRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
@@ -93,6 +93,9 @@ class GrantsService:
         self._collections = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
         self._users = UserRepository(session, tenant_id)
+        # Group grantee validation (ADR-0022 §4) — tenant-scoped, so a
+        # foreign-tenant group resolves to None exactly like a missing one.
+        self._groups = GroupRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
@@ -160,28 +163,54 @@ class GrantsService:
         a ``group``/``role`` principal — none of which the retrieval filter honors
         (it admits only a ``user`` principal in the requester's tenant), so the
         grant would report success yet never make the resource retrievable, or
-        worse cross the tenant boundary. Two guards (spec 0004 §2.2 — MVP emits
-        ``user`` only):
+        worse cross the tenant boundary. Two guards (spec 0004 §2.2, widened by
+        ADR-0022 §4 to admit ``group``):
 
-        1. **Unsupported principal type** (``GROUP``/``ROLE``) → 422
+        1. **Unsupported principal type** (``ROLE``) → 422
            :class:`ValidationError` at the boundary (INV-8). The grant is *not*
            persisted and *no* success audit is emitted. No ``permission.denied``
            is emitted either — this is a malformed request, not an access denial.
-        2. **Unknown / foreign-tenant grantee** — the user is looked up via the
-           tenant-scoped :class:`UserRepository` (the granting principal's
-           tenant), so a tenant-B user resolves to ``None`` exactly like a
-           non-existent one. Missing ⇒ 404 :class:`NotFoundError` (existence
-           non-disclosure, never 403; INV-1/§2.1) **after** a ``permission.denied``
-           audit event (INV-6). The grant is not persisted.
+        2. **Unknown / foreign-tenant grantee** — the user (or group) is looked
+           up via the tenant-scoped :class:`UserRepository` /
+           :class:`GroupRepository` for the granting principal's tenant, so a
+           tenant-B principal resolves to ``None`` exactly like a non-existent
+           one. Missing ⇒ 404 :class:`NotFoundError` (existence non-disclosure,
+           never 403; INV-1/§2.1) **after** a ``permission.denied`` audit event
+           (INV-6). The grant is not persisted.
         """
-        if principal_type is not GrantPrincipalType.USER:
-            # MVP supports user grants only (spec 0004 §2.2). Reject at the
-            # boundary — do not persist or audit a success for a principal the
-            # retrieval filter can never honor.
+        if principal_type is GrantPrincipalType.ROLE:
+            # ``ROLE`` remains unsupported (ADR-0022 §4): nothing needs it yet,
+            # and admitting it unreviewed would widen INV-2 for free. Reject at
+            # the boundary — do not persist or audit a success for a principal
+            # the retrieval filter cannot honor.
             raise ValidationError(
-                "Only user grants are supported.",
+                "Only user and group grants are supported.",
                 code="unsupported_principal_type",
             )
+
+        if principal_type is GrantPrincipalType.GROUP:
+            # ADR-0022 §4: a group grant admits every member of the group. The
+            # tenant-scoped repository returns None for a foreign-tenant group
+            # exactly as it does for a non-existent one, so a cross-tenant group
+            # grant is a 404 — the same existence-non-disclosure rule as users.
+            group = await self._groups.get(principal_id)
+            if group is None:
+                await self._audit.emit(
+                    action=AuditAction.PERMISSION_DENIED,
+                    actor=AuditActor.user(self._owner_id),
+                    resource_type=resource_type.value,
+                    resource_id=str(resource_id),
+                    outcome=AuditOutcome.DENIED,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata={
+                        "reason": "grantee_not_in_tenant",
+                        "principal_type": principal_type.value,
+                        "principal_id": str(principal_id),
+                    },
+                )
+                raise NotFoundError("Grantee not found.")
+            return
 
         grantee = await self._users.get(principal_id)
         if grantee is None:
