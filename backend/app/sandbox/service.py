@@ -192,6 +192,31 @@ def _install_refusal(name: str, value: str, shipped: Version | None) -> str:
     )
 
 
+def session_resource_bounds(settings: Settings) -> tuple[float | None, int | None, int | None]:
+    """The cpu / memory / PID bounds for a session container — none unless asked for.
+
+    ADR-0020 launches the execution container with **no** cpu, memory or PID limit. That
+    is a deliberate sponsor decision (its Consequences section: no automatic protection
+    against infinite loops, fork bombs, disk growth or resource monopolisation, with
+    explicit cancel/reset as the recovery path) and it stays the default here — all three
+    values are ``None``, and the runner then calls the engine exactly as it did before.
+
+    What was NOT a decision is that the runner's wire schema typed those fields ``None``,
+    which made the posture unchangeable by configuration: a deploy unwilling to let one
+    ``run_python`` call exhaust host RAM or fill ``/var/lib/docker`` could not even ask
+    for a bound. ``SANDBOX_SESSION_LIMITS_ENABLED`` is that ask, and it carries the
+    ADR-0013 numbers the deploy already configures. Deploy-wide rather than per-tenant on
+    purpose: the resource at risk is the host every tenant shares.
+
+    These bound a long-lived SESSION, not one run (ADR-0020 §4), so a memory bound that
+    is comfortable for a single analysis turn can still stop a later turn in the same
+    chat — which is why this is opt-in rather than a default anyone inherits silently.
+    """
+    if not settings.sandbox_session_limits_enabled:
+        return (None, None, None)
+    return (settings.sandbox_cpus, settings.sandbox_memory_bytes, settings.sandbox_pids_limit)
+
+
 def validate_requested_packages(
     requested: tuple[str, ...],
     *,
@@ -387,7 +412,7 @@ class SandboxSessionService:
         else:
             sandbox = await self._sessions.get(run.sandbox_session_id)
             await self._runner.cancel(
-                SandboxSessionSpec(
+                self._build_spec(
                     sandbox_session_id=run.sandbox_session_id,
                     generation=run.sandbox_generation,
                     image=run.image_digest
@@ -396,9 +421,6 @@ class SandboxSessionService:
                         if sandbox is not None
                         else self._settings.sandbox_image
                     ),
-                    runtime=self._settings.sandbox_runtime,
-                    output_bytes_cap=self._settings.sandbox_output_bytes_cap,
-                    env=self._session_env(),
                 ),
                 run.id,
             )
@@ -461,15 +483,29 @@ class SandboxSessionService:
             raise SandboxDisabledError(reason)
 
     def _spec(self, value: SandboxSession) -> SandboxSessionSpec:
-        return SandboxSessionSpec(
+        return self._build_spec(
             sandbox_session_id=value.id,
             generation=value.generation,
             image=value.image_digest,
+        )
+
+    def _build_spec(
+        self, *, sandbox_session_id: UUID, generation: int, image: str
+    ) -> SandboxSessionSpec:
+        """The single place a session spec is built, so every path carries one posture."""
+        cpus, memory_bytes, pids_limit = session_resource_bounds(self._settings)
+        return SandboxSessionSpec(
+            sandbox_session_id=sandbox_session_id,
+            generation=generation,
+            image=image,
             runtime=self._settings.sandbox_runtime,
             # The runner reads collected output files into its own memory and is the
             # single Docker-socket holder, so this bound is what keeps one chat turn's
             # output from taking code execution down for every tenant.
             output_bytes_cap=self._settings.sandbox_output_bytes_cap,
+            cpus=cpus,
+            memory_bytes=memory_bytes,
+            pids_limit=pids_limit,
             env=self._session_env(),
         )
 
@@ -887,5 +923,6 @@ __all__ = [
     "SandboxDisabledError",
     "SandboxService",
     "SandboxSessionService",
+    "session_resource_bounds",
     "validate_requested_packages",
 ]

@@ -86,7 +86,11 @@ class ContainerFlags:
     cap_drop: tuple[str, ...] = ("ALL",)
     security_opt: tuple[str, ...] = ("no-new-privileges:true",)
     runtime: str = "runc"
-    # ADR-0020 intentionally starts without automatic CPU/memory/PID/time limits.
+    # ADR-0020 intentionally starts without automatic CPU/memory/PID/time limits, so
+    # these stay ``None`` unless a deploy sets ``SANDBOX_SESSION_LIMITS_ENABLED``. The
+    # runner's wire schema accepts a positive value and applies the engine flag; a
+    # wall clock is the exception, since no code enforces one (ADR-0020 replaced the
+    # ADR-0013 timeout with explicit cancel/reset).
     cpus: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
@@ -98,8 +102,20 @@ class ContainerFlags:
 
 
 def build_container_flags(spec: SandboxSessionSpec) -> ContainerFlags:
-    """Return the fixed contained-root posture for a reusable session."""
-    return ContainerFlags(runtime=spec.runtime, output_bytes_cap=spec.output_bytes_cap)
+    """Return the fixed contained-root posture for a reusable session.
+
+    Everything that makes the container contained — no network, no binds, all
+    capabilities dropped, no-new-privileges — is fixed here and cannot be widened by a
+    caller. Only the *narrowing* values ride on the spec: the output-collection budget
+    and, when a deploy opts in, the cpu/memory/PID bounds.
+    """
+    return ContainerFlags(
+        runtime=spec.runtime,
+        output_bytes_cap=spec.output_bytes_cap,
+        cpus=spec.cpus,
+        memory_bytes=spec.memory_bytes,
+        pids_limit=spec.pids_limit,
+    )
 
 
 class SandboxRunner(Protocol):

@@ -15,18 +15,32 @@
 # Build (the runner launches it on the HOST daemon, so it must exist there):
 #   docker compose --profile sandbox build sandbox-exec-image
 # or, without compose:
-#   docker build -t lumen-sandbox-exec:0.1.0 ./sandbox_exec
+#   docker build -t lumen-sandbox-exec:0.1.1 ./sandbox_exec
 #
 # Base pinned by DIGEST, never `:latest` (ADR-0013 §3, root AGENTS.md §10). The tag
 # is kept alongside the digest for readability; the digest is what is resolved.
-FROM python:3.12.8-slim-bookworm@sha256:2199a62885a12290dc9c5be3ca0681d367576ab7bf037da120e564723292a2f0
+#
+# KEEP THIS CURRENT. A digest pin fixes the Debian userland too, so a stale pin is
+# months of unpatched libc/openssl/zlib in the image that parses tenant spreadsheets
+# as (contained) root — the previous pin was a Dec-2024 3.12.8 build, ~19 months old.
+# Re-resolve on every image bump:
+#   docker pull python:3.12-slim-bookworm
+#   docker image inspect python:3.12-slim-bookworm --format '{{index .RepoDigests 0}}'
+# Resolved 2026-07-30: python 3.12.13, linux/amd64 (the 3.12.13 and 3.12 tags name
+# the same manifest — both were pulled and compared).
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
 
 # MPLBACKEND=Agg: the container has no display and no X libraries, so any other
 # matplotlib backend raises on import of `pyplot`. MPLCONFIGDIR: matplotlib writes
 # its font cache and config there on first use; left unset it targets $HOME, which
-# is not guaranteed writable for the uid the run executes as. Both are also set by
-# the application per session (`SandboxSessionService._session_env`) — baked here
-# too so the image is correct under any launcher.
+# is not guaranteed writable for the uid the run executes as.
+#
+# MPLBACKEND is also set per session by the application
+# (`SandboxSessionService._session_env`); MPLCONFIGDIR is NOT, and cannot be — the
+# runner's `EnsureSessionRequest.env` allowlist accepts only HOME, PYTHONUNBUFFERED,
+# MPLBACKEND and LANG, and would reject it. It exists ONLY because it is baked here,
+# which is why the build-time cache warm-up below is load-bearing rather than an
+# optimisation.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

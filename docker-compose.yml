@@ -243,7 +243,7 @@ services:
   sandbox-exec-image:
     build:
       context: ./sandbox_exec
-    image: lumen-sandbox-exec:0.1.0
+    image: lumen-sandbox-exec:0.1.1
     profiles: ["sandbox"]
     # Build-and-verify only — never restart it, and give it nothing: no socket, no
     # volumes, no network, no env from .env.

@@ -110,7 +110,7 @@ def test_floating_or_malformed_execution_image_is_rejected(image: str) -> None:
 
 @pytest.mark.parametrize(
     "image",
-    [f"lumen-sandbox-exec@{_DIGEST}", f"lumen-sandbox-exec:0.1.0@{_DIGEST}"],
+    [f"lumen-sandbox-exec@{_DIGEST}", f"lumen-sandbox-exec:0.1.1@{_DIGEST}"],
 )
 def test_digest_pinned_execution_image_is_accepted(image: str) -> None:
     """``name@sha256:…`` (with or without a readability tag) is the strongest pin."""
@@ -136,7 +136,7 @@ def _production_env(**overrides: object) -> dict[str, object]:
 def test_enabled_sandbox_outside_local_requires_a_digest_pinned_image() -> None:
     """A tag is trust-on-first-build; outside local dev the digest is mandatory."""
     with pytest.raises(ValueError, match="@sha256"):
-        sandbox_settings(**_production_env(SANDBOX_IMAGE="lumen-sandbox-exec:0.1.0"))
+        sandbox_settings(**_production_env(SANDBOX_IMAGE="lumen-sandbox-exec:0.1.1"))
 
     settings = sandbox_settings(**_production_env(SANDBOX_IMAGE=f"lumen-sandbox-exec@{_DIGEST}"))
     assert settings.sandbox_image.endswith(_DIGEST)
@@ -151,7 +151,7 @@ def test_disabled_sandbox_outside_local_still_boots_on_the_tag_default() -> None
     settings = sandbox_settings(**_production_env(SANDBOX_ENABLED="false"))
 
     assert settings.sandbox_enabled is False
-    assert settings.sandbox_image == "lumen-sandbox-exec:0.1.0"
+    assert settings.sandbox_image == "lumen-sandbox-exec:0.1.1"
 
 
 # --- The pre-installed manifest must be settable from the ENVIRONMENT ---------

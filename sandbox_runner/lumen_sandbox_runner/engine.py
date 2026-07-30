@@ -20,7 +20,7 @@ from uuid import UUID
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-from lumen_sandbox_runner.models import EnsureSessionRequest, ExecuteRequest
+from lumen_sandbox_runner.models import ContainerPolicy, EnsureSessionRequest, ExecuteRequest
 
 _MANAGED_LABEL = "com.lumen.sandbox.managed"
 _SESSION_LABEL = "com.lumen.sandbox.session"
@@ -268,7 +268,28 @@ class DockerSandboxEngine:
             # A tiny PID 1 reaps orphaned descendants between executions in the
             # long-lived container; it does not impose a process/time limit.
             init=True,
+            **self._resource_bounds(request.container),
         )
+
+    @staticmethod
+    def _resource_bounds(policy: ContainerPolicy) -> dict[str, object]:
+        """Engine flags for the bounds a caller asked for — none, unless asked.
+
+        ADR-0020's shipped posture is an unbounded execution container, so an absent
+        value stays absent: this returns an empty mapping and ``containers.run`` is
+        called exactly as before. A deploy that wants a bound gets the real engine flag
+        rather than a field the schema accepted and nothing read, which is the state
+        ``output_bytes_cap`` was found in.
+        """
+        bounds: dict[str, object] = {}
+        if policy.memory_bytes is not None:
+            bounds["mem_limit"] = policy.memory_bytes
+        if policy.pids_limit is not None:
+            bounds["pids_limit"] = policy.pids_limit
+        if policy.cpus is not None:
+            # Docker expresses a fractional CPU budget in billionths of a core.
+            bounds["nano_cpus"] = int(policy.cpus * 1_000_000_000)
+        return bounds
 
     def _execute_unlocked(self, container: Any, request: ExecuteRequest) -> dict[str, object]:
         run_root = f"/workspace/.lumen/runs/{request.execution_id}"

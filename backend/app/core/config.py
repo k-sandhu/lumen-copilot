@@ -1135,7 +1135,7 @@ class Settings(BaseSettings):
     # code execution is enabled outside local development. In local dev a tag is
     # trust-on-first-build: you built the image yourself, on this daemon.
     sandbox_image: str = Field(
-        default="lumen-sandbox-exec:0.1.0",
+        default="lumen-sandbox-exec:0.1.1",
         alias="SANDBOX_IMAGE",
     )
 
@@ -1202,13 +1202,29 @@ class Settings(BaseSettings):
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # Compatibility-only ADR-0013 settings. Existing admin-policy rows and API clients
-    # still read these fields, so they remain validated and configurable, but ADR-0020
-    # reusable sessions deliberately do NOT pass them to the runner or enforce them.
+    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED — no cpu,
+    # memory or PID limit on the execution container — which is a deliberate sponsor
+    # decision (ADR-0020 Consequences) and the largest residual operational risk in
+    # that design: one ``run_python`` call can exhaust host RAM, saturate every core or
+    # fork-bomb, and explicit cancel/reset is the only recovery.
+    #
+    # These three values are what a deploy that does NOT want to accept that risk sends
+    # instead, and ``SANDBOX_SESSION_LIMITS_ENABLED`` is the switch. Off (the default)
+    # preserves ADR-0020's posture exactly; on, they are passed to the runner, which
+    # applies them as ``--memory`` / ``--pids-limit`` / ``--cpus`` on the session
+    # container. They bound a long-lived session rather than one run, so a bound that
+    # is comfortable for a single analysis turn can still stop a later one.
+    #
+    # ``sandbox_wall_clock_seconds`` stays compatibility-only: ADR-0020 removed the
+    # automatic timeout, nothing enforces a wall clock, and the runner's wire schema
+    # refuses the field rather than accept a promise no code keeps.
     sandbox_cpus: float = Field(default=1.0, alias="SANDBOX_CPUS")
     sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
+    sandbox_session_limits_enabled: bool = Field(
+        default=False, alias="SANDBOX_SESSION_LIMITS_ENABLED"
+    )
     # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
     # execution's output directory the runner will read into its own memory before it
     # stops and reports partial collection. This protects the RUNNER, not the run —

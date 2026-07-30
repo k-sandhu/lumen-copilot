@@ -9,17 +9,37 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.sandbox.runner import build_container_flags
+from app.sandbox.service import session_resource_bounds
 from app.sandbox.spec import SandboxSessionSpec, StagedInput
 from tests._sandbox_helpers import sandbox_settings
 
 
-def _session(*, runtime: str = "runsc", output_bytes_cap: int | None = None) -> SandboxSessionSpec:
+def _limits_for(settings: Settings) -> tuple[float | None, int | None, int | None]:
+    """The whole backend chain for a session bound: config → spec → container flags."""
+    cpus, memory_bytes, pids_limit = session_resource_bounds(settings)
+    flags = build_container_flags(
+        _session(cpus=cpus, memory_bytes=memory_bytes, pids_limit=pids_limit)
+    )
+    return (flags.cpus, flags.memory_bytes, flags.pids_limit)
+
+
+def _session(
+    *,
+    runtime: str = "runsc",
+    output_bytes_cap: int | None = None,
+    cpus: float | None = None,
+    memory_bytes: int | None = None,
+    pids_limit: int | None = None,
+) -> SandboxSessionSpec:
     return SandboxSessionSpec(
         sandbox_session_id=uuid4(),
         generation=1,
         image="python@sha256:abc",
         runtime=runtime,
         output_bytes_cap=output_bytes_cap,
+        cpus=cpus,
+        memory_bytes=memory_bytes,
+        pids_limit=pids_limit,
         env=(
             ("HOME", "/root"),
             ("PYTHONUNBUFFERED", "1"),
@@ -45,6 +65,39 @@ def test_no_automatic_time_resource_or_pid_limits() -> None:
     assert flags.cpus is None
     assert flags.memory_bytes is None
     assert flags.pids_limit is None
+
+
+def test_the_shipped_default_sends_no_cpu_memory_or_pid_bound() -> None:
+    """ADR-0020's posture is the default, and it is stated here rather than implied.
+
+    Its Consequences section is explicit that there is no automatic protection against
+    infinite loops, fork bombs, disk growth or resource monopolisation, and that this
+    is a deliberate sponsor decision. So the *absence* is asserted: a change that
+    started bounding sessions silently would fail this test and have to argue for it.
+    """
+    limits = _limits_for(sandbox_settings())
+
+    assert limits == (None, None, None)
+
+
+def test_a_deploy_may_opt_into_bounding_the_session_container() -> None:
+    """The gap this closes: the risk was documented but not configurable.
+
+    The runner's wire schema typed cpu/memory/PID ``None``, so a deployer who was not
+    willing to let one ``run_python`` call exhaust host RAM could not even ask for a
+    bound. With ``SANDBOX_SESSION_LIMITS_ENABLED`` the ADR-0013 numbers a deploy
+    already configures are carried down to the engine flags.
+    """
+    settings = sandbox_settings(
+        SANDBOX_SESSION_LIMITS_ENABLED="true",
+        SANDBOX_CPUS="1.5",
+        SANDBOX_MEMORY_BYTES=str(256 * 1024 * 1024),
+        SANDBOX_PIDS_LIMIT="64",
+    )
+
+    assert _limits_for(settings) == (1.5, 256 * 1024 * 1024, 64)
+    # Still no wall clock: nothing enforces one, so nothing claims to.
+    assert build_container_flags(_session()).wall_clock_seconds is None
 
 
 def test_output_collection_is_bounded_by_the_configured_cap() -> None:

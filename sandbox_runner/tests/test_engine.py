@@ -132,7 +132,7 @@ class _Images:
     """The host daemon's local image store, plus the pull docker-py would perform."""
 
     def __init__(self) -> None:
-        self.present = {"lumen-sandbox-runner:0.2.0", "lumen-sandbox-exec:0.1.0"}
+        self.present = {"lumen-sandbox-runner:0.2.0", "lumen-sandbox-exec:0.1.1"}
         self.gets: list[str] = []
         self.pulls: list[str] = []
 
@@ -198,7 +198,14 @@ def test_wire_policy_rejects_any_isolation_widening() -> None:
     with pytest.raises(ValidationError):
         ContainerPolicy(binds=["/host:/workspace"])
     with pytest.raises(ValidationError):
-        ContainerPolicy(memory_bytes=1024)  # type: ignore[arg-type]
+        ContainerPolicy(read_only_rootfs=True)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        ContainerPolicy(cap_drop=["ALL", "NET_ADMIN"])  # type: ignore[list-item]
+    # No wall clock is enforced anywhere in this service, so the field stays ``None``:
+    # accepting a number would be a promise no code keeps (ADR-0020 replaced
+    # ADR-0013's automatic timeout with explicit cancel/reset).
+    with pytest.raises(ValidationError):
+        ContainerPolicy(wall_clock_seconds=30)  # type: ignore[arg-type]
     # ``output_bytes_cap`` is the one policy value a caller may set, because lowering
     # it only narrows what the runner will hold in memory. Zero would mean "collect
     # nothing" by accident rather than by decision, and negative is nonsense.
@@ -210,6 +217,64 @@ def test_wire_policy_rejects_any_isolation_widening() -> None:
             image="python",
             env={"DATABASE_URL": "secret"},
         )
+
+
+# --- The bounds ADR-0020 ships WITHOUT, but a deploy may now ask for (C5) ------
+#
+# ADR-0020 launches the execution container with no cpu, memory or PID limit. That is
+# a sponsor decision and the design's largest residual operational risk — one
+# `run_python` call can exhaust host RAM, saturate every core, or fork-bomb, and the
+# only recovery is explicit cancel. Typing these fields `None` went further than the
+# decision, though: it made the posture unchangeable by configuration, so a deployer
+# who WANTED a bound could not even ask. They narrow only, so a caller may set them.
+
+
+def test_no_resource_bound_is_applied_unless_one_is_asked_for() -> None:
+    """The shipped posture is unchanged: absent values mean absent engine flags."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    engine.ensure(uuid4(), _ensure())
+
+    kwargs = client.containers.run_kwargs[0]
+    assert "mem_limit" not in kwargs
+    assert "pids_limit" not in kwargs
+    assert "nano_cpus" not in kwargs
+
+
+def test_a_requested_cpu_memory_and_pid_bound_reaches_the_engine() -> None:
+    """A bound a deploy asks for must become a real flag, not an accepted-and-ignored
+    field — which is exactly the state ``output_bytes_cap`` was found in."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    engine.ensure(
+        uuid4(),
+        EnsureSessionRequest(
+            generation=1,
+            image="lumen-sandbox-runner:0.2.0",
+            env={"HOME": "/root"},
+            container={"memory_bytes": 512 * 1024 * 1024, "pids_limit": 128, "cpus": 1.5},
+        ),
+    )
+
+    kwargs = client.containers.run_kwargs[0]
+    assert kwargs["mem_limit"] == 512 * 1024 * 1024
+    assert kwargs["pids_limit"] == 128
+    assert kwargs["nano_cpus"] == 1_500_000_000
+    # Nothing about containment moved to make room for them.
+    assert kwargs["network_mode"] == "none"
+    assert kwargs["cap_drop"] == ["ALL"]
+
+
+def test_a_bound_the_engine_would_refuse_is_rejected_at_the_wire() -> None:
+    """A non-positive bound is not "no bound" — it is a container Docker will not create.
+
+    Docker's floor for ``--memory`` is 6 MiB. Refusing here makes the failure a
+    readable 422 on one session instead of a container-creation error that looks like
+    the runner is broken.
+    """
+    for hopeless in ({"memory_bytes": 1024}, {"memory_bytes": 0}, {"pids_limit": 0}, {"cpus": 0}):
+        with pytest.raises(ValidationError):
+            ContainerPolicy(**hopeless)  # type: ignore[arg-type]
 
 
 def test_ensure_reuses_one_root_writable_offline_container() -> None:
