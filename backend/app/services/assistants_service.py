@@ -62,8 +62,6 @@ from app.domain.entities import (
     AssistantVersion,
     AuditOutcome,
     AutonomyLevel,
-    GrantPrincipalType,
-    GrantResourceType,
     KnowledgeMode,
     KnowledgeScope,
     Role,
@@ -347,20 +345,13 @@ class AssistantsService:
         the user and is a silent divergence between two permission checks.
         """
         group_ids = await self._groups.group_ids_for_user(self._owner_id)
-        grants = await self._grants.list_for_principal(
-            principal_type=GrantPrincipalType.USER, principal_id=self._owner_id
+        # ONE query for both principal kinds — the same resolver the retrieval
+        # chokepoint uses, so the two permission checks cannot drift and a user
+        # in many groups does not cost a query per group.
+        documents, collections = await self._grants.granted_resource_ids(
+            self._owner_id, group_ids=group_ids
         )
-        for group_id in sorted(group_ids):
-            grants += await self._grants.list_for_principal(
-                principal_type=GrantPrincipalType.GROUP, principal_id=group_id
-            )
-        collections = {
-            g.resource_id for g in grants if g.resource_type == GrantResourceType.COLLECTION
-        }
-        documents = {
-            g.resource_id for g in grants if g.resource_type == GrantResourceType.DOCUMENT
-        }
-        return collections, documents
+        return set(collections), set(documents)
 
     async def _validate_backup_owner(self, backup_owner_id: UUID | None) -> None:
         """A backup owner (if set) must be a distinct user in the same tenant (422 else)."""

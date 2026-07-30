@@ -3250,8 +3250,12 @@ class GroupRepository(_TenantScopedRepository):
         await self._session.flush()
         return True
 
-    async def ensure_system_group(self) -> Group:
+    async def ensure_system_group(self) -> tuple[Group, bool]:
         """Get-or-create the tenant's derived "All members" group (ADR-0022 §3).
+
+        Returns ``(group, created_here)``. ``created_here`` is True only for the
+        transaction that actually inserted, so the caller can audit the creation
+        exactly once (INV-6) without a concurrent loser double-recording it.
 
         Idempotent: a partial unique index allows at most one per tenant, so a
         concurrent create loses the race and re-reads. The group is created
@@ -3264,7 +3268,7 @@ class GroupRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalars().one_or_none()
         if row is not None:
-            return _to_group(row)
+            return _to_group(row), False
 
         # Insert conflict-ignoring, then re-read. A plain INSERT would abort the
         # whole transaction on the partial unique index when two first-time
@@ -3279,9 +3283,12 @@ class GroupRepository(_TenantScopedRepository):
         }
         dialect = self._session.bind.dialect.name if self._session.bind is not None else ""
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
-        await self._session.execute(insert(models.Group).values(**values).on_conflict_do_nothing())
+        result = await self._session.execute(
+            insert(models.Group).values(**values).on_conflict_do_nothing()
+        )
         await self._session.flush()
-        return _to_group((await self._session.execute(stmt)).scalars().one())
+        created = bool(result.rowcount)
+        return _to_group((await self._session.execute(stmt)).scalars().one()), created
 
     async def add_member(self, *, group_id: UUID, user_id: UUID, added_by: UUID | None) -> bool:
         """Add a user to a group. Idempotent — ``False`` if already a member."""
@@ -3344,6 +3351,26 @@ class GroupRepository(_TenantScopedRepository):
             models.GroupMember.group_id == group_id,
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_members(self, group_id: UUID) -> list[User]:
+        """The group's members as users, ordered by email — ONE joined query.
+
+        Resolving ids then fetching each user is an unbounded N+1 on an
+        unpaginated endpoint; a group with thousands of members would issue
+        thousands of sequential reads. Tenant-scoped on both sides (INV-1).
+        """
+        stmt = (
+            select(models.User)
+            .join(models.GroupMember, models.GroupMember.user_id == models.User.id)
+            .where(
+                models.GroupMember.tenant_id == self._tenant_id,
+                models.GroupMember.group_id == group_id,
+                models.User.tenant_id == self._tenant_id,
+            )
+            .order_by(func.lower(models.User.email))
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_user(r) for r in rows]
 
     async def group_ids_for_user(self, user_id: UUID) -> frozenset[UUID]:
         """The group principals ``user_id`` carries — the allow-set hot path.

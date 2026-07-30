@@ -162,7 +162,13 @@ class GroupsService:
         # ADR-0022 §3 chose lazy creation over provisioning-time creation so
         # existing tenants need no back-fill; without a caller the group would
         # never exist and tenant-wide visibility would have nothing to target.
-        await self._groups.ensure_system_group()
+        system, created_here = await self._groups.ensure_system_group()
+        if created_here:
+            # Lazily materializing the tenant-wide group IS a mutation, and this
+            # route commits it — so it is audited like every other one (INV-6).
+            # Only the transaction that inserted emits, so a concurrent first
+            # listing cannot double-record the creation.
+            await self._emit(AuditAction.GROUP_CREATED, system.id, name=system.name, kind="system")
         groups = await self._groups.list_all()
         counts = await self._groups.member_counts()
         return [(g, None if g.is_system else counts.get(g.id, 0)) for g in groups]
@@ -244,14 +250,13 @@ class GroupsService:
         """The group's members as users, ordered by email — the roster the API returns.
 
         Resolving ids to users belongs here rather than in the router (a router
-        holds no business logic, ADR-0004) and lets the admin console show who is
-        in a group without a second round trip per member. A membership row whose
-        user has since been deleted resolves to ``None`` and is skipped rather
-        than yielding a half-populated entry.
+        holds no business logic, ADR-0004). The repository does it as a single
+        joined, email-ordered query — one read regardless of group size, and a
+        membership row whose user no longer exists simply does not join.
         """
-        member_ids = await self.list_member_ids(group_id)
-        members = [await self._users.get(uid) for uid in member_ids]
-        return sorted((u for u in members if u is not None), key=lambda u: u.email)
+        self._require_admin()
+        await self._get_or_404(group_id)
+        return await self._groups.list_members(group_id)
 
     async def member_count(self, group_id: UUID) -> int | None:
         """How many users are explicitly in a group, or ``None`` for the system group.

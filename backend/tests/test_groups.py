@@ -158,7 +158,8 @@ async def test_system_group_membership_is_derived_not_stored(
     tenant_a, _ = two_tenants
     user = await _make_user(session, tenant_a, "a@x.test")
     groups = GroupRepository(session, tenant_a)
-    system = await groups.ensure_system_group()
+    system, created = await groups.ensure_system_group()
+    assert created is True, "first call inserts"
 
     assert system.kind is GroupKind.SYSTEM
     assert system.is_system
@@ -172,8 +173,11 @@ async def test_ensure_system_group_is_idempotent(
 ) -> None:
     tenant_a, _ = two_tenants
     groups = GroupRepository(session, tenant_a)
-    first = await groups.ensure_system_group()
-    second = await groups.ensure_system_group()
+    first, first_created = await groups.ensure_system_group()
+    second, second_created = await groups.ensure_system_group()
+    assert first_created is True and second_created is False, (
+        "only the inserting call reports creation, so only it audits"
+    )
     assert first.id == second.id
     assert len([g for g in await groups.list_all() if g.is_system]) == 1
 
@@ -548,7 +552,7 @@ async def test_system_group_cannot_be_renamed_deleted_or_populated(
     """ADR-0022 §3: the derived group is listed but immutable."""
     tenant_a, _ = two_tenants
     admin = await _make_user(session, tenant_a, "admin@x.test")
-    system = await GroupRepository(session, tenant_a).ensure_system_group()
+    system, _ = await GroupRepository(session, tenant_a).ensure_system_group()
     svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
 
     assert system.id in {g.id for g in await svc.list_groups()}
