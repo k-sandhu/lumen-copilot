@@ -770,3 +770,94 @@ async def test_six_message_session_summarises_under_retuned_defaults(
         # keep=4 preserves the last 2 turns (messages 2-5) verbatim; turns 0-1
         # (messages 0-1) roll into the summary.
         assert row.covers_through_message_id == six_message_ctx.message_ids[1]
+
+
+# --- #541: a garbage completion must not advance the cursor -------------------
+
+
+class _GarbageGateway(_FakeGateway):
+    """A route that leaks chat-template scaffolding instead of writing a summary.
+
+    Not hypothetical: `openrouter/openai/gpt-oss-20b:free` returned exactly this for a
+    seven-turn batch on the live stack, and it was persisted as the session summary.
+    """
+
+    payload = "<|start|>spire"
+
+    async def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        await super().chat(messages, **kwargs)
+        return Completion(
+            content=self.payload,
+            model="fake",
+            usage=TokenUsage(prompt_tokens=50, completion_tokens=20, total_tokens=70),
+        )
+
+
+async def test_a_control_token_completion_is_refused_and_the_cursor_stays_put(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing is strictly better than accepting: the turns stay verbatim.
+
+    Accepting is NOT a no-op — `upsert_summary` advances `covers_through_message_id`,
+    so the covered turns stop riding verbatim and are represented only by what was
+    stored. A 14-character protocol artifact standing in for ten turns is silent,
+    irreversible context loss; leaving them verbatim merely costs tokens until the
+    next attempt succeeds.
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _GarbageGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+
+    assert outcome == "skipped_implausible_summary"
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
+        # No row at all, or one that never advanced — either way the turns are intact.
+        assert row is None or row.covers_through_message_id is None
+        # And nothing was audited as a successful summarisation.
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        assert not [e for e in recent if e.action == "session.summarized"]
+
+
+async def test_an_implausibly_short_completion_is_refused(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No control token, just far too small to be a summary of ten turns."""
+    from app.tasks import summarize as task_module
+
+    class _Tiny(_GarbageGateway):
+        payload = "ok"
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Tiny)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+
+async def test_a_genuine_summary_is_still_accepted(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the guard must not make the feature unusable.
+
+    Without this, "reject everything" would pass the two tests above.
+    """
+    from app.tasks import summarize as task_module
+
+    class _Real(_GarbageGateway):
+        payload = (
+            "The user asked about Q3 revenue across regions. The assistant reported a "
+            "12% rise in the northern region driven by two renewals, flat performance "
+            "in the south, and an unresolved question about west-region attribution."
+        )
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Real)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "summarized"
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
+        assert row is not None and row.covers_through_message_id == ctx.message_ids[9]

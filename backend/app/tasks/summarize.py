@@ -23,6 +23,7 @@ session's persisted summary:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from uuid import UUID
 
@@ -169,6 +170,50 @@ _REDACT_MIN_WINDOW_WORDS = 4
 _REDACT_MIN_WINDOW_CHARS = 15
 
 
+#: Chat-template / protocol scaffolding a route can leak into a completion instead of
+#: prose. Observed live: a free OSS route returned exactly ``"<|start|>spire"`` for a
+#: seven-turn batch, which passed the emptiness check and was persisted as the summary.
+_CONTROL_TOKEN = re.compile(r"<\|[^|]*\|>")
+
+#: A summary must be at least this long outright, and at least this FRACTION of the
+#: text it claims to represent. Both are deliberately LOW: a short conversation can
+#: legitimately summarise to one short sentence, and the primary signal is the control
+#: token check, not length. An earlier 40-char floor rejected a perfectly good 34-char
+#: summary — the guard must catch protocol artifacts, not police terseness.
+_SUMMARY_MIN_CHARS = 16
+_SUMMARY_MIN_RATIO = 0.01
+
+
+def _implausible_summary(summary: str, covered_text: str) -> str | None:
+    """Why ``summary`` cannot be a summary of ``covered_text``, or ``None`` if it can.
+
+    This is a QUALITY gate, distinct from the leak guard (`_redact_cited_snippets`,
+    which still runs and still wins). It exists because accepting a bad completion is
+    not a no-op: `upsert_summary` advances the coverage cursor, so the covered turns
+    stop riding verbatim and are represented ONLY by whatever was stored. A garbage
+    summary is therefore silent, irreversible context loss — strictly worse than not
+    summarising at all, which merely costs tokens.
+
+    Deliberately cheap and model-agnostic (no second LLM call): a route that leaks
+    chat-template scaffolding, or returns something far too small to represent its
+    input, is refused and the turns stay verbatim for the next attempt.
+    """
+    text = summary.strip()
+    if not text:
+        return "empty"
+    if _CONTROL_TOKEN.search(text):
+        # The route leaked protocol scaffolding rather than answering.
+        return "contains chat-template control tokens"
+    if len(text) < _SUMMARY_MIN_CHARS:
+        return f"too short ({len(text)} chars, minimum {_SUMMARY_MIN_CHARS})"
+    if covered_text and len(text) < len(covered_text) * _SUMMARY_MIN_RATIO:
+        return (
+            f"implausibly short for its input ({len(text)} chars for "
+            f"{len(covered_text)} chars of conversation)"
+        )
+    return None
+
+
 def _redact_cited_snippets(summary: str, snippets: list[str]) -> str:
     """Remove verbatim cited-source SPANS from the summary (#446 r2 blocker 1).
 
@@ -310,6 +355,23 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         summary_text = _redact_cited_snippets(summary_text, batch_snippets)
         if not summary_text.strip():
             return "skipped_empty_summary"
+        # QUALITY gate, AFTER the leak guard so redaction always wins. Accepting a
+        # bad completion is not a no-op: the upsert below advances the coverage
+        # cursor, so the covered turns stop riding verbatim and are represented ONLY
+        # by what is stored. Observed live on a free OSS route: `"<|start|>spire"`
+        # — 14 characters of protocol scaffolding standing in for seven turns, which
+        # the emptiness check happily accepted. Refusing leaves the turns verbatim
+        # and lets the next enqueue retry; that is strictly better than losing them.
+        implausible = _implausible_summary(summary_text, user_block)
+        if implausible is not None:
+            log.warning(
+                "summarize.implausible_summary",
+                session_id=str(session_id),
+                model=route.model,
+                reason=implausible,
+                summary_chars=len(summary_text),
+            )
+            return "skipped_implausible_summary"
         accepted, updated = await summaries.upsert_summary(
             session_id,
             summary=summary_text,
