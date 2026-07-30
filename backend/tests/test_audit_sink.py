@@ -320,7 +320,7 @@ async def test_a_non_address_source_ip_is_stored_as_null_and_kept_in_metadata(
     # Nothing that is not an address reaches the column.
     assert event.source_ip is None
     # …but the trail keeps what the caller actually stated.
-    assert event.metadata["source_ip"] == "system"
+    assert event.metadata["source_ip_declared"] == "system"
 
 
 async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) -> None:
@@ -340,7 +340,7 @@ async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) 
         )
         assert event.source_ip == address
         # No sentinel key invented for a genuine address.
-        assert "source_ip" not in event.metadata
+        assert "source_ip_declared" not in event.metadata
 
 
 async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSession) -> None:
@@ -360,4 +360,85 @@ async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSes
     )
 
     assert event.metadata["covered_messages"] == 12
-    assert event.metadata["source_ip"] == "system"
+    assert event.metadata["source_ip_declared"] == "system"
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        # Plain addresses, stored canonically.
+        ("203.0.113.10", "203.0.113.10"),
+        ("2001:db8::1", "2001:db8::1"),
+        ("::ffff:1.2.3.4", "::ffff:1.2.3.4"),
+        ("  192.168.1.5  ", "192.168.1.5"),
+        # `INET` accepts CIDR too.
+        ("10.0.0.0/8", "10.0.0.0/8"),
+        # ZONE-SCOPED: Python parses it, Postgres does NOT — storing the raw text would
+        # reproduce the very rollback this function exists to prevent, for any
+        # link-local peer. The zone is dropped and the address kept.
+        ("fe80::1%eth0", "fe80::1"),
+        # BRACKETED / port-bearing: not an address to Python, so a naive parse would
+        # silently NULL a REAL client address and lose audit fidelity.
+        ("[2001:db8::1]:443", "2001:db8::1"),
+        ("[2001:db8::1]", "2001:db8::1"),
+    ],
+)
+async def test_real_addresses_survive_in_every_form_a_client_can_present(
+    session: AsyncSession, given: str, stored: str
+) -> None:
+    """The regression that would matter most: silently NULLing genuine client IPs."""
+    sink = AuditSink(AuditEventRepository(session, uuid.uuid4()))
+    event = await sink.emit(
+        action=AuditAction.RETRIEVAL_QUERY,
+        actor=AuditActor.system(),
+        resource_type="document",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req",
+        source_ip=given,
+    )
+    assert event.source_ip == stored
+    assert "source_ip_declared" not in event.metadata
+
+
+async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(
+    session: AsyncSession,
+) -> None:
+    """The collision the previous test only claimed to cover.
+
+    An audit event may legitimately carry an upstream `source_ip` of its own; the
+    preserved envelope value is a DIFFERENT fact, so it gets its own namespaced key.
+    """
+    sink = AuditSink(AuditEventRepository(session, uuid.uuid4()))
+    event = await sink.emit(
+        action=AuditAction.RETRIEVAL_QUERY,
+        actor=AuditActor.system(),
+        resource_type="document",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req",
+        source_ip="system",
+        metadata={"source_ip": "198.51.100.7"},
+    )
+    assert event.metadata["source_ip"] == "198.51.100.7"  # the caller's, untouched
+    assert event.metadata["source_ip_declared"] == "system"  # ours, alongside it
+
+
+async def test_the_request_path_sentinel_is_handled_too(session: AsyncSession) -> None:
+    """`request.client` is None for an AF_UNIX peer, so the app sends "unknown".
+
+    Without this, a socket-mode proxy deployment would NULL `source_ip` on every event
+    for genuine user traffic — silently, since the coercion never raises.
+    """
+    sink = AuditSink(AuditEventRepository(session, uuid.uuid4()))
+    event = await sink.emit(
+        action=AuditAction.RETRIEVAL_QUERY,
+        actor=AuditActor.system(),
+        resource_type="document",
+        outcome=AuditOutcome.ALLOWED,
+        resource_id=str(uuid.uuid4()),
+        request_id="req",
+        source_ip="unknown",
+    )
+    assert event.source_ip is None
+    assert event.metadata["source_ip_declared"] == "unknown"

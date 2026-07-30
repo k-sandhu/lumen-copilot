@@ -171,6 +171,12 @@ async def _covered_citations(
 _REDACT_MIN_WINDOW_WORDS = 4
 _REDACT_MIN_WINDOW_CHARS = 15
 
+#: What the redactor leaves behind where verbatim source text was removed. It is
+#: NOT conversational content, so the quality gate must not count it as length —
+#: a completion that echoed only cited passages redacts down to one or more of
+#: these and would otherwise pass as a summary while carrying no information.
+_REDACTION_MARKER = "[cited source text removed]"
+
 
 #: Chat-template / protocol scaffolding a route can leak instead of prose. Deliberately
 #: several families, not just the one observed: a route that leaks ANY of these is
@@ -260,6 +266,13 @@ def _implausible_summary(summary: str, covered_messages: int) -> str | None:
     if _CONTROL_TOKEN.search(text):
         # The route leaked protocol scaffolding rather than answering.
         return "contains chat-template control tokens"
+    # Redaction markers are not conversational content. A completion that echoed only
+    # cited passages is redacted down to one or more markers — 27 chars each, so two of
+    # them clear every length bar below while carrying NOTHING about the conversation.
+    # Measure what is left after removing them, so padding cannot buy a pass.
+    text = text.replace(_REDACTION_MARKER, " ").strip()
+    if not text:
+        return "no content left after redaction (the completion was only cited text)"
     if len(text) < _SUMMARY_MIN_CHARS:
         return f"too short ({len(text)} chars, minimum {_SUMMARY_MIN_CHARS})"
     if covered_messages >= _MULTI_TURN_THRESHOLD and len(text) < _SUMMARY_MULTI_TURN_MIN_CHARS:
@@ -284,7 +297,7 @@ def _redact_cited_snippets(summary: str, snippets: list[str]) -> str:
     and survives; the prompt rule + this verbatim backstop are the contract.
     """
     redacted = summary
-    marker = "[cited source text removed]"
+    marker = _REDACTION_MARKER
     for snippet in snippets:
         words = snippet.split()
         if len(words) < _REDACT_MIN_WINDOW_WORDS:

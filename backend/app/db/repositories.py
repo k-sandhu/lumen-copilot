@@ -36,6 +36,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db import models
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
@@ -4192,31 +4193,77 @@ class TenantAutonomyPolicyRepository(_TenantScopedRepository):
         return _to_tenant_autonomy_policy(row)
 
 
+#: The sentinels the app itself is known to send when there is no client address:
+#: background tasks pass ``"system"``, and the request path passes ``"unknown"`` when
+#: ``request.client`` is ``None`` (an AF_UNIX peer behind a socket-mode proxy). These
+#: are EXPECTED and coerced quietly. Anything else non-address is coerced too — never
+#: crash an audited action — but logged, because a value that is neither an address nor
+#: a known sentinel means a misconfigured proxy silently losing audit fidelity.
+_KNOWN_SOURCE_IP_SENTINELS = frozenset({"system", "unknown"})
+
+
+log = get_logger(__name__)
+
+
 def _split_source_ip(value: str | None) -> tuple[str | None, str | None]:
-    """Split an envelope ``source_ip`` into (column value, preserved sentinel).
+    """Split an envelope ``source_ip`` into (column value, preserved original).
 
     The audit envelope requires a non-empty ``source_ip`` (spec 0004 §2.4), but the
-    column is ``INET`` on Postgres and a background task has no client address. A
-    caller therefore passes a sentinel such as ``"system"``. Postgres rejects that,
-    and since the audit write rides the caller's transaction the rejection rolled the
-    ACTION back too.
+    column is ``INET`` on Postgres and a background task has no client address, so
+    callers pass a sentinel. Postgres rejects that, and because the audit write rides
+    the caller's transaction the rejection rolled the ACTION back with it.
 
-    Returns the address to store (or ``None`` when there is no real one) and the
-    original sentinel to preserve in metadata, so the trail records what was stated
-    without asking ``INET`` to hold something that is not an address. An IPv4/IPv6
-    literal — with or without a prefix, since ``INET`` accepts CIDR — is stored as
-    given; anything else is treated as a sentinel.
+    **Python's parser is not Postgres's.** Two forms need care, both verified against
+    the live database rather than assumed:
+
+    * A ZONE-SCOPED address (``fe80::1%eth0``) parses happily in Python but
+      ``select 'fe80::1%eth0'::inet`` errors — so storing the raw text would reproduce
+      the exact rollback this function exists to prevent, for any link-local peer. The
+      zone is stripped and the canonical address stored.
+    * A BRACKETED or port-bearing form (``[2001:db8::1]:443``) is not an address to
+      Python, so it would silently become NULL and lose real audit fidelity. It is
+      unwrapped first, and only then parsed.
+
+    Storing ``str(parsed)`` rather than the caller's text also normalises casing and
+    zero-compression, so the column holds one canonical spelling per address.
+
+    Returns ``(address_to_store, original_to_preserve)``. Exactly one is non-None for a
+    non-empty input: a real address stores nothing in metadata, and a sentinel stores
+    nothing in the column.
     """
     if value is None:
         return None, None
     text = value.strip()
     if not text:
         return None, None
+
+    candidate = text
+    # `[v6]:port` / `[v6]` — unwrap before parsing so a real address is not lost.
+    if candidate.startswith("["):
+        closing = candidate.find("]")
+        if closing > 0:
+            candidate = candidate[1:closing]
+    # A zone id is meaningful to the OS, not to `inet`; drop it rather than fail.
+    zone_index = candidate.find("%")
+    if zone_index >= 0:
+        candidate = candidate[:zone_index]
+
+    # Parse to VALIDATE, but store the candidate text rather than `str(parsed)`.
+    # Python's canonical form is not Postgres's: `ipaddress` renders
+    # `::ffff:1.2.3.4` as `::ffff:102:304`, while `select '::ffff:1.2.3.4'::inet`
+    # keeps the dotted form. Normalising here would quietly rewrite the address an
+    # operator sees in the audit trail into a different spelling than the database
+    # itself would have stored. (Note `ip_address` PRESERVES a zone id, so the strip
+    # above — not the parse — is what keeps link-local addresses out of `INET`.)
     try:
-        ipaddress.ip_network(text, strict=False)
+        ipaddress.ip_address(candidate)
     except ValueError:
-        return None, text
-    return text, None
+        try:
+            # `INET` also accepts CIDR (`10.0.0.0/8`) — a network, not an address.
+            ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            return None, text
+    return candidate, None
 
 
 class AuditEventRepository(_TenantScopedRepository):
@@ -4257,7 +4304,21 @@ class AuditEventRepository(_TenantScopedRepository):
         # system, and "no client IP" is the honest value when there was no client.
         stored_ip, sentinel = _split_source_ip(source_ip)
         if sentinel is not None:
-            metadata = {**(metadata or {}), "source_ip": sentinel}
+            if sentinel.lower() not in _KNOWN_SOURCE_IP_SENTINELS:
+                # Neither an address nor a sentinel we ship. Coerce anyway — an audit
+                # write must never crash the action it records — but say so, because
+                # silently NULLing every event is how a misconfigured proxy loses audit
+                # fidelity without anyone noticing.
+                log.warning(
+                    "audit.source_ip_not_an_address",
+                    action=action,
+                    resource_type=resource_type,
+                    value_length=len(sentinel),
+                )
+            # Namespaced so it can never collide with a caller's own metadata: an
+            # audit event may legitimately carry an upstream `source_ip` of its own,
+            # and this preserved envelope value is a different fact.
+            metadata = {**(metadata or {}), "source_ip_declared": sentinel}
         row = models.AuditEvent(
             tenant_id=self._tenant_id,
             actor_id=actor_id,
