@@ -95,7 +95,13 @@ def test_execution_image_ships_the_curated_scientific_stack() -> None:
 
 
 def test_execution_image_base_is_digest_pinned_and_never_latest() -> None:
-    """No ``:latest`` (root AGENTS.md §10); ADR-0013 §3 asks for a digest pin."""
+    """No ``:latest`` (root AGENTS.md §10); ADR-0013 §3 asks for a digest pin.
+
+    Scope, stated so it is not mistaken for more than it is: this asserts the BUILD
+    input — the ``FROM`` line's base layer. The reference the runner actually
+    launches is ``SANDBOX_IMAGE``, pinned at boot by ``Settings`` and covered by
+    ``tests/test_sandbox_config.py``. Both are needed; neither implies the other.
+    """
     from_lines = [
         line for line in _dockerfile().splitlines() if line.strip().upper().startswith("FROM ")
     ]

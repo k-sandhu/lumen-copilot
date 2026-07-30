@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from lumen_sandbox_runner.engine import DockerSandboxEngine
+from lumen_sandbox_runner.engine import DockerSandboxEngine, RunnerError
 from lumen_sandbox_runner.models import ContainerPolicy, EnsureSessionRequest, ExecuteRequest
 
 
@@ -89,6 +89,30 @@ class _Container:
         return [data.getvalue()], {}
 
 
+class _ImageNotFound(Exception):
+    """Stands in for ``docker.errors.ImageNotFound``."""
+
+
+class _Images:
+    """The host daemon's local image store, plus the pull docker-py would perform."""
+
+    def __init__(self) -> None:
+        self.present = {"lumen-sandbox-runner:0.2.0", "lumen-sandbox-exec:0.1.0"}
+        self.gets: list[str] = []
+        self.pulls: list[str] = []
+
+    def get(self, name: str) -> object:
+        self.gets.append(name)
+        if name not in self.present:
+            raise _ImageNotFound(name)
+        return _Image()
+
+    def pull(self, name: str, **kwargs: object) -> object:  # pragma: no cover - must not run
+        del kwargs
+        self.pulls.append(name)
+        return _Image()
+
+
 class _Containers:
     def __init__(self) -> None:
         self.values: list[_Container] = []
@@ -119,6 +143,7 @@ class _Containers:
 class _Client:
     def __init__(self) -> None:
         self.containers = _Containers()
+        self.images = _Images()
 
 
 def _ensure(*, generation: int = 1) -> EnsureSessionRequest:
@@ -164,6 +189,73 @@ def test_ensure_reuses_one_root_writable_offline_container() -> None:
     assert "mem_limit" not in kwargs
     assert "nano_cpus" not in kwargs
     assert "pids_limit" not in kwargs
+
+
+def test_missing_execution_image_fails_closed_instead_of_pulling_it() -> None:
+    """docker-py pulls on a local miss — the runner must resolve the image first.
+
+    ``ContainerCollection.run`` catches ``ImageNotFound`` and pulls before retrying
+    (docker 7.1.0, ``containers.py``). Left to it, a typo'd or tampered
+    ``SANDBOX_IMAGE`` becomes a registry fetch performed by the one process holding
+    the Docker socket, and the fetched image then executes as contained root. The
+    runner launches only what the host daemon already has.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+
+    with pytest.raises(RunnerError) as refusal:
+        engine.ensure(
+            uuid4(),
+            EnsureSessionRequest(generation=1, image="lumen-sandbox-exec:0.2.0-typo"),
+        )
+
+    assert refusal.value.status_code == 503
+    assert "not present on the host daemon" in str(refusal.value)
+    assert client.images.pulls == []
+    assert client.containers.run_kwargs == []
+
+
+def test_present_image_is_resolved_before_the_container_is_created() -> None:
+    """The check is a precondition of launch, not a post-hoc audit."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    engine.ensure(uuid4(), _ensure())
+
+    assert client.images.gets == ["lumen-sandbox-runner:0.2.0"]
+    assert len(client.containers.run_kwargs) == 1
+
+
+def test_runtime_is_runner_side_config_and_ignores_the_request() -> None:
+    """A gVisor deploy cannot be downgraded per session by the caller.
+
+    ``EnsureSessionRequest`` carries ``runtime`` for wire compatibility, but the whole
+    safety argument of a gVisor deploy rests on the sandbox host's configuration — so
+    that is where the value comes from.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client, runtime="runsc")
+
+    engine.ensure(uuid4(), _ensure())  # the request asks for plain runc
+
+    assert client.containers.run_kwargs[0]["runtime"] == "runsc"
+
+
+def test_runtime_defaults_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``SANDBOX_RUNTIME`` on the runner service is the single source of truth."""
+    monkeypatch.setenv("SANDBOX_RUNTIME", "runsc")
+    client = _Client()
+
+    DockerSandboxEngine(client).ensure(uuid4(), _ensure())
+
+    assert client.containers.run_kwargs[0]["runtime"] == "runsc"
+
+
+def test_unknown_configured_runtime_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misconfigured runtime must not silently degrade to the Docker baseline."""
+    monkeypatch.setenv("SANDBOX_RUNTIME", "firecracker")
+
+    with pytest.raises(RunnerError):
+        DockerSandboxEngine(_Client())
 
 
 def test_packages_install_before_tenant_inputs_and_execution() -> None:

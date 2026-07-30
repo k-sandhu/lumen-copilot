@@ -195,6 +195,13 @@ services:
     image: lumen-sandbox-runner:0.2.0
     profiles: ["sandbox"]
     restart: unless-stopped
+    # The OCI runtime is decided HERE, by the sandbox host — not by the caller. The
+    # runner ignores the `runtime` field on an ensure request (it is kept only for wire
+    # compatibility), because a caller-selectable runtime would let anyone who reaches
+    # the internal API downgrade a gVisor deploy to plain `runc` for one session. Same
+    # `.env` variable the backend validates, so the two cannot disagree.
+    environment:
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runc}
     # The single Docker-socket holder. Socket authority is host-root-equivalent and
     # is confined here; the app/worker/session containers NEVER receive this mount.
     volumes:

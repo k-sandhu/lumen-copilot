@@ -26,6 +26,9 @@ _SESSION_LABEL = "com.lumen.sandbox.session"
 _GENERATION_LABEL = "com.lumen.sandbox.generation"
 _IDLE_COMMAND = ["sh", "-lc", "while :; do sleep 3600; done"]
 
+#: The OCI runtimes this runner will launch: the hardened Docker baseline, or gVisor.
+_KNOWN_RUNTIMES = ("runc", "runsc")
+
 
 class RunnerError(RuntimeError):
     """Safe internal-runner failure carrying an HTTP status."""
@@ -55,17 +58,38 @@ class DockerSandboxEngine:
         client: Any | None = None,
         *,
         package_downloader: Callable[[tuple[str, ...], Path], None] | None = None,
+        runtime: str | None = None,
     ) -> None:
         self._client = client if client is not None else self._docker_client()
         self._locks = SessionLocks()
         self._download = package_downloader or self._download_binary_packages
         self._results: dict[tuple[UUID, int, UUID], dict[str, object]] = {}
+        self._runtime = self._configured_runtime(runtime)
 
     @staticmethod
     def _docker_client() -> Any:
         import docker
 
         return docker.from_env()
+
+    @staticmethod
+    def _configured_runtime(explicit: str | None) -> str:
+        """Resolve the OCI runtime from THIS SERVICE's configuration, never a request.
+
+        ``EnsureSessionRequest`` still carries ``runtime`` (the backend sends its own
+        ``SANDBOX_RUNTIME`` and older payloads must keep validating), but a
+        caller-selectable runtime means a deploy whose entire safety argument rests on
+        gVisor can be downgraded to ``runc`` for one session by whoever can reach the
+        internal API. The sandbox host decides; a value it does not recognise fails
+        closed rather than degrading to the Docker baseline.
+        """
+        value = explicit if explicit is not None else os.environ.get("SANDBOX_RUNTIME", "runc")
+        value = value.strip()
+        if value not in _KNOWN_RUNTIMES:
+            raise RunnerError(
+                "sandbox runner SANDBOX_RUNTIME must be 'runc' or 'runsc'", status_code=500
+            )
+        return value
 
     def ensure(self, session_id: UUID, request: EnsureSessionRequest) -> dict[str, object]:
         with self._locks.get(session_id):
@@ -149,7 +173,7 @@ class DockerSandboxEngine:
             _SESSION_LABEL: str(session_id),
             _GENERATION_LABEL: str(request.generation),
         }
-        policy = request.container
+        self._require_local_image(request.image)
         return self._client.containers.run(
             request.image,
             command=_IDLE_COMMAND,
@@ -162,7 +186,7 @@ class DockerSandboxEngine:
             user="0:0",
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
-            runtime=policy.runtime,
+            runtime=self._runtime,
             volumes=None,
             working_dir="/workspace",
             # A tiny PID 1 reaps orphaned descendants between executions in the
@@ -247,6 +271,27 @@ class DockerSandboxEngine:
             "output_files": output_files,
             "resource_usage": {"output_bytes": output_bytes},
         }
+
+    def _require_local_image(self, image: str) -> None:
+        """Launch only an image the host daemon ALREADY has — never trigger a pull.
+
+        docker-py's ``ContainerCollection.run`` catches ``ImageNotFound`` and pulls
+        before retrying (docker 7.1.0, ``containers.py``). Relying on that, a typo'd or
+        tampered ``SANDBOX_IMAGE`` turns into a registry fetch performed by the single
+        process that holds the Docker socket — and the fetched image then executes as
+        contained root. Resolving it first keeps image provenance an operator decision
+        (build it, or ``docker pull`` the digest onto this host) and makes the failure
+        an honest 503 instead of a silent download.
+
+        A daemon that cannot answer at all lands here too: that is fail-closed by
+        design — no session, no execution.
+        """
+        try:
+            self._client.images.get(image)
+        except Exception as exc:
+            raise RunnerError(
+                "sandbox execution image is not present on the host daemon", status_code=503
+            ) from exc
 
     def _containers(self, session_id: UUID) -> list[Any]:
         return list(

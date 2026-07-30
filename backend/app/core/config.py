@@ -13,6 +13,7 @@ process refuses to boot misconfigured rather than failing deep in a request.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -144,6 +145,11 @@ _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES: tuple[str, ...] = (
     "python-dateutil==2.9.0.post0",
     "six==1.17.0",
 )
+
+# An OCI content digest as it appears in an image reference (``name@sha256:<hex>``).
+# Only this form makes ``SANDBOX_IMAGE`` immutable: a tag can be repointed on the
+# daemon between two sessions of the same deploy.
+_SANDBOX_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class Settings(BaseSettings):
@@ -1117,10 +1123,43 @@ class Settings(BaseSettings):
     # The runner launches this on the HOST daemon, so the image has to EXIST there:
     # ``docker compose --profile sandbox build sandbox-exec-image`` (see the runbook,
     # docs/runbooks/sandbox-code-execution.md).
+    #
+    # PINNED AT LAUNCH TIME, not only at build time. ``sandbox_exec/Dockerfile``
+    # pins its BASE by digest, but that is a fact about a layer at build time; this
+    # value is the reference the runner resolves per session. It was previously
+    # unvalidated, so ``:latest`` or a tagless name — either of which can change
+    # what tenant code executes in without any deploy — was accepted while
+    # ADR-0013 §3 claimed a digest pin. The validators below require an exact tag
+    # (never ``latest``), and require the ``name@sha256:<64 hex>`` digest form once
+    # code execution is enabled outside local development. In local dev a tag is
+    # trust-on-first-build: you built the image yourself, on this daemon.
     sandbox_image: str = Field(
         default="lumen-sandbox-exec:0.1.0",
         alias="SANDBOX_IMAGE",
     )
+
+    @field_validator("sandbox_image")
+    @classmethod
+    def _sandbox_image_is_pinned(cls, value: str) -> str:
+        """Refuse a mutable or unparseable execution-image reference (ADR-0013 §3)."""
+        reference = value.strip()
+        if not reference:
+            raise ValueError("SANDBOX_IMAGE must name the sandbox execution image")
+        name, _, digest = reference.partition("@")
+        if digest and not _SANDBOX_IMAGE_DIGEST.fullmatch(digest):
+            raise ValueError("SANDBOX_IMAGE digest must be 'sha256:<64 hex chars>' (ADR-0013 §3)")
+        # Docker allows a port in the registry host (``host:5000/name``), so the tag
+        # is only the colon inside the FINAL path segment.
+        _, _, tag = name.rsplit("/", 1)[-1].partition(":")
+        if not digest and not tag:
+            raise ValueError(
+                "SANDBOX_IMAGE must be pinned to an exact tag or digest, not a bare "
+                "image name (ADR-0013 §3, ADR-0005: no floating references)"
+            )
+        if tag == "latest":
+            raise ValueError("SANDBOX_IMAGE must not use the ':latest' tag (ADR-0013 §3)")
+        return reference
+
     # What the execution image above ALREADY SHIPS — the exact, version-pinned closure
     # in ``sandbox_exec/requirements.txt`` (the drift guard in
     # ``backend/tests/test_sandbox_exec_image.py`` fails if the two diverge).
@@ -1198,6 +1237,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SANDBOX_RUNTIME must be 'runsc' when SANDBOX_ENABLED=true outside local "
                 "development (ADR-0020)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _sandbox_image_digest_outside_local(self) -> Settings:
+        """An enabled sandbox outside local development runs a digest-pinned image.
+
+        A tag is mutable on the daemon: whoever can push/retag it chooses what
+        model-authored code executes in, with no deploy and no audit trail. Local dev
+        may keep the tag (you built it there yourself, from this checkout); anywhere
+        else the digest is the pin ADR-0013 §3 promises. Gated on ``sandbox_enabled``
+        so a deploy that launches nothing is not held hostage to a reference it never
+        resolves.
+        """
+        if (
+            self.sandbox_enabled
+            and self.environment != "local"
+            and "@sha256:" not in self.sandbox_image
+        ):
+            raise ValueError(
+                "SANDBOX_IMAGE must be digest-pinned ('name@sha256:<64 hex chars>') when "
+                "SANDBOX_ENABLED=true outside local development (ADR-0013 §3)"
             )
         return self
 

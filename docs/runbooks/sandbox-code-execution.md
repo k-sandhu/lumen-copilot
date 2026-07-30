@@ -38,7 +38,17 @@ image, so every run had fastapi and pydantic available and **no pandas, numpy, o
 matplotlib** — the capability could not do the data work it exists for.)
 
 The runner drives the **host** Docker daemon through the mounted socket, so the
-image must exist **there**; nothing pulls it from a registry.
+image must exist **there** before code execution is enabled.
+
+> **Correction (was wrong until this PR).** This runbook used to say "nothing pulls
+> it from a registry". That was false: docker-py's `containers.run` catches
+> `ImageNotFound` and **pulls**, so a typo'd or tampered `SANDBOX_IMAGE` became a
+> registry fetch performed by the one process holding the Docker socket — and the
+> fetched image then executed as contained root. The runner now resolves the image on
+> the local daemon *first* and refuses with **503 "sandbox execution image is not
+> present on the host daemon"** when it is missing. Getting the image onto the host is
+> an operator step (`build`, or an explicit `docker pull` of the digest); the runner
+> will not do it for you.
 
 ```bash
 # From the repo root — the documented build command:
@@ -49,6 +59,36 @@ docker build -t lumen-sandbox-exec:0.1.0 ./sandbox_exec
 
 # Confirm the host daemon has it (this is the daemon the runner drives):
 docker image inspect lumen-sandbox-exec:0.1.0 --format '{{.Id}}'
+```
+
+### Pin the reference the runner launches (not just the base layer)
+
+`sandbox_exec/Dockerfile` pins its **base** by digest, but that is a build-time fact
+about a layer. What tenant code actually executes in is whatever `SANDBOX_IMAGE`
+resolves to **at launch**, so that value is validated at boot:
+
+| `SANDBOX_IMAGE` | `ENVIRONMENT=local` | anything else, `SANDBOX_ENABLED=true` |
+|---|---|---|
+| `lumen-sandbox-exec:0.1.0` | accepted (trust-on-first-build) | **refused** — needs a digest |
+| `lumen-sandbox-exec@sha256:<64 hex>` | accepted | accepted |
+| `lumen-sandbox-exec:0.1.0@sha256:<64 hex>` | accepted | accepted |
+| `lumen-sandbox-exec:latest` | **refused** | **refused** |
+| `lumen-sandbox-exec` (bare name) | **refused** | **refused** |
+
+A tag is mutable on the daemon: anyone who can retag it picks what model-authored
+code runs in, with no deploy and no audit trail. In local dev the tag is accepted
+because you built the image yourself, on this daemon, from this checkout — outside
+local dev that assumption does not hold, so the digest is mandatory.
+
+Outside local dev this means the image comes from a registry you pushed it to (a
+purely local build has no `RepoDigests` entry until then), and — because the runner
+never pulls (§1 above) — you `docker pull` that digest onto the **host** daemon
+yourself before enabling code execution:
+
+```bash
+# Get the digest of the pushed image, then pin and pre-pull it on the sandbox host:
+docker image inspect <registry>/lumen-sandbox-exec:0.1.0 --format '{{index .RepoDigests 0}}'
+docker pull <registry>/lumen-sandbox-exec@sha256:<64 hex>   # on the host the runner drives
 ```
 
 Smoke-test the image the way the runner launches it — uid 0, all capabilities
@@ -81,7 +121,8 @@ docker run --rm --network none --cap-drop ALL \
 ```bash
 # .env
 SANDBOX_ENABLED=true
-# SANDBOX_IMAGE=lumen-sandbox-exec:0.1.0   # the default; set only to override
+# SANDBOX_IMAGE=lumen-sandbox-exec:0.1.0   # the default; must be tag- or digest-pinned
+#                                          # (digest REQUIRED outside ENVIRONMENT=local)
 # SANDBOX_RUNTIME=runsc                    # REQUIRED outside ENVIRONMENT=local (gVisor)
 
 docker compose --profile sandbox up -d sandbox-runner
@@ -94,6 +135,16 @@ stack it ships and exits 0. An `Exited (0)` container is the expected steady sta
 Outside `ENVIRONMENT=local`, `SANDBOX_ENABLED=true` with `SANDBOX_RUNTIME=runc`
 **fails configuration validation at boot** (ADR-0020 §2) — root-capable sandboxes
 require gVisor there.
+
+`SANDBOX_RUNTIME` is read **twice, from the same `.env`**: the backend validates it
+(gVisor mandatory outside local), and compose passes it to the `sandbox-runner`
+service, which is what actually launches containers with it. That is deliberate — the
+runner takes the runtime from **its own** configuration and ignores the `runtime`
+field on an ensure request, so a caller cannot pick `runc` for one session on a
+gVisor deploy. **Restart `sandbox-runner` after changing it**
+(`docker compose --profile sandbox up -d sandbox-runner`); restarting only the
+backend and worker leaves the old runtime in force, and the runner refuses to start
+at all on a value that is neither `runc` nor `runsc`.
 
 ## 3. Enable it for a workspace and an assistant
 

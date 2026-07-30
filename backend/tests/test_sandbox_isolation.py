@@ -87,6 +87,10 @@ def test_non_local_enabled_sandbox_requires_gvisor() -> None:
         # refused outside local) — also part of the minimal production env.
         "GDRIVE_OAUTH_CLIENT_ID": "prod-google-client-id",
         "GDRIVE_OAUTH_CLIENT_SECRET": "prod-google-client-secret",
+        # ADR-0013 §3: an enabled sandbox outside local dev runs a DIGEST-pinned
+        # execution image, so the minimal production env carries one (the tag-only
+        # default is refused — see test_sandbox_config).
+        "SANDBOX_IMAGE": "lumen-sandbox-exec@sha256:" + "a" * 64,
     }
     with pytest.raises(ValidationError, match="runsc"):
         Settings(**common, SANDBOX_RUNTIME="runc")  # type: ignore[arg-type]
