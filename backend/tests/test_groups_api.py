@@ -50,6 +50,7 @@ from app.domain.entities import (
     GrantPrincipalType,
     GrantResourceType,
     GrantRole,
+    GroupKind,
     Role,
 )
 from app.domain.llm import Embedding
@@ -579,3 +580,36 @@ async def test_route_mutations_are_persisted_and_audited(
         }
     assert AuditAction.GROUP_CREATED.value in actions
     assert AuditAction.GROUP_MEMBER_ADDED.value in actions
+
+
+async def test_lazy_system_group_creation_is_audited_exactly_once(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Materializing "All members" is a committed mutation, so INV-6 applies.
+
+    The listing route creates and commits the derived group on first use. That
+    is a write, and an unaudited write contradicts the service's own guarantee —
+    a row would appear in a tenant with nothing in the audit log explaining it.
+    Repeating the call must NOT record a second creation, which is what the
+    repository's ``created_here`` flag exists to guarantee.
+    """
+    token = await _login(client, seeded.admin_a_email)
+
+    first = await client.get("/api/v1/admin/groups", headers=_auth(token))
+    assert first.status_code == 200, first.text
+    second = await client.get("/api/v1/admin/groups", headers=_auth(token))
+    assert second.status_code == 200, second.text
+
+    async with sessionmaker() as session:
+        groups = await GroupRepository(session, seeded.tenant_a).list_all()
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=50)
+
+    system = [g for g in groups if g.kind is GroupKind.SYSTEM]
+    assert len(system) == 1, "exactly one derived group, however many listings"
+
+    creations = [
+        e
+        for e in events
+        if e.action == AuditAction.GROUP_CREATED.value and e.resource_id == str(system[0].id)
+    ]
+    assert len(creations) == 1, f"expected exactly one creation event, got {len(creations)}"
