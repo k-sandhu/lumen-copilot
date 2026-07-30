@@ -16,7 +16,7 @@ driven by an ``httpx.MockTransport`` so no real socket opens. Every block raises
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 
 import httpx
 import pytest
@@ -130,7 +130,7 @@ def test_validate_url_syntactic_does_no_dns(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_validate_url_does_dns_at_fetch_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The authoritative fetch-time guard still resolves the host (DNS, off-request).
+    """The authoritative fetch-time guard still resolves the host (DNS, off-loop).
 
     Confirms the split keeps DNS on the fetch path: ``_validate_url`` (the
     fetch-time guard) resolves a hostname and rejects it when it maps to a blocked
@@ -364,79 +364,82 @@ async def test_outbound_request_defaults_to_descriptive_user_agent() -> None:
 # ``_resolve_safe_ip`` → ``resolve_safe_ip`` → ``socket.getaddrinfo`` — and stub
 # only that last blocking primitive. A probe that replaced the chokepoint itself
 # could not see this defect at all, which is precisely how it was missed.
+#
+# Both probes are **handshakes, not stopwatches**: they block until the condition
+# under test actually occurs, so no wall-clock threshold and no assumption about
+# how fast threads start can flip the result on a loaded machine (review round 2,
+# finding 6). The timeouts only bound the failure case.
 
-_DNS_STALL_SECONDS = 0.25
-_DNS_TICK_SECONDS = 0.01
-# Resolution on the loop yields a gap of >= _DNS_STALL_SECONDS; off the loop the
-# gaps stay at tick resolution.
-_DNS_MAX_GAP_SECONDS = 0.1
+_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 
 
-class _ResolverProbe:
-    """A blocking ``getaddrinfo`` stand-in that records thread and concurrency."""
+def _addrinfo() -> list:
+    import socket
 
-    def __init__(self) -> None:
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PUBLIC_IP, 0))]
+
+
+class _LoopHandshakeResolver:
+    """A ``getaddrinfo`` stand-in that will not return until the loop runs."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
         self.threads: set[int] = set()
-        self.in_flight = 0
-        self.max_in_flight = 0
+        self.released_by_loop = False
 
     def __call__(self, *_args: object, **_kwargs: object) -> list:
-        import socket
-        import threading
-
         self.threads.add(threading.get_ident())
-        self.in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self.in_flight)
-        try:
-            time.sleep(_DNS_STALL_SECONDS)
-        finally:
-            self.in_flight -= 1
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PUBLIC_IP, 0))]
+        released = threading.Event()
+
+        def _release() -> None:
+            self.released_by_loop = True
+            released.set()
+
+        # Queued on the loop; it can only run if the loop is not sitting inside
+        # this very resolution — exactly the property under test.
+        self._loop.call_soon_threadsafe(_release)
+        if not released.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS):
+            raise AssertionError(
+                "the event loop never ran while the SSRF guard was resolving DNS "
+                "— resolution is blocking the loop"
+            )
+        return _addrinfo()
+
+
+class _BarrierResolver:
+    """Holds every resolver until ``parties`` of them are resolving at once."""
+
+    def __init__(self, parties: int) -> None:
+        self._barrier = threading.Barrier(parties, timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        self.threads: set[int] = set()
+
+    def __call__(self, *_args: object, **_kwargs: object) -> list:
+        self.threads.add(threading.get_ident())
+        # Serial resolution can never assemble `parties` simultaneously, so this
+        # raises BrokenBarrierError rather than quietly passing. Reaching the
+        # other side *is* the proof that they overlapped.
+        self._barrier.wait()
+        return _addrinfo()
 
 
 async def test_fetch_url_resolves_dns_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blocking resolve happens on a worker thread, never the loop's own."""
-    import socket
-    import threading
+    """Resolution happens on a worker thread while the loop keeps running.
 
-    probe = _ResolverProbe()
+    One assertion covers both halves: the loop released the resolver (so it was
+    alive during the lookup) and the lookup did not happen on the loop's thread.
+    """
+    import socket
+
+    probe = _LoopHandshakeResolver(asyncio.get_running_loop())
     monkeypatch.setattr(socket, "getaddrinfo", probe)
 
     result = await _fetch(_ok_html, url="http://dns-probe.example.com/page")
 
     assert result.final_url == "http://dns-probe.example.com/page"
+    assert probe.released_by_loop is True
     assert probe.threads and threading.get_ident() not in probe.threads
-
-
-async def test_fetch_url_does_not_stall_the_event_loop_during_dns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The loop keeps servicing other work while a host is being resolved."""
-    import socket
-
-    monkeypatch.setattr(socket, "getaddrinfo", _ResolverProbe())
-
-    gaps: list[float] = []
-
-    async def _ticker() -> None:
-        last = time.perf_counter()
-        while True:
-            await asyncio.sleep(_DNS_TICK_SECONDS)
-            now = time.perf_counter()
-            gaps.append(now - last)
-            last = now
-
-    ticker = asyncio.create_task(_ticker())
-    try:
-        await asyncio.sleep(0)
-        await _fetch(_ok_html, url="http://dns-probe.example.com/page")
-    finally:
-        ticker.cancel()
-
-    # No tick at all means the loop never came back — the worst case, not a pass.
-    assert max(gaps, default=float("inf")) < _DNS_MAX_GAP_SECONDS
 
 
 async def test_concurrent_fetches_overlap_their_dns(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,15 +447,17 @@ async def test_concurrent_fetches_overlap_their_dns(monkeypatch: pytest.MonkeyPa
 
     This is the assertion that makes the #513 concurrency claim true end to end:
     with resolution inline, three gathered fetches resolved one after another and
-    the peak stayed at 1 however they were gathered.
+    could never all be in flight at once.
     """
     import socket
 
-    probe = _ResolverProbe()
+    probe = _BarrierResolver(parties=3)
     monkeypatch.setattr(socket, "getaddrinfo", probe)
 
     urls = [f"http://host-{i}.example.com/page" for i in range(3)]
+    # The barrier only clears when all three are resolving simultaneously;
+    # serial resolution breaks it and fails the gather.
     results = await asyncio.gather(*(_fetch(_ok_html, url=u) for u in urls))
 
     assert [r.final_url for r in results] == urls
-    assert probe.max_in_flight == 3
+    assert len(probe.threads) == 3

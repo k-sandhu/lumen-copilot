@@ -141,8 +141,9 @@ def validate_url_syntactic(url: str) -> str:
     its range is checked directly (loopback/private/link-local/metadata refused).
     A *hostname* is left for fetch-time resolution: this function does **no**
     ``getaddrinfo`` so it never blocks the event loop (ADR-0009 §3 — keep
-    request-path validation bounded; the full per-redirect DNS guard runs in the
-    Celery sync path). Returns the host on success.
+    request-path validation bounded). The full per-redirect DNS guard runs in
+    :func:`fetch_url`, which reaches it from a thread rather than inline, so it
+    is safe on the request path too (#524). Returns the host on success.
 
     Raises:
         UrlBlockedError: a non-http(s) scheme, a missing host, or an IP-literal
@@ -159,7 +160,7 @@ def validate_url_syntactic(url: str) -> str:
         raise UrlBlockedError("URL has no host")
 
     # An IP-literal host is range-checked synchronously (no DNS). A hostname is
-    # left for fetch-time resolution (off the event loop / in the worker).
+    # left for fetch-time resolution, which fetch_url runs off the event loop.
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:

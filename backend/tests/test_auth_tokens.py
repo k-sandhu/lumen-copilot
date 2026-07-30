@@ -182,39 +182,60 @@ async def test_verification_concurrency_is_bounded_by_a_dedicated_pool() -> None
 
 
 async def test_both_login_paths_share_one_verification_queue() -> None:
-    """The known-user and unknown-user paths must saturate together.
+    """The known-user and unknown-user paths must contend for the SAME workers.
 
-    Routing them to separate executors would give them different queueing
-    behaviour under load and reintroduce the account-existence timing signal
+    Routing them to separate executors would give them independent saturation
+    behaviour and reintroduce, under load, the account-existence timing signal
     that ``dummy_verify`` exists to close (spec 0004 §2.3).
-    """
-    seen: set[str] = set()
-    release = threading.Event()
 
-    def _record(*_args: object) -> bool:
-        seen.add(threading.current_thread().name)
-        release.wait(timeout=5.0)
+    Asserting on thread-name prefixes is not enough — two separate pools sharing
+    a prefix would pass that (review round 2, finding 2). Instead this saturates
+    the pool with ``cap`` known-user verifies and then shows an unknown-user
+    verify cannot start until one of them retires: only a shared queue can
+    produce that back-pressure.
+    """
+    cap = hashing._MAX_CONCURRENT_VERIFICATIONS
+
+    saturated = threading.Barrier(cap + 1, timeout=5.0)
+    hold = threading.Event()
+    dummy_started = threading.Event()
+
+    def _blocking_verify(*_args: object) -> bool:
+        saturated.wait()  # every worker is now occupied
+        hold.wait(timeout=5.0)
         return True
+
+    def _dummy() -> None:
+        dummy_started.set()
 
     original_verify = hashing.verify_password
     original_dummy = hashing.dummy_verify
-    hashing.verify_password = _record  # type: ignore[assignment]
-    hashing.dummy_verify = _record  # type: ignore[assignment]
+    hashing.verify_password = _blocking_verify  # type: ignore[assignment]
+    hashing.dummy_verify = _dummy  # type: ignore[assignment]
     try:
-        tasks = [
-            asyncio.create_task(hashing.verify_password_async("h", "pw")),
-            asyncio.create_task(hashing.dummy_verify_async()),
+        verifies = [
+            asyncio.create_task(hashing.verify_password_async("h", "pw")) for _ in range(cap)
         ]
-        await asyncio.sleep(0.1)
-        release.set()
-        await asyncio.gather(*tasks)
+        # Wait until all `cap` workers are parked inside a verify.
+        await asyncio.to_thread(saturated.wait)
+
+        dummy = asyncio.create_task(hashing.dummy_verify_async())
+        await asyncio.sleep(0.2)
+        # The unknown-user path is queued behind the same busy workers.
+        blocked_while_saturated = not dummy_started.is_set()
+
+        hold.set()
+        await asyncio.gather(*verifies, dummy)
     finally:
-        release.set()
+        hold.set()
         hashing.verify_password = original_verify  # type: ignore[assignment]
         hashing.dummy_verify = original_dummy  # type: ignore[assignment]
 
-    # Both landed on the one dedicated pool.
-    assert seen and all(name.startswith("argon2-verify") for name in seen)
+    assert blocked_while_saturated, (
+        "the unknown-user path ran while the pool was saturated by known-user "
+        "verifies — the two paths are not sharing one queue"
+    )
+    assert dummy_started.is_set()  # it did run once a worker freed up
 
 
 # --- Refresh tokens (opaque; hashed at rest) -------------------------------
