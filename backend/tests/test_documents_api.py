@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -1604,3 +1607,107 @@ async def test_owner_can_still_delete_an_unreadable_connector_document(
     token = await _login(client, seeded.alice_email)
     resp = await client.delete(f"/api/v1/documents/{doc_id}", headers=_auth(token))
     assert resp.status_code == 204, resp.text
+
+
+# --- Perf: the page's chunk counts cost one query, not one per row (#526) ----
+#
+# Every listed document carries a ``chunk_count``. Resolved per row that is a
+# serial COUNT over ``chunks`` — the largest table — for each document in the
+# page, up to the route's 100-row cap, on a view users hit constantly. The
+# assertion is on the SQL the page issues, not just its output, because the
+# output was already correct when it was slow. Same defect class as #396.
+
+
+@contextmanager
+def _chunk_count_queries() -> Iterator[list[str]]:
+    """Record every aggregate SELECT against ``chunks`` issued in the block."""
+    seen: list[str] = []
+
+    def _record(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.split()).lower()
+        # Matches both shapes: the per-row `select count(*) from chunks ...` and
+        # the batched `select chunks.document_id, count(*) ... group by`.
+        if (
+            normalized.startswith("select")
+            and "count(" in normalized
+            and "from chunks" in normalized
+        ):
+            seen.append(normalized)
+
+    event.listen(Engine, "before_cursor_execute", _record)
+    try:
+        yield seen
+    finally:
+        event.remove(Engine, "before_cursor_execute", _record)
+
+
+async def _seed_chunks(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    count: int,
+) -> None:
+    async with sessionmaker() as session:
+        await ChunkRepository(session, tenant_id).replace_for_document(
+            document_id,
+            [ChunkInput(text=f"chunk {i}", char_start=i, char_end=i + 1) for i in range(count)],
+        )
+        await session.commit()
+
+
+async def test_documents_list_resolves_chunk_counts_in_one_query(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeObjectStore,
+) -> None:
+    """A page spanning many documents costs one grouped COUNT, not one per row."""
+    coll = await _seed_collection(
+        sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email
+    )
+    expected: dict[str, int] = {}
+    for index in range(5):
+        doc_id = await _seed_document(
+            sessionmaker,
+            store,
+            tenant_id=seeded.tenant_a,
+            owner_email=seeded.alice_email,
+            collection_id=coll,
+            filename=f"doc-{index}.txt",
+        )
+        # Distinct counts per document so a batched query cannot pass by
+        # accidentally giving every row the same number.
+        await _seed_chunks(
+            sessionmaker, tenant_id=seeded.tenant_a, document_id=doc_id, count=index + 1
+        )
+        expected[f"doc-{index}.txt"] = index + 1
+
+    token = await _login(client, seeded.alice_email)
+    with _chunk_count_queries() as queries:
+        resp = await client.get("/api/v1/documents", headers=_auth(token))
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert {i["filename"]: i["chunk_count"] for i in items} == expected
+    assert len(queries) == 1
+
+
+async def test_documents_list_with_no_rows_issues_no_chunk_count_query(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """An empty page must not pay for a query with an empty IN list."""
+    token = await _login(client, seeded.alice_email)
+    with _chunk_count_queries() as queries:
+        resp = await client.get("/api/v1/documents", headers=_auth(token))
+
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+    assert queries == []

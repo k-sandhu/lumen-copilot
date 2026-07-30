@@ -428,6 +428,73 @@ async def test_get_many_handles_duplicates_and_empty_input(
     assert await docs_a.get_many([]) == {}
 
 
+async def test_batched_counts_stay_tenant_scoped_and_omit_empties(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """The #526 batch counts must fail closed exactly like their single-id forms.
+
+    Widening a predicate to an ``IN`` list is where a tenant scope is easy to
+    lose, so this pins that another tenant's ids are **absent** rather than
+    counted, and that a row with nothing to count is omitted (callers default it
+    to 0) rather than reported wrongly.
+    """
+    tenant_a, tenant_b = two_tenants
+
+    async def _owner(tenant: uuid.UUID, email: str) -> uuid.UUID:
+        user = await UserRepository(session, tenant).create(
+            email=email, password_hash="h", roles=[Role.MEMBER]
+        )
+        return user.id
+
+    owner_a = await _owner(tenant_a, "a@x.test")
+    owner_b = await _owner(tenant_b, "b@x.test")
+
+    colls_a = CollectionRepository(session, tenant_a)
+    docs_a = DocumentRepository(session, tenant_a)
+
+    full = await colls_a.create(owner_id=owner_a, name="full")
+    empty = await colls_a.create(owner_id=owner_a, name="empty")
+    foreign_coll = await CollectionRepository(session, tenant_b).create(
+        owner_id=owner_b, name="theirs"
+    )
+
+    async def _doc(tenant: uuid.UUID, owner: uuid.UUID, coll: uuid.UUID, name: str) -> uuid.UUID:
+        created = await DocumentRepository(session, tenant).create(
+            owner_id=owner,
+            collection_id=coll,
+            filename=name,
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key=f"{tenant}/{name}",
+            acl_enforced=False,
+        )
+        return created.id
+
+    chunked = await _doc(tenant_a, owner_a, full.id, "one.txt")
+    unchunked = await _doc(tenant_a, owner_a, full.id, "two.txt")
+    foreign_doc = await _doc(tenant_b, owner_b, foreign_coll.id, "theirs.txt")
+    await ChunkRepository(session, tenant_a).replace_for_document(
+        chunked, [ChunkInput(text="a", char_start=0, char_end=1)]
+    )
+    await ChunkRepository(session, tenant_b).replace_for_document(
+        foreign_doc, [ChunkInput(text="b", char_start=0, char_end=1)]
+    )
+
+    # Documents-per-collection: the foreign collection is a miss, the empty one
+    # is omitted rather than reported as 0 by the query itself.
+    per_collection = await colls_a.count_documents_for([full.id, empty.id, foreign_coll.id])
+    assert per_collection == {full.id: 2}
+
+    # Chunks-per-document: same shape. The foreign document has a chunk in ITS
+    # tenant, which must not leak into this tenant's counts (INV-1).
+    per_document = await docs_a.count_chunks_for([chunked, unchunked, foreign_doc])
+    assert per_document == {chunked: 1}
+
+    # Empty input issues no query and returns an empty mapping.
+    assert await colls_a.count_documents_for([]) == {}
+    assert await docs_a.count_chunks_for([]) == {}
+
+
 async def test_inv1_chat_and_audit_are_tenant_scoped(
     session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:

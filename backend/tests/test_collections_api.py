@@ -22,11 +22,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -517,3 +520,83 @@ async def test_get_malformed_uuid_is_422(client: AsyncClient, seeded: _Seeded) -
     token = await _login(client, seeded.alice_email)
     resp = await client.get("/api/v1/collections/not-a-uuid", headers=_auth(token))
     assert resp.status_code == 422
+
+
+# --- Perf: the page's document counts cost one query, not one per row (#526) --
+#
+# Every listed collection carries a ``document_count``. Resolved per row that is
+# a serial aggregate over ``documents`` for each collection in the page, up to
+# the route's 100-row cap — on the library view and every collection picker.
+# Asserts the SQL the page issues, not just its output, since the output was
+# already correct when it was slow. Same defect class as #396.
+
+
+@contextmanager
+def _document_count_queries() -> Iterator[list[str]]:
+    """Record every aggregate SELECT against ``documents`` issued in the block."""
+    seen: list[str] = []
+
+    def _record(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = " ".join(statement.split()).lower()
+        # Matches both shapes: the per-row `select count(*) from documents ...`
+        # and the batched `select documents.collection_id, count(*) ... group by`.
+        if (
+            normalized.startswith("select")
+            and "count(" in normalized
+            and "from documents" in normalized
+        ):
+            seen.append(normalized)
+
+    event.listen(Engine, "before_cursor_execute", _record)
+    try:
+        yield seen
+    finally:
+        event.remove(Engine, "before_cursor_execute", _record)
+
+
+async def test_collections_list_resolves_document_counts_in_one_query(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A page of collections costs one grouped COUNT, not one per row."""
+    expected: dict[str, int] = {}
+    for index in range(4):
+        # Distinct counts per collection so a batched query cannot pass by
+        # accidentally giving every row the same number. Index 0 stays empty,
+        # which pins the absent-from-mapping -> 0 default.
+        await _seed_collection(
+            sessionmaker,
+            tenant_id=seeded.tenant_a,
+            owner_email=seeded.alice_email,
+            name=f"c{index}",
+            documents=index,
+        )
+        expected[f"c{index}"] = index
+
+    token = await _login(client, seeded.alice_email)
+    with _document_count_queries() as queries:
+        resp = await client.get("/api/v1/collections", headers=_auth(token))
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert {i["name"]: i["document_count"] for i in items} == expected
+    assert len(queries) == 1
+
+
+async def test_collections_list_with_no_rows_issues_no_count_query(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """An empty page must not pay for a query with an empty IN list."""
+    token = await _login(client, seeded.alice_email)
+    with _document_count_queries() as queries:
+        resp = await client.get("/api/v1/collections", headers=_auth(token))
+
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+    assert queries == []

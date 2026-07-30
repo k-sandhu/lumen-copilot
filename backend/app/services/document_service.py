@@ -489,7 +489,16 @@ class DocumentService:
         permitted = await permitted_document_ids(
             self._session, allow_set=self._allow_set, document_ids=[d.id for d in page]
         )
-        items = [await self._view(d) for d in page if d.id in permitted]
+        visible = [d for d in page if d.id in permitted]
+        # One grouped COUNT for the whole page (#526). Resolved per row this was
+        # a serial aggregate over ``chunks`` — the largest table — for every
+        # document in the page, on a view users hit constantly. A document with
+        # no chunks is absent from the mapping and defaults to 0, exactly as the
+        # single-id count returns for a document ingestion has not populated yet.
+        chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
+        items = [
+            DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible
+        ]
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:
