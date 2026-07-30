@@ -26,10 +26,18 @@ The four gates:
 2. the **deploy kill-switch** ``SANDBOX_ENABLED`` (``core/config.py``);
 3. the **tenant sandbox policy** row (``services/sandbox_policy_service.py``) —
    absent or ``enabled=false``;
-4. the **runner being unreachable** (``sandbox/runner.py`` → ``DependencyError``).
+4. the **runner** — itself three answers, not one (``sandbox/runner.py``): nothing
+   answered, it answered 4xx (it is up and refused the request), or it answered
+   5xx (up but broken).
 
 The established error CODES are unchanged (``approval_denied`` /
 ``code_execution_denied``); the reason is ADDITIVE specificity on top of them.
+
+Every distinctness claim in this module is derived from **real refusals** — a
+gate's own :class:`ApprovalDecision` or the ``reason_code`` the execution path
+audited. An earlier version asserted over a set of hand-written string literals,
+which called no production code and would have passed with every reason-plumbing
+line deleted.
 """
 
 from __future__ import annotations
@@ -85,6 +93,7 @@ from app.services.sandbox_policy_service import EffectiveSandboxPolicy, SandboxP
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
+    ApprovalDecision,
     ApprovalRequest,
     DenyAllApprovalGate,
     ToolContext,
@@ -165,6 +174,45 @@ def _approval_request(world: _World) -> ApprovalRequest:
     )
 
 
+class _BoomSession:
+    """A DB session whose every read fails — the fail-closed (INV-7) branch."""
+
+    async def execute(self, *_: Any, **__: Any) -> Any:
+        raise RuntimeError("db is down")
+
+
+async def _tool_policy_decisions(world: _World) -> list[ApprovalDecision]:
+    """The four REAL :class:`PolicyApprovalGate` outcomes, in policy order.
+
+    Absent row → disabled row → enabled-but-still-flagged (#500) → unreadable. Both
+    the distinctness assertion and the disclosure scan read from here, so neither
+    can drift into asserting against hand-written literals.
+    """
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+    policies = TenantToolPolicyRepository(world.session, world.tenant_id)
+
+    absent = await gate.request(_approval_request(world))
+
+    await policies.upsert(
+        tool_name="run_python", enabled=False, requires_approval=True, updated_by=world.user_id
+    )
+    await world.session.commit()
+    disabled = await gate.request(_approval_request(world))
+
+    await policies.upsert(
+        tool_name="run_python", enabled=True, requires_approval=True, updated_by=world.user_id
+    )
+    await world.session.commit()
+    unavailable = await gate.request(_approval_request(world))
+
+    unreadable = await PolicyApprovalGate(
+        _BoomSession(),  # type: ignore[arg-type]
+        tenant_id=world.tenant_id,
+    ).request(_approval_request(world))
+
+    return [absent, disabled, unavailable, unreadable]
+
+
 async def test_absent_tool_policy_names_the_tool_policy_switch(world: _World) -> None:
     """No admin row ⇒ denied *because no policy enables it* — not "approval denied"."""
     decision = await PolicyApprovalGate(world.session, tenant_id=world.tenant_id).request(
@@ -221,11 +269,6 @@ async def test_requires_approval_says_approval_is_unavailable_not_disabled(
 
 async def test_unreadable_tool_policy_is_its_own_reason(world: _World) -> None:
     """Fail-closed (INV-7) — but say so, rather than looking like "not enabled"."""
-
-    class _BoomSession:
-        async def execute(self, *_: Any, **__: Any) -> Any:
-            raise RuntimeError("db is down")
-
     decision = await PolicyApprovalGate(
         _BoomSession(),  # type: ignore[arg-type]
         tenant_id=world.tenant_id,
@@ -363,7 +406,12 @@ async def _refuse(
     deploy_enabled: bool = True,
     runner: _FakeRunner | None = None,
 ) -> tuple[CodeRunStatus, str, dict[str, object]]:
-    """Run one code run and return (status, stderr, the terminal audit metadata)."""
+    """Run one code run and return (status, stderr, the terminal audit metadata).
+
+    The audit event is matched on this run's own ``resource_id``, so a test may
+    refuse several runs in a row without the newest-first ordering deciding which
+    metadata it gets back.
+    """
     run = await CodeRunRepository(world.session, world.tenant_id).create(
         owner_id=world.user_id,
         session_id=world.chat_id,
@@ -380,8 +428,12 @@ async def _refuse(
     status = await service.execute(world.session, run.id)
     persisted = await CodeRunRepository(world.session, world.tenant_id).get(run.id)
     assert persisted is not None
-    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
-    terminal = next(e for e in events if e.action in {"code_run.denied", "code_run.finished"})
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=50)
+    terminal = next(
+        e
+        for e in events
+        if e.resource_id == str(run.id) and e.action in {"code_run.denied", "code_run.finished"}
+    )
     return status, persisted.stderr, dict(terminal.metadata)
 
 
@@ -454,23 +506,80 @@ async def test_unreachable_runner_names_the_runner_not_a_policy(world: _World) -
 
 
 async def test_the_four_gates_give_pairwise_distinct_reasons(world: _World) -> None:
-    """The whole point of #502: four gates, four distinguishable answers."""
-    reasons = {
+    """The whole point of #502: four gates, four distinguishable answers.
+
+    Every value below is **produced by the gate that refused**. The earlier version
+    of this test built a set of four string LITERALS and asserted its size, which
+    called no production code at all and would have passed with every
+    reason-plumbing line in the codebase deleted.
+    """
+
+    def _audited(metadata: dict[str, object]) -> str:
+        value = metadata.get("reason_code")
+        assert isinstance(value, str) and value, f"terminal carried no reason_code: {metadata}"
+        return value
+
+    collected: list[str] = []
+
+    # Gate 1 — the tenant TOOL policy. Enabled, but left flagged "requires
+    # approval", which no surface can satisfy (#500).
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=True, updated_by=world.user_id
+    )
+    await world.session.commit()
+    decision = await PolicyApprovalGate(world.session, tenant_id=world.tenant_id).request(
+        _approval_request(world)
+    )
+    assert decision.reason is not None
+    collected.append(decision.reason)
+
+    # Gate 2 — the deploy kill-switch, with the workspace fully enabled.
+    await _enable_tenant_sandbox(world)
+    await world.session.commit()
+    _, _, deploy = await _refuse(world, deploy_enabled=False)
+    collected.append(_audited(deploy))
+
+    # Gate 4 — every policy says yes; the runner service is simply not there.
+    unreachable = _FakeRunner(
+        ensure_raises=DependencyError(
+            "sandbox runner unavailable", code="sandbox_runner_unavailable"
+        )
+    )
+    _, _, runner_meta = await _refuse(world, runner=unreachable)
+    collected.append(_audited(runner_meta))
+
+    # Gate 3 — the workspace's own sandbox policy says no.
+    await _enable_tenant_sandbox(world, enabled=False)
+    await world.session.commit()
+    _, _, tenant_meta = await _refuse(world)
+    collected.append(_audited(tenant_meta))
+
+    assert len(collected) == 4
+    assert all(collected), f"a gate produced no reason at all: {collected}"
+    assert len(set(collected)) == 4, collected
+    # The codes are the documented ones, so the runbook's table stays true.
+    assert collected == [
         APPROVAL_REASON_APPROVAL_UNAVAILABLE,
         SANDBOX_REASON_DEPLOY_DISABLED,
-        SANDBOX_REASON_TENANT_DISABLED,
         SANDBOX_REASON_RUNNER_UNAVAILABLE,
-    }
-    assert len(reasons) == 4
-    # …and the tool-policy family is itself split into its four sub-reasons.
-    tool_policy = {
+        SANDBOX_REASON_TENANT_DISABLED,
+    ]
+
+
+async def test_the_tool_policy_family_splits_into_four_real_sub_reasons(
+    world: _World,
+) -> None:
+    """Gate 1 is four gates wearing one coat — asserted from four real decisions."""
+    decisions = await _tool_policy_decisions(world)
+    reasons = [decision.reason for decision in decisions]
+    assert all(reasons)
+    assert len(set(reasons)) == 4, reasons
+    assert set(reasons) == {
         APPROVAL_REASON_POLICY_ABSENT,
         APPROVAL_REASON_POLICY_DISABLED,
         APPROVAL_REASON_APPROVAL_UNAVAILABLE,
         APPROVAL_REASON_POLICY_UNREADABLE,
     }
-    assert len(tool_policy) == 4
-    assert reasons.isdisjoint(tool_policy - {APPROVAL_REASON_APPROVAL_UNAVAILABLE})
 
 
 async def test_a_runner_that_refuses_the_request_is_not_reported_as_unreachable(
@@ -599,50 +708,17 @@ async def test_no_approval_gate_detail_discloses_deployment_infrastructure(
     inert gate used to say "this deployment has no approval flow wired" (process
     topology); both are reachable by a prompt-injected "quote the tool error".
     """
-    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
-    details: dict[str, str] = {}
+    decisions = [
+        *await _tool_policy_decisions(world),
+        await DenyAllApprovalGate().request(_approval_request(world)),
+    ]
 
-    # (a) no admin row at all.
-    absent = await gate.request(_approval_request(world))
-    details[APPROVAL_REASON_POLICY_ABSENT] = absent.detail or ""
-
-    # (b) an explicitly disabled row.
-    policies = TenantToolPolicyRepository(world.session, world.tenant_id)
-    await policies.upsert(
-        tool_name="run_python", enabled=False, requires_approval=True, updated_by=world.user_id
-    )
-    await world.session.commit()
-    disabled = await gate.request(_approval_request(world))
-    details[APPROVAL_REASON_POLICY_DISABLED] = disabled.detail or ""
-
-    # (c) enabled but still flagged "requires approval" (#500).
-    await policies.upsert(
-        tool_name="run_python", enabled=True, requires_approval=True, updated_by=world.user_id
-    )
-    await world.session.commit()
-    unavailable = await gate.request(_approval_request(world))
-    details[APPROVAL_REASON_APPROVAL_UNAVAILABLE] = unavailable.detail or ""
-
-    # (d) the policy could not be read at all (fail-closed).
-
-    class _BoomSession:
-        async def execute(self, *_: Any, **__: Any) -> Any:
-            raise RuntimeError("db is down")
-
-    unreadable = await PolicyApprovalGate(
-        _BoomSession(),  # type: ignore[arg-type]
-        tenant_id=world.tenant_id,
-    ).request(_approval_request(world))
-    details[APPROVAL_REASON_POLICY_UNREADABLE] = unreadable.detail or ""
-
-    # (e) the inert default gate.
-    inert = await DenyAllApprovalGate().request(_approval_request(world))
-    details["approval_gate_inert"] = inert.detail or ""
-
-    assert len(details) == 5
-    for reason, detail in details.items():
-        assert detail, f"gate {reason} produced no model-facing detail at all"
-        assert_control_neutral(detail, where=f"ApprovalDecision.detail ({reason})")
+    assert len(decisions) == 5
+    for decision in decisions:
+        assert decision.detail, f"gate {decision.reason} produced no model-facing detail"
+        assert_control_neutral(
+            decision.detail, where=f"ApprovalDecision.detail ({decision.reason})"
+        )
 
 
 async def test_every_sandbox_refusal_stderr_is_control_neutral(world: _World) -> None:
