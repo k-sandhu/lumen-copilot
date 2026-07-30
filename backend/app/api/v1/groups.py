@@ -61,7 +61,9 @@ class GroupResponse(BaseModel):
     tenant's derived "All members" group, whose membership is not stored and
     therefore not countable (ADR-0022 §3). ``null`` is not zero, so this model
     must NOT be serialized with ``exclude_none`` — dropping the key would turn
-    "everyone" into "field absent".
+    "everyone" into "field absent". It also carries **no default**: a default
+    would make it optional in the generated schema, contradicting the
+    contract's ``required``.
     """
 
     model_config = {"extra": "forbid"}
@@ -69,7 +71,7 @@ class GroupResponse(BaseModel):
     id: UUID
     name: str
     kind: str
-    member_count: int | None = None
+    member_count: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -112,7 +114,7 @@ class GroupMemberResponse(BaseModel):
     The same shape the admin roster uses, so the console can render a group's
     members with the fields it already knows. ``email_attested_at`` is
     contract-required and nullable, so this must not be serialized with
-    ``exclude_none`` either.
+    ``exclude_none`` either, and carries no default for the same reason.
     """
 
     model_config = {"extra": "forbid"}
@@ -120,7 +122,7 @@ class GroupMemberResponse(BaseModel):
     id: UUID
     email: str
     role: list[str]
-    email_attested_at: datetime | None = None
+    email_attested_at: datetime | None
 
 
 class GroupMemberListResponse(BaseModel):

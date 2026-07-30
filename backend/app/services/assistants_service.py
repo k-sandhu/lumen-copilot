@@ -51,6 +51,7 @@ from app.db.repositories import (
     AssistantVersionRepository,
     CollectionRepository,
     GrantRepository,
+    GroupRepository,
     McpServerRepository,
     SourceRepository,
 )
@@ -181,6 +182,9 @@ class AssistantsService:
         self._collections = CollectionRepository(session, tenant_id)
         self._sources = SourceRepository(session, tenant_id)
         self._grants = GrantRepository(session, tenant_id)
+        # Group principals widen what the caller may scope an assistant to,
+        # exactly as they widen retrieval (ADR-0022 §5).
+        self._groups = GroupRepository(session, tenant_id)
         self._mcp_servers = McpServerRepository(session, tenant_id)
         # The per-tenant autonomy cap (issue #218) the publish path enforces — an
         # assistant may not be published above the tenant ceiling. Tenant-scoped (INV-1).
@@ -333,10 +337,23 @@ class AssistantsService:
                 )
 
     async def _granted_resource_ids(self) -> tuple[set[UUID], set[UUID]]:
-        """The (collection ids, document ids) explicitly granted to the caller."""
+        """The (collection ids, document ids) granted to the caller.
+
+        Covers **both** of the caller's principal kinds (ADR-0022 §5): their own
+        ``user`` grants and every ``group`` grant they carry by membership.
+        Resolving only the user principal would contradict the retrieval
+        chokepoint — a group-granted collection would be readable in chat yet
+        rejected here as ``scope_collection_forbidden``, which reads as a bug to
+        the user and is a silent divergence between two permission checks.
+        """
+        group_ids = await self._groups.group_ids_for_user(self._owner_id)
         grants = await self._grants.list_for_principal(
             principal_type=GrantPrincipalType.USER, principal_id=self._owner_id
         )
+        for group_id in sorted(group_ids):
+            grants += await self._grants.list_for_principal(
+                principal_type=GrantPrincipalType.GROUP, principal_id=group_id
+            )
         collections = {
             g.resource_id for g in grants if g.resource_type == GrantResourceType.COLLECTION
         }
