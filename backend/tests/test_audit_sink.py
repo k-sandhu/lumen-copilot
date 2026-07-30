@@ -341,9 +341,11 @@ async def test_a_real_client_address_is_stored_unchanged(session: AsyncSession) 
             source_ip=address,
         )
         assert event.source_ip == address
-        # A real client address means a `client` origin, and nothing in metadata.
+        # A real client address means a `client` origin — and the repository writes
+        # nothing into the caller's metadata to say so. Pinned because the interim fix
+        # did exactly that, and re-adding it would resurrect the collision above.
         assert event.source_origin == "client"
-        assert "source_ip_declared" not in event.metadata
+        assert event.metadata == {}
 
 
 async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSession) -> None:
@@ -407,10 +409,13 @@ async def test_real_addresses_survive_in_every_form_a_client_can_present(
 async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(
     session: AsyncSession,
 ) -> None:
-    """The collision the previous test only claimed to cover.
+    """The collision that sank the interim fix.
 
-    An audit event may legitimately carry an upstream `source_ip` of its own; the
-    preserved envelope value is a DIFFERENT fact, so it gets its own namespaced key.
+    An audit event may legitimately carry an upstream `source_ip` of its own — a
+    proxied peer, a webhook's caller — and that is a DIFFERENT fact from where the
+    platform saw the request come from. Keeping the origin in `metadata` meant those
+    two facts competed for one key. In its own column they cannot collide at all,
+    and this test pins that: the caller's metadata comes back exactly as given.
     """
     sink = AuditSink(AuditEventRepository(session, uuid.uuid4()))
     event = await sink.emit(
@@ -424,7 +429,8 @@ async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(
         metadata={"source_ip": "198.51.100.7"},
     )
     assert event.metadata["source_ip"] == "198.51.100.7"  # the caller's, untouched
-    assert event.source_origin == "system"  # ours, alongside it
+    assert event.source_origin == "system"  # ours, in a column of its own
+    assert event.source_ip is None
 
 
 async def test_the_request_path_sentinel_is_handled_too(session: AsyncSession) -> None:
