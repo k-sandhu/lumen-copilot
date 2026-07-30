@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -35,6 +35,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
+from app.domain.audit import AuditAction
 from app.domain.entities import (
     DocumentStatus,
     GrantPrincipalType,
@@ -48,6 +49,7 @@ from app.retrieval import RetrievalService
 from app.retrieval.permissions import AllowSet
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
+from app.services.groups_service import GroupsService
 
 # Importing models registers them on Base.metadata.
 import app.db.models  # noqa: F401  isort: skip
@@ -423,3 +425,140 @@ async def test_empty_group_set_degrades_to_user_only_grants(
 
     _docs, colls = await GrantRepository(session, tenant_a).granted_resource_ids(outsider)
     assert colls == frozenset()
+
+
+# --- GroupsService: admin gate, immutability, audit (ADR-0022 §2) ----------------
+
+
+def _groups_service(
+    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, roles: tuple[Role, ...]
+) -> GroupsService:
+    return GroupsService(
+        session,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        roles=roles,
+        audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        request_id="req-test",
+        source_ip="203.0.113.1",
+    )
+
+
+async def test_member_may_not_manage_groups(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-5: group management is admin-only — 403, not a silent no-op."""
+    tenant_a, _ = two_tenants
+    member = await _make_user(session, tenant_a, "member@x.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=member, roles=(Role.MEMBER,))
+    with pytest.raises(ForbiddenError):
+        await svc.create_group(name="Tax Team")
+    with pytest.raises(ForbiddenError):
+        await svc.list_groups()
+
+
+async def test_admin_creates_renames_and_deletes_a_group(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+
+    group = await svc.create_group(name="  Tax Team  ")
+    assert group.name == "Tax Team"  # trimmed
+    renamed = await svc.rename_group(group.id, name="Tax & Audit")
+    assert renamed.name == "Tax & Audit"
+    await svc.delete_group(group.id)
+    with pytest.raises(NotFoundError):
+        await svc.get_group(group.id)
+
+
+async def test_duplicate_group_name_is_conflict_case_insensitively(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+    await svc.create_group(name="Tax Team")
+    with pytest.raises(ConflictError, match="already exists"):
+        await svc.create_group(name="tax team")
+
+
+async def test_blank_group_name_is_rejected(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, _ = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+    with pytest.raises(ValidationError):
+        await svc.create_group(name="   ")
+
+
+async def test_system_group_cannot_be_renamed_deleted_or_populated(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """ADR-0022 §3: the derived group is listed but immutable."""
+    tenant_a, _ = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    system = await GroupRepository(session, tenant_a).ensure_system_group()
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+
+    assert system.id in {g.id for g in await svc.list_groups()}
+    for call in (
+        svc.rename_group(system.id, name="Everyone"),
+        svc.delete_group(system.id),
+        svc.add_member(system.id, user_id=admin),
+        svc.remove_member(system.id, user_id=admin),
+    ):
+        with pytest.raises(ConflictError, match="system_group_immutable|managed automatically"):
+            await call
+
+
+async def test_foreign_tenant_group_is_404_for_admin(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-1: a tenant-B group is 404 for a tenant-A admin, never 403."""
+    tenant_a, tenant_b = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    group_b = await GroupRepository(session, tenant_b).create(name="B team", created_by=None)
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+    with pytest.raises(NotFoundError):
+        await svc.get_group(group_b.id)
+
+
+async def test_adding_a_foreign_tenant_user_is_404(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_a, tenant_b = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    outsider = await _make_user(session, tenant_b, "outsider@b.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+    group = await svc.create_group(name="Tax Team")
+    with pytest.raises(NotFoundError):
+        await svc.add_member(group.id, user_id=outsider)
+    assert await svc.list_member_ids(group.id) == []
+
+
+async def test_membership_changes_are_idempotent_and_audited(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """INV-6: every mutation is provable after the fact; repeats are no-ops."""
+    tenant_a, _ = two_tenants
+    admin = await _make_user(session, tenant_a, "admin@x.test")
+    member = await _make_user(session, tenant_a, "member@x.test")
+    svc = _groups_service(session, tenant_id=tenant_a, actor_id=admin, roles=(Role.ADMIN,))
+    group = await svc.create_group(name="Tax Team")
+
+    await svc.add_member(group.id, user_id=member)
+    await svc.add_member(group.id, user_id=member)  # idempotent
+    assert await svc.list_member_ids(group.id) == [member]
+    await svc.remove_member(group.id, user_id=member)
+    await svc.remove_member(group.id, user_id=member)  # idempotent
+    assert await svc.list_member_ids(group.id) == []
+
+    actions = {
+        e.action for e in await AuditEventRepository(session, tenant_a).list_recent(limit=20)
+    }
+    assert AuditAction.GROUP_CREATED.value in actions
+    assert AuditAction.GROUP_MEMBER_ADDED.value in actions
+    assert AuditAction.GROUP_MEMBER_REMOVED.value in actions

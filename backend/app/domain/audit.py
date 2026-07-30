@@ -69,6 +69,13 @@ class AuditAction(str, enum.Enum):
     # principal access to which resource. The grant *API*/UI is a follow-up; the
     # service that emits these is the testable seam landed here.
     PERMISSION_GRANTED = "permission.granted"
+    # Group management (ADR-0022 §2) — admin-only, every mutation audited so
+    # a change to who can see what is provable after the fact (INV-6).
+    GROUP_CREATED = "group.created"
+    GROUP_UPDATED = "group.updated"
+    GROUP_DELETED = "group.deleted"
+    GROUP_MEMBER_ADDED = "group.member_added"
+    GROUP_MEMBER_REMOVED = "group.member_removed"
     PERMISSION_REVOKED = "permission.revoked"
     # Admin per-tenant settings write (issue #148). Additive to the §2.4 taxonomy
     # — deny-by-default is preserved (the set only grows). The first /admin write:

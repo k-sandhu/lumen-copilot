@@ -3279,6 +3279,10 @@ class GroupRepository(_TenantScopedRepository):
             return None
         row.name = name.strip()
         await self._session.flush()
+        # ``updated_at`` carries ``onupdate``, so the UPDATE expires it; refresh
+        # before mapping or reading it would attempt lazy IO outside the async
+        # greenlet (the same pattern the other updating repositories use).
+        await self._session.refresh(row)
         return _to_group(row)
 
     async def delete(self, group_id: UUID) -> bool:
