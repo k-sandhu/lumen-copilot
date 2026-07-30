@@ -27,6 +27,8 @@ import re
 from datetime import datetime
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.db.repositories import (
@@ -40,7 +42,7 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Message, MessageRole, Role
-from app.domain.llm import ChatMessage
+from app.domain.llm import ChatMessage, Completion
 from app.domain.llm import Role as LlmRole
 from app.llm import LLMGateway
 from app.services.audit import AuditSink
@@ -170,46 +172,101 @@ _REDACT_MIN_WINDOW_WORDS = 4
 _REDACT_MIN_WINDOW_CHARS = 15
 
 
-#: Chat-template / protocol scaffolding a route can leak into a completion instead of
-#: prose. Observed live: a free OSS route returned exactly ``"<|start|>spire"`` for a
-#: seven-turn batch, which passed the emptiness check and was persisted as the summary.
-_CONTROL_TOKEN = re.compile(r"<\|[^|]*\|>")
+#: Chat-template / protocol scaffolding a route can leak instead of prose. Deliberately
+#: several families, not just the one observed: a route that leaks ANY of these is
+#: emitting protocol, not a summary. Seen live from a free OSS route:
+#: ``"<|start|>spire"`` — 14 chars standing in for seven turns, which the emptiness
+#: check accepted and persisted.
+#:   ``<|…|>``            ChatML / harmony (gpt-oss, Qwen, many OpenAI-lineage routes)
+#:   ``<start_of_turn>``  Gemma
+#:   ``[INST]``/``[/INST]``  Llama-2, Mistral
+#:   ``<<SYS>>``          Llama-2 system block
+#:   ``<s>``/``</s>``     raw BOS/EOS leakage
+_CONTROL_TOKEN = re.compile(
+    r"<\|[^|]{0,64}\|>"
+    r"|<\s*/?\s*s\s*>"
+    r"|<\s*/?\s*start_of_turn\s*>"
+    r"|\[/?INST\]"
+    r"|<<\s*/?SYS\s*>>",
+    re.IGNORECASE,
+)
 
-#: A summary must be at least this long outright, and at least this FRACTION of the
-#: text it claims to represent. Both are deliberately LOW: a short conversation can
-#: legitimately summarise to one short sentence, and the primary signal is the control
-#: token check, not length. An earlier 40-char floor rejected a perfectly good 34-char
-#: summary — the guard must catch protocol artifacts, not police terseness.
+#: Absolute floor, and a higher floor once a batch spans several turns. Deliberately far
+#: BELOW what the prompt asks for (~300 words ≈ 1,500-1,900 chars), so a compliant
+#: summary can never be refused.
+#:
+#: These are NOT scaled against the input length, and that is the point. An earlier cut
+#: required the summary to be ≥1% of the covered text, which inverts the actual
+#: contract: the prompt targets a FIXED output size regardless of input, so a
+#: proportional floor grows past what the model is allowed to produce. Measured on this
+#: deployment — p95 message length 4,156 chars × the 40-message batch cap ≈ 166k chars
+#: of input, demanding ≥1,662 chars while ``max_tokens=600`` caps output at ~2,400 and
+#: the prompt asks for less — a perfectly good summary was refused, and past ~240k chars
+#: of input NO completion could ever pass, leaving the session permanently
+#: unsummarisable. That would have bitten hardest on the first pass over a backlogged
+#: session, i.e. immediately on deploy.
+#: Both bars are deliberately WEAK. This gate's job is to catch protocol artifacts and
+#: obvious non-summaries, not to judge quality — without a grader it cannot tell a
+#: terse-but-true summary from a terse-but-useless one, and guessing costs real turns.
+#: Two successive attempts to set these higher (40 absolute, then 64 multi-turn) each
+#: rejected a legitimate 34-character summary; the bar belongs where only junk falls
+#: under it. The control-token rule is what actually caught the observed failure.
 _SUMMARY_MIN_CHARS = 16
-_SUMMARY_MIN_RATIO = 0.01
+_SUMMARY_MULTI_TURN_MIN_CHARS = 32
+_MULTI_TURN_THRESHOLD = 4
 
 
-def _implausible_summary(summary: str, covered_text: str) -> str | None:
-    """Why ``summary`` cannot be a summary of ``covered_text``, or ``None`` if it can.
+async def _record_summary_spend(
+    session: AsyncSession,
+    tenant_id: UUID,
+    session_id: UUID,
+    completion: Completion,
+    route: ModelRoute,
+) -> None:
+    """Record the summariser's token spend (message-less, grouped by session).
 
-    This is a QUALITY gate, distinct from the leak guard (`_redact_cited_snippets`,
-    which still runs and still wins). It exists because accepting a bad completion is
-    not a no-op: `upsert_summary` advances the coverage cursor, so the covered turns
-    stop riding verbatim and are represented ONLY by whatever was stored. A garbage
-    summary is therefore silent, irreversible context loss — strictly worse than not
-    summarising at all, which merely costs tokens.
+    Called on BOTH the accepted and the refused path: a refused completion was still
+    paid for, and refusals repeat on every answer until the model produces something
+    usable, so leaving them unrecorded hides exactly the spend an operator would need
+    to notice (ADR-0016 §2.6 — no invisible spend).
+    """
+    if not (completion.usage.total_tokens or completion.usage.prompt_tokens):
+        return
+    await LlmUsageRepository(session, tenant_id).record(
+        model=completion.model or route.model,
+        prompt_tokens=completion.usage.prompt_tokens,
+        completion_tokens=completion.usage.completion_tokens,
+        total_tokens=completion.usage.total_tokens,
+        session_id=session_id,
+    )
 
-    Deliberately cheap and model-agnostic (no second LLM call): a route that leaks
-    chat-template scaffolding, or returns something far too small to represent its
-    input, is refused and the turns stay verbatim for the next attempt.
+
+def _implausible_summary(summary: str, covered_messages: int) -> str | None:
+    """Why ``summary`` cannot be a summary of ``covered_messages`` turns, else ``None``.
+
+    A QUALITY gate, distinct from the leak guard (`_redact_cited_snippets`, which runs
+    first and still wins). It exists because accepting a bad completion is not a no-op:
+    `upsert_summary` advances the coverage cursor, so the covered turns stop riding
+    verbatim and are represented ONLY by what was stored. A garbage summary is silent,
+    irreversible context loss — strictly worse than not summarising, which merely costs
+    tokens until the next attempt.
+
+    Cheap and model-agnostic by design (no second LLM call), and bounded by TURN COUNT
+    rather than input length so it can never demand more than the model is allowed to
+    write. It catches protocol leakage and obvious non-summaries; it does not pretend to
+    judge quality — a fluent but wrong summary passes, as it must without a grader.
     """
     text = summary.strip()
-    if not text:
-        return "empty"
     if _CONTROL_TOKEN.search(text):
         # The route leaked protocol scaffolding rather than answering.
         return "contains chat-template control tokens"
     if len(text) < _SUMMARY_MIN_CHARS:
         return f"too short ({len(text)} chars, minimum {_SUMMARY_MIN_CHARS})"
-    if covered_text and len(text) < len(covered_text) * _SUMMARY_MIN_RATIO:
+    if covered_messages >= _MULTI_TURN_THRESHOLD and len(text) < _SUMMARY_MULTI_TURN_MIN_CHARS:
+        # Still a fixed bound, so it stays reachable however long the turns were.
         return (
-            f"implausibly short for its input ({len(text)} chars for "
-            f"{len(covered_text)} chars of conversation)"
+            f"too short for {covered_messages} turns "
+            f"({len(text)} chars, minimum {_SUMMARY_MULTI_TURN_MIN_CHARS})"
         )
     return None
 
@@ -362,7 +419,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         # — 14 characters of protocol scaffolding standing in for seven turns, which
         # the emptiness check happily accepted. Refusing leaves the turns verbatim
         # and lets the next enqueue retry; that is strictly better than losing them.
-        implausible = _implausible_summary(summary_text, user_block)
+        implausible = _implausible_summary(summary_text, len(to_cover))
         if implausible is not None:
             log.warning(
                 "summarize.implausible_summary",
@@ -370,6 +427,29 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
                 model=route.model,
                 reason=implausible,
                 summary_chars=len(summary_text),
+            )
+            # The refusal is NOT free: the completion above really was paid for, and
+            # because the cursor does not advance the SAME batch is rebuilt and re-sent
+            # on the next answer. Recording the spend and auditing the refusal is what
+            # makes that visible — a structlog line is ops logging, which spec 0004 §2.4
+            # explicitly distinguishes from the product audit trail. Without this, a
+            # tenant pinned to a junk route pays a full summariser prompt per answer,
+            # forever, with nothing in `llm_usage` or `audit_events` to find it by
+            # (ADR-0016 §2.6: no invisible spend).
+            await _record_summary_spend(session, tenant_id, session_id, completion, route)
+            await AuditSink(AuditEventRepository(session, tenant_id)).emit(
+                action=AuditAction.SESSION_SUMMARIZED,
+                actor=AuditActor.system(),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ERROR,
+                request_id="summarize-task",
+                source_ip="system",
+                metadata={
+                    "covered_messages": len(to_cover),
+                    "refused": implausible,
+                    "model": route.model,
+                },
             )
             return "skipped_implausible_summary"
         accepted, updated = await summaries.upsert_summary(
@@ -399,14 +479,7 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
         )
         # The summarizer's own spend is real — record it (message-less; the
         # session groups it; ADR-0016 §2.6 posture: no invisible spend).
-        if completion.usage.total_tokens or completion.usage.prompt_tokens:
-            await LlmUsageRepository(session, tenant_id).record(
-                model=completion.model or route.model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens,
-                total_tokens=completion.usage.total_tokens,
-                session_id=session_id,
-            )
+        await _record_summary_spend(session, tenant_id, session_id, completion, route)
         return "summarized"
 
 

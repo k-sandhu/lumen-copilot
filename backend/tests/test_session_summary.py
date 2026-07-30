@@ -816,15 +816,20 @@ async def test_a_control_token_completion_is_refused_and_the_cursor_stays_put(
         row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         # No row at all, or one that never advanced — either way the turns are intact.
         assert row is None or row.covers_through_message_id is None
-        # And nothing was audited as a successful summarisation.
+        # A refusal IS audited — but as an error carrying the reason, never as a
+        # successful summarisation (that distinction is the point: the operator can
+        # find a session burning tokens without producing a usable summary).
         recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
-        assert not [e for e in recent if e.action == "session.summarized"]
+        summarized = [e for e in recent if e.action == "session.summarized"]
+        assert summarized, "the refusal left no audit trail at all"
+        assert all(e.outcome == "error" for e in summarized)
+        assert all(e.metadata.get("refused") for e in summarized)
 
 
-async def test_an_implausibly_short_completion_is_refused(
+async def test_a_completion_under_the_absolute_floor_is_refused(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No control token, just far too small to be a summary of ten turns."""
+    """No control token — just below the absolute character floor."""
     from app.tasks import summarize as task_module
 
     class _Tiny(_GarbageGateway):
@@ -835,6 +840,97 @@ async def test_an_implausibly_short_completion_is_refused(
 
     outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
     assert outcome == "skipped_implausible_summary"
+
+
+async def test_a_completion_over_the_floor_but_tiny_for_many_turns_is_refused(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MULTI-TURN branch, which review found had no test reaching it at all.
+
+    Both other refusal tests trip earlier rules (control token, absolute floor), so
+    this branch was live code with no coverage. 20 chars clears the 16-char floor but
+    cannot represent ten turns.
+    """
+    from app.tasks import summarize as task_module
+
+    class _Terse(_GarbageGateway):
+        payload = "Talked about stuff"  # 18 chars: over the 16 floor, under the 32 multi-turn bar
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Terse)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+
+async def test_the_bar_never_exceeds_what_the_model_is_allowed_to_write(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compliant summary must pass no matter how LONG the covered turns were.
+
+    An earlier cut scaled the minimum against the covered TEXT (>=1% of input). At the
+    40-message batch cap with this deployment's p95 message length that demanded ~1,662
+    chars, while the prompt asks for "under 300 words" and `max_tokens=600` caps output
+    around 2,400 — so a compliant summary was refused, and past ~240k chars of input no
+    completion could pass at all, leaving the session permanently unsummarisable. The
+    bar is now fixed per turn-count, so enormous turns cannot move it.
+    """
+    from app.tasks import summarize as task_module
+    from app.db import models as _models
+    from sqlalchemy import update as _upd
+
+    # Make the covered turns enormous — the exact condition that broke the old rule.
+    async with ctx.sessionmaker() as session:
+        await session.execute(
+            _upd(_models.Message)
+            .where(_models.Message.session_id == ctx.session_id)
+            .values(content="x" * 6000)
+        )
+        await session.commit()
+
+    class _Compliant(_GarbageGateway):
+        # ~200 chars: far under "300 words", comfortably a real summary.
+        payload = (
+            "The user asked about regional revenue and the assistant walked through "
+            "the northern and southern figures, flagged one unresolved attribution "
+            "question, and agreed to follow up next week."
+        )
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Compliant)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "summarized", "a compliant summary was refused for long input"
+
+
+async def test_a_refused_summary_still_records_its_spend_and_audits(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal is not free, and it repeats — so it must be visible.
+
+    The completion was paid for, and because the cursor does not advance the same batch
+    is re-sent on every subsequent answer. Without a usage row and an audit event, a
+    tenant on a junk route pays a full summariser prompt per answer forever with
+    nothing to find it by (ADR-0016 §2.6: no invisible spend; spec 0004 §2.4 puts ops
+    logging outside the product audit trail).
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _GarbageGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+    async with ctx.sessionmaker() as session:
+        usage = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert usage and usage[-1].total_tokens == 70, "refused spend went unrecorded"
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        refusals = [
+            e for e in recent if e.action == "session.summarized" and e.metadata.get("refused")
+        ]
+        assert refusals, "the refusal was invisible in the audit trail"
+        assert refusals[0].outcome == "error"
 
 
 async def test_a_genuine_summary_is_still_accepted(
