@@ -18,14 +18,14 @@ created from the ORM metadata. A dev user is seeded with an Argon2id hash, then:
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
 from fastapi import Depends, FastAPI
-from httpx import ASGITransport, AsyncClient, Response
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -273,74 +273,69 @@ def test_require_roles_admits_correct_role() -> None:
 # serves nothing else for its whole duration, so an unauthenticated login flood
 # stalls every other request in the process.
 #
-# The probe is a 10 ms ticker coroutine racing the login, and the assertion is on
-# the **longest gap** between its wakeups — not on a tick count. A login awaits
-# the database several times either way, so a count accumulates enough ticks
-# around the stall to pass even when the loop *was* parked; the longest gap
-# isolates exactly the unresponsive stretch this issue is about.
+# The probe is a **handshake, not a stopwatch**: the stand-in verifier asks the
+# event loop to release it and refuses to proceed until the loop actually does.
+# On a worker thread the loop is free, runs the callback, and the verify carries
+# on immediately. Run inline on the loop, the callback is queued behind the very
+# verify that is waiting for it and can never fire — a deadlock the wait turns
+# into a clear failure. Nothing here depends on how fast the machine is, so a
+# loaded CI worker cannot flip the result (review round 1, finding 5).
 #
-# The stall is injected at ``hashing._hasher`` — the one Argon2 object *both*
-# ``verify_password`` and ``dummy_verify`` funnel through. Patching there (rather
-# than either wrapper) keeps the probe independent of how the module routes work
-# to a thread, so the test measures loop residency and not an implementation
-# detail. A fixed stall also keeps it fast and deterministic; real Argon2 timing
-# would be neither.
+# The stand-in replaces ``hashing._hasher`` — the one Argon2 object *both*
+# ``verify_password`` and ``dummy_verify`` funnel through — so the probe measures
+# loop residency rather than how the module happens to reach a thread.
 
-_STALL_SECONDS = 0.3
-_TICK_SECONDS = 0.01
-# Verification on the loop produces a gap of >= _STALL_SECONDS; off the loop the
-# gaps stay at tick resolution. 0.1 s sits an order of magnitude above Windows
-# timer jitter and 3x below the stall, so the two regimes cannot be confused.
-_MAX_GAP_SECONDS = 0.1
+# Only bounds the failure case: on success the handshake completes in microseconds.
+_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 
 
-class _StallingHasher:
-    """The real hasher plus a fixed stall — same verdicts, deliberate cost."""
+class _LoopHandshakeHasher:
+    """Real hasher, but it will not verify until the event loop proves it is alive."""
 
-    def __init__(self, inner: object) -> None:
+    def __init__(self, inner: object, loop: asyncio.AbstractEventLoop) -> None:
         self._inner = inner
+        self._loop = loop
+        self.released_by_loop = False
 
     def verify(self, password_hash: str, password: str) -> bool:
-        time.sleep(_STALL_SECONDS)
+        released = threading.Event()
+
+        def _release() -> None:
+            self.released_by_loop = True
+            released.set()
+
+        # Queued on the loop. It can only run if the loop is not sitting inside
+        # this very call — which is exactly the property under test.
+        self._loop.call_soon_threadsafe(_release)
+        if not released.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS):
+            raise AssertionError(
+                "the event loop never ran while Argon2 verification was in progress "
+                "— verification is blocking the loop"
+            )
         # Delegate so mismatches still raise exactly what the wrappers catch.
         verified: bool = self._inner.verify(password_hash, password)  # type: ignore[attr-defined]
         return verified
 
 
-async def _longest_loop_gap_during(awaitable: Awaitable[Response]) -> tuple[Response, float]:
-    """Await ``awaitable``; return it with the longest event-loop stall observed."""
-    gaps: list[float] = []
-
-    async def _ticker() -> None:
-        last = time.perf_counter()
-        while True:
-            await asyncio.sleep(_TICK_SECONDS)
-            now = time.perf_counter()
-            gaps.append(now - last)
-            last = now
-
-    ticker = asyncio.create_task(_ticker())
-    try:
-        await asyncio.sleep(0)  # let the ticker reach its first await
-        result = await awaitable
-    finally:
-        ticker.cancel()
-    # No tick at all means the loop never came back — the worst case, not a pass.
-    return result, max(gaps, default=float("inf"))
+def _install_handshake_hasher(monkeypatch: pytest.MonkeyPatch) -> _LoopHandshakeHasher:
+    probe = _LoopHandshakeHasher(hashing._hasher, asyncio.get_running_loop())
+    monkeypatch.setattr(hashing, "_hasher", probe)
+    return probe
 
 
 async def test_login_does_not_stall_the_event_loop(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The known-user verify runs off the loop, so concurrent work keeps running."""
-    monkeypatch.setattr(hashing, "_hasher", _StallingHasher(hashing._hasher))
+    """The known-user verify runs off the loop, so the loop keeps servicing work."""
+    probe = _install_handshake_hasher(monkeypatch)
 
-    resp, longest_gap = await _longest_loop_gap_during(
-        client.post("/api/v1/auth/login", json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD})
+    resp = await client.post(
+        "/api/v1/auth/login", json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD}
     )
+
     # Unchanged outcome: the thread hop moves cost, never the verdict.
     assert resp.status_code == 200
-    assert longest_gap < _MAX_GAP_SECONDS
+    assert probe.released_by_loop is True
 
 
 async def test_unknown_account_login_does_not_stall_the_event_loop(
@@ -353,12 +348,13 @@ async def test_unknown_account_login_does_not_stall_the_event_loop(
     path exactly as expensive as the authenticated one, so it must be off the
     loop too — otherwise anyone can stall the worker with invented addresses.
     """
-    monkeypatch.setattr(hashing, "_hasher", _StallingHasher(hashing._hasher))
+    probe = _install_handshake_hasher(monkeypatch)
 
-    resp, longest_gap = await _longest_loop_gap_during(
-        client.post("/api/v1/auth/login", json={"email": "ghost@acme.test", "password": "x"})
+    resp = await client.post(
+        "/api/v1/auth/login", json={"email": "ghost@acme.test", "password": "x"}
     )
+
     # Still the same generic 401 — no observable outcome changes.
     assert resp.status_code == 401
     assert resp.json().get("detail", "") == "Invalid email or password."
-    assert longest_gap < _MAX_GAP_SECONDS
+    assert probe.released_by_loop is True

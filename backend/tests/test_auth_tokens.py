@@ -8,6 +8,7 @@ a missing/expired/tampered/wrong-issuer token must fail closed → ``InvalidToke
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import uuid
@@ -126,6 +127,94 @@ async def test_dummy_verify_async_still_pays_the_cost_off_the_loop(
     monkeypatch.setattr(hashing, "dummy_verify", _record)
     await hashing.dummy_verify_async()
     assert ran_on == [ran_on[0]] and ran_on[0] != threading.get_ident()
+
+
+async def test_verification_concurrency_is_bounded_by_a_dedicated_pool() -> None:
+    """Concurrent verifies are capped, and never run on the shared default executor.
+
+    Argon2id is memory-hard, so verifications in flight are a memory budget: on
+    the shared ``asyncio.to_thread`` executor an unauthenticated login burst
+    could both multiply that budget without limit and starve every other
+    ``to_thread`` caller. This pins the ceiling and the isolation (review round 1,
+    finding 2).
+    """
+    cap = hashing._MAX_CONCURRENT_VERIFICATIONS
+    assert 2 <= cap <= 8  # a memory ceiling, not an unbounded pool
+
+    in_flight = 0
+    peak = 0
+    threads: set[str] = set()
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def _blocking_verify(password_hash: str, password: str) -> bool:  # noqa: ARG001
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            threads.add(threading.current_thread().name)
+        # Hold every worker until the pool is provably saturated, so `peak`
+        # reflects the pool's real ceiling rather than how fast verifies retire.
+        release.wait(timeout=5.0)
+        with lock:
+            in_flight -= 1
+        return True
+
+    original = hashing.verify_password
+    hashing.verify_password = _blocking_verify  # type: ignore[assignment]
+    try:
+        # Ask for more than the cap; the surplus must queue, not run.
+        tasks = [
+            asyncio.create_task(hashing.verify_password_async("h", "pw")) for _ in range(cap + 4)
+        ]
+        # Let the pool fill, then let everyone go.
+        await asyncio.sleep(0.2)
+        observed_peak = peak
+        release.set()
+        assert all(await asyncio.gather(*tasks))
+    finally:
+        release.set()
+        hashing.verify_password = original  # type: ignore[assignment]
+
+    assert observed_peak == cap
+    # Its own named threads — not the shared default executor's.
+    assert threads and all(name.startswith("argon2-verify") for name in threads)
+
+
+async def test_both_login_paths_share_one_verification_queue() -> None:
+    """The known-user and unknown-user paths must saturate together.
+
+    Routing them to separate executors would give them different queueing
+    behaviour under load and reintroduce the account-existence timing signal
+    that ``dummy_verify`` exists to close (spec 0004 §2.3).
+    """
+    seen: set[str] = set()
+    release = threading.Event()
+
+    def _record(*_args: object) -> bool:
+        seen.add(threading.current_thread().name)
+        release.wait(timeout=5.0)
+        return True
+
+    original_verify = hashing.verify_password
+    original_dummy = hashing.dummy_verify
+    hashing.verify_password = _record  # type: ignore[assignment]
+    hashing.dummy_verify = _record  # type: ignore[assignment]
+    try:
+        tasks = [
+            asyncio.create_task(hashing.verify_password_async("h", "pw")),
+            asyncio.create_task(hashing.dummy_verify_async()),
+        ]
+        await asyncio.sleep(0.1)
+        release.set()
+        await asyncio.gather(*tasks)
+    finally:
+        release.set()
+        hashing.verify_password = original_verify  # type: ignore[assignment]
+        hashing.dummy_verify = original_dummy  # type: ignore[assignment]
+
+    # Both landed on the one dedicated pool.
+    assert seen and all(name.startswith("argon2-verify") for name in seen)
 
 
 # --- Refresh tokens (opaque; hashed at rest) -------------------------------

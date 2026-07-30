@@ -125,9 +125,22 @@ class WebSearchService:
         # the whole search down with it (ADR-0014 §4).
         fetched, rest = results[: self._fetch_top_n], results[self._fetch_top_n :]
         async with httpx.AsyncClient(follow_redirects=False) as fetch_client:
-            passages = await asyncio.gather(
-                *(self._fetch_passage(r.url, client=fetch_client) for r in fetched)
-            )
+            tasks = [
+                asyncio.create_task(self._fetch_passage(r.url, client=fetch_client))
+                for r in fetched
+            ]
+            try:
+                passages = await asyncio.gather(*tasks)
+            except BaseException:
+                # A failure ``_fetch_passage`` does not absorb (or cancellation of
+                # this search) would otherwise leave siblings running while the
+                # ``async with`` closes the client out from under them. Retire
+                # them here so the shared client only closes once nothing is
+                # using it — the serial loop never left a fetch in flight either.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         # Zip strictly back onto the rows they came from: gather preserves the
         # argument order, so ranking survives whatever order the pages returned in.
         enriched = [

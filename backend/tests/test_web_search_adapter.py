@@ -504,3 +504,39 @@ async def test_rate_limit_still_precedes_every_fetch(monkeypatch: pytest.MonkeyP
     with pytest.raises(WebSearchRateLimited):
         await service.search("python")
     assert probe.urls == []
+
+
+async def test_unexpected_fetch_failure_retires_siblings_before_closing_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure the chokepoint does not absorb must not strand its siblings.
+
+    ``_fetch_passage`` swallows the two documented failure classes, so anything
+    else propagates out of the gather. The serial loop simply never started the
+    remaining fetches; a bare gather leaves them running while the ``async with``
+    closes the shared client underneath them. Retiring them keeps the two shapes
+    equivalent — nothing is still touching the client when it closes.
+    """
+    started: list[str] = []
+    retired: list[str] = []
+    never_set = asyncio.Event()
+
+    async def _fetch(url: str, **_kw: object) -> FetchResult:
+        started.append(url)
+        if url == "https://a.example/":
+            raise RuntimeError("transport blew up in a way the guard does not model")
+        try:
+            await never_set.wait()  # parks until cancelled
+            raise AssertionError("unreachable")
+        finally:
+            retired.append(url)
+
+    monkeypatch.setattr("app.search_web.service.fetch_url", _fetch)
+
+    with pytest.raises(RuntimeError):
+        await _probe_service(3, _THREE_RESULTS).search("python")
+
+    # Every sibling that started has been driven to completion (cancelled), so
+    # the client closed with no fetch still in flight.
+    assert set(started) == {r.url for r in _THREE_RESULTS}
+    assert set(retired) == {"https://b.example/", "https://c.example/"}
