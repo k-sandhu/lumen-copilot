@@ -10,14 +10,16 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.sandbox.runner import build_container_flags
 from app.sandbox.spec import SandboxSessionSpec, StagedInput
+from tests._sandbox_helpers import sandbox_settings
 
 
-def _session(*, runtime: str = "runsc") -> SandboxSessionSpec:
+def _session(*, runtime: str = "runsc", output_bytes_cap: int | None = None) -> SandboxSessionSpec:
     return SandboxSessionSpec(
         sandbox_session_id=uuid4(),
         generation=1,
         image="python@sha256:abc",
         runtime=runtime,
+        output_bytes_cap=output_bytes_cap,
         env=(
             ("HOME", "/root"),
             ("PYTHONUNBUFFERED", "1"),
@@ -37,13 +39,27 @@ def test_root_is_contained_without_host_mounts_socket_or_network() -> None:
     assert flags.security_opt == ("no-new-privileges:true",)
 
 
-def test_no_automatic_time_resource_pid_or_output_limits() -> None:
+def test_no_automatic_time_resource_or_pid_limits() -> None:
     flags = build_container_flags(_session())
     assert flags.wall_clock_seconds is None
     assert flags.cpus is None
     assert flags.memory_bytes is None
     assert flags.pids_limit is None
-    assert flags.output_bytes_cap is None
+
+
+def test_output_collection_is_bounded_by_the_configured_cap() -> None:
+    """The one limit ADR-0020 does enforce, because it protects OTHER tenants.
+
+    Collected output is read into the runner's memory, and the runner is the single
+    holder of the Docker socket: an unbounded collection let one chat turn OOM the
+    process every tenant's code execution depends on. ``output_bytes_cap`` existed as
+    a field that nothing populated and nothing read; it is now carried to the runner.
+    """
+    settings = sandbox_settings()
+    flags = build_container_flags(_session(output_bytes_cap=settings.sandbox_output_bytes_cap))
+
+    assert flags.output_bytes_cap == settings.sandbox_output_bytes_cap
+    assert flags.output_bytes_cap is not None and flags.output_bytes_cap > 0
 
 
 def test_curated_session_env_contains_no_application_secret_keys() -> None:

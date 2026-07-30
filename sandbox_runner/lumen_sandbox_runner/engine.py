@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
@@ -29,6 +29,18 @@ _IDLE_COMMAND = ["sh", "-lc", "while :; do sleep 3600; done"]
 #: The OCI runtimes this runner will launch: the hardened Docker baseline, or gVisor.
 _KNOWN_RUNTIMES = ("runc", "runsc")
 
+#: Hard ceiling on how many bytes of ONE execution's output directory this process
+#: will read into memory, whatever a caller asks for. ``get_archive`` streams a tar of
+#: a MODEL-CONTROLLED directory: without a budget, one ``open('big','wb').write(...)``
+#: in a chat turn takes the only Docker-socket holder past its container memory limit,
+#: and the OOM killer removes code execution for every tenant. A session may request
+#: LESS (the backend sends ``SANDBOX_OUTPUT_BYTES_CAP``); nothing may request more.
+_OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
+
+#: The effective budget rides on the container, so an execution against an
+#: already-ensured generation enforces the number that generation was created with.
+_OUTPUT_CAP_LABEL = "com.lumen.sandbox.output-cap"
+
 
 class RunnerError(RuntimeError):
     """Safe internal-runner failure carrying an HTTP status."""
@@ -36,6 +48,49 @@ class RunnerError(RuntimeError):
     def __init__(self, message: str, *, status_code: int = 500) -> None:
         self.status_code = status_code
         super().__init__(message)
+
+
+class _BudgetedReader:
+    """A read-only file view over a chunk stream that stops at a hard byte budget.
+
+    ``tarfile`` in stream mode (``r|*``) only ever calls ``read``, so this is the whole
+    interface it needs. Once the budget is spent the reader reports EOF instead of
+    pulling more of a model-controlled archive into memory; ``exhausted`` records that
+    data was actually dropped (a stream that ends exactly on the budget is not
+    truncated). Peak memory is the budget plus at most one source chunk.
+    """
+
+    def __init__(self, chunks: Iterable[bytes], budget: int) -> None:
+        self._chunks = iter(chunks)
+        self._buffer = bytearray()
+        self._remaining = max(budget, 0)
+        self.exhausted = False
+
+    def read(self, size: int = -1) -> bytes:
+        # Once the budget is spent, stop pulling from the source stream altogether:
+        # draining the rest of a huge archive costs nothing in memory but keeps the
+        # daemon streaming it. Buffered bytes are still served, then EOF.
+        while not self.exhausted and (size < 0 or len(self._buffer) < size):
+            try:
+                chunk = next(self._chunks)
+            except StopIteration:
+                break
+            if not chunk:
+                continue
+            if len(chunk) > self._remaining:
+                # Keep only what the budget still allows, then stop reading entirely.
+                self.exhausted = True
+                if self._remaining > 0:
+                    self._buffer.extend(chunk[: self._remaining])
+                    self._remaining = 0
+                break
+            self._remaining -= len(chunk)
+            self._buffer.extend(chunk)
+        if size < 0:
+            size = len(self._buffer)
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
 
 
 class SessionLocks:
@@ -172,6 +227,7 @@ class DockerSandboxEngine:
             _MANAGED_LABEL: "true",
             _SESSION_LABEL: str(session_id),
             _GENERATION_LABEL: str(request.generation),
+            _OUTPUT_CAP_LABEL: str(self._effective_output_cap(request.container.output_bytes_cap)),
         }
         self._require_local_image(request.image)
         return self._client.containers.run(
@@ -259,7 +315,17 @@ class DockerSandboxEngine:
             if self._container_running(container):
                 raise RunnerError("sandbox execution failed") from exc
         duration_ms = int((time.monotonic() - started) * 1000)
-        output_files = self._collect_outputs(container, output_dir) if status != "killed" else []
+        output_files: list[dict[str, object]] = []
+        truncated = False
+        if status != "killed":
+            budget = self._output_cap_of(container)
+            output_files, truncated = self._collect_outputs(container, output_dir, budget)
+            if truncated:
+                note = (
+                    f"Only part of the output directory was collected: it exceeded the "
+                    f"{budget}-byte limit for one execution. Write fewer or smaller files."
+                )
+                stderr = f"{stderr}\n{note}" if stderr else note
         output_bytes = len(stdout.encode()) + len(stderr.encode())
         return {
             "status": status,
@@ -400,30 +466,69 @@ class DockerSandboxEngine:
             raise RunnerError("sandbox preparation command failed", status_code=422)
 
     @staticmethod
-    def _collect_outputs(container: Any, output_dir: str) -> list[dict[str, object]]:
+    def _effective_output_cap(requested: int | None) -> int:
+        """The session's output budget: what was asked for, never above the ceiling."""
+        if requested is None or requested > _OUTPUT_BYTES_CEILING:
+            return _OUTPUT_BYTES_CEILING
+        return max(requested, 1)
+
+    @staticmethod
+    def _output_cap_of(container: Any) -> int:
+        """Read the budget the generation was created with; anything odd fails closed."""
+        try:
+            value = int(str((container.labels or {}).get(_OUTPUT_CAP_LABEL)))
+        except (TypeError, ValueError):
+            return _OUTPUT_BYTES_CEILING
+        if value < 1:
+            return _OUTPUT_BYTES_CEILING
+        return min(value, _OUTPUT_BYTES_CEILING)
+
+    @staticmethod
+    def _collect_outputs(
+        container: Any, output_dir: str, byte_budget: int
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Collect the run's output files under a hard byte budget.
+
+        The previous ``b"".join(stream)`` read a tar of a model-controlled directory
+        into memory in full before anything looked at its size, so the size of one
+        chat turn's output was the size of the runner's memory footprint. Streaming
+        with a budget bounds it. A file the budget cuts in half is DROPPED rather than
+        delivered short — a truncated PNG or xlsx persisted as an artifact would be a
+        silently corrupt deliverable — and the caller is told collection was partial.
+        """
         try:
             stream, _ = container.get_archive(output_dir)
         except Exception:
-            return []
-        raw = b"".join(stream)
+            return [], False
+        reader = _BudgetedReader(stream, byte_budget)
         files: list[dict[str, object]] = []
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                extracted = tar.extractfile(member)
-                if extracted is None:
-                    continue
-                filename = PurePosixPath(member.name).name
-                files.append(
-                    {
-                        "filename": filename,
-                        "content_type": mimetypes.guess_type(filename)[0]
-                        or "application/octet-stream",
-                        "data_b64": base64.b64encode(extracted.read()).decode("ascii"),
-                    }
-                )
-        return files
+        truncated = False
+        try:
+            with tarfile.open(fileobj=reader, mode="r|*") as tar:  # type: ignore[arg-type]
+                for member in tar:
+                    if not member.isfile():
+                        continue
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    data = extracted.read()
+                    if len(data) != member.size:
+                        truncated = True
+                        break
+                    filename = PurePosixPath(member.name).name
+                    files.append(
+                        {
+                            "filename": filename,
+                            "content_type": mimetypes.guess_type(filename)[0]
+                            or "application/octet-stream",
+                            "data_b64": base64.b64encode(data).decode("ascii"),
+                        }
+                    )
+        except (tarfile.TarError, EOFError, OSError):
+            # A tar cut short by the budget raises where the next header should be;
+            # the members already read whole are still good.
+            truncated = True
+        return files, truncated or reader.exhausted
 
 
 __all__ = ["DockerSandboxEngine", "RunnerError", "SessionLocks"]

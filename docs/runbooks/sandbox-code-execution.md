@@ -221,7 +221,19 @@ docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
 - `status=succeeded` with your output in `stdout` → all four gates are open.
 - `status=denied` → read `stderr`; it names the gate (§0).
 - `status=failed` with "the code sandbox service is unreachable" → the runner is
-  down, or the execution image is missing from the host daemon (§1).
+  down, or the execution image is missing from the host daemon (§1). The runner
+  answers `503 sandbox execution image is not present on the host daemon` for the
+  second case, and never pulls the image to fix it for you.
+- `status=succeeded` but a file you expected is missing, with *"Only part of the
+  output directory was collected"* in `stderr` → the run wrote more than
+  `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB). Collection is budgeted because the
+  runner reads those bytes into its own memory and is the single Docker-socket
+  holder; a file the budget cuts in half is dropped rather than delivered corrupt.
+  Collection follows archive order, so one oversized file also costs you the files
+  after it — verified live: with the cap set to 4 KiB, a run writing `big.bin` (2 MB)
+  and `small.txt` returned **no** files and that stderr note, while the run itself
+  still reported `succeeded`. Write fewer/smaller files, or raise the cap (the runner
+  clamps it to 64 MiB).
 
 ## 6. Verify it automatically — the live execution test (#506)
 

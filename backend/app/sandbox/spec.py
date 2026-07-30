@@ -82,17 +82,27 @@ class SandboxPolicy:
 
 @dataclass(frozen=True, slots=True)
 class SandboxSessionSpec:
-    """The opaque reusable-container identity passed to the runner (ADR-0020)."""
+    """The opaque reusable-container identity passed to the runner (ADR-0020).
+
+    ``output_bytes_cap`` is the one limit ADR-0020 does enforce, and it protects the
+    RUNNER rather than the run: collected output files are read into the runner's
+    memory, and the runner is the single holder of the Docker socket, so an unbounded
+    collection let one chat turn OOM the process every tenant's code execution depends
+    on. ``None`` leaves the runner's own ceiling in force.
+    """
 
     sandbox_session_id: UUID
     generation: int
     image: str
     runtime: str
+    output_bytes_cap: int | None = None
     env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.generation < 1:
             raise ValueError("sandbox generation must be >= 1")
+        if self.output_bytes_cap is not None and self.output_bytes_cap < 1:
+            raise ValueError("sandbox output_bytes_cap must be >= 1 when set")
 
 
 @dataclass(frozen=True, slots=True)

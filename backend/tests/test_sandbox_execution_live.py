@@ -154,6 +154,9 @@ async def sandbox() -> AsyncIterator[_LiveSandbox]:
         generation=1,
         image=settings.sandbox_image,
         runtime=settings.sandbox_runtime,
+        # The deploy's real output budget, so a live run exercises the number the
+        # lifecycle actually sends rather than the runner's fallback ceiling.
+        output_bytes_cap=settings.sandbox_output_bytes_cap,
         # The SAME curated env the production lifecycle hands a session, so this run
         # inherits MPLBACKEND/HOME exactly as a chat's sandbox does — if that env
         # changes, this test follows it instead of drifting from it.

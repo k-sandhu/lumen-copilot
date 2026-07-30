@@ -1195,7 +1195,20 @@ class Settings(BaseSettings):
     sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
-    sandbox_output_bytes_cap: int = Field(default=1 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP")
+    # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
+    # execution's output directory the runner will read into its own memory before it
+    # stops and reports partial collection. This protects the RUNNER, not the run —
+    # the runner is the single Docker-socket holder, so an unbounded collection let one
+    # chat turn's 4GB file OOM the process every tenant's code execution depends on
+    # (the field was previously sent as ``None`` and read by nothing).
+    #
+    # 32 MiB: comfortably above a real analysis turn (a matplotlib PNG is tens of KB, a
+    # generated spreadsheet a few MB) and far below the runner's own container memory
+    # limit even after base64 expansion. The runner clamps anything larger to its own
+    # ceiling; lowering this only narrows collection.
+    sandbox_output_bytes_cap: int = Field(
+        default=32 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
+    )
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
     # Compatibility-only tenant quota values; not enforced for ADR-0020 sessions.
     sandbox_max_concurrent_per_tenant: int = Field(

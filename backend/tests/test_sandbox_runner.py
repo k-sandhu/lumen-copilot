@@ -20,6 +20,7 @@ def _session(*, generation: int = 1) -> SandboxSessionSpec:
         generation=generation,
         image="python@sha256:abc",
         runtime="runsc",
+        output_bytes_cap=4 * 1024 * 1024,
         env=(("HOME", "/root"),),
     )
 
@@ -72,7 +73,10 @@ async def test_execute_ensures_root_writable_unbounded_session_then_runs() -> No
         "memory_bytes": None,
         "pids_limit": None,
         "wall_clock_seconds": None,
-        "output_bytes_cap": None,
+        # The one bound that IS sent: the runner must not read an unbounded amount of
+        # a model-controlled output directory into the memory of the single
+        # Docker-socket holder. It was `None` here, and dead on the runner side too.
+        "output_bytes_cap": 4 * 1024 * 1024,
     }
     assert session_body["env"] == {"HOME": "/root"}
     assert requests[1][2]["packages"] == ["numpy==2.1.0"]

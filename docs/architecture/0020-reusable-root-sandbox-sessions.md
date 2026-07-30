@@ -17,7 +17,9 @@ one chat session and is reused until the user resets it, closes it, or deletes t
 The model runs as root **inside that isolated container** so approved packages can be
 installed into the mutable environment. This intentionally trades the original
 resource-abuse posture for interactive flexibility: v1 has no automatic execution or
-idle timeout and no per-run CPU, memory, PID, output, or daily-runtime limit.
+idle timeout and no per-run CPU, memory, PID, or daily-runtime limit. (Collected
+**output** is the one bounded quantity — see §4 — because it is consumed by the shared
+runner rather than by the run.)
 
 Root plus direct network access would let model-authored code bypass domain allowlists,
 scan internal services, or exfiltrate staged tenant data. Root therefore does not imply
@@ -119,9 +121,23 @@ the **runner's** outbound access, which a locked-down deploy is expected to with
   image digest, stdout/stderr, exit, duration, artifacts, and trace.
   The run's opaque sandbox UUID is historical data rather than a foreign key, so it
   survives deletion of the chat-scoped lifecycle row for audit/reconstruction.
-- There is no automatic runtime/resource/output limit. `duration_ms` and best-effort
+- There is no automatic runtime/CPU/memory/PID limit. `duration_ms` and best-effort
   usage remain observational. The compatibility statuses `timeout` and `killed` remain
   readable for historical rows and explicit cancellation/runtime failures.
+- **Amendment (PR #507 review, 2026-07-29): output COLLECTION is bounded.** The one
+  exception to the line above, and it is not a limit on the run — it protects the
+  *runner*. Collecting `LUMEN_OUTPUT_DIR` streams a tar of a model-controlled directory
+  into the runner's memory, and the runner is the single Docker-socket holder, so a run
+  that writes one very large file could push it past its container memory limit and let
+  the OOM killer take code execution away from **every** tenant. `output_bytes_cap`
+  existed on the wire but was typed `None` and read by nothing; it now carries
+  `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB), the runner clamps it to its own 64 MiB
+  ceiling and applies that ceiling when the field is absent, and collection stops at
+  the budget. Complete files up to the cap are returned; a file the budget cuts in half
+  is **dropped rather than delivered short** (a truncated PNG or xlsx persisted as an
+  artifact would be a silently corrupt deliverable), and the run's `stderr` says
+  collection was partial. The execution itself is untouched — it still ran, and its
+  status is unchanged.
 
 ### 5. Runner boundary and cancellation
 

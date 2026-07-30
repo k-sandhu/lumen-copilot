@@ -477,6 +477,34 @@ async def test_cancel_kills_run_and_advances_generation(session: AsyncSession) -
         await lifecycle.cancel(value.id)
 
 
+async def test_ensured_session_carries_the_configured_output_budget(
+    session: AsyncSession,
+) -> None:
+    """``SANDBOX_OUTPUT_BYTES_CAP`` reaches the runner instead of being dropped.
+
+    The runner reads a run's output directory into ITS OWN memory and is the single
+    holder of the Docker socket, so an unbounded collection let one chat turn OOM the
+    process every tenant's code execution depends on. The setting existed but nothing
+    populated the spec field, so the number never left the backend.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    runner = _FakeRunner()
+    settings = sandbox_settings(SANDBOX_OUTPUT_BYTES_CAP="2097152")
+    lifecycle = SandboxSessionService(
+        session,
+        tenant_id=tenant,
+        owner_id=owner,
+        runner=runner,
+        settings=settings,
+    )
+
+    await lifecycle.ensure(chat)
+
+    assert runner.ensured[0].output_bytes_cap == 2 * 1024 * 1024
+    assert settings.sandbox_output_bytes_cap == 2 * 1024 * 1024
+
+
 async def test_cancelling_old_run_does_not_destroy_or_advance_new_generation(
     session: AsyncSession,
 ) -> None:

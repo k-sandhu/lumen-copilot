@@ -350,6 +350,7 @@ class SandboxSessionService:
                         else self._settings.sandbox_image
                     ),
                     runtime=self._settings.sandbox_runtime,
+                    output_bytes_cap=self._settings.sandbox_output_bytes_cap,
                     env=self._session_env(),
                 ),
                 run.id,
@@ -417,6 +418,10 @@ class SandboxSessionService:
             generation=value.generation,
             image=value.image_digest,
             runtime=self._settings.sandbox_runtime,
+            # The runner reads collected output files into its own memory and is the
+            # single Docker-socket holder, so this bound is what keeps one chat turn's
+            # output from taking code execution down for every tenant.
+            output_bytes_cap=self._settings.sandbox_output_bytes_cap,
             env=self._session_env(),
         )
 

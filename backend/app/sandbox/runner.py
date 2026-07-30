@@ -26,17 +26,20 @@ class ContainerFlags:
     cap_drop: tuple[str, ...] = ("ALL",)
     security_opt: tuple[str, ...] = ("no-new-privileges:true",)
     runtime: str = "runc"
-    # ADR-0020 intentionally starts without automatic resource/time/output limits.
+    # ADR-0020 intentionally starts without automatic CPU/memory/PID/time limits.
     cpus: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
     wall_clock_seconds: int | None = None
+    # The exception, and it is not about the run: collected output is read into the
+    # RUNNER's memory, and the runner is the only Docker-socket holder, so unbounded
+    # collection made one chat turn able to take code execution down for every tenant.
     output_bytes_cap: int | None = None
 
 
 def build_container_flags(spec: SandboxSessionSpec) -> ContainerFlags:
     """Return the fixed contained-root posture for a reusable session."""
-    return ContainerFlags(runtime=spec.runtime)
+    return ContainerFlags(runtime=spec.runtime, output_bytes_cap=spec.output_bytes_cap)
 
 
 class SandboxRunner(Protocol):

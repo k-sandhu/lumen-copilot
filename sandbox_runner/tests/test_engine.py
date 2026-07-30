@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import builtins
 import io
 import tarfile
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +15,12 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from lumen_sandbox_runner.engine import DockerSandboxEngine, RunnerError
+from lumen_sandbox_runner.engine import (
+    _OUTPUT_BYTES_CEILING,
+    _OUTPUT_CAP_LABEL,
+    DockerSandboxEngine,
+    RunnerError,
+)
 from lumen_sandbox_runner.models import ContainerPolicy, EnsureSessionRequest, ExecuteRequest
 
 
@@ -37,6 +44,13 @@ class _Container:
         self.execution_exit_code = 0
         self.stop_on_execute = False
         self._guard = threading.Lock()
+        # What the model wrote to the output dir: (filename, byte length). The
+        # archive is handed back in small chunks so a test can observe how much of
+        # a model-controlled stream the engine was willing to read.
+        self.output_files: list[tuple[str, int]] = []
+        self.archive_chunk_size = 256
+        self.archive_chunks_yielded = 0
+        self.archive_chunks_total = 0
 
     def reload(self) -> None:
         return None
@@ -81,12 +95,28 @@ class _Container:
             self.events.append("code")
         return True
 
-    def get_archive(self, path: str) -> tuple[list[bytes], dict[str, object]]:
+    def get_archive(self, path: str) -> tuple[Iterator[bytes], dict[str, object]]:
         del path
         data = io.BytesIO()
-        with tarfile.open(fileobj=data, mode="w"):
-            pass
-        return [data.getvalue()], {}
+        with tarfile.open(fileobj=data, mode="w") as archive:
+            for name, size in self.output_files:
+                info = tarfile.TarInfo(f"output/{name}")
+                info.size = size
+                archive.addfile(info, io.BytesIO(b"z" * size))
+        raw = data.getvalue()
+        chunks = [
+            raw[start : start + self.archive_chunk_size]
+            for start in range(0, len(raw), self.archive_chunk_size)
+        ]
+        self.archive_chunks_total = len(chunks)
+        self.archive_chunks_yielded = 0
+
+        def _stream() -> Iterator[bytes]:
+            for chunk in chunks:
+                self.archive_chunks_yielded += 1
+                yield chunk
+
+        return _stream(), {}
 
 
 class _ImageNotFound(Exception):
@@ -146,12 +176,12 @@ class _Client:
         self.images = _Images()
 
 
-def _ensure(*, generation: int = 1) -> EnsureSessionRequest:
+def _ensure(*, generation: int = 1, output_bytes_cap: int | None = None) -> EnsureSessionRequest:
     return EnsureSessionRequest(
         generation=generation,
         image="lumen-sandbox-runner:0.2.0",
         env={"HOME": "/root"},
-        container={"runtime": "runc"},
+        container={"runtime": "runc", "output_bytes_cap": output_bytes_cap},
     )
 
 
@@ -162,6 +192,11 @@ def test_wire_policy_rejects_any_isolation_widening() -> None:
         ContainerPolicy(binds=["/host:/workspace"])
     with pytest.raises(ValidationError):
         ContainerPolicy(memory_bytes=1024)  # type: ignore[arg-type]
+    # ``output_bytes_cap`` is the one policy value a caller may set, because lowering
+    # it only narrows what the runner will hold in memory. Zero would mean "collect
+    # nothing" by accident rather than by decision, and negative is nonsense.
+    with pytest.raises(ValidationError):
+        ContainerPolicy(output_bytes_cap=0)
     with pytest.raises(ValidationError):
         EnsureSessionRequest(
             generation=1,
@@ -311,6 +346,101 @@ def test_same_session_executions_serialize_and_duplicate_is_cached() -> None:
 
     engine.execute_existing(session_id, first)
     assert container.python_calls == 2
+
+
+def _execute(engine: DockerSandboxEngine, session_id: object) -> dict[str, object]:
+    return engine.execute_existing(
+        session_id,  # type: ignore[arg-type]
+        ExecuteRequest(generation=1, execution_id=uuid4(), code="print('ok')"),
+    )
+
+
+def test_collected_output_within_the_budget_is_returned_whole() -> None:
+    """The cap is a bound on a hostile case, not a tax on the routine one."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure(output_bytes_cap=1_000_000))
+    container = client.containers.values[0]
+    container.output_files = [("chart.png", 900), ("table.csv", 400)]
+
+    result = _execute(engine, session_id)
+
+    files = result["output_files"]
+    assert isinstance(files, list)
+    assert [value["filename"] for value in files] == ["chart.png", "table.csv"]
+    assert len(base64.b64decode(str(files[0]["data_b64"]))) == 900
+    assert "exceeded" not in str(result["stderr"])
+    assert container.archive_chunks_yielded == container.archive_chunks_total
+
+
+def test_output_collection_stops_at_the_byte_budget_and_says_so() -> None:
+    """One chat turn must not be able to OOM the only Docker-socket holder.
+
+    ``get_archive`` streams a tar of a MODEL-CONTROLLED directory. Read whole into
+    memory (``b"".join(stream)``) and then base64-encoded, a single
+    ``open('big','wb').write(...)`` drives the runner past its container memory
+    limit — and the OOM killer takes code execution away from every tenant, not just
+    the one that ran it. So the collection is budgeted: complete files up to the cap
+    are returned, the rest is dropped, and the run says what happened.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure(output_bytes_cap=2_000))
+    container = client.containers.values[0]
+    container.output_files = [(f"file{index}.bin", 800) for index in range(6)]
+
+    result = _execute(engine, session_id)
+
+    files = result["output_files"]
+    assert isinstance(files, list)
+    # The first member fits (512-byte header + 1024 bytes of padded data); the rest
+    # of the stream is never pulled into the runner's memory at all.
+    assert [value["filename"] for value in files] == ["file0.bin"]
+    assert len(base64.b64decode(str(files[0]["data_b64"]))) == 800
+    assert "exceeded" in str(result["stderr"])
+    assert container.archive_chunks_yielded < container.archive_chunks_total
+    assert container.archive_chunks_yielded * container.archive_chunk_size <= 2_000 + 256
+
+
+def test_a_partially_read_file_is_dropped_rather_than_delivered_corrupt() -> None:
+    """Truncating in the middle of a file yields no file, not half a file."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure(output_bytes_cap=1_024))
+    client.containers.values[0].output_files = [("report.xlsx", 4_096)]
+
+    result = _execute(engine, session_id)
+
+    assert result["output_files"] == []
+    assert "exceeded" in str(result["stderr"])
+
+
+def test_output_budget_is_clamped_to_the_runner_ceiling() -> None:
+    """A caller may lower the budget; it can never raise it past the runner's own.
+
+    The effective cap rides on the container as a label so an execution against an
+    already-ensured generation (the production path) enforces the same number the
+    session was created with.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    engine.ensure(uuid4(), _ensure(output_bytes_cap=8 * 1024 * 1024 * 1024))
+    engine.ensure(uuid4(), _ensure(output_bytes_cap=4_096))
+
+    assert client.containers.values[0].labels[_OUTPUT_CAP_LABEL] == str(_OUTPUT_BYTES_CEILING)
+    assert client.containers.values[1].labels[_OUTPUT_CAP_LABEL] == "4096"
+
+
+def test_an_absent_output_cap_still_gets_the_runner_ceiling() -> None:
+    """A caller that sends nothing is bounded anyway — the cap fails closed."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    engine.ensure(uuid4(), _ensure())
+
+    assert client.containers.values[0].labels[_OUTPUT_CAP_LABEL] == str(_OUTPUT_BYTES_CEILING)
 
 
 def test_cancel_destroys_the_matching_generation() -> None:

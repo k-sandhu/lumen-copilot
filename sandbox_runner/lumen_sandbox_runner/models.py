@@ -35,7 +35,12 @@ class ContainerPolicy(BaseModel):
     memory_bytes: None = None
     pids_limit: None = None
     wall_clock_seconds: None = None
-    output_bytes_cap: None = None
+    # The one policy value a caller may choose, because it only ever NARROWS what this
+    # process will hold in memory: the runner clamps it to its own ceiling and applies
+    # that ceiling when the field is absent. It was typed ``None`` and read by nothing,
+    # so output collection was unbounded — one execution's files could OOM the single
+    # Docker-socket holder and take code execution down for every tenant.
+    output_bytes_cap: int | None = Field(default=None, ge=1)
 
 
 class EnsureSessionRequest(BaseModel):
