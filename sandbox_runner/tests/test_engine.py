@@ -176,12 +176,14 @@ class _Client:
         self.images = _Images()
 
 
-def _ensure(*, generation: int = 1, output_bytes_cap: int | None = None) -> EnsureSessionRequest:
+def _ensure(
+    *, generation: int = 1, output_bytes_cap: int | None = None, runtime: str = "runc"
+) -> EnsureSessionRequest:
     return EnsureSessionRequest(
         generation=generation,
         image="lumen-sandbox-runner:0.2.0",
         env={"HOME": "/root"},
-        container={"runtime": "runc", "output_bytes_cap": output_bytes_cap},
+        container={"runtime": runtime, "output_bytes_cap": output_bytes_cap},
     )
 
 
@@ -260,29 +262,41 @@ def test_present_image_is_resolved_before_the_container_is_created() -> None:
     assert len(client.containers.run_kwargs) == 1
 
 
-def test_runtime_is_runner_side_config_and_ignores_the_request() -> None:
-    """A gVisor deploy cannot be downgraded per session by the caller.
+def test_runtime_comes_from_the_environment_not_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SANDBOX_RUNTIME`` on the runner service is the single source of truth.
 
-    ``EnsureSessionRequest`` carries ``runtime`` for wire compatibility, but the whole
-    safety argument of a gVisor deploy rests on the sandbox host's configuration — so
-    that is where the value comes from.
+    A gVisor deploy's whole safety argument rests on the sandbox host's own
+    configuration, so a caller cannot select the runtime: the launched value is read
+    here (the constructor default is ``runc``, so a request for ``runsc`` only
+    succeeds because the environment says so).
+    """
+    monkeypatch.setenv("SANDBOX_RUNTIME", "runsc")
+    client = _Client()
+
+    DockerSandboxEngine(client).ensure(uuid4(), _ensure(runtime="runsc"))
+
+    assert client.containers.run_kwargs[0]["runtime"] == "runsc"
+
+
+def test_a_runtime_the_caller_disagrees_with_is_refused_not_silently_applied() -> None:
+    """A disagreement is a misconfiguration, and it must be loud.
+
+    Both sides read the same ``SANDBOX_RUNTIME``, so they only diverge when an
+    operator changed it and restarted one of them — most dangerously the backend but
+    not this service, which would leave a deploy that believes it is on gVisor
+    quietly launching containers under ``runc``. Refusing the session turns that
+    silent downgrade into an error naming both values.
     """
     client = _Client()
     engine = DockerSandboxEngine(client, runtime="runsc")
 
-    engine.ensure(uuid4(), _ensure())  # the request asks for plain runc
+    with pytest.raises(RunnerError) as refusal:
+        engine.ensure(uuid4(), _ensure())  # the caller believes it is on runc
 
-    assert client.containers.run_kwargs[0]["runtime"] == "runsc"
-
-
-def test_runtime_defaults_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``SANDBOX_RUNTIME`` on the runner service is the single source of truth."""
-    monkeypatch.setenv("SANDBOX_RUNTIME", "runsc")
-    client = _Client()
-
-    DockerSandboxEngine(client).ensure(uuid4(), _ensure())
-
-    assert client.containers.run_kwargs[0]["runtime"] == "runsc"
+    assert "runsc" in str(refusal.value)
+    assert client.containers.run_kwargs == []
 
 
 def test_unknown_configured_runtime_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:

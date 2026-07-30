@@ -139,12 +139,16 @@ require gVisor there.
 `SANDBOX_RUNTIME` is read **twice, from the same `.env`**: the backend validates it
 (gVisor mandatory outside local), and compose passes it to the `sandbox-runner`
 service, which is what actually launches containers with it. That is deliberate — the
-runner takes the runtime from **its own** configuration and ignores the `runtime`
-field on an ensure request, so a caller cannot pick `runc` for one session on a
-gVisor deploy. **Restart `sandbox-runner` after changing it**
-(`docker compose --profile sandbox up -d sandbox-runner`); restarting only the
-backend and worker leaves the old runtime in force, and the runner refuses to start
-at all on a value that is neither `runc` nor `runsc`.
+runner takes the runtime from **its own** configuration, never from a request, so a
+caller cannot pick `runc` for one session on a gVisor deploy.
+
+**Restart `sandbox-runner` after changing it**
+(`docker compose --profile sandbox up -d sandbox-runner`). If you restart only the
+backend and worker, the two sides disagree and the runner **refuses every session**
+with `409 sandbox runtime mismatch: this runner is configured for '<x>' but the
+session asked for '<y>'` — deliberately loud, because the alternative is a deploy that
+believes it is on gVisor while every container runs under plain `runc`. A value that
+is neither `runc` nor `runsc` makes the runner refuse to serve at all.
 
 ## 3. Enable it for a workspace and an assistant
 

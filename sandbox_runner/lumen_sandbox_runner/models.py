@@ -26,10 +26,12 @@ class ContainerPolicy(BaseModel):
     security_opt: list[Literal["no-new-privileges:true"]] = Field(
         default_factory=lambda: ["no-new-privileges:true"], min_length=1, max_length=1
     )
-    # Accepted for wire compatibility and IGNORED: the OCI runtime is read from THIS
-    # service's own ``SANDBOX_RUNTIME`` (see ``DockerSandboxEngine._configured_runtime``).
-    # A caller-selectable runtime would let anyone who reaches the internal API run one
+    # NOT the runtime that gets used: the OCI runtime is read from THIS service's own
+    # ``SANDBOX_RUNTIME`` (see ``DockerSandboxEngine._configured_runtime``), because a
+    # caller-selectable runtime would let anyone who reaches the internal API run one
     # session under plain ``runc`` on a deploy whose safety argument rests on gVisor.
+    # This field is what the caller BELIEVES is in force; a disagreement is refused
+    # rather than silently overridden, so a half-restarted deploy is loud.
     runtime: Literal["runc", "runsc"] = "runc"
     cpus: None = None
     memory_bytes: None = None

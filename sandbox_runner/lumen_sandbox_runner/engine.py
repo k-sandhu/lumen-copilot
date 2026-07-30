@@ -223,13 +223,17 @@ class DockerSandboxEngine:
                 return container
             self._remove(container)
 
+        # Preconditions of LAUNCH, checked before anything is created. They apply to a
+        # new container only: one that already exists was created under the runtime and
+        # image in force then, and keeps them until the session is reset or closed.
+        self._require_agreed_runtime(request.container.runtime)
+        self._require_local_image(request.image)
         labels = {
             _MANAGED_LABEL: "true",
             _SESSION_LABEL: str(session_id),
             _GENERATION_LABEL: str(request.generation),
             _OUTPUT_CAP_LABEL: str(self._effective_output_cap(request.container.output_bytes_cap)),
         }
-        self._require_local_image(request.image)
         return self._client.containers.run(
             request.image,
             command=_IDLE_COMMAND,
@@ -337,6 +341,23 @@ class DockerSandboxEngine:
             "output_files": output_files,
             "resource_usage": {"output_bytes": output_bytes},
         }
+
+    def _require_agreed_runtime(self, requested: str) -> None:
+        """Refuse a session whose caller believes in a different runtime than this one.
+
+        The launched runtime is always ``self._runtime`` — a caller cannot select it.
+        But silently overriding a disagreement hides the dangerous direction of it:
+        both sides read the same ``SANDBOX_RUNTIME``, so they diverge only when an
+        operator changed it and restarted the backend without recreating this service,
+        which would leave a deploy that believes it is on gVisor launching containers
+        under plain ``runc``. Refusing names both values instead.
+        """
+        if requested != self._runtime:
+            raise RunnerError(
+                f"sandbox runtime mismatch: this runner is configured for "
+                f"'{self._runtime}' but the session asked for '{requested}'",
+                status_code=409,
+            )
 
     def _require_local_image(self, image: str) -> None:
         """Launch only an image the host daemon ALREADY has — never trigger a pull.
