@@ -1,6 +1,6 @@
 # 22. Group access model — group principals, and who a source is visible to
 
-- **Status:** Proposed *(scope model decided by sponsor 2026-07-30; design proposed)*
+- **Status:** Accepted *(scope model decided by sponsor 2026-07-30; design accepted 2026-07-30)*
 - **Date:** 2026-07-30
 - **Builds on:** [spec 0004 §2.2](../specs/0004-security-and-domain-invariants.md) (grants, the INV-2 chokepoint, the `group`/`role` `revisit-at-implementation` follow-up), [ADR-0004](0004-architecture-boundaries-and-adapters.md) (one owning module per concern), [ADR-0009](0009-connector-framework-and-web-source.md) (the `sources` model), [ADR-0019](0019-connector-sdk-and-oauth.md) (mirrored ACLs and the freshness floor), [ADR-0021](0021-data-pack-connector.md) (data packs as sources — whose §5 this supersedes)
 

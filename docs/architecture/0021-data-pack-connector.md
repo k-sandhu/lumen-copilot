@@ -1,6 +1,6 @@
 # 21. Data packs as a connector — curated document sets as a managed source
 
-- **Status:** Proposed *(surface decided by sponsor 2026-07-30: connectors, not Settings; design proposed)*
+- **Status:** Accepted *(surface decided by sponsor 2026-07-30: connectors, not Settings; design accepted 2026-07-30)*
 - **Date:** 2026-07-30
 - **Builds on:** [ADR-0004](0004-architecture-boundaries-and-adapters.md) (the `connectors/` boundary), [ADR-0009](0009-connector-framework-and-web-source.md) (connector framework, `sources` model, SSRF chokepoint), [ADR-0019](0019-connector-sdk-and-oauth.md) (SDK widening: binary payloads, `external_id` reconcile), [spec 0004](../specs/0004-security-and-domain-invariants.md) (INV-1/INV-2 scoping, INV-6 audit, INV-7 tiers)
 
