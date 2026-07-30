@@ -44,6 +44,22 @@ _OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
 #: event in the caller's transaction. Generous for a chat turn, fatal as a fan-out.
 _MAX_OUTPUT_MEMBERS = 64
 
+#: Cap on the stdout/stderr this process RETAINS and returns per execution.
+#: NOTE the honest limit: docker-py's non-streaming ``exec_run`` buffers the whole
+#: process output before returning, so this bounds the JSON payload and the result
+#: cache but NOT peak memory during the exec itself — ``print('x'*2_000_000_000)``
+#: is still a runner-side OOM risk. Bounding that needs the streaming low-level exec
+#: API, tracked separately; ADR-0013 §G7 and the runbook say so plainly rather than
+#: claiming a bound that does not exist.
+_MAX_STREAM_CHARS = 256 * 1024
+
+#: How many completed execution results are retained for idempotent re-reads. The
+#: cache is keyed per (session, generation, execution) and was previously unbounded,
+#: so long-lived sessions accumulated every result — up to the output cap each —
+#: until close. Oldest-first eviction keeps it bounded; an evicted key simply
+#: re-executes rather than returning a stale answer.
+_MAX_CACHED_RESULTS = 64
+
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
 _OUTPUT_CAP_LABEL = "com.lumen.sandbox.output-cap"
@@ -150,6 +166,39 @@ class DockerSandboxEngine:
         return docker.from_env()
 
     @staticmethod
+    def _clip(text: str) -> str:
+        """Bound one stream's retained text, saying so in-band when it is cut."""
+        if len(text) <= _MAX_STREAM_CHARS:
+            return text
+        return text[:_MAX_STREAM_CHARS] + (
+            f"\n[output truncated at {_MAX_STREAM_CHARS} characters]"
+        )
+
+    def _remember(self, key: tuple[UUID, int, UUID], result: dict[str, object]) -> None:
+        """Cache a completed result, evicting oldest-first past the bound."""
+        self._results[key] = result
+        while len(self._results) > _MAX_CACHED_RESULTS:
+            self._results.pop(next(iter(self._results)), None)
+
+    @staticmethod
+    def _container_runtime(container: Any) -> str | None:
+        """The runtime a container is ACTUALLY running under, or ``None`` if unreadable.
+
+        Read from ``HostConfig.Runtime`` on the live inspect payload (``reload()`` has
+        just refreshed it). ``None`` means the daemon did not report one — treated as
+        "cannot prove a mismatch", so an unreadable value never destroys a working
+        session; the launch-time checks still govern anything newly created.
+        """
+        attrs = getattr(container, "attrs", None)
+        if not isinstance(attrs, dict):
+            return None
+        host_config = attrs.get("HostConfig")
+        if not isinstance(host_config, dict):
+            return None
+        runtime = host_config.get("Runtime")
+        return runtime if isinstance(runtime, str) and runtime else None
+
+    @staticmethod
     def _configured_runtime(explicit: str | None) -> str:
         """Resolve the OCI runtime from THIS SERVICE's configuration, never a request.
 
@@ -195,7 +244,7 @@ class DockerSandboxEngine:
             container = self._ensure_unlocked(session_id, session_request)
             result = self._execute_unlocked(container, request)
             if result.get("status") != "killed":
-                self._results[key] = result
+                self._remember(key, result)
             return result
 
     def execute_existing(self, session_id: UUID, request: ExecuteRequest) -> dict[str, object]:
@@ -217,7 +266,7 @@ class DockerSandboxEngine:
             container = matches[0]
             result = self._execute_unlocked(container, request)
             if result.get("status") != "killed":
-                self._results[key] = result
+                self._remember(key, result)
             return result
 
     def close(self, session_id: UUID, generation: int | None = None) -> None:
@@ -240,14 +289,26 @@ class DockerSandboxEngine:
             current = int(container.labels[_GENERATION_LABEL])
             if current == request.generation:
                 container.reload()
+                # A reused container was created under whatever runtime was configured
+                # THEN. If this service has since been repinned (runc → runsc), keeping
+                # it would go on executing model code under the weaker runtime while the
+                # backend — and the runbook — believe gVisor is enforced. That silent
+                # downgrade is exactly the window a half-restarted deploy opens, so the
+                # ACTUAL runtime is inspected, not assumed from creation time. A mismatch
+                # is handled like any other "not the container we want": remove it and
+                # create a fresh one below. Recreating (rather than refusing) keeps the
+                # session available — ADR-0020 §1 makes the environment a cache, not
+                # durable storage — while guaranteeing nothing runs under the wrong one.
+                actual = self._container_runtime(container)
+                if actual is not None and actual != self._runtime:
+                    self._remove(container)
+                    break
                 if container.status != "running":
                     container.start()
                 return container
             self._remove(container)
 
-        # Preconditions of LAUNCH, checked before anything is created. They apply to a
-        # new container only: one that already exists was created under the runtime and
-        # image in force then, and keeps them until the session is reset or closed.
+        # Preconditions of LAUNCH, checked before anything is created.
         self._require_agreed_runtime(request.container.runtime)
         self._require_local_image(request.image)
         labels = {
@@ -345,8 +406,8 @@ class DockerSandboxEngine:
             )
             exit_code = int(outcome.exit_code)
             stdout_raw, stderr_raw = outcome.output or (b"", b"")
-            stdout = (stdout_raw or b"").decode("utf-8", errors="replace")
-            stderr = (stderr_raw or b"").decode("utf-8", errors="replace")
+            stdout = self._clip((stdout_raw or b"").decode("utf-8", errors="replace"))
+            stderr = self._clip((stderr_raw or b"").decode("utf-8", errors="replace"))
             if exit_code != 0 and not self._container_running(container):
                 # Docker returns exit 137 rather than raising when cancel removes a
                 # container during exec. Treat any non-zero outcome from a container

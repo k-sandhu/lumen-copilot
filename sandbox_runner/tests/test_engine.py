@@ -36,7 +36,7 @@ class _Container:
         self.labels = labels
         self.events = events
         self.image = _Image()
-        self.attrs = {"Config": {"Env": []}}
+        self.attrs = {"Config": {"Env": []}, "HostConfig": {"Runtime": "runc"}}
         self.status = "running"
         self.removed = False
         self.python_calls = 0
@@ -172,6 +172,11 @@ class _Containers:
         del image
         self.run_kwargs.append(kwargs)
         container = _Container(dict(kwargs["labels"]), [])  # type: ignore[arg-type]
+        # Mirror the daemon: the container reports the runtime it was created with,
+        # which is what the reuse path inspects rather than assuming.
+        runtime = kwargs.get("runtime")
+        if isinstance(runtime, str):
+            container.attrs["HostConfig"]["Runtime"] = runtime
         self.values.append(container)
         return container
 
@@ -635,6 +640,93 @@ def test_the_archive_stream_is_released_when_the_budget_stops_reading() -> None:
         "the archive stream was abandoned rather than closed — the daemon-side writer "
         "stays blocked with no read timeout and the connection is never reclaimed"
     )
+
+
+def test_a_reused_container_on_the_old_runtime_is_replaced_not_kept() -> None:
+    """A half-restarted deploy must not keep executing under the weaker runtime.
+
+    A container created while ``SANDBOX_RUNTIME=runc`` keeps running under runc. If this
+    service is then repinned to ``runsc`` but an existing session is reused, the earlier
+    code returned that container untouched — so model code went on running under the
+    Docker baseline while the backend, the ADR and the runbook all believed gVisor was
+    enforced. The container's ACTUAL runtime is now inspected, and a mismatch is treated
+    like any other wrong container: removed and recreated.
+    """
+    client = _Client()
+    old = DockerSandboxEngine(client, runtime="runc")
+    session_id = uuid4()
+    old.ensure(session_id, _ensure())
+    first = client.containers.values[0]
+    assert first.attrs["HostConfig"]["Runtime"] == "runc"
+
+    # Same session, same generation — but this runner is pinned to gVisor.
+    upgraded = DockerSandboxEngine(client, runtime="runsc")
+    upgraded.ensure(session_id, _ensure(runtime="runsc"))
+
+    assert first.removed, "the runc container was kept and would have executed model code"
+    fresh = client.containers.values[-1]
+    assert fresh is not first
+    assert fresh.attrs["HostConfig"]["Runtime"] == "runsc"
+
+
+def test_a_reused_container_on_the_current_runtime_is_kept() -> None:
+    """The control: a matching runtime must NOT churn the session (state is a cache)."""
+    client = _Client()
+    engine = DockerSandboxEngine(client, runtime="runc")
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+    first = client.containers.values[0]
+
+    engine.ensure(session_id, _ensure())
+
+    assert not first.removed
+    assert len(client.containers.values) == 1
+
+
+def test_output_collection_stops_at_the_member_ceiling() -> None:
+    """Bytes alone do not bound members, and every member becomes a persisted artifact.
+
+    A tar member costs ~1 KiB on the wire, so a byte budget admits tens of thousands of
+    them — and each one downstream is an object-store PUT, an ``artifacts`` row and an
+    audit event inside the caller's transaction. One chat turn writing 40k tiny files
+    would fan out into 40k of each.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    # A generous byte budget, so ONLY the member ceiling can stop this.
+    engine.ensure(session_id, _ensure(output_bytes_cap=8 * 1024 * 1024))
+    container = client.containers.values[0]
+    container.output_files = [(f"f{index}.txt", 1) for index in range(200)]
+
+    result = _execute(engine, session_id)
+
+    files = result["output_files"]
+    assert isinstance(files, list)
+    assert len(files) == 64
+    assert "exceeded" in str(result["stderr"])
+
+
+def test_a_failed_archive_read_is_reported_as_partial_not_clean() -> None:
+    """A daemon error during collection must not read as "succeeded, no artifacts"."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+    container = client.containers.values[0]
+    container.output_files = [("chart.png", 128)]
+
+    def _boom(path: str) -> tuple[Iterator[bytes], dict[str, object]]:
+        del path
+        raise RuntimeError("daemon said no")
+
+    container.get_archive = _boom  # type: ignore[method-assign]
+
+    result = _execute(engine, session_id)
+
+    assert result["output_files"] == []
+    # The run still succeeded, but the caller is TOLD output was lost.
+    assert "exceeded" in str(result["stderr"]) or "truncat" in str(result["stderr"]).lower()
 
 
 def test_a_partially_read_file_is_dropped_rather_than_delivered_corrupt() -> None:

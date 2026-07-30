@@ -48,6 +48,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest_asyncio
+from packaging.version import Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -99,7 +100,7 @@ from app.services.tools.types import (
     ToolContext,
     ToolDefinition,
 )
-from tests._disclosure import assert_control_neutral
+from tests._disclosure import assert_control_neutral, control_neutral_violations
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -754,3 +755,24 @@ async def test_every_sandbox_refusal_stderr_is_control_neutral(world: _World) ->
     assert all(seen), "a refusal with an empty stderr tells the model nothing"
     for value in seen:
         assert_control_neutral(value, where="code_runs.stderr")
+
+
+def test_the_package_refusal_is_control_neutral_too() -> None:
+    """The one model-facing refusal that does NOT come from the public table.
+
+    `_install_refusal` writes straight into `code_runs.stderr` -> the tool `content` the
+    model reads, bypassing `SANDBOX_REASON_PUBLIC_MESSAGES` — so every other disclosure
+    assertion in this suite scanned a table this string was never in. It carries the same
+    obligation, and now the same guard: an admin control may be named, deployment
+    topology and network posture may not.
+    """
+    from app.sandbox.service import _install_refusal
+
+    unknown = _install_refusal("scikit-learn", "scikit-learn", None)
+    mismatch = _install_refusal("pandas", "pandas==1.0", Version("3.0.5"))
+
+    for message in (unknown, mismatch):
+        violations = control_neutral_violations(message)
+        assert not violations, f"package refusal leaks {violations}: {message!r}"
+    # It still tells the reader what would actually change the answer.
+    assert "Admin" in unknown and "allowed-packages" in unknown

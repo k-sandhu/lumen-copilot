@@ -171,11 +171,15 @@ def _satisfied_by_image(requirement: Requirement, shipped: Version | None) -> bo
 def _install_refusal(name: str, value: str, shipped: Version | None) -> str:
     """The refusal sentence for a package that would need a real install (#504).
 
-    Model- and user-facing (it becomes the run's ``stderr``), so it names the control
-    that changes the answer and never tenant-internal detail. The two cases are kept
-    apart because they need different actions: a version the image cannot provide is
-    an allow-list decision, while an unknown distribution is that PLUS the runner's
-    outbound network — the honest limitation, since the sandbox itself never has one.
+    Model- and user-facing (it becomes the run's ``stderr``), so it names the control an
+    admin would change and nothing about how the deployment is built. It is the one
+    model-reachable refusal that does NOT come from
+    :data:`~app.domain.code_execution.SANDBOX_REASON_PUBLIC_MESSAGES`, so it carries that
+    table's obligation directly: no env var, no service or process topology, no network
+    posture. An earlier version ended "...requires the sandbox service to have outbound
+    network access", which told a prompt-injectable surface both that a distinct service
+    exists and what its egress posture is; the remedy is the same either way — ask an
+    admin — so the detail bought the reader nothing and is kept to the operator log.
     """
     if shipped is not None:
         return (
@@ -187,8 +191,7 @@ def _install_refusal(name: str, value: str, shipped: Version | None) -> str:
     return (
         f"Package '{name}' is not installed in the code sandbox image and is not on "
         "this workspace's allowed-packages list. An admin can add it under "
-        "Admin → Code execution; installing it also requires the sandbox service to "
-        "have outbound network access."
+        "Admin → Code execution."
     )
 
 

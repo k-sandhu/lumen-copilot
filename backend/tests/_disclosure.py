@@ -32,6 +32,13 @@ _ENV_VAR = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _INTERNAL_NAMES = (
     "sandbox-runner",
     "sandbox_runner",
+    # The SPACED spelling is how `app/sandbox/runner.py` phrases its own exceptions
+    # ("sandbox runner unavailable"), so a public message copied from one of those
+    # would have slipped past a guard listing only the hyphen/underscore forms.
+    "sandbox runner",
+    # Naming a distinct service AND its egress posture tells a prompt-injectable
+    # reader both that the component exists and how it reaches the network.
+    "outbound network",
     "lumen-copilot",
     "postgres",
     "opensearch",
