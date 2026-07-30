@@ -45,13 +45,19 @@ desired. `download --smoke` fetches only the one-file-per-format smoke subset.
 
 ## The corpus
 
-27 pinned entries (~80 MB): 25 ingestable real-world files spanning **every
+100 pinned entries (~150 MB): 98 ingestable real-world files spanning **every
 upload-allowlisted format** (PDF, DOCX, PPTX, XLSX, TXT, MD) and **two
 deliberate negatives** in formats outside the allowlist (CSV, HTML) that must
 be rejected fail-closed. Sizes run from ~0.5 KB to ~32 MB (all under
 `MAX_UPLOAD_BYTES` = 50 MiB); domains span literature, web standards, ML
 research, tax, digital-identity security, climate science, official statistics,
-and clinical research; languages are English plus one German text. One entry
+and clinical research; languages are English plus one German text.
+
+The **benchmark slice** the question bank is authored against is the original
+~40 entries; the remaining 60 are the tax-research packs' documents (see
+[Tax-research packs](#tax-research-packs-515) below), which no question cites.
+Nothing downloads unless you ask for it: `download` fetches the whole corpus,
+but `load_pack --pack <id>` fetches only that pack's files. One entry
 (`nidcr-site-activation-checklist`, a checklist DOCX whose content lives in
 Word tables) is pinned `text_quality="poor"`: the paragraphs-only DOCX parser
 extracts almost nothing from it, a real product gap this dataset surfaced —
@@ -60,8 +66,10 @@ questions reference it, and a test asserts the limitation stays pinned until
 the parser learns tables.
 
 Sources are trusted public hosts only (Project Gutenberg, RFC Editor, arXiv,
-IRS, NIST, IPCC, US Census Bureau, NIH NIDCR, UN Statistics Division, and
-tag-pinned GitHub raw files), fetched with an honest project User-Agent —
+IRS, NIST, IPCC, US Census Bureau, NIH NIDCR, UN Statistics Division, the NYS
+Department of Taxation and Finance, the Canada Revenue Agency, Justice Laws
+Canada, the Ontario Central Forms Repository, and tag-pinned GitHub raw files),
+fetched with an honest project User-Agent —
 hosts that reject it (bot walls) are excluded by policy rather than evaded.
 Each manifest entry records provenance and license; the corpus is downloaded
 for local benchmarking, never redistributed via the repo.
@@ -251,6 +259,8 @@ use-case surveys ([Uptech](https://www.uptech.team/blog/rag-use-cases),
 | `legal-compliance` | 5 | GDPR, Copyright Circular 1, US Constitution, Federalist Papers, NIST SP 800-63B |
 | `software-cloud-engineering` | 8 | HTTP RFCs, ECMA-404, AWS Well-Architected, Intel SDM, K8s changelog, pandoc, FastAPI |
 | `government-data-climate` | 7 | Census tables + Statistical Abstract, IPCC AR6 ×2, UNSD decks |
+| `tax-research-new-york` | 36 | see [Tax-research packs](#tax-research-packs-515) |
+| `tax-research-ontario` | 26 | see [Tax-research packs](#tax-research-packs-515) |
 
 ```powershell
 # from backend/ — browse the catalog, then load one into your profile:
@@ -265,11 +275,147 @@ first-N, no round-robin). Packs never include the negative-format or
 poor-extraction files — a curated pack is all signal.
 
 **Rolling entries (refresh on demand).** Entries marked `rolling` point at a
-source's *current* alias (today: the IRS current-tax-year 1040 instructions).
+source's *current* alias (the IRS current-tax-year 1040 instructions, the NYS
+sales-tax and withholding publications, the consolidated Canadian statutes).
 Their checksum pin is a last-seen record, not a gate; `--refresh` re-downloads
 them and **replaces** them in your profile (delete + re-upload). Benchmark
 questions may never cite rolling files — grounding stays on immutable pinned
 files, enforced by validation.
+
+## Tax-research packs (#515)
+
+Two packs give a tax team every document a company or an individual meets when
+filing in one jurisdiction — **`tax-research-new-york`** (36 files, US federal +
+New York State) and **`tax-research-ontario`** (26 files, Canadian federal +
+Ontario).
+
+**Why tax.** Tax research is the profession's fastest-moving AI use case and the
+one least tolerant of an ungrounded answer: weekly use of AI for tax research
+rose from ~33% to ~60% of practitioners in a single year, a third of tax firms
+already use generative AI (14% agentic, 63% considering or planning it), and tax
+preparation/research shows the highest generative-AI uptake in the profession.
+Sources: [Blue J / CPA.com AI tax survey](https://www.cpa.com/news/blue-j-and-cpacom-survey-finds-ai-adoption-among-tax-firms-has-nearly-doubled-one-year)
+([coverage](https://www.cpapracticeadvisor.com/2026/06/02/blue-j-and-cpa-com-survey-finds-ai-adoption-among-tax-firms-has-nearly-doubled-in-one-year/184376/)),
+[Thomson Reuters Institute — AI in Professional Services 2026](https://www.thomsonreuters.com/en-us/posts/technology/ai-in-professional-services-report-2026/),
+[Thomson Reuters — impact of AI on tax and accounting](https://tax.thomsonreuters.com/blog/the-impact-of-ai-on-the-tax-and-accounting-profession/),
+[CPA Trendlines Outlook 2026](https://cpatrendlines.com/2026/01/10/outlook-2026-agentic-ai-reaches-the-tipping-point-in-tax-and-accounting-firms/).
+
+### Coverage is a validated property, not a claim
+
+A pack in the `tax-research` family must map **every** topic below onto at least
+one of its own files, and every file it carries must serve at least one topic.
+`pack_issues()` fails the build otherwise, so "covers all aspects of tax" is
+enforced rather than asserted — drop the last document behind a topic and the
+tests go red.
+
+| topic | what it covers | NY | ON |
+|---|---|---|---|
+| `personal_income` | Individual income tax return and its computation | 5 | 4 |
+| `business_income` | Corporate / unincorporated business income tax | 4 | 4 |
+| `pass_through` | Partnerships, S corporations, elective entity-level tax | 4 | 1 |
+| `payroll_withholding` | Employer withholding, remittance, wage reporting | 5 | 4 |
+| `consumption_tax` | Sales & use tax / GST-HST on supplies | 3 | 4 |
+| `property_transfer` | Property tax and real-estate transfer tax | 2 | 3 |
+| `credits_deductions` | Credits, deductions, depreciation, capital cost | 3 | 3 |
+| `cross_border` | Non-resident, part-year, multi-jurisdiction allocation | 3 | 2 |
+| `estates_trusts` | Estate tax, trusts, fiduciary returns | 2 | 1 |
+| `filing_procedure` | Deadlines, instalments, elections, how to file | 5 | 3 |
+| `disputes_penalties` | Audit, objection/appeal rights, penalties, interest | 2 | 1 |
+| `primary_authority` | The statute, regulation or official ruling itself | 3 | 2 |
+| `reference_data` | Rate schedules, threshold tables, statistics | 4 | 2 |
+
+A file may serve several topics (New York's IT-112-R resident credit is both
+`cross_border` and `credits_deductions`), which is why the columns sum to more
+than the pack size.
+
+### What's in them
+
+**`tax-research-new-york`** — a New York filing question is never answerable
+from one jurisdiction, so the pack is deliberately two-layered:
+
+- *Federal (IRS, public domain):* Publication 17, the Form 1040 instructions
+  (2024 pinned **and** current-year rolling), Forms 1120 / 1120-S / 1065 /
+  1041 / Schedule C instructions, Publication 15 (Circular E) and the W-2/W-3
+  instructions, Publication 946 (depreciation), 505 (estimated tax), 519
+  (aliens), 556 (appeals) and 1 (taxpayer rights), **Internal Revenue Bulletin
+  2025-01** and **Rev. Proc. 2024-40** as primary authority, plus the SOI
+  New York individual-return **XLSX** as reference data.
+- *New York State (NYS Dept. of Taxation and Finance):* IT-201 resident and
+  IT-203 nonresident instructions, IT-112-R resident credit, IT-225
+  modifications, IT-2105 estimated tax, CT-3 franchise tax, CT-3-S, IT-204
+  partnership, **TSB-M-21(1)C,(1)I** (the Department's own PTET memorandum),
+  Publication 750 sales-tax guide, Publication 718 rates by jurisdiction,
+  ST-100 quarterly return, NYS-45 employer return, NYS-50-T-NYS withholding
+  tables, MTA-305 (MCTMT), ET-706 estate tax, TP-584 transfer tax, and
+  Publication 1093 (veterans' property-tax exemption).
+
+**`tax-research-ontario`** — Ontario's personal and corporate income tax is
+computed on the federal base and administered by the CRA, so the CRA guides
+*are* the Ontario authority:
+
+- *Federal + Ontario (CRA):* 5000-G federal guide, **5006-PC Ontario
+  Information Guide** and **5006-C (ON428) Ontario Tax**, T4012 T2 corporation
+  guide with **Schedule 500 (Ontario tax calculation)** and **Schedule 510
+  (Ontario corporate minimum tax)**, T4002 self-employed, T4068 partnership
+  (T5013), T4001 payroll deductions, T4130 taxable benefits, RC4110
+  employee-or-self-employed, RC4022 GST/HST registrants, RC4058 quick method,
+  RC4028 new-housing rebate, T4037 capital gains, T4036 rental income, T4044
+  employment expenses, T4013 T3 trust guide, T4058 non-residents, T4144
+  section 216, P105 students, P148 objection and appeal rights.
+- *Ontario-administered:* the **Employer Health Tax** return guide and the
+  **Land Transfer Tax Affidavit** from the Ontario Central Forms Repository —
+  the two taxes Ontario collects itself.
+- *Primary authority:* the consolidated **Income Tax Act** and **Excise Tax
+  Act** from Justice Laws Canada (rolling — a consolidation is re-published on
+  every amendment).
+
+### Pin stability
+
+Tax documents are republished every filing season, so each entry uses the most
+immutable URL its source offers and is marked `rolling` only when none exists:
+
+| source | immutable form used | rolling instead |
+|---|---|---|
+| IRS | prior-year archive (`/pub/irs-prior/p17--2024.pdf`); bulletins and rev. procs. are dated by nature | Pub 556 and Pub 1 — revision-dated, no year-stamped archive |
+| NYS | per-year archive for annual income/corporation forms (`/pdf/2024/inc/it201i_2024.pdf`); TSB-M memoranda are dated | sales-tax, withholding, estate and property documents, which exist only at their current path |
+| CRA | the tax year is in the filename (`t4012-25e.pdf`), so each year is its own URL | — |
+| Justice Laws / Ontario CFR | — | consolidated statutes and CFR forms are served in place |
+
+### Loading one
+
+```powershell
+# from backend/ — the whole New York pack into your profile:
+uv run --extra dev python -m tests.eval.benchmark.load_pack `
+  --api http://localhost:47181 --email you@acme.test --password ... `
+  --pack tax-research-new-york --collection "NY tax research"
+
+# just one aspect of filing — e.g. the Ontario payroll documents:
+uv run --extra dev python -m tests.eval.benchmark.load_pack `
+  --pack tax-research-ontario --tax-topic payroll_withholding --dry-run
+
+# pull the current statutes / current-season forms again:
+uv run --extra dev python -m tests.eval.benchmark.load_pack ... `
+  --pack tax-research-ontario --refresh
+```
+
+`--tax-topic` composes with `--formats` and `--count` and preserves curated pack
+order. Filters that leave nothing to load are an **error**, not an empty run.
+
+### Deliberate gaps
+
+Recorded rather than papered over:
+
+- **New York City** business taxes (NYC-2 Business Corporation Tax, NYC-202
+  UBT) are absent: `nyc.gov` answers **403** to our honest User-Agent, and the
+  corpus policy is to exclude bot-walled hosts rather than evade them. NYC
+  *personal* income tax is still covered — it is computed on the IT-201.
+- **Ontario's own consolidated statutes** (Taxation Act 2007, Employer Health
+  Tax Act) are HTML-only on e-Laws, which is outside the upload allowlist;
+  `files.ontario.ca` is bot-walled. Federal statutes carry `primary_authority`
+  for the Ontario pack, which is legally where Ontario income tax is computed.
+- **No benchmark questions** are authored against these 60 files yet — the
+  question bank still measures the original ~40-entry slice. Grounded tax
+  questions are follow-up work; nothing here changes the reference run.
 
 ## Live accuracy run (#430)
 

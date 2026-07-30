@@ -24,6 +24,13 @@ always select the same files. Missing files are downloaded first (checksum
 pins verified); uploads are idempotent (files already in your profile are
 skipped by filename), so re-running is a no-op that reports what's there.
 
+**Packs.** ``--pack <id>`` loads a curated set in its own order instead of the
+round-robin selection (``--list-packs`` shows the catalog). Tax-research packs
+additionally declare which aspect of filing each file answers for, so
+``--tax-topic <topic>`` narrows a pack to just that slice — e.g. only the
+payroll-withholding documents. Filters compose; if they leave nothing to load
+that is an error, not an empty run.
+
 Credentials can come from flags or the ``LUMEN_PACK_EMAIL`` /
 ``LUMEN_PACK_PASSWORD`` environment variables. Sync httpx is deliberate —
 host-side tooling, not app code.
@@ -48,7 +55,15 @@ from tests.eval.benchmark.manifest import (
     load_checksums,
     size_class,
 )
-from tests.eval.benchmark.packs import PACKS, pack_by_id, pack_files
+from tests.eval.benchmark.packs import (
+    PACKS,
+    TAX_FAMILY,
+    TAX_TOPIC_LABELS,
+    pack_by_id,
+    pack_files,
+    pack_files_for_topic,
+    topics_of,
+)
 
 _INGEST_TIMEOUT_SECONDS = 45 * 60
 
@@ -115,14 +130,22 @@ def select_from_pack(
     pack_id: str,
     formats: Sequence[str] | None = None,
     count: int | None = None,
+    tax_topic: str | None = None,
 ) -> tuple[CorpusFile, ...]:
     """Deterministic pack selection: curated pack order, optionally filtered.
 
-    ``--formats`` narrows to those formats (pack order preserved); ``--count``
-    takes the first N of what remains. No round-robin here — a pack's order is
-    itself the curation.
+    ``tax_topic`` narrows a tax-research pack to the files that cover one aspect
+    of filing (``--tax-topic payroll_withholding`` for just the payroll set);
+    ``--formats`` narrows to those formats; ``--count`` takes the first N of what
+    remains. Pack order is preserved throughout — no round-robin, because a
+    pack's order is itself the curation.
+
+    Raises ``ValueError`` on a bad format/count or when the filters leave nothing
+    to load, and ``KeyError`` on an unknown pack or topic — never a silent empty
+    selection.
     """
-    files = pack_files(pack_by_id(pack_id))
+    pack = pack_by_id(pack_id)
+    files = pack_files_for_topic(pack, tax_topic) if tax_topic else pack_files(pack)
     if formats is not None:
         keys = []
         for name in formats:
@@ -140,30 +163,47 @@ def select_from_pack(
         if count <= 0:
             raise ValueError("count must be a positive integer")
         files = files[:count]
+    if not files:
+        raise ValueError(
+            f"no files in pack {pack_id!r} match "
+            + (f"topic {tax_topic!r} and " if tax_topic else "")
+            + f"formats {','.join(formats) if formats else 'any'}"
+        )
     return files
 
 
-def _print_selection(selection: tuple[CorpusFile, ...]) -> None:
+def _print_selection(selection: tuple[CorpusFile, ...], pack_id: str | None = None) -> None:
     pins = load_checksums()
+    pack = pack_by_id(pack_id) if pack_id else None
     print(f"{len(selection)} file(s) selected (deterministic):")
     for entry in selection:
         pin = pins.get(entry.file_id)
         size = f"{pin.size_bytes:,} B ({size_class(pin.size_bytes)})" if pin else "unpinned"
         fmt = next(k for k, v in FORMAT_MIME.items() if v == entry.mime_type)
         marker = "  (rolling)" if entry.rolling else ""
-        print(f"  {fmt:>4}  {entry.file_id:<34} {size}{marker}")
+        topics = ", ".join(topics_of(pack, entry.file_id)) if pack else ""
+        suffix = f"{marker}  {topics}" if topics else marker
+        print(f"  {fmt:>4}  {entry.file_id:<42} {size}{suffix}")
 
 
 def _print_packs() -> None:
-    print("Available industry packs:")
+    print("Available packs:")
     for pack in PACKS:
         rolling = sum(1 for e in pack_files(pack) if e.rolling)
-        print(f"\n  {pack.pack_id}  —  {pack.name} ({pack.industry})")
+        family = "" if pack.family == "industry" else f"  [{pack.family}]"
+        print(f"\n  {pack.pack_id}  —  {pack.name} ({pack.industry}){family}")
         print(
             f"      {len(pack.file_ids)} files"
             + (f", {rolling} rolling (refresh with --refresh)" if rolling else "")
         )
         print(f"      {pack.rationale}")
+        if pack.family == TAX_FAMILY:
+            # A tax pack's promise is coverage, so show it: every aspect of
+            # filing and how many of the pack's files answer for it.
+            print("      tax topics (--tax-topic <id>):")
+            for coverage in pack.tax_coverage:
+                label = TAX_TOPIC_LABELS[coverage.topic]
+                print(f"        {coverage.topic:<20} {len(coverage.file_ids):>2} file(s)  {label}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -172,8 +212,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--email", default=os.environ.get("LUMEN_PACK_EMAIL", ""))
     parser.add_argument("--password", default=os.environ.get("LUMEN_PACK_PASSWORD", ""))
     parser.add_argument("--collection", default="RAG benchmark pack")
-    parser.add_argument("--pack", help="industry pack id (see --list-packs)")
+    parser.add_argument("--pack", help="pack id (see --list-packs)")
     parser.add_argument("--list-packs", action="store_true", help="show the pack catalog")
+    parser.add_argument(
+        "--tax-topic",
+        help="narrow a tax-research pack to one aspect of filing, e.g. "
+        f"{', '.join(list(TAX_TOPIC_LABELS)[:3])}, … (requires --pack)",
+    )
     parser.add_argument("--formats", help="comma-separated: txt,md,pdf,docx,pptx,xlsx")
     parser.add_argument("--count", type=int, help="max files (default: all matching)")
     parser.add_argument(
@@ -188,16 +233,20 @@ def main(argv: list[str] | None = None) -> int:
         _print_packs()
         return 0
 
+    if args.tax_topic and not args.pack:
+        print("error: --tax-topic requires --pack", file=sys.stderr)
+        return 2
+
     formats = [t for t in args.formats.split(",") if t.strip()] if args.formats else None
     try:
         if args.pack:
-            selection = select_from_pack(args.pack, formats, args.count)
+            selection = select_from_pack(args.pack, formats, args.count, args.tax_topic)
         else:
             selection = select_pack(formats, args.count)
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    _print_selection(selection)
+    _print_selection(selection, args.pack)
     if args.dry_run:
         return 0
     if not args.email or not args.password:

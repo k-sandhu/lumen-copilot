@@ -575,6 +575,765 @@ CORPUS: tuple[CorpusFile, ...] = (
         "season. The pinned prior-year archive entry stays the benchmark's "
         "immutable ground truth; no questions may cite this file.",
     ),
+    # --- Tax research: US federal (IRS) ---------------------------------------
+    # Filing guidance for the New York pack's federal layer (a New York filer
+    # always files federally too). Year-stamped entries come from the IRS
+    # *prior-year archive* (``/pub/irs-prior/<code>--<year>.pdf``), which is
+    # immutable; the two publications the IRS revises without year-stamping are
+    # marked ``rolling`` and fetched from the current alias instead.
+    CorpusFile(
+        file_id="irs-pub17-individual-2024",
+        filename="irs-pub17-your-federal-income-tax-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/p17--2024.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 17 — Your Federal Income Tax, tax year 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="The individual filer's reference manual: income, deductions, "
+        "credits, filing status, and dependents in one long PDF.",
+    ),
+    CorpusFile(
+        file_id="irs-i1120-corporation-2024",
+        filename="irs-form-1120-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/i1120--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — Form 1120 (US Corporation Income Tax Return) instructions, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Corporate return instructions: schedules, due dates, and the "
+        "line-by-line computation of taxable income.",
+    ),
+    CorpusFile(
+        file_id="irs-i1065-partnership-2024",
+        filename="irs-form-1065-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/i1065--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — Form 1065 (US Return of Partnership Income) instructions, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Partnership return instructions, including Schedule K-1 "
+        "reporting for each partner's distributive share.",
+    ),
+    CorpusFile(
+        file_id="irs-i1120s-s-corporation-2024",
+        filename="irs-form-1120s-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/i1120s--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — Form 1120-S (S Corporation Income Tax Return) instructions, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="S-corporation return instructions: shareholder basis, "
+        "built-in gains, and pass-through reporting.",
+        notes="Distractor pair with irs-i1065-partnership-2024 — adjacent "
+        "pass-through regimes whose rules differ.",
+    ),
+    CorpusFile(
+        file_id="irs-i1040sc-schedule-c-2024",
+        filename="irs-schedule-c-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/i1040sc--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — Schedule C (Profit or Loss From Business) instructions, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Sole-proprietor business income: expense categories, "
+        "business-use-of-home, and the material-participation tests.",
+    ),
+    CorpusFile(
+        file_id="irs-pub15-circular-e-2024",
+        filename="irs-pub15-circular-e-employers-tax-guide-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/p15--2024.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 15 (Circular E) — Employer's Tax Guide, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Employer payroll obligations: withholding, FICA, deposit "
+        "schedules, and the penalty rules for late deposits.",
+    ),
+    CorpusFile(
+        file_id="irs-iw2w3-wage-statements-2024",
+        filename="irs-form-w2-w3-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/iw2w3--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — General Instructions for Forms W-2 and W-3, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Wage-statement reporting: box-by-box codes, correction "
+        "procedure, and information-return penalties.",
+    ),
+    CorpusFile(
+        file_id="irs-pub946-depreciation-2024",
+        filename="irs-pub946-how-to-depreciate-property-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/p946--2024.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 946 — How To Depreciate Property, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="MACRS recovery periods, section 179 expensing, bonus "
+        "depreciation, and the percentage tables.",
+    ),
+    CorpusFile(
+        file_id="irs-pub505-estimated-tax-2024",
+        filename="irs-pub505-tax-withholding-and-estimated-tax-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/p505--2024.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 505 — Tax Withholding and Estimated Tax, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Quarterly instalments, safe-harbour percentages, and the "
+        "underpayment-penalty computation.",
+    ),
+    CorpusFile(
+        file_id="irs-pub519-aliens-2024",
+        filename="irs-pub519-us-tax-guide-for-aliens-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/p519--2024.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 519 — US Tax Guide for Aliens, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Residency tests (substantial presence, green card), "
+        "dual-status years, and treaty-based return positions.",
+    ),
+    CorpusFile(
+        file_id="irs-i1041-estates-trusts-2024",
+        filename="irs-form-1041-instructions-2024.pdf",
+        url="https://www.irs.gov/pub/irs-prior/i1041--2024.pdf",
+        mime_type=_PDF,
+        source="IRS — Form 1041 (Income Tax Return for Estates and Trusts) " "instructions, 2024",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Fiduciary return instructions: distributable net income, "
+        "the 65-day rule, and Schedule K-1 beneficiary reporting.",
+    ),
+    CorpusFile(
+        file_id="irs-irb-2025-01",
+        filename="irs-internal-revenue-bulletin-2025-01.pdf",
+        url="https://www.irs.gov/pub/irs-irbs/irb25-01.pdf",
+        mime_type=_PDF,
+        source="IRS — Internal Revenue Bulletin No. 2025-1 (30 December 2024)",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Primary authority as tax researchers cite it: revenue "
+        "rulings, revenue procedures, notices, and Treasury decisions — including "
+        "Rev. Proc. 2025-1 on letter rulings.",
+        notes="Bulletins are published once and never revised — a naturally immutable URL.",
+    ),
+    CorpusFile(
+        file_id="irs-rev-proc-2024-40",
+        filename="irs-rev-proc-2024-40-inflation-adjustments.pdf",
+        url="https://www.irs.gov/pub/irs-drop/rp-24-40.pdf",
+        mime_type=_PDF,
+        source="IRS — Revenue Procedure 2024-40, inflation-adjusted amounts for 2025",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="The annual indexation tables: bracket thresholds, standard "
+        "deduction, and dozens of dollar limits for tax year 2025.",
+        notes="Dense exact-figure tables — the lookup shape tax questions take.",
+    ),
+    CorpusFile(
+        file_id="irs-soi-new-york-2022",
+        filename="irs-soi-new-york-individual-income-tax-2022.xlsx",
+        url="https://www.irs.gov/pub/irs-soi/22in33ny.xlsx",
+        mime_type=_XLSX,
+        source="IRS Statistics of Income — New York individual income tax returns, 2022",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Real tax spreadsheet: New York returns by AGI band, with "
+        "counts and dollar amounts per line item.",
+        notes="The tax packs' aggregation/table case — a genuine XLSX, not prose.",
+    ),
+    CorpusFile(
+        file_id="irs-pub556-appeals-current",
+        filename="irs-pub556-examination-appeal-rights-current.pdf",
+        url="https://www.irs.gov/pub/irs-pdf/p556.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 556 — Examination of Returns, Appeal Rights, and "
+        "Claims for Refund (current revision)",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="Audit process, the 30-day letter, Appeals conferences, and "
+        "refund-claim limitation periods.",
+        rolling=True,
+        notes="Revision-dated rather than year-stamped: the IRS has no "
+        "prior-year archive URL for it, so the current alias is the only "
+        "citable source — refreshed on demand.",
+    ),
+    CorpusFile(
+        file_id="irs-pub1-taxpayer-rights-current",
+        filename="irs-pub1-your-rights-as-a-taxpayer-current.pdf",
+        url="https://www.irs.gov/pub/irs-pdf/p1.pdf",
+        mime_type=_PDF,
+        source="IRS Publication 1 — Your Rights as a Taxpayer (current revision)",
+        license="Public domain (US federal government work)",
+        domain="tax",
+        description="The Taxpayer Bill of Rights: ten enumerated rights plus the "
+        "examination, collection, and appeal safeguards.",
+        rolling=True,
+        notes="Revision-dated, not year-stamped — see irs-pub556-appeals-current.",
+    ),
+    # --- Tax research: New York State ----------------------------------------
+    # NYS publishes annual income/corporation forms into an immutable per-year
+    # archive (``/pdf/<year>/inc|corp/<form>_<year>.pdf``) — those are pinned.
+    # Sales-tax, withholding, estate and property documents live only at their
+    # current path and are re-published in place, so they are ``rolling``.
+    # NYC's own business taxes are deliberately absent: nyc.gov answers 403 to
+    # our honest User-Agent, and the corpus policy is to exclude bot-walled
+    # hosts rather than evade them.
+    CorpusFile(
+        file_id="nys-it201i-resident-2024",
+        filename="nys-it201-resident-income-tax-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it201i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-201-I, "
+        "Resident Income Tax Return instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="The New York resident return: state tax tables, NYC and "
+        "Yonkers resident surcharges, and the state credit schedule.",
+        notes="Distractor pair with nys-it203i-nonresident-2024 — resident vs "
+        "nonresident rules diverge on income allocation.",
+    ),
+    CorpusFile(
+        file_id="nys-it203i-nonresident-2024",
+        filename="nys-it203-nonresident-income-tax-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it203i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-203-I, "
+        "Nonresident and Part-Year Resident Income Tax Return instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="New York source income allocation for nonresidents and "
+        "part-year residents — the commuter and relocation case.",
+    ),
+    CorpusFile(
+        file_id="nys-it204i-partnership-2024",
+        filename="nys-it204-partnership-return-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it204i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-204-I, "
+        "Partnership Return instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Partnership filing duty, New York apportionment, and the "
+        "partner schedules a New York partnership must issue.",
+    ),
+    CorpusFile(
+        file_id="nys-ct3i-franchise-2024",
+        filename="nys-ct3-general-business-franchise-tax-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/corp/ct3i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form CT-3-I, General "
+        "Business Corporation Franchise Tax Return instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Post-reform New York franchise tax: the business income "
+        "base, capital base, fixed dollar minimum, and apportionment.",
+    ),
+    CorpusFile(
+        file_id="nys-ct3si-s-corporation-2024",
+        filename="nys-ct3s-new-york-s-corporation-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/corp/ct3si_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form CT-3-S-I, New York "
+        "S Corporation Franchise Tax Return instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="New York S-corporation election, the fixed dollar minimum, "
+        "and shareholder pass-through reporting.",
+    ),
+    CorpusFile(
+        file_id="nys-it225i-modifications-2024",
+        filename="nys-it225-state-modifications-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it225i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-225-I, New York "
+        "State Modifications instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Every addition and subtraction modification code that moves "
+        "federal income to New York income — a pure code-lookup document.",
+    ),
+    CorpusFile(
+        file_id="nys-it112ri-resident-credit-2024",
+        filename="nys-it112r-resident-credit-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it112ri_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-112-R-I, New York "
+        "State Resident Credit instructions, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Credit for income tax paid to another state — the "
+        "double-taxation relief computation for cross-border earners.",
+    ),
+    CorpusFile(
+        file_id="nys-it2105i-estimated-tax-2024",
+        filename="nys-it2105-estimated-income-tax-instructions-2024.pdf",
+        url="https://www.tax.ny.gov/pdf/2024/inc/it2105i_2024.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form IT-2105-I, Estimated "
+        "Tax Payment instructions for individuals, 2024",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="New York instalment due dates, the annualized-income option, "
+        "and estimated-tax penalty exceptions.",
+    ),
+    CorpusFile(
+        file_id="nys-tsbm-ptet-2021",
+        filename="nys-tsb-m-21-1c-1i-pass-through-entity-tax.pdf",
+        url="https://www.tax.ny.gov/pdf/memos/ptet/m21-1c-1i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — TSB-M-21(1)C, (1)I, "
+        "Pass-Through Entity Tax (25 August 2021)",
+        license="New York State government work (official technical memorandum)",
+        domain="tax",
+        description="The Department's own interpretation of Article 24-A PTET: "
+        "who may elect, the irrevocable annual election, and the partner credit.",
+        notes="A technical memorandum is dated and never revised in place — "
+        "immutable, and the closest thing to citable state authority.",
+    ),
+    CorpusFile(
+        file_id="nys-pub750-sales-tax-current",
+        filename="nys-pub750-guide-to-sales-tax-current.pdf",
+        url="https://www.tax.ny.gov/pdf/publications/sales/pub750.pdf",
+        mime_type=_PDF,
+        source="NYS Publication 750 — A Guide to Sales Tax in New York State " "(current revision)",
+        license="New York State government work (freely distributable publication)",
+        domain="tax",
+        description="Vendor registration, what is taxable, exemption "
+        "certificates, and the sales-tax filing calendar.",
+        rolling=True,
+        notes="Revision-dated at a fixed URL — re-published in place, so rolling.",
+    ),
+    CorpusFile(
+        file_id="nys-pub718-sales-tax-rates-current",
+        filename="nys-pub718-sales-tax-rates-by-jurisdiction-current.pdf",
+        url="https://www.tax.ny.gov/pdf/publications/sales/pub718.pdf",
+        mime_type=_PDF,
+        source="NYS Publication 718 — New York State Sales and Use Tax Rates by "
+        "Jurisdiction (current revision)",
+        license="New York State government work (freely distributable publication)",
+        domain="tax",
+        description="Combined state/local rate and reporting code for every New "
+        "York county and city — the rate-lookup table.",
+        rolling=True,
+        notes="Rates change by legislation; the URL always serves the current " "schedule.",
+    ),
+    CorpusFile(
+        file_id="nys-st100i-sales-return-current",
+        filename="nys-st100-quarterly-sales-tax-return-instructions-current.pdf",
+        url="https://www.tax.ny.gov/pdf/current_forms/st/st100i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form ST-100-I, Quarterly "
+        "Sales and Use Tax Return instructions (current period)",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Quarterly sales-tax filing mechanics: jurisdiction reporting, "
+        "vendor collection credit, and prepaid-tax schedules.",
+        rolling=True,
+        notes="The ``current_forms`` path is a per-period alias — rolling by " "construction.",
+    ),
+    CorpusFile(
+        file_id="nys-nys45i-employer-quarterly-current",
+        filename="nys-nys45-employer-quarterly-return-instructions-current.pdf",
+        url="https://www.tax.ny.gov/pdf/current_forms/wt/nys45i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form NYS-45-I, Quarterly "
+        "Combined Withholding, Wage Reporting and UI Return instructions (current)",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="The single New York employer return: unemployment insurance "
+        "contributions, wage reporting, and withholding reconciliation.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="nys-nys50t-withholding-tables-current",
+        filename="nys-nys50-t-nys-withholding-tax-tables-current.pdf",
+        url="https://www.tax.ny.gov/pdf/publications/withholding/nys50_t_nys.pdf",
+        mime_type=_PDF,
+        source="NYS Publication NYS-50-T-NYS — New York State Withholding Tax "
+        "Tables and Methods (current revision)",
+        license="New York State government work (freely distributable publication)",
+        domain="tax",
+        description="Payroll withholding tables and the exact-calculation method "
+        "by payroll frequency — dense numeric tables.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="nys-et706i-estate-tax-current",
+        filename="nys-et706-estate-tax-return-instructions-current.pdf",
+        url="https://www.tax.ny.gov/pdf/current_forms/et/et706i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form ET-706-I, New York "
+        "State Estate Tax Return instructions (current revision)",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="New York estate tax: the basic exclusion amount, the "
+        "three-year gift add-back, and the exclusion cliff.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="nys-tp584i-transfer-tax-current",
+        filename="nys-tp584-real-estate-transfer-tax-instructions-current.pdf",
+        url="https://www.tax.ny.gov/pdf/current_forms/property/tp584i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form TP-584-I, Real "
+        "Estate Transfer Tax Return instructions (current revision)",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="Transfer tax on conveyances, the mansion tax, and the "
+        "exemptions claimed at closing.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="nys-pub1093-veterans-exemption-current",
+        filename="nys-pub1093-veterans-property-tax-exemption-current.pdf",
+        url="https://www.tax.ny.gov/pdf/publications/orpts/pub1093.pdf",
+        mime_type=_PDF,
+        source="NYS Publication 1093 — Veterans Exemption Questions and Answers: "
+        "Partial Exemption from Property Taxes in New York State (current revision)",
+        license="New York State government work (freely distributable publication)",
+        domain="tax",
+        description="The three veterans' property-tax exemptions, their eligibility "
+        "tests and application mechanics — the local-tax layer a New York filer "
+        "also meets.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="nys-mta305i-mctmt-current",
+        filename="nys-mta305-employer-mctmt-return-instructions-current.pdf",
+        url="https://www.tax.ny.gov/pdf/current_forms/mctmt/mta305i.pdf",
+        mime_type=_PDF,
+        source="NYS Department of Taxation and Finance — Form MTA-305-I, Employer's "
+        "Quarterly Metropolitan Commuter Transportation Mobility Tax Return "
+        "instructions (current revision)",
+        license="New York State government work (freely distributable tax form)",
+        domain="tax",
+        description="The MCTMT: which employers in the MCTD owe it, the two zones, "
+        "the payroll-expense thresholds, and the rates.",
+        rolling=True,
+        notes="A New York-only tax with no federal analogue — the kind of "
+        "jurisdiction-specific obligation a tax pack exists to surface. Chosen "
+        "over Publication 420, whose own cover insert says its MCTMT computation "
+        "guidance is out of date and cannot be relied upon.",
+    ),
+    # --- Tax research: Canada federal (CRA) + Ontario -------------------------
+    # CRA guides carry the tax year in the filename (``t4012-25e.pdf``), so each
+    # year is its own immutable URL — all pinned. The consolidated statutes at
+    # Justice Laws and the Ontario Central Forms Repository serve *current* law
+    # and forms in place, so those are ``rolling``. Ontario's own consolidated
+    # statutes (e-Laws) are HTML-only, which is outside the upload allowlist —
+    # federal statutes carry primary authority for the Ontario pack instead.
+    CorpusFile(
+        file_id="cra-5000-g-federal-guide-2025",
+        filename="cra-5000-g-federal-income-tax-benefit-guide-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/5000-g/5000-g-25e.pdf",
+        mime_type=_PDF,
+        source="CRA 5000-G — Federal Income Tax and Benefit Guide, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="The T1 line-by-line guide every Canadian filer works from, "
+        "including what changed for the year.",
+    ),
+    CorpusFile(
+        file_id="cra-5006-pc-ontario-guide-2025",
+        filename="cra-5006-pc-ontario-information-guide-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/5006-pc/5006-pc-25e.pdf",
+        mime_type=_PDF,
+        source="CRA 5006-PC — Ontario Information Guide (T1 Ontario package), 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Ontario-specific personal credits, the Ontario surtax, and "
+        "the province's own benefit programs.",
+    ),
+    CorpusFile(
+        file_id="cra-5006-c-on428-2025",
+        filename="cra-5006-c-on428-ontario-tax-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pbg/5006-c/5006-c-25e.pdf",
+        mime_type=_PDF,
+        source="CRA 5006-C — Form ON428, Ontario Tax, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="The Ontario tax calculation itself: bracket rates, surtax "
+        "thresholds, and non-refundable credit amounts.",
+    ),
+    CorpusFile(
+        file_id="cra-t4012-t2-corporation-2025",
+        filename="cra-t4012-t2-corporation-income-tax-guide-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4012/t4012-25e.pdf",
+        mime_type=_PDF,
+        source="CRA T4012 — T2 Corporation Income Tax Guide, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Corporate filing in Canada: schedules, the small business "
+        "deduction, and provincial tax including Ontario.",
+    ),
+    CorpusFile(
+        file_id="cra-t2sch500-ontario-tax-2023",
+        filename="cra-t2-schedule-500-ontario-corporation-tax-calculation-2023.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pbg/t2sch500/t2sch500-23e.pdf",
+        mime_type=_PDF,
+        source="CRA T2 Schedule 500 — Ontario Corporation Tax Calculation, 2023",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="How Ontario corporate tax is computed on the federal T2: "
+        "basic rate, the small business deduction, and rate reductions.",
+    ),
+    CorpusFile(
+        file_id="cra-t2sch510-ontario-minimum-tax-2014",
+        filename="cra-t2-schedule-510-ontario-corporate-minimum-tax-2014.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pbg/t2sch510/t2sch510-14e.pdf",
+        mime_type=_PDF,
+        source="CRA T2 Schedule 510 — Ontario Corporate Minimum Tax, 2014 revision",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Ontario's corporate minimum tax under section 55 of the "
+        "Taxation Act, 2007 (Ontario): the total-assets and revenue thresholds "
+        "that trigger it, and the CMT credit carry-forward.",
+        notes="The 2014 revision is the current one and applies to 2009 and later "
+        "tax years (stated on the schedule itself) — the year in the URL is a "
+        "revision date, not staleness.",
+    ),
+    CorpusFile(
+        file_id="cra-t4002-self-employed-2025",
+        filename="cra-t4002-self-employed-business-income-guide-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4002/t4002-25e.pdf",
+        mime_type=_PDF,
+        source="CRA T4002 — Self-employed Business, Professional, Commission, "
+        "Farming and Fishing Income, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Unincorporated business income: the T2125 statement, "
+        "capital cost allowance classes, and deductible expenses.",
+    ),
+    CorpusFile(
+        file_id="cra-t4068-partnership-2024",
+        filename="cra-t4068-partnership-information-return-guide-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4068/t4068-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4068 — Guide for the Partnership Information Return " "(T5013 forms), 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Which partnerships must file a T5013, the allocation "
+        "schedules, and the late-filing penalties.",
+    ),
+    CorpusFile(
+        file_id="cra-t4001-payroll-deductions-2025",
+        filename="cra-t4001-employers-guide-payroll-deductions-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4001/t4001-25e.pdf",
+        mime_type=_PDF,
+        source="CRA T4001 — Employers' Guide: Payroll Deductions and Remittances, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="CPP, EI and income tax at source: remitter types, due "
+        "dates, and the penalties for late remittance.",
+    ),
+    CorpusFile(
+        file_id="cra-t4130-taxable-benefits-2024",
+        filename="cra-t4130-employers-guide-taxable-benefits-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4130/t4130-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4130 — Employers' Guide: Taxable Benefits and Allowances, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Which benefits are taxable, the automobile-benefit formulas, "
+        "and GST/HST on benefits.",
+    ),
+    CorpusFile(
+        file_id="cra-rc4110-employee-or-self-employed-2023",
+        filename="cra-rc4110-employee-or-self-employed-2023.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/rc4110/rc4110-23e.pdf",
+        mime_type=_PDF,
+        source="CRA RC4110 — Employee or Self-employed?, 2023",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="The worker-classification tests CRA applies, and the "
+        "consequences of getting the relationship wrong.",
+    ),
+    CorpusFile(
+        file_id="cra-rc4022-gsthst-registrants-2025",
+        filename="cra-rc4022-general-information-for-gst-hst-registrants-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/rc4022/rc4022-25e.pdf",
+        mime_type=_PDF,
+        source="CRA RC4022 — General Information for GST/HST Registrants, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Ontario's 13% HST in practice: registration thresholds, "
+        "input tax credits, place-of-supply rules, and filing periods.",
+    ),
+    CorpusFile(
+        file_id="cra-rc4058-gsthst-quick-method-2024",
+        filename="cra-rc4058-quick-method-of-accounting-for-gst-hst-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/rc4058/rc4058-24e.pdf",
+        mime_type=_PDF,
+        source="CRA RC4058 — Quick Method of Accounting for GST/HST, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="The simplified HST remittance election: eligibility, the "
+        "Ontario remittance rates, and the 1% credit.",
+    ),
+    CorpusFile(
+        file_id="cra-rc4028-gsthst-housing-rebate-2025",
+        filename="cra-rc4028-gst-hst-new-housing-rebate-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/rc4028/rc4028-25e.pdf",
+        mime_type=_PDF,
+        source="CRA RC4028 — GST/HST New Housing Rebate, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="The federal and Ontario new-housing rebates: eligibility, "
+        "the price thresholds, and the claim deadlines.",
+    ),
+    CorpusFile(
+        file_id="cra-t4037-capital-gains-2024",
+        filename="cra-t4037-capital-gains-guide-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4037/t4037-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4037 — Capital Gains, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Adjusted cost base, the inclusion rate, the principal "
+        "residence exemption, and the lifetime capital gains exemption.",
+    ),
+    CorpusFile(
+        file_id="cra-t4036-rental-income-2024",
+        filename="cra-t4036-rental-income-guide-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4036/t4036-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4036 — Rental Income, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Rental operations on the T776: current vs capital expenses, "
+        "CCA restrictions, and co-ownership reporting.",
+    ),
+    CorpusFile(
+        file_id="cra-t4044-employment-expenses-2024",
+        filename="cra-t4044-employment-expenses-guide-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4044/t4044-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4044 — Employment Expenses, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Employee deductions on the T777, including work-space-in-"
+        "the-home and the employer's T2200 certification.",
+    ),
+    CorpusFile(
+        file_id="cra-t4013-t3-trust-guide-2024",
+        filename="cra-t4013-t3-trust-guide-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4013/t4013-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4013 — T3 Trust Guide, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Trust and estate returns: the expanded reporting rules, "
+        "graduated rate estates, and beneficiary allocations.",
+    ),
+    CorpusFile(
+        file_id="cra-t4058-non-residents-2024",
+        filename="cra-t4058-non-residents-and-income-tax-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4058/t4058-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4058 — Non-Residents and Income Tax, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Residency determination, Part XIII withholding, and which "
+        "Canadian-source income a non-resident must report.",
+    ),
+    CorpusFile(
+        file_id="cra-t4144-section-216-2024",
+        filename="cra-t4144-electing-under-section-216-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/t4144/t4144-24e.pdf",
+        mime_type=_PDF,
+        source="CRA T4144 — Income Tax Guide for Electing Under Section 216, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Non-resident owners of Canadian rental property: the "
+        "section 216 election, NR6, and the withholding mechanics.",
+    ),
+    CorpusFile(
+        file_id="cra-p105-students-2024",
+        filename="cra-p105-students-and-income-tax-2024.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/p105/p105-24e.pdf",
+        mime_type=_PDF,
+        source="CRA P105 — Students and Income Tax, 2024",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Tuition and education amounts, scholarship exemptions, and "
+        "student loan interest — a common individual filing scenario.",
+    ),
+    CorpusFile(
+        file_id="cra-p148-resolving-dispute-2025",
+        filename="cra-p148-resolving-your-dispute-2025.pdf",
+        url="https://www.canada.ca/content/dam/cra-arc/formspubs/pub/p148/p148-25e.pdf",
+        mime_type=_PDF,
+        source="CRA P148 — Resolving Your Dispute: Objection and Appeal Rights "
+        "Under the Income Tax Act, 2025",
+        license="Government of Canada — non-commercial reproduction permitted",
+        domain="tax",
+        description="Notice of objection deadlines, the appeals process, and "
+        "onward appeal to the Tax Court of Canada.",
+    ),
+    CorpusFile(
+        file_id="justice-income-tax-act-canada",
+        filename="canada-income-tax-act-consolidated.pdf",
+        url="https://laws-lois.justice.gc.ca/PDF/I-3.3.pdf",
+        mime_type=_PDF,
+        source="Justice Laws Canada — Income Tax Act (R.S.C., 1985, c. 1 (5th "
+        "Supp.)), current consolidation",
+        license="Reproduction of federal law permitted (Reproduction of Federal "
+        "Law Order, SI/97-5) without charge or further permission",
+        domain="tax",
+        description="The statute itself — the largest entry in the corpus and the "
+        "ultimate authority behind every Canadian filing answer.",
+        rolling=True,
+        notes="The consolidation is re-published whenever the Act is amended, so "
+        "its checksum is a last-seen record, not a gate.",
+    ),
+    CorpusFile(
+        file_id="justice-excise-tax-act-canada",
+        filename="canada-excise-tax-act-consolidated.pdf",
+        url="https://laws-lois.justice.gc.ca/PDF/E-15.pdf",
+        mime_type=_PDF,
+        source="Justice Laws Canada — Excise Tax Act (R.S.C., 1985, c. E-15), "
+        "current consolidation",
+        license="Reproduction of federal law permitted (Reproduction of Federal "
+        "Law Order, SI/97-5) without charge or further permission",
+        domain="tax",
+        description="GST/HST law in its statutory form — Part IX is the authority "
+        "behind Ontario's 13% HST.",
+        rolling=True,
+    ),
+    CorpusFile(
+        file_id="ontario-eht-return-guide",
+        filename="ontario-employer-health-tax-return-guide.pdf",
+        url=(
+            "https://forms.mgcs.gov.on.ca/dataset/8cbf9517-7f61-47d9-a942-421699ab8b67/"
+            "resource/d7351997-3c9f-4af9-a418-d0b9f8c15464/download/2272e.pdf"
+        ),
+        mime_type=_PDF,
+        source="Ontario Ministry of Finance — How to complete your Employer Health "
+        "Tax (EHT) Return (Central Forms Repository 013-2272)",
+        license="© King's Printer for Ontario — reproduction permitted for " "non-commercial use",
+        domain="tax",
+        description="A payroll tax Ontario administers itself: the exemption "
+        "threshold, associated-employer rules, and instalment duty.",
+        rolling=True,
+        notes="Ontario re-publishes Central Forms Repository documents in place, "
+        "so the pin is informational.",
+    ),
+    CorpusFile(
+        file_id="ontario-land-transfer-tax-affidavit",
+        filename="ontario-land-transfer-tax-affidavit.pdf",
+        url=(
+            "https://forms.mgcs.gov.on.ca/dataset/ffec364a-4bbb-41cc-8ea8-4692bcf937a3/"
+            "resource/d19409e3-e1be-4d82-a6f3-e638597e1cae/download/0449e.pdf"
+        ),
+        mime_type=_PDF,
+        source="Ontario Ministry of Finance — Land Transfer Tax Affidavit "
+        "(Central Forms Repository 013-0449)",
+        license="© King's Printer for Ontario — reproduction permitted for " "non-commercial use",
+        domain="tax",
+        description="Ontario land transfer tax at closing: the rate bands, the "
+        "value-of-consideration statements, and the exemption codes.",
+        rolling=True,
+    ),
     # --- Deliberate negatives (formats outside the upload allowlist) ----------
     CorpusFile(
         file_id="census-state-population-csv",
