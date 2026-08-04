@@ -276,7 +276,8 @@ poor-extraction files — a curated pack is all signal.
 
 **Rolling entries (refresh on demand).** Entries marked `rolling` point at a
 source's *current* alias (the IRS current-tax-year 1040 instructions, the NYS
-sales-tax and withholding publications, the consolidated Canadian statutes).
+sales-tax and withholding publications, the consolidated Canadian statutes, and
+the AWS Well-Architected Framework — its URL is literally a `/latest/` alias).
 Their checksum pin is a last-seen record, not a gate; `--refresh` re-downloads
 them and **replaces** them in your profile (delete + re-upload). Benchmark
 questions may never cite rolling files — grounding stays on immutable pinned
@@ -485,6 +486,12 @@ citations to refusal answers, which the eval contract (AC-3) forbids.
 - **A pin broke** (`checksum mismatch`): the upstream file changed. Decide
   deliberately: re-pin (`download --pin`) and re-run `verify` so every quote is
   re-proven against the new bytes; or swap the entry for a stabler source.
+- **A pin breaks repeatedly**: the URL is a *current* alias, not a version — 
+  re-pinning just restarts the clock and leaves `download` exiting 1 for
+  everyone in between. Mark the entry `rolling` instead and move any question
+  grounding off it (validation enforces that). `aws-well-architected` was
+  reclassified this way in #516 after its sha256 changed three times in five
+  days at a constant byte size, with no dated URL available.
 - **Adding a file**: add the `CorpusFile` entry (license + provenance
   required), `download --pin`, extract, author questions against
   `corpus/_extracted/<file_id>.txt`, run `verify`.
