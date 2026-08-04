@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -159,15 +160,22 @@ def _upload_corpus(state: RunState) -> None:
 
 
 def _wait_for_ingestion(state: RunState) -> None:
+    # Keyed by document id, not filename: waiting on a filename can be satisfied
+    # by a DIFFERENT row with the same name (an older copy, or one from another
+    # collection), which would mark this run's upload ready when it is not.
     pending = {
-        u.filename: u for u in state.uploads if u.expected == "ok" and u.document_id is not None
+        u.document_id: u for u in state.uploads if u.expected == "ok" and u.document_id is not None
     }
-    outcomes = state.api.wait_for_documents(set(pending), timeout_seconds=_INGEST_TIMEOUT_SECONDS)
-    for filename, status in outcomes.items():
-        pending[filename].status = status
+    outcomes = state.api.wait_for_documents(
+        {d for d in pending if d is not None},
+        collection_id=state.collection_id,
+        timeout_seconds=_INGEST_TIMEOUT_SECONDS,
+    )
+    for document_id, status in outcomes.items():
+        pending[document_id].status = status
         if status == "timeout":
             print(
-                f"[timout] {pending[filename].file_id}: "
+                f"[timout] {pending[document_id].file_id}: "
                 f"not ready after {_INGEST_TIMEOUT_SECONDS}s"
             )
 
@@ -453,6 +461,29 @@ def main(argv: list[str] | None = None) -> int:
         state = RunState(api=api)
         state.collection_id = api.ensure_collection(args.collection)
         print(f"collection: {state.collection_id}")
+
+        # A scored run measures the benchmark slice and nothing else. Search and
+        # chat are scoped to this collection, so any document left in it by an
+        # earlier run — a tax-pack file, a refreshed rolling statute — is still
+        # a retrieval competitor and silently changes the result. Refuse to run
+        # against a contaminated collection rather than report a number that
+        # is not comparable to the recorded baseline.
+        allowed = {
+            e.filename
+            for e in list(benchmark_corpus()) + [e for e in CORPUS if e.expected_ingest != "ok"]
+        }
+        present = state.api.existing_documents(collection_id=state.collection_id)
+        strays = sorted(set(present) - allowed)
+        if strays:
+            shown = "\n  ".join(strays[:20]) + ("\n  …" if len(strays) > 20 else "")
+            print(
+                f"error: collection {args.collection!r} holds {len(strays)} document(s) "
+                f"outside the benchmark slice — a scored run would measure them too:\n"
+                f"  {shown}\n\n"
+                "Use a fresh --collection (recommended), or remove those documents.",
+                file=sys.stderr,
+            )
+            return 2
 
         if args.skip_upload:
             existing = state.api.existing_documents(collection_id=state.collection_id)

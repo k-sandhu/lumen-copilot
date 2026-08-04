@@ -447,3 +447,45 @@ def test_coverage_evidence_rejects_an_unrelated_document() -> None:
     assert any(
         "consumption_tax" in i.problem for i in issues
     ), "a topic mapped to an unrelated document must not pass evidence checking"
+
+
+@needs_tax_corpus
+def test_coverage_checks_do_not_prove_curation_quality() -> None:
+    """Pin the KNOWN LIMIT of the coverage checks, so nobody re-overclaims it.
+
+    A reviewer defeated the structural + evidence rules with an arbitrary
+    disjoint partition: give every topic its own slice of the pack's files and
+    everything passes, because within a tax corpus nearly every document
+    mentions nearly every tax term.
+
+    This test asserts that this is *still* true. It is not celebrating the gap —
+    it is making the gap executable, so the docstrings and README that now say
+    "curation quality is human-reviewed" cannot quietly drift back to claiming
+    the checks prove it. If someone later strengthens the rules enough to reject
+    an arbitrary partition, this test fails and should be replaced by one
+    asserting the stronger guarantee.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    files = list(pack.file_ids)
+    topics = list(TAX_TOPICS)
+    # Round-robin every file across the topics: complete, non-degenerate, and
+    # entirely arbitrary.
+    buckets: dict[str, list[str]] = {t: [] for t in topics}
+    for i, fid in enumerate(files):
+        buckets[topics[i % len(topics)]].append(fid)
+    # Every topic needs at least one file; top up any empty bucket.
+    for i, topic in enumerate(topics):
+        if not buckets[topic]:
+            buckets[topic].append(files[i % len(files)])
+    partitioned = tuple(TaxCoverage(t, tuple(buckets[t])) for t in topics)
+    arbitrary = replace(pack, tax_coverage=partitioned)
+
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    structural = pack_issues((arbitrary,))
+    evidence = tax_coverage_evidence_issues(arbitrary, texts)
+
+    assert structural == [] and evidence == [], (
+        "The checks unexpectedly rejected an arbitrary partition. That is an "
+        "IMPROVEMENT — replace this test with one asserting the new guarantee, "
+        "and update the 'human-reviewed' wording in packs.py and the README."
+    )

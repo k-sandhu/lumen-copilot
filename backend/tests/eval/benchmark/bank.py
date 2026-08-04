@@ -313,14 +313,30 @@ def _validate_one(q: BenchmarkQuestion, ok_ids: set[str], good_ids: set[str]) ->
             bad("unanswerable question must have no evidence/sources/facts/gold_answer")
         if not q.absence_probes:
             bad("unanswerable question needs >= 1 absence_probe")
-        # An absence probe must be about what was actually asked. "Absent from
-        # the corpus" is trivially satisfiable by any nonce string, so a probe
-        # that shares no wording with its question proves nothing about THIS
-        # question being unanswerable — it just proves a random string is
-        # missing. Requiring overlap with the question text makes the negative
-        # control meaningful rather than vacuous.
+        # An absence probe is the machine-checkable half of "the corpus really
+        # does not contain this": `verify` proves the exact phrase appears in NO
+        # extracted corpus text. What validation can add is that the probe is
+        # about the question — otherwise any nonce satisfies it.
+        #
+        # Two rules, both with zero false positives on the authored bank:
+        #   * the probe must contain a real token (plain "???" proved nothing);
+        #   * it must share at least one significant word with the question.
+        #
+        # Stricter variants were tried and REJECTED for rejecting good data:
+        # requiring every probe word to come from the question kills legitimate
+        # paraphrase ("born in 1775" against "when was Austen born?"), and a
+        # phrase-length floor kills valid single-token probes like "GPT-2".
+        # The residual — whether the phrase is a *plausible* thing the corpus
+        # might have said — is an authoring judgement, reviewed rather than
+        # computed, and it is deliberately not asserted here.
         question_words = _significant_words(q.question)
         for probe in q.absence_probes:
+            if not re.search(r"[a-z0-9]{2,}", normalize(probe)):
+                bad(
+                    f"absence_probe {probe!r} contains no real token — it cannot "
+                    "show the corpus lacks anything in particular"
+                )
+                continue
             probe_words = _significant_words(probe)
             if probe_words and not (probe_words & question_words):
                 bad(

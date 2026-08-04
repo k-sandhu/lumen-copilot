@@ -300,13 +300,22 @@ Sources: [Blue J / CPA.com AI tax survey](https://www.cpa.com/news/blue-j-and-cp
 [Thomson Reuters — impact of AI on tax and accounting](https://tax.thomsonreuters.com/blog/the-impact-of-ai-on-the-tax-and-accounting-profession/),
 [CPA Trendlines Outlook 2026](https://cpatrendlines.com/2026/01/10/outlook-2026-agentic-ai-reaches-the-tipping-point-in-tax-and-accounting-firms/).
 
-### Coverage is a validated property, not a claim
+### What the coverage checks prove — and what they don't
 
 A pack in the `tax-research` family must map **every** topic below onto at least
 one of its own files, and every file it carries must serve at least one topic.
-`pack_issues()` fails the build otherwise, so "covers all aspects of tax" is
-enforced rather than asserted — drop the last document behind a topic and the
-tests go red.
+`pack_issues()` fails the build otherwise, so a missing topic or an orphan file
+is caught mechanically — drop the last document behind a topic and the tests go
+red. It also rejects **degenerate** mappings (one document claimed for most of
+the taxonomy; two topics resting on an identical file set), and a separate
+corpus-dependent check requires each topic's files to actually mention it in
+the text the real parsers extract.
+
+It does **not** prove a document substantively *covers* a topic. An arbitrary
+disjoint partition of a pack's files across the topics passes every check,
+because within a tax corpus nearly every document mentions nearly every tax
+term. Curation quality is a human-review property; these checks catch the
+mechanical failures, not a plausible-but-lazy mapping.
 
 | topic | what it covers | NY | ON |
 |---|---|---|---|

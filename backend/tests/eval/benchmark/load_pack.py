@@ -296,18 +296,32 @@ def main(argv: list[str] | None = None) -> int:
         # new one. The worst case now is a transient duplicate, which a re-run
         # reconciles; the previous worst case was silent data loss.
         supersede: dict[str, str] = {}
+        # Document ids we must see reach `ready` — either because we uploaded
+        # them now, or because an existing row is still mid-ingestion.
+        awaiting: dict[str, str] = {}
         for entry in selection:
-            if entry.filename in existing:
+            prior = existing.get(entry.filename)
+            if prior is not None:
+                status = str(prior["status"])
                 if entry.rolling and args.refresh:
-                    supersede[entry.filename] = str(existing[entry.filename]["id"])
+                    supersede[entry.filename] = str(prior["id"])
                     replaced += 1
                     print(f"[replac] {entry.file_id}: uploading refreshed copy first")
-                else:
-                    print(
-                        f"[  skip] {entry.file_id}: already in profile "
-                        f"(status={existing[entry.filename]['status']})"
-                    )
+                elif status == "ready":
+                    print(f"[  skip] {entry.file_id}: already ready")
                     continue
+                elif status in {"pending", "processing"}:
+                    # Present but not usable yet — wait for it rather than
+                    # reporting success over a document that may still fail.
+                    awaiting[str(prior["id"])] = entry.file_id
+                    print(f"[  wait] {entry.file_id}: already uploaded, still {status}")
+                    continue
+                else:
+                    # `failed` (or anything unexpected): the pack is not usable
+                    # with this row in place, and silently skipping it is how a
+                    # broken pack reports "done". Replace it.
+                    supersede[entry.filename] = str(prior["id"])
+                    print(f"[replac] {entry.file_id}: previous copy is {status}; re-uploading")
             payload = (directory / entry.filename).read_bytes()
             response = api.upload_document(
                 collection_id=collection_id,
@@ -322,12 +336,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
             uploaded.add(entry.filename)
+            awaiting[str(response.json()["id"])] = entry.file_id
             print(f"[upload] {entry.file_id}")
 
-        if uploaded:
-            print(f"\nwaiting for ingestion of {len(uploaded)} file(s)…")
-            outcomes = api.wait_for_documents(uploaded, timeout_seconds=_INGEST_TIMEOUT_SECONDS)
-            not_ready = {f: s for f, s in outcomes.items() if s != "ready"}
+        if awaiting:
+            print(f"\nwaiting for ingestion of {len(awaiting)} file(s)…")
+            outcomes = api.wait_for_documents(
+                set(awaiting),
+                collection_id=collection_id,
+                timeout_seconds=_INGEST_TIMEOUT_SECONDS,
+            )
+            not_ready = {awaiting[d]: s for d, s in outcomes.items() if s != "ready"}
             if not_ready:
                 # Leave every superseded document in place: the refreshed copies
                 # are not usable, so deleting the old ones now would destroy the

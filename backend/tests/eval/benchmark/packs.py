@@ -27,12 +27,30 @@ Packs reference immutable pinned files by id, plus (where useful) a
 never include the deliberate negative-format files or the pinned
 poor-extraction case — a curated pack should be all signal.
 
-**Tax-research packs prove their completeness.** A pack in the ``tax-research``
-family must map every topic in :data:`TAX_TOPICS` — the aspects of tax a company
-or an individual actually meets when filing — onto at least one of its own
-files, and every file it carries must serve at least one topic. "Covers all
-aspects of tax" is therefore a validated property (:func:`pack_issues`), not a
-claim in a docstring.
+**What the tax-pack coverage checks do and do not prove.** A pack in the
+``tax-research`` family must map every topic in :data:`TAX_TOPICS` — the aspects
+of tax a company or an individual meets when filing — onto at least one of its
+own files, and every file it carries must serve at least one topic
+(:func:`pack_issues`). Three properties are machine-checked:
+
+* **completeness** — no topic is left without a document;
+* **consistency** — every id resolves, and only the pack's own files are cited;
+* **non-degeneracy** — one document cannot stand in for most of the taxonomy,
+  and no two topics may rest on an identical file set.
+
+Plus a **floor** on relevance (:func:`tax_coverage_evidence_issues`): each
+topic's mapped files must actually mention it in the text the real parsers
+extract, so a mapping to a document about something else fails.
+
+What is **not** proven — stated plainly because an earlier version of this
+docstring overclaimed it — is the editorial judgement that a given document
+*substantively covers* a topic. A reviewer demonstrated the limit concretely:
+an arbitrary disjoint partition of the pack's files across the topics passes
+every check above, because within a tax corpus almost every document mentions
+almost every tax term. Curation quality is therefore a **human review**
+property; these checks catch the mechanical failures (a missing topic, an
+orphan file, one document doing all the work, a document about the wrong
+subject), not a plausible-but-lazy mapping.
 """
 
 from __future__ import annotations
