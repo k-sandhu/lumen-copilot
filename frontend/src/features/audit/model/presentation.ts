@@ -35,13 +35,39 @@ export function kindForEventType(type: AuditEventType): AuditKind {
     case 'action.executed':
       return 'action';
     default:
-      return 'access';
+      // The taxonomy has 84 actions and only ever grows (#545), so an exhaustive
+      // switch would be a standing merge conflict. Fold the rest by VERB: anything
+      // that changed state is an action, anything that read or was refused is an
+      // access decision. Getting this wrong picks a slightly-off icon — it never
+      // hides a row — so a heuristic is the right trade here.
+      return /\.(created|updated|deleted|added|removed|revoked|granted|executed|reset|closed|connected|synced|published|drafted|certified|deprecated|disabled|featured|transferred|attested|accessed|requested|approved)$/.test(
+        type,
+      )
+        ? 'action'
+        : 'access';
   }
+}
+
+/**
+ * Turn a wire action into a readable sentence when no curated label exists —
+ * `sandbox_session.created` reads as "Sandbox session created".
+ *
+ * The alternative was showing the raw dotted identifier in the ledger, which is
+ * what happened before: `eventTypeLabel` fell back to `?? type`, and the curated
+ * map covered 14 of 84 actions.
+ */
+function humanise(type: string): string {
+  const words = type.replace(/[._]/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 /** Human-readable label for a wire event_type (for the row's primary line). */
 export function eventTypeLabel(type: AuditEventType): string {
-  const LABELS: Record<AuditEventType, string> = {
+  // PARTIAL by design: these are the hand-polished wordings, not the taxonomy.
+  // A total map would break the build every time an action is added — which is how
+  // this drifted to 14 of 84 in the first place — so anything uncurated falls back
+  // to a readable rendering of the action itself.
+  const LABELS: Partial<Record<AuditEventType, string>> = {
     'auth.login': 'Signed in',
     'auth.login_failed': 'Sign-in failed',
     'auth.logout': 'Signed out',
@@ -57,7 +83,7 @@ export function eventTypeLabel(type: AuditEventType): string {
     'action.approved': 'Action approved',
     'action.executed': 'Action executed',
   };
-  return LABELS[type] ?? type;
+  return LABELS[type] ?? humanise(type);
 }
 
 /** A short id for monospace display, e.g. "evt_9f3a…" — never the full UUID. */
