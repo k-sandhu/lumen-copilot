@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -41,7 +42,7 @@ import httpx
 
 from tests.eval.benchmark.bank import BenchmarkQuestion, load_questions, normalize
 from tests.eval.benchmark.client import ApiClient
-from tests.eval.benchmark.manifest import CORPUS, corpus_dir
+from tests.eval.benchmark.manifest import CORPUS, benchmark_corpus, corpus_dir
 from tests.eval.metrics import is_refusal
 
 _POLL_SECONDS = 3.0
@@ -91,8 +92,16 @@ class RunState:
 
 
 def _upload_corpus(state: RunState) -> None:
-    existing = state.api.existing_documents()
-    for entry in CORPUS:
+    # The measured slice plus the deliberate negative-format entries (uploaded
+    # on purpose to prove the 415 path). Pack-only and rolling entries are NOT
+    # uploaded: extra documents are extra retrieval competitors, and a rolling
+    # file's bytes can change between runs, so including them would make the
+    # scored result neither comparable nor reproducible.
+    measured = list(benchmark_corpus()) + [e for e in CORPUS if e.expected_ingest != "ok"]
+    # Collection-scoped: a same-named document elsewhere in the profile is not
+    # ours to reuse or report on.
+    existing = state.api.existing_documents(collection_id=state.collection_id)
+    for entry in measured:
         prior = existing.get(entry.filename)
         if prior is not None and entry.expected_ingest == "ok":
             state.doc_ids[entry.file_id] = str(prior["id"])
@@ -151,15 +160,22 @@ def _upload_corpus(state: RunState) -> None:
 
 
 def _wait_for_ingestion(state: RunState) -> None:
+    # Keyed by document id, not filename: waiting on a filename can be satisfied
+    # by a DIFFERENT row with the same name (an older copy, or one from another
+    # collection), which would mark this run's upload ready when it is not.
     pending = {
-        u.filename: u for u in state.uploads if u.expected == "ok" and u.document_id is not None
+        u.document_id: u for u in state.uploads if u.expected == "ok" and u.document_id is not None
     }
-    outcomes = state.api.wait_for_documents(set(pending), timeout_seconds=_INGEST_TIMEOUT_SECONDS)
-    for filename, status in outcomes.items():
-        pending[filename].status = status
+    outcomes = state.api.wait_for_documents(
+        {d for d in pending if d is not None},
+        collection_id=state.collection_id,
+        timeout_seconds=_INGEST_TIMEOUT_SECONDS,
+    )
+    for document_id, status in outcomes.items():
+        pending[document_id].status = status
         if status == "timeout":
             print(
-                f"[timout] {pending[filename].file_id}: "
+                f"[timout] {pending[document_id].file_id}: "
                 f"not ready after {_INGEST_TIMEOUT_SECONDS}s"
             )
 
@@ -169,10 +185,18 @@ def _gold_document_ids(state: RunState, question: BenchmarkQuestion) -> set[str]
 
 
 def _score_retrieval(state: RunState, question: BenchmarkQuestion) -> int | None:
+    # Scoped to the benchmark collection. Unscoped, the rank depends on every
+    # document the authenticated user happens to own, so a run against a
+    # non-fresh profile silently measures a different corpus than the one this
+    # run uploaded — and reports it as the benchmark result.
     response = state.api.request(
         "GET",
         "/api/v1/search",
-        params={"q": question.question, "limit": str(_SEARCH_K)},
+        params={
+            "q": question.question,
+            "limit": str(_SEARCH_K),
+            "collection_id": state.collection_id,
+        },
     )
     response.raise_for_status()
     gold = _gold_document_ids(state, question)
@@ -193,10 +217,17 @@ def _ask_chat(
     )
     created.raise_for_status()
     session_id = created.json()["id"]
+    # Same scoping for generation: `collection_ids` restricts retrieval to the
+    # benchmark collection, so citations and refusals are graded against the
+    # uploaded corpus rather than whatever else is in the profile.
     sent = state.api.request(
         "POST",
         f"/api/v1/chat/sessions/{session_id}/messages",
-        json={"content": question.question, "model": model},
+        json={
+            "content": question.question,
+            "model": model,
+            "collection_ids": [state.collection_id],
+        },
     )
     sent.raise_for_status()
 
@@ -431,9 +462,34 @@ def main(argv: list[str] | None = None) -> int:
         state.collection_id = api.ensure_collection(args.collection)
         print(f"collection: {state.collection_id}")
 
+        # A scored run measures the benchmark slice and nothing else. Search and
+        # chat are scoped to this collection, so any document left in it by an
+        # earlier run — a tax-pack file, a refreshed rolling statute — is still
+        # a retrieval competitor and silently changes the result. Refuse to run
+        # against a contaminated collection rather than report a number that
+        # is not comparable to the recorded baseline.
+        allowed = {
+            e.filename
+            for e in list(benchmark_corpus()) + [e for e in CORPUS if e.expected_ingest != "ok"]
+        }
+        present = state.api.existing_documents(collection_id=state.collection_id)
+        strays = sorted(set(present) - allowed)
+        if strays:
+            shown = "\n  ".join(strays[:20]) + ("\n  …" if len(strays) > 20 else "")
+            print(
+                f"error: collection {args.collection!r} holds {len(strays)} document(s) "
+                f"outside the benchmark slice — a scored run would measure them too:\n"
+                f"  {shown}\n\n"
+                "Use a fresh --collection (recommended), or remove those documents.",
+                file=sys.stderr,
+            )
+            return 2
+
         if args.skip_upload:
-            existing = state.api.existing_documents()
-            for entry in CORPUS:
+            existing = state.api.existing_documents(collection_id=state.collection_id)
+            for entry in list(benchmark_corpus()) + [
+                e for e in CORPUS if e.expected_ingest != "ok"
+            ]:
                 row = existing.get(entry.filename)
                 if row is not None:
                     state.doc_ids[entry.file_id] = str(row["id"])

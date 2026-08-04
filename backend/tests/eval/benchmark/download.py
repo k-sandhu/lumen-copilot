@@ -50,6 +50,11 @@ _USER_AGENT = (
 )
 _TIMEOUT_SECONDS = 120.0
 _ATTEMPTS = 3
+# Hard ceiling for a single stream. A pinned entry is capped at exactly its
+# pinned size (anything larger cannot be the pinned file); an unpinned or
+# rolling one gets this ceiling, which matches the app's upload limit — a
+# corpus file that would not be uploadable is not worth fetching.
+_MAX_STREAM_BYTES = 50 * 1024 * 1024
 
 # Cheap magic-byte sanity checks per declared MIME family: catches an HTML
 # error page saved where a PDF/OOXML file should be, before hashing even runs.
@@ -87,20 +92,46 @@ def _sha256_of(path: Path) -> Checksum:
     return Checksum(sha256=digest.hexdigest(), size_bytes=size)
 
 
-def _fetch(client: httpx.Client, entry: CorpusFile, dest: Path) -> Checksum:
-    """Stream ``entry.url`` to ``dest`` (via a .part temp) and return its checksum."""
+def _fetch(
+    client: httpx.Client, entry: CorpusFile, dest: Path, *, max_bytes: int
+) -> tuple[Checksum, Path]:
+    """Stream ``entry.url`` into a ``.part`` quarantine file next to ``dest``.
+
+    Returns ``(checksum, part_path)`` and **never touches ``dest``** — installing
+    the bytes is the caller's decision, made only after the pin is verified
+    (:func:`_process_entry`). That ordering matters: replacing ``dest`` first, as
+    this used to, meant a magic-byte-valid but *wrong* response overwrote a good
+    cached file, and a later run that only downloads *missing* files would then
+    happily upload the bad bytes.
+
+    ``max_bytes`` caps the stream and is enforced **as it arrives**, so a hostile
+    or misbehaving host cannot fill the disk while we wait for a checksum that
+    will never match. The declared ``Content-Length`` is rejected up front when
+    it already exceeds the cap.
+    """
     part = dest.with_suffix(dest.suffix + ".part")
     last_error: Exception | None = None
     for _attempt in range(1, _ATTEMPTS + 1):
         try:
             with client.stream("GET", entry.url) as response:
                 response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+                    raise ValueError(
+                        f"declared Content-Length {int(declared):,} B exceeds the "
+                        f"{max_bytes:,} B cap for this entry"
+                    )
                 digest = hashlib.sha256()
                 size = 0
                 with part.open("wb") as handle:
                     for block in response.iter_bytes(chunk_size=1 << 20):
-                        digest.update(block)
                         size += len(block)
+                        if size > max_bytes:
+                            raise ValueError(
+                                f"response exceeded the {max_bytes:,} B cap "
+                                f"after {size:,} B — aborting mid-stream"
+                            )
+                        digest.update(block)
                         handle.write(block)
             with part.open("rb") as check_handle:
                 head = check_handle.read(2048)
@@ -109,8 +140,7 @@ def _fetch(client: httpx.Client, entry: CorpusFile, dest: Path) -> Checksum:
                     f"magic-byte check failed for {entry.mime_type} "
                     f"(first bytes: {head[:16]!r}) — likely an HTML error page"
                 )
-            part.replace(dest)
-            return Checksum(sha256=digest.hexdigest(), size_bytes=size)
+            return Checksum(sha256=digest.hexdigest(), size_bytes=size), part
         except (httpx.HTTPError, ValueError, OSError) as exc:  # retry transient failures
             last_error = exc
             part.unlink(missing_ok=True)
@@ -149,16 +179,29 @@ def _process_entry(
             )
         # Local bytes disagree with the pin — re-fetch below.
 
+    # A pinned entry cannot legitimately be larger than its pin, so cap the
+    # stream there; rolling/unpinned entries get the app's upload ceiling.
+    cap = pin.size_bytes if (pin is not None and not entry.rolling) else _MAX_STREAM_BYTES
     try:
-        observed = _fetch(client, entry, dest)
+        observed, part = _fetch(client, entry, dest, max_bytes=cap)
     except RuntimeError as exc:
         return FetchResult(entry, "FAILED", str(exc))
+
+    def _install() -> None:
+        """Promote the verified quarantine file over the real filename."""
+        part.replace(dest)
+
+    def _discard(detail: str) -> FetchResult:
+        """Drop unverified bytes, leaving any previously-good ``dest`` intact."""
+        part.unlink(missing_ok=True)
+        return FetchResult(entry, "FAILED", detail, observed)
 
     if entry.rolling:
         # Rolling entries always record their last-seen identity; a change from
         # the previous pin is the expected refresh, never a failure.
         changed = pin is not None and observed != pin
         pins[entry.file_id] = observed
+        _install()
         return FetchResult(
             entry,
             "rolled" if changed else ("pinned" if pin_mode or pin is None else "ok"),
@@ -168,18 +211,22 @@ def _process_entry(
         )
     if pin_mode:
         pins[entry.file_id] = observed
+        _install()
         return FetchResult(entry, "pinned", f"downloaded and pinned ({observed.size_bytes:,} B)")
     if pin is None:
-        return FetchResult(entry, "FAILED", "no pin in checksums.json (run --pin first)", observed)
+        # Unverifiable: do NOT install, or an unpinned download would masquerade
+        # as corpus content on the next run.
+        return _discard("no pin in checksums.json (run --pin first)")
     if observed != pin:
-        return FetchResult(
-            entry,
-            "FAILED",
+        # The bytes are NOT what the questions were authored against. Discard
+        # them: the previous verified copy (if any) stays in place, so a later
+        # run cannot pick up unverified content it would then upload.
+        return _discard(
             f"checksum mismatch: expected {pin.sha256[:12]}…/{pin.size_bytes:,} B, "
             f"got {observed.sha256[:12]}…/{observed.size_bytes:,} B — upstream changed; "
-            "review and re-pin deliberately",
-            observed,
+            "review and re-pin deliberately (nothing was installed)"
         )
+    _install()
     return FetchResult(entry, "ok", f"downloaded, checksum verified ({observed.size_bytes:,} B)")
 
 

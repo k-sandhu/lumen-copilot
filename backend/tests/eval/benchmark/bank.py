@@ -55,6 +55,7 @@ from tests.eval.benchmark.manifest import (
     CORPUS,
     QUESTIONS_PATH,
     CorpusFile,
+    benchmark_corpus,
     entry_by_id,
 )
 from tests.eval.golden import GoldenDocument, GoldenQuestion
@@ -154,6 +155,15 @@ class BenchmarkQuestion:
     absence_probes: tuple[str, ...] = ()
     language: str = "en"
     notes: str = ""
+
+
+def _significant_words(text: str) -> set[str]:
+    """Content words of ``text`` — the unit the loose-relatedness checks compare.
+
+    Words of 4+ alphanumeric characters, normalized. Short tokens are dropped so
+    that "the"/"of"/"a" cannot make two unrelated strings look related.
+    """
+    return {w for w in re.findall(r"[a-z0-9]+", normalize(text)) if len(w) > 3}
 
 
 def normalize(text: str) -> str:
@@ -282,11 +292,57 @@ def _validate_one(q: BenchmarkQuestion, ok_ids: set[str], good_ids: set[str]) ->
         for fact in q.answer_facts:
             if not any(normalize(fact) in normalize(ev.quote) for ev in q.evidence):
                 bad(f"answer_fact {fact!r} not found in any evidence quote")
+        # `gold_answer` is a HUMAN-READABLE rendering, deliberately not the
+        # machine contract: nothing scores on it (run_live counts `answer_facts`
+        # in the model's answer — run_live.py:258 — and no scorer reads
+        # `gold_answer` at all). The machine chain is
+        # `answer_facts` -> evidence quotes -> real parser output, each link
+        # checked above and in `verify`.
+        #
+        # It was previously validated only as non-empty. A fuzzy "is the answer
+        # about its facts" heuristic was tried and rejected: every variant
+        # false-positived on legitimate rows (German facts against an English
+        # answer, "96dpi" vs "96 dpi", "default" vs "defaults"), and rewriting
+        # hand-authored ground truth to satisfy a heuristic is worse than the
+        # gap it closes. What IS checked is the failure mode that actually
+        # occurs when authoring by hand: pasting the question into the answer.
+        if normalize(q.gold_answer) == normalize(q.question):
+            bad("gold_answer is a copy of the question text")
     else:
         if q.evidence or q.source_files or q.answer_facts or q.gold_answer.strip():
             bad("unanswerable question must have no evidence/sources/facts/gold_answer")
         if not q.absence_probes:
             bad("unanswerable question needs >= 1 absence_probe")
+        # An absence probe is the machine-checkable half of "the corpus really
+        # does not contain this": `verify` proves the exact phrase appears in NO
+        # extracted corpus text. What validation can add is that the probe is
+        # about the question — otherwise any nonce satisfies it.
+        #
+        # Two rules, both with zero false positives on the authored bank:
+        #   * the probe must contain a real token (plain "???" proved nothing);
+        #   * it must share at least one significant word with the question.
+        #
+        # Stricter variants were tried and REJECTED for rejecting good data:
+        # requiring every probe word to come from the question kills legitimate
+        # paraphrase ("born in 1775" against "when was Austen born?"), and a
+        # phrase-length floor kills valid single-token probes like "GPT-2".
+        # The residual — whether the phrase is a *plausible* thing the corpus
+        # might have said — is an authoring judgement, reviewed rather than
+        # computed, and it is deliberately not asserted here.
+        question_words = _significant_words(q.question)
+        for probe in q.absence_probes:
+            if not re.search(r"[a-z0-9]{2,}", normalize(probe)):
+                bad(
+                    f"absence_probe {probe!r} contains no real token — it cannot "
+                    "show the corpus lacks anything in particular"
+                )
+                continue
+            probe_words = _significant_words(probe)
+            if probe_words and not (probe_words & question_words):
+                bad(
+                    f"absence_probe {probe!r} shares no significant wording with the "
+                    "question — a probe unrelated to what was asked proves nothing"
+                )
 
     for ev in q.evidence:
         if ev.file_id not in ok_ids:
@@ -328,6 +384,8 @@ def bank_issues(
     ok_ids = {e.file_id for e in corpus if e.expected_ingest == "ok"}
     good_ids = {e.file_id for e in corpus if e.expected_ingest == "ok" and e.text_quality == "good"}
     rolling_ids = {e.file_id for e in corpus if e.rolling}
+    # The measured slice — what the live runner actually uploads.
+    benchmark_ids = {e.file_id for e in benchmark_corpus(corpus)}
     issues: list[BankIssue] = []
 
     seen_qids: set[str] = set()
@@ -341,8 +399,13 @@ def bank_issues(
             issues.append(BankIssue(q.qid, "duplicate question text"))
         seen_questions.add(normalized_question)
         issues.extend(_validate_one(q, ok_ids, good_ids))
-        # Rolling files (#443) refresh on demand — a question grounded in one
-        # would silently break on refresh, so citing them is a validation error.
+        # A question may only ground in the measured benchmark slice. Two ways
+        # to fall outside it, both validation errors:
+        #   * rolling files (#443) refresh on demand, so a grounded answer would
+        #     silently break the next time they change;
+        #   * pack-only files (#517) are not uploaded by the live runner at all,
+        #     so a question citing one is unanswerable *by construction* on the
+        #     scored run — a gold answer nothing can ever retrieve.
         for ev in q.evidence:
             if ev.file_id in rolling_ids:
                 issues.append(
@@ -350,6 +413,15 @@ def bank_issues(
                         q.qid,
                         f"evidence cites rolling file {ev.file_id!r} — "
                         "questions must ground in immutable (pinned) files",
+                    )
+                )
+            elif ev.file_id not in benchmark_ids:
+                issues.append(
+                    BankIssue(
+                        q.qid,
+                        f"evidence cites pack-only file {ev.file_id!r} — questions "
+                        "must ground in the measured benchmark slice "
+                        "(manifest.benchmark_corpus), which the live runner uploads",
                     )
                 )
 
@@ -404,10 +476,15 @@ def golden_documents(
     """
     from tests.eval.benchmark.extract import cached_text
 
+    # Draw from the measured benchmark slice, never raw CORPUS: pack-only and
+    # rolling entries would otherwise enter the golden set, where a refreshed
+    # rolling file could silently change what a graded question retrieves.
+    from tests.eval.benchmark.manifest import benchmark_corpus
+
     chosen = [
         e
-        for e in corpus
-        if e.expected_ingest == "ok" and e.text_quality == "good" and (subset == "full" or e.smoke)
+        for e in benchmark_corpus(corpus)
+        if e.text_quality == "good" and (subset == "full" or e.smoke)
     ]
     return tuple(
         GoldenDocument(doc_id=e.file_id, filename=e.filename, text=cached_text(e.file_id))

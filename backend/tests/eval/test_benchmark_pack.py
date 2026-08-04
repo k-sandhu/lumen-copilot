@@ -7,6 +7,8 @@ the 401-refresh replay that long ingestion waits depend on.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import httpx
 import pytest
 
@@ -18,8 +20,35 @@ from tests.eval.benchmark.bank import (
 )
 from tests.eval.benchmark.client import ApiClient
 from tests.eval.benchmark.load_pack import FORMAT_MIME, select_from_pack, select_pack
-from tests.eval.benchmark.manifest import CORPUS, manifest_issues
-from tests.eval.benchmark.packs import PACKS, pack_issues
+from tests.eval.benchmark.manifest import CORPUS, extracted_dir, manifest_issues
+from tests.eval.benchmark.packs import (
+    PACKS,
+    TAX_TOPICS,
+    IndustryPack,
+    TaxCoverage,
+    pack_by_id,
+    pack_files,
+    pack_files_for_topic,
+    pack_issues,
+    tax_coverage_evidence_issues,
+    tax_packs,
+    topics_of,
+)
+
+
+def _tax_corpus_ready() -> bool:
+    """True when every tax-pack file has been extracted (the packs' own slice)."""
+    from tests.eval.benchmark.packs import tax_packs as _packs
+
+    wanted = {fid for p in _packs() for fid in p.file_ids}
+    return bool(wanted) and all((extracted_dir() / f"{fid}.txt").exists() for fid in wanted)
+
+
+needs_tax_corpus = pytest.mark.skipif(
+    not _tax_corpus_ready(),
+    reason=("tax-pack corpus not extracted — run `download --only <tax ids>` then `extract`"),
+)
+
 
 # --- Deterministic selection ---------------------------------------------------
 
@@ -93,7 +122,7 @@ def test_pack_catalog_is_structurally_sound() -> None:
     """Ids resolve, packs are all-signal (no negatives / poor extraction), ≥4 files."""
     issues = pack_issues()
     assert issues == [], "\n".join(f"{i.pack_id}: {i.problem}" for i in issues)
-    assert len(PACKS) == 5
+    assert len(PACKS) == 7  # 5 industry + 2 tax-research
 
 
 def test_pack_selection_is_deterministic_and_ordered() -> None:
@@ -157,6 +186,161 @@ def test_bank_validation_rejects_a_rolling_citation() -> None:
     assert any("rolling" in i.problem for i in problems)
 
 
+# --- Tax-research packs (#515) --------------------------------------------------
+#
+# A tax pack's product promise is *coverage*: every aspect of tax a company or an
+# individual meets when filing has at least one document behind it. These tests
+# are that promise's mechanism — they fail if a topic loses its last file, if a
+# file stops serving any topic, or if a pack claims coverage it cannot back.
+
+TAX_PACK_IDS = ("tax-research-new-york", "tax-research-ontario")
+
+
+def test_tax_packs_are_registered() -> None:
+    assert [p.pack_id for p in tax_packs()] == list(TAX_PACK_IDS)
+
+
+@pytest.mark.parametrize("pack_id", TAX_PACK_IDS)
+def test_tax_pack_covers_every_aspect_of_filing(pack_id: str) -> None:
+    """The headline guarantee: no topic in the taxonomy is left without a document."""
+    pack = pack_by_id(pack_id)
+    covered = {c.topic for c in pack.tax_coverage}
+    assert covered == set(TAX_TOPICS), f"missing: {sorted(set(TAX_TOPICS) - covered)}"
+    for coverage in pack.tax_coverage:
+        assert coverage.file_ids, f"{coverage.topic} has no files"
+
+
+@pytest.mark.parametrize("pack_id", TAX_PACK_IDS)
+def test_every_tax_pack_file_serves_a_topic(pack_id: str) -> None:
+    """No filler: each file is claimed by at least one aspect of filing."""
+    pack = pack_by_id(pack_id)
+    orphans = [fid for fid in pack.file_ids if not topics_of(pack, fid)]
+    assert orphans == [], f"files serving no topic: {orphans}"
+
+
+@pytest.mark.parametrize("pack_id", TAX_PACK_IDS)
+def test_tax_pack_files_are_tax_domain_and_licensed(pack_id: str) -> None:
+    """Every entry is a real tax document with recorded provenance and licence."""
+    for entry in pack_files(pack_by_id(pack_id)):
+        assert entry.domain == "tax", f"{entry.file_id} is domain={entry.domain}"
+        assert entry.source and entry.license
+        assert entry.url.startswith("https://")
+
+
+def test_tax_packs_span_both_jurisdictional_layers() -> None:
+    """A filing answer needs federal *and* sub-national sources — both are present."""
+    ny = pack_by_id("tax-research-new-york").file_ids
+    assert any(f.startswith("irs-") for f in ny), "no US federal layer"
+    assert any(f.startswith("nys-") for f in ny), "no New York State layer"
+
+    on = pack_by_id("tax-research-ontario").file_ids
+    assert any(f.startswith("cra-") for f in on), "no Canadian federal layer"
+    assert any(f.startswith("ontario-") for f in on), "no Ontario-administered layer"
+
+
+def test_tax_packs_carry_statutory_or_official_authority() -> None:
+    """primary_authority must resolve to real statutes/rulings, not more guidance."""
+    for pack_id in TAX_PACK_IDS:
+        pack = pack_by_id(pack_id)
+        files = pack_files_for_topic(pack, "primary_authority")
+        assert files, f"{pack_id} has no primary authority"
+
+
+# --- Topic-scoped selection ----------------------------------------------------
+
+
+def test_topic_selection_is_deterministic_and_pack_ordered() -> None:
+    """--tax-topic keeps curated pack order and is stable across calls."""
+    first = select_from_pack("tax-research-ontario", None, None, "payroll_withholding")
+    second = select_from_pack("tax-research-ontario", None, None, "payroll_withholding")
+    assert [e.file_id for e in first] == [e.file_id for e in second]
+    pack = pack_by_id("tax-research-ontario")
+    order = [f for f in pack.file_ids if f in {e.file_id for e in first}]
+    assert [e.file_id for e in first] == order
+
+
+def test_topic_selection_narrows_to_the_topic() -> None:
+    selection = select_from_pack("tax-research-new-york", None, None, "consumption_tax")
+    pack = pack_by_id("tax-research-new-york")
+    for entry in selection:
+        assert "consumption_tax" in topics_of(pack, entry.file_id)
+
+
+def test_topic_composes_with_formats_and_count() -> None:
+    selection = select_from_pack("tax-research-new-york", ["pdf"], 2, "payroll_withholding")
+    assert len(selection) == 2
+    assert all(e.mime_type == FORMAT_MIME["pdf"] for e in selection)
+
+
+def test_unknown_tax_topic_raises() -> None:
+    with pytest.raises(KeyError, match="declares no topic"):
+        select_from_pack("tax-research-ontario", None, None, "carbon_tax")
+
+
+def test_topic_on_a_non_tax_pack_raises() -> None:
+    """An industry pack declares no coverage, so any topic is a hard error."""
+    with pytest.raises(KeyError, match="declares no topic"):
+        select_from_pack("financial-services", None, None, "personal_income")
+
+
+def test_empty_pack_selection_raises_rather_than_loading_nothing() -> None:
+    """The Ontario pack is all PDF — asking for XLSX must fail, not no-op."""
+    with pytest.raises(ValueError, match="no files in pack"):
+        select_from_pack("tax-research-ontario", ["xlsx"])
+
+
+# --- Coverage-contract negatives ------------------------------------------------
+
+
+def _mutated(pack_id: str, **changes: object) -> tuple[IndustryPack, ...]:
+    """The real pack with one field replaced — the input to a negative check."""
+    return (replace(pack_by_id(pack_id), **changes),)  # type: ignore[arg-type]
+
+
+def test_tax_pack_missing_a_topic_is_rejected() -> None:
+    pack = pack_by_id("tax-research-ontario")
+    dropped = tuple(c for c in pack.tax_coverage if c.topic != "estates_trusts")
+    issues = pack_issues(_mutated(pack.pack_id, tax_coverage=dropped))
+    assert any("does not cover 'estates_trusts'" in i.problem for i in issues)
+
+
+def test_tax_pack_with_no_coverage_is_rejected() -> None:
+    issues = pack_issues(_mutated("tax-research-ontario", tax_coverage=()))
+    assert any("declares no topic coverage" in i.problem for i in issues)
+
+
+def test_coverage_citing_a_file_outside_the_pack_is_rejected() -> None:
+    pack = pack_by_id("tax-research-ontario")
+    smuggled = (
+        TaxCoverage("estates_trusts", ("gutenberg-moby-dick",)),
+        *(c for c in pack.tax_coverage if c.topic != "estates_trusts"),
+    )
+    issues = pack_issues(_mutated(pack.pack_id, tax_coverage=smuggled))
+    assert any("not in the pack" in i.problem for i in issues)
+
+
+def test_pack_file_serving_no_topic_is_rejected() -> None:
+    """Adding a file without claiming a topic for it is a silent gap — caught."""
+    pack = pack_by_id("tax-research-ontario")
+    issues = pack_issues(_mutated(pack.pack_id, file_ids=(*pack.file_ids, "gutenberg-moby-dick")))
+    assert any("serves no declared tax topic" in i.problem for i in issues)
+
+
+def test_non_tax_pack_may_not_declare_tax_coverage() -> None:
+    """Half-declared coverage is worse than none — an industry pack must not have it."""
+    issues = pack_issues(
+        _mutated("financial-services", tax_coverage=(TaxCoverage("personal_income", ()),))
+    )
+    assert any("may declare tax coverage" in i.problem for i in issues)
+
+
+def test_unknown_topic_in_coverage_is_rejected() -> None:
+    pack = pack_by_id("tax-research-ontario")
+    bogus = (TaxCoverage("carbon_tax", pack.file_ids[:1]), *pack.tax_coverage)  # type: ignore[arg-type]
+    issues = pack_issues(_mutated(pack.pack_id, tax_coverage=bogus))
+    assert any("unknown tax topic" in i.problem for i in issues)
+
+
 # --- ApiClient 401-refresh replay ----------------------------------------------
 
 
@@ -184,3 +368,124 @@ def test_client_relogs_in_once_on_401() -> None:
         "POST /api/v1/auth/login",  # transparent re-login
         "GET /api/v1/documents",  # replay succeeds
     ]
+
+
+# --- Tax coverage: structural non-degeneracy + parser-grounded evidence ---------
+
+
+def test_degenerate_coverage_mapping_is_rejected() -> None:
+    """One broad document standing in for the whole taxonomy is not coverage.
+
+    ``pack_issues`` can prove a mapping is complete and consistent, but it never
+    reads a document — so on its own it would accept "point every topic at the
+    federal tax guide". Keyword evidence alone does not save it either: a 480 KB
+    comprehensive guide genuinely does mention withholding, GST, trusts,
+    penalties and rates. The structural non-degeneracy rules are what actually
+    reject it, so this pins them.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    first = pack.file_ids[0]
+    rest = tuple(f for f in pack.file_ids if f != first)
+    degenerate = tuple(
+        TaxCoverage(topic, (first,) + (rest if topic == "personal_income" else ()))
+        for topic in TAX_TOPICS
+    )
+
+    issues = pack_issues((replace(pack, tax_coverage=degenerate),))
+    assert any("claimed for" in i.problem for i in issues), "over-claimed file not caught"
+    assert any("identical file set" in i.problem for i in issues), "duplicate topic sets not caught"
+
+
+def test_a_file_may_serve_a_couple_of_topics() -> None:
+    """The bound must not punish legitimate multi-topic files.
+
+    New York's IT-112-R really is both ``cross_border`` and
+    ``credits_deductions``; both real packs top out at two topics per file.
+    """
+    for pack in tax_packs():
+        per_file: dict[str, int] = {}
+        for coverage in pack.tax_coverage:
+            for fid in coverage.file_ids:
+                per_file[fid] = per_file.get(fid, 0) + 1
+        assert max(per_file.values()) <= 2, f"{pack.pack_id} exceeds the observed spread"
+    assert pack_issues() == []
+
+
+@needs_tax_corpus
+def test_every_tax_topic_is_evidenced_by_its_own_files() -> None:
+    """The semantic half: each topic's mapped files really discuss that topic.
+
+    Checked against the text the REAL ingestion parsers produce, not the
+    manifest — a mapping to a document that never mentions the topic fails here
+    even though it is structurally perfect.
+    """
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    for pack in tax_packs():
+        issues = tax_coverage_evidence_issues(pack, texts)
+        assert issues == [], "\n".join(f"{i.pack_id}: {i.problem}" for i in issues)
+
+
+@needs_tax_corpus
+def test_coverage_evidence_rejects_an_unrelated_document() -> None:
+    """The negative: mapping a topic to a document about something else fails.
+
+    Uses a real corpus file from a different domain, so this is a genuine
+    "wrong document" case rather than a synthetic string.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    # The Ontario corporate-tax-calculation schedule genuinely says nothing
+    # about sales tax or GST/HST — verified against the extracted text, rather
+    # than assumed (the first candidate tried, P148, does mention GST/HST
+    # because objections cover it).
+    unrelated = "cra-t2sch500-ontario-tax-2023"
+    swapped = tuple(
+        TaxCoverage("consumption_tax", (unrelated,)) if c.topic == "consumption_tax" else c
+        for c in pack.tax_coverage
+    )
+    issues = tax_coverage_evidence_issues(replace(pack, tax_coverage=swapped), texts)
+    assert any(
+        "consumption_tax" in i.problem for i in issues
+    ), "a topic mapped to an unrelated document must not pass evidence checking"
+
+
+@needs_tax_corpus
+def test_coverage_checks_do_not_prove_curation_quality() -> None:
+    """Pin the KNOWN LIMIT of the coverage checks, so nobody re-overclaims it.
+
+    A reviewer defeated the structural + evidence rules with an arbitrary
+    disjoint partition: give every topic its own slice of the pack's files and
+    everything passes, because within a tax corpus nearly every document
+    mentions nearly every tax term.
+
+    This test asserts that this is *still* true. It is not celebrating the gap —
+    it is making the gap executable, so the docstrings and README that now say
+    "curation quality is human-reviewed" cannot quietly drift back to claiming
+    the checks prove it. If someone later strengthens the rules enough to reject
+    an arbitrary partition, this test fails and should be replaced by one
+    asserting the stronger guarantee.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    files = list(pack.file_ids)
+    topics = list(TAX_TOPICS)
+    # Round-robin every file across the topics: complete, non-degenerate, and
+    # entirely arbitrary.
+    buckets: dict[str, list[str]] = {t: [] for t in topics}
+    for i, fid in enumerate(files):
+        buckets[topics[i % len(topics)]].append(fid)
+    # Every topic needs at least one file; top up any empty bucket.
+    for i, topic in enumerate(topics):
+        if not buckets[topic]:
+            buckets[topic].append(files[i % len(files)])
+    partitioned = tuple(TaxCoverage(t, tuple(buckets[t])) for t in topics)
+    arbitrary = replace(pack, tax_coverage=partitioned)
+
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    structural = pack_issues((arbitrary,))
+    evidence = tax_coverage_evidence_issues(arbitrary, texts)
+
+    assert structural == [] and evidence == [], (
+        "The checks unexpectedly rejected an arbitrary partition. That is an "
+        "IMPROVEMENT — replace this test with one asserting the new guarantee, "
+        "and update the 'human-reviewed' wording in packs.py and the README."
+    )

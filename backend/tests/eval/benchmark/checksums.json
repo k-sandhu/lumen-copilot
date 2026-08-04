@@ -43,6 +43,94 @@
     "sha256": "a37450360b4b440cb10ccfd9ce37cb92ea8193884c5700948df942aa1c62920f",
     "size_bytes": 111322
   },
+  "cra-5000-g-federal-guide-2025": {
+    "sha256": "1f263de22ae9e2c1c1d5749c249cd38a76adf6a9b7b83c24caed14dfb07a316f",
+    "size_bytes": 420974
+  },
+  "cra-5006-c-on428-2025": {
+    "sha256": "be18f03acf24b2b7857a45e2faf4b1630c5b3450b502d3cef516ee0b40bf73ba",
+    "size_bytes": 54533
+  },
+  "cra-5006-pc-ontario-guide-2025": {
+    "sha256": "24a573eb2f934e9fd2bbd23b16d5be9ea266100f484c82a8a0f12ad59f5b6cbd",
+    "size_bytes": 114043
+  },
+  "cra-p105-students-2024": {
+    "sha256": "08647463c1a6fea15b360fa041312fdb33f00335ebfac22dc03cc90be3c93152",
+    "size_bytes": 163241
+  },
+  "cra-p148-resolving-dispute-2025": {
+    "sha256": "a8929e330a1c162c9a7dd533279e1b46c9088606de68246f8985063f8241adc8",
+    "size_bytes": 116325
+  },
+  "cra-rc4022-gsthst-registrants-2025": {
+    "sha256": "811d6e9a8a31b606108b72431bdec8cab837cc55fb50066c78b493497dc4887d",
+    "size_bytes": 650597
+  },
+  "cra-rc4028-gsthst-housing-rebate-2025": {
+    "sha256": "f916e2cd76ea7cb4526dbc4248767fccae25bbbb91efd5566eae7499ca4ab39c",
+    "size_bytes": 278877
+  },
+  "cra-rc4058-gsthst-quick-method-2024": {
+    "sha256": "2dff8b077550dbed0889da1dfb5cdf72eb4b32691ded9a2665fbe283b6faf341",
+    "size_bytes": 156641
+  },
+  "cra-rc4110-employee-or-self-employed-2023": {
+    "sha256": "2fb99aa7a8782008f74589deebc75a60211a0679295a5e2903e4ed1b32086113",
+    "size_bytes": 192319
+  },
+  "cra-t2sch500-ontario-tax-2023": {
+    "sha256": "e731d6e4ee66457b2497ec0dc3441d462ea5dd29892bc8b3f9bc7c44a40fa650",
+    "size_bytes": 50341
+  },
+  "cra-t2sch510-ontario-minimum-tax-2014": {
+    "sha256": "bea8fdca06196aa93c3ca599261bf905e8040e8886fa711cc121a845d5b9ab97",
+    "size_bytes": 57643
+  },
+  "cra-t4001-payroll-deductions-2025": {
+    "sha256": "b8a50cfd2f7b8515fb6aba863701764641f6ace1b3d4b3a3ed35fe63d1e60b4f",
+    "size_bytes": 464690
+  },
+  "cra-t4002-self-employed-2025": {
+    "sha256": "8efc96434bfaab1beabe95b48d8cb3c764a6b2292e9865cb9aaeac938673453f",
+    "size_bytes": 802009
+  },
+  "cra-t4012-t2-corporation-2025": {
+    "sha256": "1b9e8f0b74b5d2670142475ae5e1a4655b03e61d2dcc30a116087cff1893d9a1",
+    "size_bytes": 926991
+  },
+  "cra-t4013-t3-trust-guide-2024": {
+    "sha256": "75e46b07b70f16524222aba0fea15f0cdcaddf06f5dc0c25c9caeb151393a1c9",
+    "size_bytes": 2649486
+  },
+  "cra-t4036-rental-income-2024": {
+    "sha256": "1153f2cf4c0239de73fba9a06ec3f34070e1df9b11f5230d503afc020dd9319f",
+    "size_bytes": 439815
+  },
+  "cra-t4037-capital-gains-2024": {
+    "sha256": "c4b9deeece645b0b27631ba74d52da17e38b6af156f68eac86ffc059402fa14a",
+    "size_bytes": 1437614
+  },
+  "cra-t4044-employment-expenses-2024": {
+    "sha256": "e1faf06c1cac2afab07306ee39bccca6aa214c789f16ed8725ba5a185fa073c4",
+    "size_bytes": 3304759
+  },
+  "cra-t4058-non-residents-2024": {
+    "sha256": "bbd81d3fbf820649b735e59ed0ea61df7d26387f91c79f7df05a902fb6bbacfe",
+    "size_bytes": 165217
+  },
+  "cra-t4068-partnership-2024": {
+    "sha256": "8998df3e73915249502c4030a8421f1c38045b4795c6ec4a94d986fceea503b4",
+    "size_bytes": 1033990
+  },
+  "cra-t4130-taxable-benefits-2024": {
+    "sha256": "0181e3757b309702fbb8f466b95bbe89fe227ba9c13d5b5ba67afb258a309eb1",
+    "size_bytes": 377418
+  },
+  "cra-t4144-section-216-2024": {
+    "sha256": "44163af6191c64ab623e167ee854605c81a54878ddfd4c37382859f7b6325c1c",
+    "size_bytes": 115983
+  },
   "ecma-404-json": {
     "sha256": "760a6f77c38172f4de333412292eaed092f33852592ca0cce9b7535a6e415fcf",
     "size_bytes": 639695
@@ -119,6 +207,78 @@
     "sha256": "7bb00943803f5cecc34782145cd75dfd8feaa07a1c4daadeab2689f0980f810b",
     "size_bytes": 129985
   },
+  "irs-i1040sc-schedule-c-2024": {
+    "sha256": "a68b4717ef5f8c364fec6f04af43c1ea9b1488d83b89390e95576338d63f189a",
+    "size_bytes": 473307
+  },
+  "irs-i1041-estates-trusts-2024": {
+    "sha256": "5c45d0369dc234465871673e9f10b5dd83aaf48968d4896b897794486c3e3ab5",
+    "size_bytes": 639705
+  },
+  "irs-i1065-partnership-2024": {
+    "sha256": "20a11d2179071c84e0ad5f76571f252933c9a0e2c17f678c55846e3cb5fb4e25",
+    "size_bytes": 863892
+  },
+  "irs-i1120-corporation-2024": {
+    "sha256": "adb05b78d6dc3d2e7ec3856f235fcd55d9adcb6b0a7d04ced58601d99341af16",
+    "size_bytes": 517474
+  },
+  "irs-i1120s-s-corporation-2024": {
+    "sha256": "9de86b9c588f868cf202515f1674723667dae0db25a28590a3896eb4e343e989",
+    "size_bytes": 724864
+  },
+  "irs-irb-2025-01": {
+    "sha256": "2ddf805a419d30fae2829768d35c63d6722b5de1a70a43551a5b03002c6a2230",
+    "size_bytes": 3086212
+  },
+  "irs-iw2w3-wage-statements-2024": {
+    "sha256": "1eae396d17506e188e6061776730e7610e1a6847fa9683a97b860fa27bc92d79",
+    "size_bytes": 534704
+  },
+  "irs-pub1-taxpayer-rights-current": {
+    "sha256": "b76c98a904265a8a25b0fd1a6cfebfe03dd29c1da4c661f2808515ae01c440ac",
+    "size_bytes": 324302
+  },
+  "irs-pub15-circular-e-2024": {
+    "sha256": "3a15da95e39b24f2b6c61f4abc85298c897f57600c3508f9381fab7180a092e0",
+    "size_bytes": 1638730
+  },
+  "irs-pub17-individual-2024": {
+    "sha256": "33a0cb93a183258bdf6ad6289c6ad599b276146da9e7ee7366c73b73ed7b2807",
+    "size_bytes": 3046757
+  },
+  "irs-pub505-estimated-tax-2024": {
+    "sha256": "9808dc6ec9307d97785d5d92881eb3f8e24572aacef1fbd5523883bd4b4caaa6",
+    "size_bytes": 1673502
+  },
+  "irs-pub519-aliens-2024": {
+    "sha256": "25459cea5f1dbed37409367b65a65303adb6f9791c6b7d7ee651dee1a633df32",
+    "size_bytes": 2130801
+  },
+  "irs-pub556-appeals-current": {
+    "sha256": "6080aaeb1ae32c1c328e4bf46384bd98373dae0c6bfceaba16bae1f2fb2a6dc6",
+    "size_bytes": 1215085
+  },
+  "irs-pub946-depreciation-2024": {
+    "sha256": "19bf94b06d8d1b9c67d44ef2dbbb31acb5b0046f0caa925d7a97590e494384a3",
+    "size_bytes": 2313055
+  },
+  "irs-rev-proc-2024-40": {
+    "sha256": "4de9db6b6662b5c305a59100a027051628823b42fd5817ea4e383ad4c302af1f",
+    "size_bytes": 249076
+  },
+  "irs-soi-new-york-2022": {
+    "sha256": "e4f48991bba2bb9c2fb14577a3ab6a917e9df9d1496980eb83332d2457aa8dca",
+    "size_bytes": 270733
+  },
+  "justice-excise-tax-act-canada": {
+    "sha256": "d813794ac36acb0caabe06220bfc45b07db10925e4b5e1ee7dff8068cffcb99e",
+    "size_bytes": 7977181
+  },
+  "justice-income-tax-act-canada": {
+    "sha256": "31cc0fee5bcb1521ea8d356c27dbe5b1394d2b24f140a34506f918ca4c38eb8a",
+    "size_bytes": 23397340
+  },
   "kubernetes-changelog-1-31": {
     "sha256": "156f4d163bb912873de1b643b9afae7d671507b59d26612853713b8bb4482d02",
     "size_bytes": 173053
@@ -138,6 +298,86 @@
   "nist-sp-800-63b": {
     "sha256": "ccfce7510a1267933f912d023306c6e7d485f21be63d271108b61aad6139127e",
     "size_bytes": 1480377
+  },
+  "nys-ct3i-franchise-2024": {
+    "sha256": "d67ecafe36368c305e5dcd974d032bfc56584548ac98d3e6bef04473db574860",
+    "size_bytes": 472340
+  },
+  "nys-ct3si-s-corporation-2024": {
+    "sha256": "ce5afca24f4ffddc484a4f85663373da51fd5dfc7a315b17182e8e1f635789ae",
+    "size_bytes": 450814
+  },
+  "nys-et706i-estate-tax-current": {
+    "sha256": "d8d4f82f07341f8a0e7e00f03293821e6a0e0e3e8f7cbbc33c2b5d0458a66de4",
+    "size_bytes": 277296
+  },
+  "nys-it112ri-resident-credit-2024": {
+    "sha256": "8c3f377c10a036881c6e4e90f5adb421fd6442c3515b03338499672c01b82cec",
+    "size_bytes": 240238
+  },
+  "nys-it201i-resident-2024": {
+    "sha256": "19113ba3858ed5e8716ef037f375f146688ef805f9b5fdca1290670725927fbe",
+    "size_bytes": 578394
+  },
+  "nys-it203i-nonresident-2024": {
+    "sha256": "20bff056ce125f97ecd781524f30503747845f01aa245d26aeb0f1fb542cb442",
+    "size_bytes": 606398
+  },
+  "nys-it204i-partnership-2024": {
+    "sha256": "452ac9a15a6e663956bd9d832f93ce9fe28465f409695229742e90e67b136a0e",
+    "size_bytes": 465597
+  },
+  "nys-it2105i-estimated-tax-2024": {
+    "sha256": "501509294870bfdb387ae3645a1910caf53b6d05ba37518a26462a60ec79dfa3",
+    "size_bytes": 340622
+  },
+  "nys-it225i-modifications-2024": {
+    "sha256": "257bab63a8fea73dbe7ae8a77160f2e7bd46359c6ee0ad4993dcb818437d5b8a",
+    "size_bytes": 398606
+  },
+  "nys-mta305i-mctmt-current": {
+    "sha256": "bf7f4f12aa84ccf61b3a54c22ddfa3bb3ae39f7cc3bf138d390934e009d9a6d4",
+    "size_bytes": 263346
+  },
+  "nys-nys45i-employer-quarterly-current": {
+    "sha256": "b2a54b19645cd93c05bf1b68d8249814d544ac67a5325861421bd2ac37f9d642",
+    "size_bytes": 322660
+  },
+  "nys-nys50t-withholding-tables-current": {
+    "sha256": "e1c2b3440572a10019efe8d8e4d727474c55afb37dd5d18a6a73b94463baf3e8",
+    "size_bytes": 384460
+  },
+  "nys-pub1093-veterans-exemption-current": {
+    "sha256": "d8a9d6004f4533ee4df32d41f5fb3427b623a875548ff917329b6b9fd1fff9f0",
+    "size_bytes": 202858
+  },
+  "nys-pub718-sales-tax-rates-current": {
+    "sha256": "697364430b70f44db8d6a5b89b743afa97d0ebb2daa0d53a728b8c253aa7d127",
+    "size_bytes": 215766
+  },
+  "nys-pub750-sales-tax-current": {
+    "sha256": "19ddf81260d40a1d2c13f088d84acedb917d6be0203e9171a969d70e7c801537",
+    "size_bytes": 628816
+  },
+  "nys-st100i-sales-return-current": {
+    "sha256": "af4dd5d3410cedf47511c1748b85b726c5c7b7dc83794420200883c2ef628427",
+    "size_bytes": 296355
+  },
+  "nys-tp584i-transfer-tax-current": {
+    "sha256": "09d341425e6db6b36c8cce8e54a2862d68afeadc378b1842fa0147eab798aa1f",
+    "size_bytes": 280940
+  },
+  "nys-tsbm-ptet-2021": {
+    "sha256": "61c6a0756e5301ed160aa721246a7b5cdd5fca3e096569a4e0722e7d8b7cb379",
+    "size_bytes": 250800
+  },
+  "ontario-eht-return-guide": {
+    "sha256": "d12144890e77a1673d59e83ddaf93c19244dc5ebaec3e3848fa0904250f39cdf",
+    "size_bytes": 789627
+  },
+  "ontario-land-transfer-tax-affidavit": {
+    "sha256": "b137441876907a8392d243f95744437f4914d64b7050d5ef7e2981c5356f4a12",
+    "size_bytes": 2120469
   },
   "pandoc-manual": {
     "sha256": "3bc86522f0c38ef9a3406940dff9f881ca6d6505d87eb694d493cb39cce62332",
