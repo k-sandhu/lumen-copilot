@@ -225,6 +225,52 @@ come from `LUMEN_PACK_EMAIL` / `LUMEN_PACK_PASSWORD`. The selection rule is
 unit-tested (`tests/eval/test_benchmark_pack.py`), and the shared HTTP client
 (`client.py`) survives the 15-minute access-token expiry mid-ingestion.
 
+## Industry packs (#443)
+
+Five curated packs give specialized teams the documents their industry
+actually loads into AI knowledge assistants. The industry/document mapping is
+evidence-based: financial services leads adoption (~84%, ~47% production
+agents) and loads filings, shareholder letters and regulation; healthcare is
+the fastest-accelerating vertical (labels, guidance, protocols); legal teams
+load statutes and privacy regulation (contract/regulatory review is the
+highest-ROI RAG use case in practitioner surveys); engineering orgs load
+specs/vendor docs/changelogs; and vertical AI for government/healthcare/legal
+roughly tripled to a ~$3.5B category. Sources: [Deloitte State of AI in the
+Enterprise](https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html),
+[NVIDIA State of AI 2026](https://blogs.nvidia.com/blog/state-of-ai-report-2026/),
+adoption-statistics roundups ([Azumo](https://azumo.com/artificial-intelligence/ai-insights/enterprise-ai-adoption-statistics),
+[Presenc](https://presenc.ai/research/ai-adoption-by-industry)), and RAG
+use-case surveys ([Uptech](https://www.uptech.team/blog/rag-use-cases),
+[Dust](https://dust.tt/blog/rag-use-cases-real-business-problems),
+[Hebbia](https://www.hebbia.com/resources/ai-powered-enterprise-search)).
+
+| pack id | files | flavour |
+|---|---|---|
+| `healthcare-life-sciences` | 4 | FDA drug labels ×2, NIDCR clinical monitoring guidance + template |
+| `financial-services` | 5 | Berkshire letters ×2, Basel III finalisation, IRS 1040 instructions (2024 pinned + **current rolling**) |
+| `legal-compliance` | 5 | GDPR, Copyright Circular 1, US Constitution, Federalist Papers, NIST SP 800-63B |
+| `software-cloud-engineering` | 8 | HTTP RFCs, ECMA-404, AWS Well-Architected, Intel SDM, K8s changelog, pandoc, FastAPI |
+| `government-data-climate` | 7 | Census tables + Statistical Abstract, IPCC AR6 ×2, UNSD decks |
+
+```powershell
+# from backend/ — browse the catalog, then load one into your profile:
+uv run --extra dev python -m tests.eval.benchmark.load_pack --list-packs
+uv run --extra dev python -m tests.eval.benchmark.load_pack `
+  --api http://localhost:47181 --email you@acme.test --password ... `
+  --pack financial-services
+```
+
+`--pack` composes with `--formats`/`--count` (curated pack order preserved;
+first-N, no round-robin). Packs never include the negative-format or
+poor-extraction files — a curated pack is all signal.
+
+**Rolling entries (refresh on demand).** Entries marked `rolling` point at a
+source's *current* alias (today: the IRS current-tax-year 1040 instructions).
+Their checksum pin is a last-seen record, not a gate; `--refresh` re-downloads
+them and **replaces** them in your profile (delete + re-upload). Benchmark
+questions may never cite rolling files — grounding stays on immutable pinned
+files, enforced by validation.
+
 ## Live accuracy run (#430)
 
 `run_live.py` drives the REAL stack over HTTP end-to-end — login, uploads

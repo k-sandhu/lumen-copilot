@@ -97,6 +97,12 @@ class ApiClient:
             files={"file": (filename, data, mime_type)},
         )
 
+    def delete_document(self, document_id: str) -> None:
+        """DELETE one document (204) — used by the loader's rolling refresh (#443)."""
+        response = self.request("DELETE", f"/api/v1/documents/{document_id}")
+        if response.status_code != 204:
+            response.raise_for_status()
+
     def wait_for_documents(self, filenames: set[str], *, timeout_seconds: float) -> dict[str, str]:
         """Poll until every filename reaches ready/failed (or the deadline).
 
