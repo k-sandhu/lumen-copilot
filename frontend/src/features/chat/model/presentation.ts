@@ -173,6 +173,13 @@ export interface CitationGroup {
   documentName: string;
   /** The passages cited from this document, each with its FLAT 1-based number. */
   passages: { citation: UiCitation; number: number }[];
+  /**
+   * The reader no longer has access to this document (#536), so the server sent
+   * the citation shell without its passage or filename. The group is still
+   * rendered — the answer really was grounded — but as unavailable, and its
+   * passages do not open, because there is nothing behind them to show.
+   */
+  redacted: boolean;
 }
 
 /**
@@ -195,6 +202,7 @@ export function groupCitationsByDocument(citations: UiCitation[]): CitationGroup
         documentId: citation.documentId,
         documentName: citation.documentName,
         passages: [],
+        redacted: citation.redacted === true,
       };
       byDoc.set(citation.documentId, group);
       order.push(citation.documentId);
@@ -327,9 +335,7 @@ export function groupSessionsByDay(
   sessions: ChatSession[],
   now: number = Date.now(),
 ): SessionGroup[] {
-  const sorted = [...sessions].sort(
-    (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
-  );
+  const sorted = [...sessions].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
   const byBucket = new Map<DayBucket, ChatSession[]>();
   for (const s of sorted) {
     const bucket = dayBucket(s.updated_at, now);
@@ -400,9 +406,7 @@ export function modeAvailability(
 ): Partial<Record<KnowledgeMode, ModeAvailability>> {
   const webAllowed = (scopeModes ?? []).includes('web');
   return {
-    web: webAllowed
-      ? { available: true }
-      : { available: false, reason: WEB_DISABLED_REASON },
+    web: webAllowed ? { available: true } : { available: false, reason: WEB_DISABLED_REASON },
   };
 }
 

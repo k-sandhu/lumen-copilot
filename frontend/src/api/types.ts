@@ -255,6 +255,10 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 /**
  * A clickable, passage-level reference (spec 0004 INV-3). Resolves to a document
  * the caller is permitted to see and a character span within it.
+ *
+ * Permission is re-checked on every read, not only when the citation was written
+ * (#536): when the caller can no longer retrieve the cited document, `redacted`
+ * is true and `snippet`/`document_name` come back empty.
  */
 export interface Citation {
   id: string;
@@ -267,6 +271,12 @@ export interface Citation {
   char_end: number;
   /** Optional retrieval/rerank score. */
   score?: number;
+  /**
+   * True when the caller may no longer retrieve the cited document, in which case
+   * `snippet` and `document_name` are empty. The shell is kept so a settled
+   * claim's provenance stays visible instead of silently disappearing.
+   */
+  redacted?: boolean;
 }
 
 /**

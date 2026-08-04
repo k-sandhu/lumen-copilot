@@ -24,7 +24,7 @@ from __future__ import annotations
 import ipaddress
 import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -2846,8 +2846,12 @@ class CitationView:
     ``document_id`` / ``document_name`` and the ``snippet`` text. This view is the
     citation row joined (tenant-scoped) to its chunk and that chunk's document, so
     ``GET .../messages`` can render a deep-linkable reference (CC-11 AC-2/AC-3)
-    without a per-row N+1. A citation only exists for a permitted passage (INV-3),
-    so the join never reveals foreign content.
+    without a per-row N+1.
+
+    A citation was only ever WRITTEN for a permitted passage (INV-3), but that is a
+    fact about write time, not read time: a grant revoked afterwards leaves the row
+    in place. This join is tenant-scoped only, so callers on a read path must
+    re-check permission and :meth:`redacted` the ones that no longer pass (#536).
     """
 
     id: UUID
@@ -2859,6 +2863,14 @@ class CitationView:
     char_start: int
     char_end: int
     score: float | None
+    #: True when the reader may no longer retrieve the cited document, in which
+    #: case ``snippet`` and ``document_name`` have been emptied. The row itself is
+    #: kept so a claim's provenance stays visible rather than silently vanishing.
+    redacted: bool = False
+
+    def redact(self) -> CitationView:
+        """This citation with everything disclosing removed, shell intact."""
+        return replace(self, snippet="", document_name="", redacted=True)
 
 
 class CitationRepository(_TenantScopedRepository):

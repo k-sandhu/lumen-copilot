@@ -156,6 +156,10 @@ class CitationResponse(BaseModel):
     char_start: int
     char_end: int
     score: float | None = None
+    #: True when the caller may no longer retrieve the cited document (#536), in
+    #: which case `snippet` and `document_name` are empty. The row is kept so a
+    #: settled claim's provenance stays visible instead of silently disappearing.
+    redacted: bool = False
 
 
 class MessageToolInvocationResponse(BaseModel):
@@ -323,6 +327,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         char_start=view.char_start,
         char_end=view.char_end,
         score=view.score,
+        redacted=view.redacted,
     )
 
 
@@ -412,7 +417,15 @@ def _build_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    request: Request | None = None,
 ) -> ChatService:
+    """Assemble the per-request chat service.
+
+    ``request`` is optional and only the transcript read supplies it: that path
+    re-checks citation permissions and audits when it withholds content (#536),
+    which needs the correlation context. Every other caller has nothing to audit
+    here, so threading a request through all nine would be noise.
+    """
     lifecycle = SandboxSessionService(
         session,
         tenant_id=tenant_id,
@@ -420,12 +433,22 @@ def _build_service(
         runner=HttpSandboxRunner(settings.sandbox_runner_url),
         settings=settings,
     )
+    audit_kwargs: dict[str, object] = {}
+    if request is not None:
+        audit_kwargs = {
+            "audit": AuditSink(AuditEventRepository(session, tenant_id)),
+            # The envelope requires a non-empty request_id / source_ip (spec 0004
+            # §2.4); fall back to a sentinel when the client supplied neither.
+            "request_id": extract_request_id(request) or "unknown",
+            "source_ip": request.client.host if request.client else "unknown",
+        }
     return ChatService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         settings=settings,
         sandbox_lifecycle=lifecycle,
+        **audit_kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -700,6 +723,7 @@ async def close_sandbox_session(
 )
 async def list_messages(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
@@ -709,7 +733,11 @@ async def list_messages(
 ) -> MessageListResponse:
     """Message history for a session (oldest → newest), citations on assistant turns."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
     )
     page = await service.list_messages(session_id, cursor=cursor, limit=limit)
     if page is None:

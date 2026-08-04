@@ -3409,6 +3409,15 @@ components:
       description: >
         A clickable, passage-level reference (spec 0004 INV-3). Resolves to a
         document the caller is permitted to see and a character span within it.
+
+
+        Permission is re-checked on every READ, not only at the time the citation
+        was written (#536): a grant revoked after the answer was produced must not
+        keep disclosing the passage through the transcript. When the caller can no
+        longer retrieve the cited document, `redacted` is true and the disclosing
+        fields (`snippet`, `document_name`) come back empty — the shell is kept so
+        a claim's provenance is still visible as "source no longer available"
+        rather than the citation silently vanishing.
       required: [id, document_id, document_name, chunk_id, snippet, char_start, char_end]
       properties:
         id: { type: string, format: uuid }
@@ -3421,6 +3430,13 @@ components:
         score:
           type: number
           description: Optional retrieval/rerank score.
+        redacted:
+          type: boolean
+          default: false
+          description: >
+            True when the caller may no longer retrieve the cited document, in
+            which case `snippet` and `document_name` are empty. Optional and
+            defaulting to false so existing clients are unaffected.
 
     MessageToolInvocation:
       type: object
