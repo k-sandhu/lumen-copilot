@@ -200,8 +200,12 @@ def app(
     import app.api.v1.chat as chat_api
     import app.api.v1.code_runs as code_runs_api
 
-    monkeypatch.setattr(chat_api, "HttpSandboxRunner", lambda _url: fake_runner)
-    monkeypatch.setattr(code_runs_api, "HttpSandboxRunner", lambda _url: fake_runner)
+    # `**_` rather than a positional-only lambda: the real constructor now also takes
+    # `token=` (#508), and a double whose signature has to be edited every time the
+    # thing it stands in for gains an argument fails for a reason that has nothing to
+    # do with what the test is checking.
+    monkeypatch.setattr(chat_api, "HttpSandboxRunner", lambda _url, **_: fake_runner)
+    monkeypatch.setattr(code_runs_api, "HttpSandboxRunner", lambda _url, **_: fake_runner)
     yield application
     application.dependency_overrides.clear()
 
