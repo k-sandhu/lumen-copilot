@@ -578,6 +578,30 @@ async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyP
     assert result[0].model == "openai/baai/bge-m3"
 
 
+async def test_embed_requests_float_encoding_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (#430): the gateway must pin ``encoding_format="float"``.
+
+    LiteLLM's OpenAI-compatible client defaults to ``base64``, which some
+    OpenAI-compatible providers reject — OpenRouter's NVIDIA embedding models
+    answer it with a **200-wrapped error body** ("Nvidia embeddings do not
+    support base64 encoding_format"), which surfaces as an opaque
+    "No embedding data received" APIError and made every ingestion embed call
+    fail while looking like provider downtime. Floats are what the gateway
+    consumes anyway; requesting them explicitly works on every provider.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        captured.update(kwargs)
+        return _EmbeddingResponse([[0.1, 0.2]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings())
+
+    await gw.embed(["x"])
+    assert captured["encoding_format"] == "float"
+
+
 async def test_embed_uses_explicit_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

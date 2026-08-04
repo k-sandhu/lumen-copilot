@@ -8,7 +8,7 @@ pipeline must reject.
 
 The corpus binaries are **never committed** — :mod:`tests.eval.benchmark.download`
 fetches them into a git-ignored corpus dir and verifies the sha256 pins in
-``checksums.json``. The question bank (``questions.jsonl``) is authored against
+``checksums.json``. The question bank (``questions.csv``) is authored against
 the text the **real ingestion parsers** extract, so every evidence quote is
 machine-verifiable (:mod:`tests.eval.benchmark.verify`).
 

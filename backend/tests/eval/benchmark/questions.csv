@@ -1,0 +1,252 @@
+﻿qid,category,difficulty,answerable,language,question,gold_answer,answer_facts,source_files,evidence1_file,evidence1_locator,evidence1_quote,evidence2_file,evidence2_locator,evidence2_quote,distractor_files,absence_probes,notes
+bm-001,single_hop,easy,yes,en,"According to the opening line of Pride and Prejudice, what must a single man in possession of a good fortune be in want of?",A wife.,want of a wife,gutenberg-pride-prejudice,gutenberg-pride-prejudice,"Chapter I, opening sentence","It is a truth universally acknowledged, that a single man in possession
+of a good fortune must be in want of a wife.",,,,,,Canonical easy factoid; answer verbatim in one famous passage.
+bm-002,single_hop,easy,yes,en,What news does Mrs. Bennet share with her husband at the very start of Pride and Prejudice?,That Netherfield Park is let at last.,Netherfield Park is let at last,gutenberg-pride-prejudice,gutenberg-pride-prejudice,"Chapter I, opening dialogue","“My dear Mr. Bennet,” said his lady to him one day, “have you heard that
+Netherfield Park is let at last?”",,,,,,Tests retrieval of dialogue with typographic (curly) quotes.
+bm-003,distractor,medium,yes,en,Who is Mr. Collins's patroness in Pride and Prejudice?,The Right Honourable Lady Catherine de Bourgh.,Lady Catherine de Bourgh,gutenberg-pride-prejudice,gutenberg-pride-prejudice,"Chapter XIII, Mr. Collins's letter","I have been so fortunate as to be distinguished by the patronage of
+     the Right Honourable Lady Catherine de Bourgh, widow of Sir Lewis
+     de Bourgh, whose bounty and beneficence has preferred me to the
+     valuable rectory of this parish",,,,gutenberg-persuasion,,Near-miss corpus: a second Austen novel in the same prose style must not be cited.
+bm-004,single_hop,easy,yes,en,Of which hall in Somersetshire is Sir Walter Elliot the owner in Persuasion?,Kellynch Hall.,Kellynch Hall,gutenberg-persuasion,gutenberg-persuasion,"Chapter 1, opening sentence","Sir Walter Elliot, of Kellynch Hall, in Somersetshire, was a man who,
+for his own amusement, never took up any book but the Baronetage; there
+he found occupation for an idle hour, and consolation in a distressed
+one",,,,,,
+bm-005,distractor,medium,yes,en,Which is the only book Sir Walter Elliot ever takes up for his own amusement?,The Baronetage.,the Baronetage,gutenberg-persuasion,gutenberg-persuasion,"Chapter 1, opening sentence","Sir Walter Elliot, of Kellynch Hall, in Somersetshire, was a man who,
+for his own amusement, never took up any book but the Baronetage; there
+he found occupation for an idle hour, and consolation in a distressed
+one",,,,gutenberg-pride-prejudice,,Same-author distractor pair; the answer lives only in Persuasion.
+bm-006,single_hop,easy,yes,en,What is the famous three-word opening sentence of Moby-Dick?,Call me Ishmael.,Call me Ishmael,gutenberg-moby-dick,gutenberg-moby-dick,"Chapter 1, Loomings — opening","Call me Ishmael. Some years ago—never mind how long precisely—having
+little or no money in my purse, and nothing particular to interest me
+on shore, I thought I would sail about a little and see the watery part
+of the world.",,,,,,
+bm-007,single_hop,medium,yes,en,"In Moby-Dick, which ship finally picks up the narrator after the sinking of the Pequod?",The Rachel.,Rachel,gutenberg-moby-dick,gutenberg-moby-dick,Epilogue,"On the second day, a
+sail drew near, nearer, and picked me up at last. It was the
+devious-cruising Rachel, that in her retracing search after her missing
+children, only found another orphan.",,,,,,Answer sits at the very end of a ~1.3 MB text — position stress for retrieval.
+bm-008,keyword,medium,yes,en,"According to Moby-Dick, of which island was Queequeg a native?",Rokovoko (an island far away to the West and South).,Rokovoko,gutenberg-moby-dick,gutenberg-moby-dick,"Chapter 12, Biographical","Queequeg was a native of Rokovoko, an island far away to the West and
+South. It is not down in any map; true places never are.",,,,,,Rare proper noun — lexical retrieval should dominate.
+bm-009,single_hop,medium,yes,en,"In Hamlet, which character speaks the line 'Something is rotten in the state of Denmark'?",Marcellus.,MARCELLUS,gutenberg-shakespeare,gutenberg-shakespeare,"Hamlet, Act I Scene IV","MARCELLUS.
+Something is rotten in the state of Denmark.",,,,,,Commonly misattributed to Hamlet — tests precise speaker attribution inside a 5.6 MB file.
+bm-010,single_hop,medium,yes,en,To what does the speaker compare the beloved in Shakespeare's Sonnet 18?,A summer's day.,summer’s day,gutenberg-shakespeare,gutenberg-shakespeare,"Sonnet 18, lines 1–4","Shall I compare thee to a summer’s day?
+Thou art more lovely and more temperate:
+Rough winds do shake the darling buds of May,
+And summer’s lease hath all too short a date:",,,,,,Fact uses the file's typographic apostrophe (summer’s).
+bm-011,keyword,easy,yes,en,"In Shakespeare's Julius Caesar, who speaks the words 'Et tu, Brute?'?",Caesar (as he falls).,CAESAR,gutenberg-shakespeare,gutenberg-shakespeare,"Julius Caesar, Act III Scene I","CAESAR.
+_Et tu, Brute?_—Then fall, Caesar!",,,,,,Rare exact phrase with markup underscores — lexical needle in a large file.
+bm-012,single_hop,medium,yes,en,"Who delivers the speech beginning 'Friends, Romans, countrymen, lend me your ears'?",Antony (Mark Antony).,ANTONY,gutenberg-shakespeare,gutenberg-shakespeare,"Julius Caesar, Act III Scene II","ANTONY.
+Friends, Romans, countrymen, lend me your ears;
+I come to bury Caesar, not to praise him.",,,,,,
+bm-013,multilingual,medium,yes,de,Welche Fächer hat Faust nach seinem Eingangsmonolog durchaus studiert?,"Philosophie, Juristerei und Medizin — und leider auch Theologie.",Philosophie | Juristerei | Medizin | Theologie,gutenberg-faust-de,gutenberg-faust-de,"Nacht, Fausts Eingangsmonolog","FAUST.
+Habe nun, ach! Philosophie,
+Juristerei und Medizin,
+Und leider auch Theologie
+Durchaus studiert, mit heißem Bemühn.",,,,,,German question over the German document — same-language retrieval.
+bm-014,multilingual,hard,yes,en,"In Goethe's Faust, which subjects does Faust say he has thoroughly studied in his opening monologue?","Philosophy, law (Juristerei) and medicine — and unfortunately also theology.",Philosophie | Medizin | Theologie,gutenberg-faust-de,gutenberg-faust-de,"Nacht, Fausts Eingangsmonolog","FAUST.
+Habe nun, ach! Philosophie,
+Juristerei und Medizin,
+Und leider auch Theologie
+Durchaus studiert, mit heißem Bemühn.",,,,,,"Cross-lingual: English question, German evidence — the harder multilingual direction."
+bm-015,single_hop,easy,yes,en,"According to RFC 9110, what does the 405 status code indicate?",Method Not Allowed: the request method is known by the origin server but not supported by the target resource.,"Method Not Allowed | known by the origin server but not
+   supported by the target resource",rfc9110-http-semantics,rfc9110-http-semantics,Section 15.5.6,"The 405 (Method Not Allowed) status code indicates that the method
+   received in the request-line is known by the origin server but not
+   supported by the target resource.",,,,,,
+bm-016,distractor,medium,yes,en,Which header field must an origin server generate in a 405 (Method Not Allowed) response?,An Allow header field (listing the target resource's supported methods).,Allow,rfc9110-http-semantics,rfc9110-http-semantics,Section 10.2.1 (Allow),"An origin server MUST generate an Allow
+   header field in a 405 (Method Not Allowed) response and MAY do so in
+   any other response.",,,,rfc9112-http11,,The adjacent HTTP/1.1 RFC is full of similar header prose — the citation must land on RFC 9110.
+bm-017,distractor,medium,yes,en,Which request methods does RFC 9110 define to be safe?,"GET, HEAD, OPTIONS, and TRACE.",GET | HEAD | OPTIONS | TRACE,rfc9110-http-semantics,rfc9110-http-semantics,"Section 9.2.1, Safe Methods","Of the request methods defined by this specification, the GET, HEAD,
+   OPTIONS, and TRACE methods are defined to be safe.",,,,rfc9112-http11,,
+bm-018,multi_hop,hard,yes,en,"Of the two HTTP RFCs in the corpus, which one obsoletes RFC 7231 and which one obsoletes RFC 7230?",RFC 9110 (HTTP Semantics) obsoletes RFC 7231; RFC 9112 (HTTP/1.1) obsoletes RFC 7230.,9110 | 9112,rfc9110-http-semantics | rfc9112-http11,rfc9110-http-semantics,RFC header block,"Request for Comments: 9110                                         Adobe
+STD: 97                                               M. Nottingham, Ed.
+Obsoletes: 2818, 7230, 7231, 7232, 7233, 7235,                    Fastly",rfc9112-http11,RFC header block,"Request for Comments: 9112                                         Adobe
+STD: 99                                               M. Nottingham, Ed.
+Obsoletes: 7230                                                   Fastly",,,Cross-document: both headers must be retrieved and distinguished (9110 also lists 7230).
+bm-019,single_hop,medium,yes,en,"According to RFC 9112, what does an HTTP/1.1 message begin with?","A start-line (a request-line or a status-line), followed by CRLF.",start-line,rfc9112-http11,rfc9112-http11,"Section 2.1, Message Format","An HTTP/1.1 message consists of a start-line followed by a CRLF and a
+   sequence of octets in a format similar to the Internet Message Format",,,,,,
+bm-020,single_hop,easy,yes,en,What is the default dpi value pandoc assumes for conversion between pixels and physical measurements?,96 dpi.,96dpi,pandoc-manual,pandoc-manual,Options: --dpi,"Specify the default dpi (dots per inch) value for conversion
+    from pixels to inch/centimeters and vice versa. (Technically,
+    the correct term would be ppi: pixels per inch.) The default
+    is 96dpi.",,,,,,
+bm-021,single_hop,easy,yes,en,How many section levels does pandoc include in the table of contents by default (--toc-depth)?,"3 (level-1, 2, and 3 headings).",The default is 3,pandoc-manual,pandoc-manual,Options: --toc-depth,"Specify the number of section levels to include in the table
+    of contents.  The default is 3",,,,,,
+bm-022,single_hop,medium,yes,en,"When pandoc wraps output lines with the default wrap mode, what column width does it use unless --columns overrides it?",72 characters.,default 72,pandoc-manual,pandoc-manual,Options: --wrap,"With `auto` (the default),
+    pandoc will attempt to wrap lines to the column width specified by
+    `--columns` (default 72).",,,,,,
+bm-023,keyword,medium,yes,en,Which security feature's support graduated to GA in Kubernetes v1.31?,AppArmor support graduated to GA.,AppArmor,kubernetes-changelog-1-31,kubernetes-changelog-1-31,v1.31 changelog — Changes by Kind / Feature,"Graduate Kubernetes' support for AppArmor to GA. ([#125257](https://github.com/kubernetes/kubernetes/pull/125257), [@vinayakankugoyal](https://github.com/vinayakankugoyal)) [SIG Apps, Node and Testing]",,,,,,Rare-token lookup in a link-dense changelog.
+bm-024,keyword,medium,yes,en,"Which Go version is Kubernetes v1.31 built with, according to its changelog?",go 1.22.5.,go 1.22.5,kubernetes-changelog-1-31,kubernetes-changelog-1-31,v1.31 changelog — Dependencies/Feature notes,"Kubernetes is now built with go 1.22.5 ([#125894](https://github.com/kubernetes/kubernetes/pull/125894), [@cpanato](https://github.com/cpanato)) [SIG Release and Testing]",,,,,,Exact version-string lookup.
+bm-025,single_hop,easy,yes,en,On which two libraries does the FastAPI README say the framework stands ('shoulders of giants')?,Starlette (for the web parts) and Pydantic (for the data parts).,Starlette | Pydantic,fastapi-readme,fastapi-readme,README — Requirements section,"FastAPI stands on the shoulders of giants:
+
+* <a href=""https://www.starlette.io/"" class=""external-link"" target=""_blank"">Starlette</a> for the web parts.
+* <a href=""https://docs.pydantic.dev/"" class=""external-link"" target=""_blank"">Pydantic</a> for the data parts.",,,,,,
+bm-026,single_hop,easy,yes,en,What BLEU score does the Transformer paper report for its big model on the WMT 2014 English-to-German translation task?,28.4 BLEU.,28.4,arxiv-attention,arxiv-attention,Abstract,"Our model achieves 28.4 BLEU on the WMT 2014 English-
+to-German translation task, improving over the existing best results, including
+ensembles, by over 2 BLEU.",,,,,,Numeric lookup from PDF text with a hyphenated line break.
+bm-027,single_hop,medium,yes,en,How many parallel attention heads does the base Transformer model employ in 'Attention Is All You Need'?,"8 heads (h = 8, with dk = dv = 64).",h = 8,arxiv-attention,arxiv-attention,"Section 3.2.2, Multi-Head Attention","In this work we employ h = 8 parallel attention layers, or heads. For each of these we use
+dk = dv = dmodel/h = 64.",,,,,,
+bm-028,single_hop,medium,yes,en,On what hardware did the authors of the Transformer paper train their models?,One machine with 8 NVIDIA P100 GPUs.,8 NVIDIA P100 GPUs,arxiv-attention,arxiv-attention,"Section 5.2, Hardware and Schedule",We trained our models on one machine with 8 NVIDIA P100 GPUs.,,,,,,
+bm-029,single_hop,medium,yes,en,To what GLUE score does the BERT paper report pushing the state of the art?,80.5% (a 7.7 point absolute improvement).,80.5,arxiv-bert,arxiv-bert,Abstract,"It obtains new state-of-the-art re-
+sults on eleven natural language processing
+tasks, including pushing the GLUE score to
+80.5% (7.7% point absolute improvement)",,,,,,
+bm-030,single_hop,medium,yes,en,How many total parameters does BERT-LARGE have according to the BERT paper?,"340M parameters (L=24, H=1024, A=16).",340M,arxiv-bert,arxiv-bert,"Section 3, Model Architecture","BERTBASE (L=12, H=768, A=12, Total Param-
+eters=110M) and BERTLARGE (L=24, H=1024,
+A=16, Total Parameters=340M).",,,,,,
+bm-031,multi_hop,hard,yes,en,"Comparing the two ML papers in the corpus: how many parallel attention heads did the original base Transformer use, and how many total parameters does BERT-LARGE have?",The base Transformer used 8 attention heads; BERT-LARGE has 340M parameters.,h = 8 | 340M,arxiv-attention | arxiv-bert,arxiv-attention,"Section 3.2.2, Multi-Head Attention","In this work we employ h = 8 parallel attention layers, or heads. For each of these we use
+dk = dv = dmodel/h = 64.",arxiv-bert,"Section 3, Model Architecture","BERTBASE (L=12, H=768, A=12, Total Param-
+eters=110M) and BERTLARGE (L=24, H=1024,
+A=16, Total Parameters=340M).",,,Cross-document synthesis over two related papers.
+bm-032,single_hop,easy,yes,en,What is the 2024 standard deduction for married filing jointly according to the Form 1040 instructions?,"$29,200 (also applies to qualifying surviving spouse).","$29,200",irs-1040-instructions-2024,irs-1040-instructions-2024,What's New — standard deduction amounts,"The amounts are:
+• $14,600–Single or Married filing 
+separately.
+• $29,200–Married filing jointly or 
+Qualifying surviving spouse.
+• $21,900–Head of household.",,,,,,Real-scale version of the synthetic golden-set tax question.
+bm-033,aggregation,hard,yes,en,"Which 2024 filing status carries the largest standard deduction, and how much larger is it than the deduction for a single filer?","Married filing jointly (or qualifying surviving spouse) at $29,200 — exactly $14,600 more than the single filer's $14,600 (double it).","$29,200 | $14,600",irs-1040-instructions-2024,irs-1040-instructions-2024,What's New — standard deduction amounts,"The amounts are:
+• $14,600–Single or Married filing 
+separately.
+• $29,200–Married filing jointly or 
+Qualifying surviving spouse.
+• $21,900–Head of household.",,,,,,Requires comparing three amounts within one retrieved passage.
+bm-034,single_hop,easy,yes,en,By what date must most taxpayers pay their 2024 federal income tax to avoid interest and penalties?,"April 15, 2025.","April 15, 2025",irs-1040-instructions-2024,irs-1040-instructions-2024,"Line 37, Amount You Owe","To avoid interest and penalties, 
+pay your taxes in full by the due 
+date of your return (not includ-
+ing extensions) —April 15, 2025, for 
+most taxpayers.",,,,,,PDF hyphenation artifact ('includ- ing') inside the evidence — realism on purpose.
+bm-035,single_hop,medium,yes,en,What was the penalty for failing to have the 1913 Form 1040 in the hands of the collector by March 1?,"$20 to $1,000.","$20 TO $1,000",irs-form-1040-1913,irs-form-1040-1913,"Page 1, penalty notice","THE PENALTY
+FOR FAILURE TO HAVE THIS RETURN IN
+THE HANDS OF THE COLLECTOR OF
+INTERNAL REVENUE ON OR BEFORE
+MARCH 1 IS $20 TO $1,000.",,,,,,Form-layout text in an odd extraction order — messy-but-real historical PDF.
+bm-036,single_hop,easy,yes,en,"Per NIST SP 800-63B, what is the minimum length of a memorized secret chosen by the subscriber?",At least 8 characters.,at least 8 characters,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.1, Memorized Secret Authenticators",Memorized secrets SHALL be at least 8 characters in length if chosen by the subscriber.,,,,,,
+bm-037,single_hop,medium,yes,en,"How long must memorized secrets be when chosen randomly by the CSP or verifier, per SP 800-63B?",At least 6 characters (and they may be entirely numeric).,at least 6 characters,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.1, Memorized Secret Authenticators","Memorized secrets chosen randomly by the CSP or verifier SHALL be at least 6 characters in 
+length and MAY be entirely numeric.",,,,,,Near-duplicate of bm-036's rule with a different subject — precision test.
+bm-038,single_hop,medium,yes,en,Does NIST SP 800-63B require users to change their passwords periodically?,"No — verifiers SHOULD NOT require arbitrary periodic changes, but SHALL force a change on evidence of compromise.",SHOULD NOT require memorized secrets to be changed arbitrarily,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.2, Memorized Secret Verifiers","Verifiers SHOULD NOT require memorized secrets to be changed arbitrarily (e.g., periodically). 
+However, verifiers SHALL force a change if there is evidence of compromise of the 
+authenticator.",,,,,,Popular-misconception probe: the common belief (mandatory rotation) contradicts the source.
+bm-039,single_hop,medium,yes,en,What maximum password length does SP 800-63B say verifiers SHOULD permit for subscriber-chosen memorized secrets?,Verifiers SHOULD permit secrets of at least 64 characters.,at least 64 characters,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.2, Memorized Secret Verifiers","Verifiers SHOULD permit subscriber-chosen memorized secrets at least 64 characters in 
+length.",,,,,,
+bm-040,single_hop,medium,yes,en,"According to the IPCC AR6 WGI Summary for Policymakers, how much higher was global surface temperature in 2011–2020 than in 1850–1900?",1.09 °C higher (very likely range 0.95 to 1.20 °C).,1.09,ipcc-ar6-wg1-spm,ipcc-ar6-wg1-spm,SPM A.1.2,"Global surface temperature was 1.09 [0.95 to 1.20] °C higher in 2011–2020 than 1850–1900, with larger 
+increases over land (1.59 [1.34 to 1.83] °C) than over the ocean (0.88 [0.68 to 1.01] °C).",,,,,,
+bm-041,single_hop,medium,yes,en,What is the AR6 assessed best estimate of equilibrium climate sensitivity?,3 °C (likely range 2.5 °C to 4 °C).,3°C,ipcc-ar6-wg1-spm,ipcc-ar6-wg1-spm,SPM A.4.4,"Based on multiple lines of evidence,21 the very likely range of equilibrium climate sensitivity is between 2°C (high 
+confidence) and 5°C ( medium confidence). The AR6 assessed best estimate is 3°C with a likely range of 2.5°C to 4°C 
+(high confidence)",,,,,,
+bm-042,single_hop,medium,yes,en,What atmospheric CO2 concentration does AR6 WGI Chapter 2 report for 2019?,409.9 (±0.4) parts per million.,409.9,ipcc-ar6-wg1-chapter02,ipcc-ar6-wg1-chapter02,Chapter 2 Executive Summary,"In 2019, concentrations of CO 2, methane (CH 4) and nitrous 
+oxide (N 2O) reached levels of 409.9 (±0.4) parts per million 
+(ppm), 1866.3 (±3.3) parts per billion (ppb) and 332.1 (±0.4) 
+ppb, respectively.",,,,,,26 MB PDF; extraction splits 'CO 2' — evidence quotes the artifact verbatim.
+bm-043,multi_hop,hard,yes,en,"Per the AR6 WGI report, what was the observed 2011–2020 global surface temperature increase relative to 1850–1900, and what was the atmospheric CO2 concentration in 2019?",Temperature was 1.09 °C higher (2011–2020 vs 1850–1900); CO2 reached 409.9 ppm in 2019.,1.09 | 409.9,ipcc-ar6-wg1-chapter02 | ipcc-ar6-wg1-spm,ipcc-ar6-wg1-spm,SPM A.1.2,"Global surface temperature was 1.09 [0.95 to 1.20] °C higher in 2011–2020 than 1850–1900, with larger 
+increases over land (1.59 [1.34 to 1.83] °C) than over the ocean (0.88 [0.68 to 1.01] °C).",ipcc-ar6-wg1-chapter02,Chapter 2 Executive Summary,"In 2019, concentrations of CO 2, methane (CH 4) and nitrous 
+oxide (N 2O) reached levels of 409.9 (±0.4) parts per million 
+(ppm), 1866.3 (±3.3) parts per billion (ppb) and 332.1 (±0.4) 
+ppb, respectively.",,,Cross-document: summary + chapter of the same report family.
+bm-044,aggregation,hard,yes,en,"According to the Statistical Abstract's population table, what was the resident population of the United States at the April 1, 2010 census?","308,745,538.","308,745,538",census-statistical-abstract-2012,census-statistical-abstract-2012,"Section 1, Table 1 (Population and Area), row '2010'","2010 (Apr. 1) . . . . . . 308,745,538 87.4 27,320,935 9.7 3,796,742 3,531,905 264,837",,,,,,Raw table-row extraction from a ~1000-page scanned-era layout; first numeric column is the population.
+bm-045,aggregation,hard,yes,en,"What was the resident population of the United States at the April 1, 2000 census, per the Statistical Abstract's population table?","281,424,603.","281,424,603",census-statistical-abstract-2012,census-statistical-abstract-2012,"Section 1, Table 1 (Population and Area), row '2000'","2000 (Apr. 1) . . . . . . 6 281,424,603 79.6 32,706,301 13.1 3,794,083 3,537,438 256,645",,,,,,Row carries a footnote marker ('6') before the population figure — table-noise robustness.
+bm-046,single_hop,medium,yes,en,Who performs all on-site monitoring responsibilities for NIDCR intramural studies?,Clinical Research Associates (CRAs) from CROMS.,CRAs) from CROMS,nidcr-monitoring-guidelines,nidcr-monitoring-guidelines,Background — Role of CROMS,Clinical Research Associates (CRAs) from CROMS will perform all on-site monitoring responsibilities for NIDCR Intramural studies. Monitoring for Extramural studies may be done by CROMS CRAs or a designee.,,,,,,
+bm-047,single_hop,medium,yes,en,"Besides oversight, what role do OCTOM staff serve for NIDCR investigators according to the monitoring guidelines?","They serve as an educational resource on clinical study implementation, monitoring, and applicable regulatory requirements.",educational resource,nidcr-monitoring-guidelines,nidcr-monitoring-guidelines,Background — Role of OCTOM,"In addition, the OCTOM staff will serve as an educational resource for NIDCR Office of the Clinical Director, NIDCR Program Officials, and investigators on clinical study implementation, monitoring, and applicable regulatory requirements.",,,,,,
+bm-048,single_hop,easy,yes,en,What is the stated purpose of the NIDCR Clinical Monitoring Plan template document?,An MS Word template used as a starting point for preparing a Clinical Monitoring Plan.,starting point for preparing a Clinical Monitoring Plan,nidcr-monitoring-plan-template,nidcr-monitoring-plan-template,Tool Summary Sheet — Purpose,Purpose: MS Word template to be used as a starting point for preparing a Clinical Monitoring Plan.,,,,,,
+bm-049,single_hop,medium,yes,en,Which four types of monitoring visits does the NIDCR Clinical Monitoring Plan template cover in section 7?,"Site Initiation, Interim Monitoring, For-cause, and Close-out visit activities.",Site Initiation Visit | Interim Monitoring Visit | For-cause Visit | Close-out Visit,nidcr-monitoring-plan-template,nidcr-monitoring-plan-template,"Table of Contents, section 7","7.1	Site Initiation Visit Activities	13
+7.2	Interim Monitoring Visit Activities	16
+7.3	For-cause Visit Activities	22
+7.4	Close-out Visit Activities	23",,,,,,List answer from a DOCX table of contents.
+bm-050,single_hop,medium,yes,en,"According to the UNSD deck on electronic data collection, what kinds of information can electronic approaches capture that paper-based approaches cannot?","GPS co-ordinates, pictures, videos, and date/time stamps.","GPS co-ordinates, pictures, videos, date/time stamps",unsd-data-collection-tech,unsd-data-collection-tech,Slide: Advantages of electronic data collection,"Allow for the collection of much of the same information collected via paper-based approaches, AND that of information that cannot be collected using paper-based approaches, such as: GPS co-ordinates, pictures, videos, date/time stamps, etc",,,,,,PPTX text-frame extraction.
+bm-051,keyword,medium,yes,en,"In the UNSD electronic data collection deck, what does the abbreviation TCO stand for?",Total Cost of Ownership.,Total Cost of Ownership,unsd-data-collection-tech,unsd-data-collection-tech,"Slide: CAPI — build, buy or freeware",When assessing cost it is important to look at Total Cost of Ownership (TCO),,,,,,Abbreviation expansion — exact-token retrieval.
+bm-052,single_hop,medium,yes,en,"According to the UNSD trade-in-services overview, how has international trade in services grown over the last 15 years?","It has more than doubled, growing faster than trade in goods.",more than double,unsd-trade-in-services,unsd-trade-in-services,Slide: Trade in services statistics — the framework,International trade in services is more than double in last 15 years and is growing more than trade in goods,,,,,,"Slide text with imperfect grammar, quoted verbatim."
+bm-053,keyword,medium,yes,en,Which UN manual (with its Compiler's Guide) is listed as a standard for international trade in services statistics?,"MSITS 2010 (the UN Manual on Statistics of International Trade in Services), with its Compiler's Guide.",MSITS 2010,unsd-trade-in-services,unsd-trade-in-services,Slide: The new standards,"UN - MSITS 2010
+(and Compiler’s Guide)",,,,,,Short exact-token slide fragment.
+bm-054,aggregation,medium,yes,en,"What was California's resident population estimate for July 1, 2024 in the Census state population table?","39,431,263 (raw table value 39431263).",39431263,census-state-population,census-state-population,"NST-EST2024-POP sheet, row 'California', last column (2024)",.California	39555674	39521958	39142565	39142414	39198693	39431263,,,,,,XLSX row rendered as tab-joined text; the last value is the 2024 estimate.
+bm-055,aggregation,medium,yes,en,"What was the total United States resident population estimate for July 1, 2024 according to the Census state population workbook?","340,110,988 (raw table value 340110988).",340110988,census-state-population,census-state-population,"NST-EST2024-POP sheet, row 'United States', last column (2024)",United States	331515736	331577720	332099760	334017321	336806231	340110988,,,,,,
+bm-056,aggregation,hard,yes,en,"Which state had the largest resident population estimate on July 1, 2024, according to the Census state table?","California, at 39,431,263 — ahead of Texas at 31,290,831.",California | 39431263,census-state-population,census-state-population,"NST-EST2024-POP sheet, row 'California' (largest 2024 value)",.California	39555674	39521958	39142565	39142414	39198693	39431263,census-state-population,"NST-EST2024-POP sheet, row 'Texas' (runner-up)",.Texas	29149458	29239570	29570351	30113488	30727890	31290831,,,Requires comparing rows; the runner-up row is included as secondary evidence.
+bm-057,distractor,medium,yes,en,"What was the July 1, 2024 population estimate for Los Angeles County, California?","9,757,179 (raw table value 9757179).",9757179,census-county-population,census-county-population,"CO-EST2024-POP sheet, row 'Los Angeles County, California', last column",".Los Angeles County, California	10017401	9996634	9809239	9748447	9731837	9757179",,,,census-state-population,,The state workbook is full of near-identical California rows — the county file must be cited.
+bm-058,multi_hop,hard,yes,en,"Which state had the largest 2024 population estimate, and what was the July 1, 2024 estimate for Los Angeles County within that state?","California was the largest state (39,431,263); Los Angeles County's 2024 estimate was 9,757,179.",California | 9757179,census-county-population | census-state-population,census-state-population,"NST-EST2024-POP sheet, row 'California'",.California	39555674	39521958	39142565	39142414	39198693	39431263,census-county-population,"CO-EST2024-POP sheet, row 'Los Angeles County, California'",".Los Angeles County, California	10017401	9996634	9809239	9748447	9731837	9757179",,,Cross-workbook join: state-level then county-level table.
+bm-059,multi_hop,hard,yes,en,"By what date did the original 1913 Form 1040 have to reach the collector of internal revenue, and what is the due date for 2024 tax-year returns?","The 1913 return was due March 1 (penalty $20–$1,000 for failure); 2024 returns are due April 15, 2025.","MARCH 1 | April 15, 2025",irs-1040-instructions-2024 | irs-form-1040-1913,irs-form-1040-1913,"Page 1, penalty notice","THE PENALTY
+FOR FAILURE TO HAVE THIS RETURN IN
+THE HANDS OF THE COLLECTOR OF
+INTERNAL REVENUE ON OR BEFORE
+MARCH 1 IS $20 TO $1,000.",irs-1040-instructions-2024,"Line 37, Amount You Owe","To avoid interest and penalties, 
+pay your taxes in full by the due 
+date of your return (not includ-
+ing extensions) —April 15, 2025, for 
+most taxpayers.",,,"Cross-document, cross-century comparison within one domain."
+bm-060,unanswerable,medium,no,en,In what year was Jane Austen born?,,,,,,,,,,,Austen was born | born in 1775,"Plausible for a corpus holding two Austen novels, but the texts contain no author biography."
+bm-061,unanswerable,medium,no,en,What is the name of Ishmael's mother in Moby-Dick?,,,,,,,,,,,Ishmael's mother | Ishmael’s mother,Character detail the novel never provides; probes cover both apostrophe forms.
+bm-062,unanswerable,hard,no,en,What does RFC 9110 specify about the QUIC handshake?,,,,,,,,,,,QUIC handshake,"HTTP-over-QUIC details live in RFC 9114, not in the corpus. (Original probe 'Too Many Requests' retired: the AWS whitepaper discusses request throttling, which made the old 429 question answerable-by-confusion once the industry slice landed.)"
+bm-063,unanswerable,hard,no,en,What default port does RFC 9112 assign to the ftp scheme?,,,,,,,,,,,the ftp scheme | default port for ftp,HTTP specs define http/https schemes only; ftp is out of scope for the corpus. (Probe 'ftp://' was rejected: reference URLs in unrelated PDFs contain it.)
+bm-064,unanswerable,easy,no,en,What is the monthly price of FastAPI's enterprise support plan?,,,,,,,,,,,FastAPI enterprise | price of FastAPI,No paid FastAPI tier exists anywhere in the corpus. (Probe 'enterprise support plan' retired: AWS Enterprise Support appears in the Well-Architected whitepaper.)
+bm-065,unanswerable,medium,no,en,What is the official release theme or mascot name of Kubernetes v1.31?,,,,,,,,,,,release theme | release is named,"Release themes live in the blog announcement, not the changelog file in the corpus."
+bm-066,unanswerable,hard,no,en,What BLEU score did the Transformer achieve on WMT 2014 English-to-Czech translation?,,,,,,,,,,,English-to-Czech | Czech translation,The paper reports English-to-German and English-to-French only — a near-miss of bm-026.
+bm-067,unanswerable,medium,no,en,How much did it cost in dollars to train BERT-LARGE?,,,,,,,,,,,training cost in dollars | cost in USD,The paper reports hardware (Cloud TPUs) but never a dollar figure.
+bm-068,unanswerable,medium,no,en,What is the standard deduction for tax year 2025 for a single filer?,,,,,,,,,,,standard deduction for 2025,The corpus holds the 2024 instructions only; a confident 2025 figure must come from outside the sources.
+bm-069,unanswerable,hard,no,en,How many days does NIST SP 800-63B set as the password expiration interval?,,,,,,,,,,,password expiration interval,"Trick pairing with bm-038: 800-63B rejects arbitrary expiration, so no interval exists to cite. (Probe 'every 90 days' retired: AWS credential-rotation guidance contains it — which also makes this a source-discrimination trap: an ungrounded system may cite AWS.)"
+bm-070,unanswerable,medium,no,en,"How many parameters does GPT-2 have, according to the papers in the corpus?",,,,,,,,,,,GPT-2,The BERT paper compares against OpenAI GPT (GPT-1); GPT-2 postdates it and never appears.
+bm-071,unanswerable,medium,no,en,What maximum per-site enrollment cap do the NIDCR monitoring guidelines impose?,,,,,,,,,,,enrollment cap | maximum enrollment,"Monitoring guidance covers visit conduct, not enrollment limits — plausible in-domain but absent."
+bm-072,condition,medium,yes,en,"If my filing status is married filing separately, at what gross income am I required to file a 2024 return, regardless of age?",$5 — any age.,$5,irs-1040-instructions-2024,irs-1040-instructions-2024,Chart A — Who Must File,"Married filing separately any age $5
+Head of household under 65",,,,,,
+bm-073,condition,medium,yes,en,"If I am single and 65 or older, what is the gross-income threshold that requires me to file a 2024 return?","$16,550.","16,550",irs-1040-instructions-2024,irs-1040-instructions-2024,Chart A — Who Must File,"Single under 65
+65 or older
+$14,600
+16,550",,,,,,
+bm-074,condition,medium,yes,en,Can a patient whose eGFR is below 30 mL/min/1.73 m2 be prescribed Glucophage?,No — severe renal impairment (eGFR below 30) is a contraindication.,contraindicated | eGFR below 30,fda-metformin-label,fda-metformin-label,CONTRAINDICATIONS,"GLUCOPHAGE and GLUCOPHAGE XR are contraindicated in patients with: 
+1.	 Severe renal impairment (eGFR below 30 mL/min/1.73 m2) (see WARNINGS and 
+PRECAUTIONS).",,,,,,
+bm-075,condition,medium,yes,en,"If an Intel processor is running in 64-bit mode, how many general-purpose registers are available?","16 GPRs, each 64 bits wide.",16,intel-sdm-vol1,intel-sdm-vol1,"Section 3.2.1, 64-bit mode execution environment","Basic program execution registers — The number of general-purpose registers (GPRs) available is 16. 
+GPRs are 64-bits wide and they support operations on byte, word, doubleword, and quadword integers.",,,,,,
+bm-076,set,medium,yes,en,What are the six pillars of the AWS Well-Architected Framework?,"Operational excellence, security, reliability, performance efficiency, cost optimization, and sustainability.",operational excellence | security | reliability | performance efficiency | cost optimization | sustainability,aws-well-architected,aws-well-architected,Introduction — the pillars,"The AWS Well-Architected Framework is based on six pillars — operational excellence, security, 
+reliability, performance eﬃciency, cost optimization, and sustainability.",,,,,,"The PDF ligature (eﬃciency) casefolds to 'efficiency', which the normalize() contract relies on."
+bm-077,set,medium,yes,en,What are the first three EBOPS service categories listed in the UNSD trade-in-services deck?,1. Manufacturing services on physical inputs owned by others; 2. Maintenance and repair services n.i.e.; 3. Transport.,Manufacturing services | Maintenance and repair | Transport,unsd-trade-in-services,unsd-trade-in-services,Slide: the EBOPS classification,"1.Manufacturing services on physical inputs owned by others.
+2. Maintenance and repair services n.i.e.
+3. Transport.",,,,,,
+bm-078,set,medium,yes,en,For which three greenhouse gases does AR6 WGI Chapter 2 report 2019 concentration levels?,"CO2, methane (CH4) and nitrous oxide (N2O).",CO 2 | methane | nitrous,ipcc-ar6-wg1-chapter02,ipcc-ar6-wg1-chapter02,Chapter 2 Executive Summary,"In 2019, concentrations of CO 2, methane (CH 4) and nitrous 
+oxide (N 2O) reached levels of 409.9 (±0.4) parts per million 
+(ppm), 1866.3 (±3.3) parts per billion (ppb) and 332.1 (±0.4) 
+ppb, respectively.",,,,,,
+bm-079,comparison,medium,yes,en,Which Transformer variant scores higher BLEU on WMT 2014 English-to-German — the base model or the big model?,The big model: 28.4 vs 27.3 for the base model.,27.3 | 28.4,arxiv-attention,arxiv-attention,Table 2,"Transformer (base model) 27.3 38.1 3.3 · 1018
+Transformer (big) 28.4 41.8 2.3 · 1019",,,,,,
+bm-080,comparison,medium,yes,en,"Which BERT variant has more parameters, and what are the two counts?",BERT-LARGE with 340M vs BERT-BASE with 110M.,110M | 340M,arxiv-bert,arxiv-bert,"Section 3, Model Architecture","BERTBASE (L=12, H=768, A=12, Total Param-
+eters=110M) and BERTLARGE (L=24, H=1024,
+A=16, Total Parameters=340M).",,,,,,
+bm-081,comparison,hard,yes,en,How did Berkshire's operating earnings in 2023 compare with 2021?,Higher: $37.4 billion in 2023 vs $27.6 billion in 2021.,$27.6 billion | $37.4 billion,berkshire-2023-letter,berkshire-2023-letter,Operating earnings discussion,"Accordingly, Berkshire also reports to Bertie and you what we call 
+“operating earnings.” Here is the story they tell: $27.6 billion for 2021; $30.9 billion for 2022 and 
+$37.4 billion for 2023.",,,,,,
+bm-082,post_processing,hard,yes,en,By how many people did the US resident population grow between the 2000 and 2010 censuses?,"27,320,935 (308,745,538 minus 281,424,603).","27,320,935",census-statistical-abstract-2012,census-statistical-abstract-2012,"Section 1, Table 1, row '2010' (increase column)","2010 (Apr. 1) . . . . . . 308,745,538 87.4 27,320,935 9.7 3,796,742 3,531,905 264,837",,,,,,
+bm-083,post_processing,hard,yes,en,By how much did Berkshire's operating earnings grow from 2021 to 2023?,By $9.8 billion (from $27.6 billion to $37.4 billion).,$27.6 billion | $37.4 billion,berkshire-2023-letter,berkshire-2023-letter,Operating earnings discussion,"Accordingly, Berkshire also reports to Bertie and you what we call 
+“operating earnings.” Here is the story they tell: $27.6 billion for 2021; $30.9 billion for 2022 and 
+$37.4 billion for 2023.",,,,,,Computed answer; facts are the operands present in the passage (the difference itself is not stated in the letter).
+bm-084,post_processing,hard,yes,en,"Per AR6, how much larger was the 2011–2020 warming over land than over the ocean?",0.71 °C more over land (1.59 °C vs 0.88 °C).,1.59 | 0.88,ipcc-ar6-wg1-spm,ipcc-ar6-wg1-spm,SPM A.1.2,"Global surface temperature was 1.09 [0.95 to 1.20] °C higher in 2011–2020 than 1850–1900, with larger 
+increases over land (1.59 [1.34 to 1.83] °C) than over the ocean (0.88 [0.68 to 1.01] °C).",,,,,,Computed answer; facts are the operands present in the passage.
+bm-085,false_premise,hard,yes,en,SP 800-63B requires passwords to be rotated every 90 days — what else must be checked at each rotation?,False premise: 800-63B says verifiers SHOULD NOT require arbitrary periodic changes; a change is forced only on evidence of compromise.,SHOULD NOT,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.2, Memorized Secret Verifiers","Verifiers SHOULD NOT require memorized secrets to be changed arbitrarily (e.g., periodically). 
+However, verifiers SHALL force a change if there is evidence of compromise of the 
+authenticator.",,,,,,False premise: mandatory periodic rotation. The source rejects it.
+bm-086,false_premise,hard,yes,en,"Given that the original Transformer was trained on Cloud TPUs, how many TPUs did Vaswani et al. use?","False premise: the models were trained on one machine with 8 NVIDIA P100 GPUs, not TPUs.",P100,arxiv-attention,arxiv-attention,"Section 5.2, Hardware and Schedule",We trained our models on one machine with 8 NVIDIA P100 GPUs.,,,,,,False premise: TPU training. The paper states P100 GPUs.
+bm-087,false_premise,hard,yes,en,Texas overtook California as the most populous state in 2024 — by how many people?,"False premise: California remained the most populous (39,431,263 vs Texas's 31,290,831 on July 1, 2024).",39431263 | 31290831,census-state-population,census-state-population,NST-EST2024-POP row 'California',.California	39555674	39521958	39142565	39142414	39198693	39431263,census-state-population,NST-EST2024-POP row 'Texas',.Texas	29149458	29239570	29570351	30113488	30727890	31290831,,,False premise: Texas overtaking California. The table shows otherwise.
+bm-088,procedural,medium,yes,en,How do I ask the IRS for more time to pay if paying by the due date would cause undue hardship?,"File Form 1127 by the due date of the return (April 15, 2025 for most taxpayers).",Form 1127,irs-1040-instructions-2024,irs-1040-instructions-2024,Amount You Owe — extension of time to pay,"undue hardship, you can ask for an ex-
+tension of time to pay by filing Form 
+1127 by the due date of your return (not 
+counting extensions) —April 15, 2025,",,,,,,
+bm-089,procedural,medium,yes,en,How should a verifier support users who keep their passwords in a password manager?,Permit “paste” functionality when entering a memorized secret.,paste,nist-sp-800-63b,nist-sp-800-63b,"Section 5.1.1.2, Memorized Secret Verifiers","Verifiers SHOULD permit claimants to use “paste” functionality when entering a memorized 
+secret. This facilitates the use of password managers, which are widely used and in many cases 
+increase the likelihood that users will choose stronger memorized secrets.",,,,,,
+bm-090,procedural,medium,yes,en,How do I stop pandoc from wrapping lines in its output?,"Use --wrap=none (with `none`, pandoc will not wrap lines at all).",`none`,pandoc-manual,pandoc-manual,Options: --wrap,"With `auto` (the default),
+    pandoc will attempt to wrap lines to the column width specified by
+    `--columns` (default 72).  With `none`, pandoc will not wrap
+    lines at all.",,,,,,
+bm-091,navigation,easy,yes,en,Which RFC in the corpus should I open to look up the semantics of HTTP status codes?,RFC 9110 (HTTP Semantics).,9110,rfc9110-http-semantics,rfc9110-http-semantics,RFC header block,"Request for Comments: 9110                                         Adobe
+STD: 97                                               M. Nottingham, Ed.
+Obsoletes: 2818, 7230, 7231, 7232, 7233, 7235,                    Fastly",,,,,,
+bm-092,navigation,medium,yes,en,Which paper in the corpus introduced the Transformer architecture?,"Attention Is All You Need (Vaswani et al., Google Brain).",Attention Is All You Need,arxiv-attention,arxiv-attention,Title page,"Attention Is All You Need
+Ashish Vaswani∗
+Google Brain",,,,,,
+bm-093,navigation,medium,yes,en,Which document should a Clinical Research Associate start from when preparing a Clinical Monitoring Plan?,The NIDCR Clinical Monitoring Plan template (an MS Word starting-point template).,Clinical Monitoring Plan,nidcr-monitoring-plan-template,nidcr-monitoring-plan-template,Tool Summary Sheet — Purpose,Purpose: MS Word template to be used as a starting point for preparing a Clinical Monitoring Plan.,,,,,,
+bm-094,single_hop,easy,yes,en,Whom does the 2023 Berkshire Hathaway letter memorialize as “The Architect of Berkshire Hathaway”?,"Charlie Munger, who died on November 28, 2023, 33 days before his 100th birthday.",Charlie Munger,berkshire-2023-letter,berkshire-2023-letter,Opening tribute,"Charlie Munger – The Architect of Berkshire Hathaway  
+Charlie Munger died on November 28, just 33 days before his 100th birthday.",,,,,,
+bm-095,single_hop,medium,yes,en,What operating earnings did Berkshire report for 2023?,$37.4 billion.,$37.4 billion,berkshire-2023-letter,berkshire-2023-letter,Operating earnings discussion,"Accordingly, Berkshire also reports to Bertie and you what we call 
+“operating earnings.” Here is the story they tell: $27.6 billion for 2021; $30.9 billion for 2022 and 
+$37.4 billion for 2023.",,,,,,
+bm-096,single_hop,medium,yes,en,"According to the Well-Architected Framework, which two pillars are generally not traded off against the others?",Security and operational excellence.,Security | operational excellence,aws-well-architected,aws-well-architected,The pillars — trade-offs,Security and operational excellence are generally not traded-oﬀ against the other pillars.,,,,,,
+bm-097,single_hop,medium,yes,en,How many structural tokens does ECMA-404 say a JSON text's token set includes?,"Six structural tokens (plus strings, numbers, and three literal name tokens).",six structural tokens,ecma-404-json,ecma-404-json,"Section 4, JSON Text","The set of tokens includes six structural tokens, strings, numbers, and three  literal name tokens.",,,,,,
+bm-098,single_hop,medium,yes,en,What condition is the subject of the boxed warning on the Glucophage prescribing information?,Lactic acidosis (metformin-associated).,LACTIC ACIDOSIS,fda-metformin-label,fda-metformin-label,Boxed warning,"WARNING: LACTIC ACIDOSIS 
+Postmarketing cases of metformin -associated lactic acidosis have resulted in death, 
+hypothermia, hypotension, and resistant bradyarrhythmias.",,,,,,
+bm-099,single_hop,medium,yes,en,"In IA-32, which registers make up the basic program execution registers?","The eight general-purpose registers, the six segment registers, the EFLAGS register, and the EIP (instruction pointer) register.",eight general-purpose registers | EFLAGS,intel-sdm-vol1,intel-sdm-vol1,"Section 3.2, execution environment overview","Basic program execution registers — The eight general-purpose registers, the six segment registers, the 
+EFLAGS register, and the EIP (instruction pointer) register comprise a basic execution environment in which to 
+execute a set of general-purpose instructions.",,,,,,
+bm-100,unanswerable,medium,no,en,What operating earnings does the 2023 Berkshire letter forecast for 2025?,,,,,,,,,,,forecast for 2025 | 2025 operating earnings,Buffett's letter reports history and explicitly avoids forecasts; a confident 2025 figure would be fabricated.
+bm-101,unanswerable,medium,no,en,What does AWS charge for a Well-Architected Framework review?,,,,,,,,,,,price of a review | charged for a review,"The whitepaper describes the framework, not commercial review pricing."

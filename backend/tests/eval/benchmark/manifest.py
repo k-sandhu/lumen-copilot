@@ -295,6 +295,78 @@ CORPUS: tuple[CorpusFile, ...] = (
         notes="Not an image-only scan: the IRS publishes it with a text layer, so it "
         "extracts real (if oddly ordered) text.",
     ),
+    # --- Industry documents (#430) --------------------------------------------
+    # Real business/industry publishing is PDF-dominant, so this slice is all
+    # PDF: finance, cloud architecture, standards, pharmaceutical, and
+    # semiconductor docs from stable vendor/organisation hosts. SEC EDGAR was
+    # evaluated for an industry XLSX and is excluded: it 403s scripted access
+    # from this environment even with its policy-compliant contact User-Agent
+    # (same exclusion policy as cdc.gov / bls.gov / govinfo.gov).
+    CorpusFile(
+        file_id="berkshire-2023-letter",
+        filename="berkshire-2023-shareholder-letter.pdf",
+        url="https://www.berkshirehathaway.com/letters/2023ltr.pdf",
+        mime_type=_PDF,
+        source="Berkshire Hathaway — Warren Buffett's 2023 letter to shareholders",
+        license="© Berkshire Hathaway; public investor-relations document (local "
+        "benchmarking use only)",
+        domain="finance",
+        description="Classic industry document: shareholder letter with GAAP figures "
+        "and plain-English financial commentary.",
+    ),
+    CorpusFile(
+        file_id="aws-well-architected",
+        filename="aws-well-architected-framework.pdf",
+        url=(
+            "https://docs.aws.amazon.com/pdfs/wellarchitected/latest/framework/"
+            "wellarchitected-framework.pdf"
+        ),
+        mime_type=_PDF,
+        source="Amazon Web Services — Well-Architected Framework whitepaper",
+        license="© Amazon; public documentation (local benchmarking use only)",
+        domain="cloud-architecture",
+        description="~14 MB vendor architecture whitepaper — the large industry-PDF "
+        "case; pillar structure suits set/list questions.",
+    ),
+    CorpusFile(
+        file_id="ecma-404-json",
+        filename="ecma-404-json-syntax.pdf",
+        url=(
+            "https://ecma-international.org/wp-content/uploads/"
+            "ECMA-404_2nd_edition_december_2017.pdf"
+        ),
+        mime_type=_PDF,
+        source="Ecma International — ECMA-404, The JSON Data Interchange Syntax (2nd ed.)",
+        license="© Ecma International; standards available free of charge",
+        domain="standards",
+        description="Short formal industry standard — precise normative definitions.",
+    ),
+    CorpusFile(
+        file_id="fda-metformin-label",
+        filename="fda-glucophage-prescribing-information.pdf",
+        url=(
+            "https://www.accessdata.fda.gov/drugsatfda_docs/label/2017/"
+            "020357s037s039,021202s021s023lbl.pdf"
+        ),
+        mime_type=_PDF,
+        source="FDA (Drugs@FDA) — Glucophage/Glucophage XR (metformin) prescribing " "information",
+        license="Public domain (US federal government work / approved labeling)",
+        domain="pharmaceutical",
+        description="Pharma industry labeling: dosing tables, contraindications, "
+        "boxed warning — dense regulated-industry prose.",
+        notes="accessdata.fda.gov accepts the project UA (unlike cdc.gov).",
+    ),
+    CorpusFile(
+        file_id="intel-sdm-vol1",
+        filename="intel-sdm-volume-1.pdf",
+        url="https://cdrdv2-public.intel.com/671436/253665-sdm-vol-1.pdf",
+        mime_type=_PDF,
+        source="Intel — 64 and IA-32 Architectures Software Developer's Manual, Vol. 1",
+        license="© Intel; public developer documentation (local benchmarking use only)",
+        domain="semiconductor",
+        description="Hardware-industry reference manual: registers, modes, "
+        "instruction-set architecture basics.",
+    ),
     # --- DOCX -----------------------------------------------------------------
     CorpusFile(
         file_id="nidcr-monitoring-guidelines",
@@ -444,7 +516,7 @@ def entry_by_id(file_id: str) -> CorpusFile:
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 CHECKSUMS_PATH = _PACKAGE_DIR / "checksums.json"
-QUESTIONS_PATH = _PACKAGE_DIR / "questions.jsonl"
+QUESTIONS_PATH = _PACKAGE_DIR / "questions.csv"
 
 # Env override so CI or a dev box can keep the (large) corpus outside the repo
 # checkout; the default keeps everything next to the manifest, git-ignored.

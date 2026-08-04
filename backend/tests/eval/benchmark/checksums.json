@@ -7,6 +7,14 @@
     "sha256": "5692a5514787a8c6727b4ff3b726a3385798bc68e12138d1d4af83947e2acf6e",
     "size_bytes": 775166
   },
+  "aws-well-architected": {
+    "sha256": "d50e518334b163d1d9da18885a123a9ae7097a015b6a0f71a15d929a8129f196",
+    "size_bytes": 14190902
+  },
+  "berkshire-2023-letter": {
+    "sha256": "829169be21f4ce05202720fe5645cc1b9a5b1ae20bf5e6ebaff987349766eafd",
+    "size_bytes": 122415
+  },
   "census-county-population": {
     "sha256": "18ed5f28af2119dfb9fe1e2a70436e6c6d3da2c6573a6c40fc00e05e03632563",
     "size_bytes": 189904
@@ -23,6 +31,10 @@
     "sha256": "c3e04155c3b32f170d3fa5a67749052c095b6f56a7630f499a28d6171e2f40cb",
     "size_bytes": 31959786
   },
+  "ecma-404-json": {
+    "sha256": "760a6f77c38172f4de333412292eaed092f33852592ca0cce9b7535a6e415fcf",
+    "size_bytes": 639695
+  },
   "example-homepage-html": {
     "sha256": "ff67a9d764d6a2367a187734e697f6a53217db9a21c101d410a113ca871a299d",
     "size_bytes": 559
@@ -30,6 +42,10 @@
   "fastapi-readme": {
     "sha256": "c8f4a2e78fff720c814b7c8fc73e02814ca96b81a5ec93098bb07cb9deee4aba",
     "size_bytes": 24204
+  },
+  "fda-metformin-label": {
+    "sha256": "5f0b2e09be4870579fa699821f6cf138a25ecf1dfe390efe1af1204c85dee8d3",
+    "size_bytes": 1159832
   },
   "gutenberg-faust-de": {
     "sha256": "fed2a58edd6910ee96d27ada614d34bcc41f03750d86541c41246bb74c564ff7",
@@ -50,6 +66,10 @@
   "gutenberg-shakespeare": {
     "sha256": "3cf4b3d44ee14cff4e14e78e2ad3318eff76f3f7f2afc3cee6bb925879110a37",
     "size_bytes": 5638480
+  },
+  "intel-sdm-vol1": {
+    "sha256": "7aca6a3e847520c4a1b2f1230da74ae3837757bc49288f5c895a6b003371d051",
+    "size_bytes": 3190742
   },
   "ipcc-ar6-wg1-chapter02": {
     "sha256": "1ed0ebc9c9997ba25be7c1d3f6de71d2f7624531481e61c9290640a87b61710c",

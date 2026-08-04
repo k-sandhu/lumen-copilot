@@ -1,12 +1,14 @@
-"""The benchmark question bank — typed loading, validation, golden-set adapter (#420).
+"""The benchmark question bank — typed loading, validation, golden-set adapter (#420, #430).
 
-``questions.jsonl`` is the reviewable data file (one JSON object per line, JSONL
-for portability to external eval tooling); this module is its single loader and
-the executable spec of its schema. Every rule the README states about the bank
-is enforced here — a malformed or ungrounded-by-construction question fails
-validation, not review.
+``questions.csv`` is the reviewable data file — a wide, Excel-friendly CSV
+(UTF-8 with BOM, up to two evidence spans per row, ``|``-separated list cells);
+this module is its single loader and the executable spec of its schema. Every
+rule the README states about the bank is enforced here — a malformed or
+ungrounded-by-construction question fails validation, not review.
 
-Question categories (the benchmark's coverage axes — see README):
+Question categories (the benchmark's coverage axes — see README for the
+published-evidence base behind them: CRAG's real-user taxonomy, the Salesforce
+enterprise deep-search benchmark, and practitioner query-intent reports):
 
 * ``single_hop``  — answer supported by one passage of one document.
 * ``multi_hop``   — requires combining passages from ≥ 2 documents.
@@ -16,6 +18,18 @@ Question categories (the benchmark's coverage axes — see README):
 * ``distractor``  — a near-miss document exists (named in ``distractor_files``);
   the right answer requires discriminating between confusable sources.
 * ``multilingual``— evidence lives in a non-English document.
+* ``condition``   — the answer depends on a stated condition ("if I am X…"),
+  usually one row/branch of a table or rule (CRAG: simple-with-condition).
+* ``set``         — the answer is a list of items (CRAG: set questions).
+* ``comparison``  — two named things compared on one attribute (CRAG).
+* ``post_processing`` — the passage must be transformed/computed over, not just
+  quoted (CRAG: post-processing-heavy).
+* ``false_premise``— the question embeds a wrong assumption; the correct answer
+  corrects it from the sources (CRAG: false-premise). ``notes`` must state the
+  premise being corrected.
+* ``procedural``  — "how do I…" workplace intent (enterprise-search evidence).
+* ``navigation``  — "which document covers…" artifact-finding intent
+  (enterprise-search evidence); evidence quotes self-identifying text.
 * ``unanswerable``— nothing in the corpus answers it; the correct behaviour is
   an honest, zero-citation refusal (AC-3). ``absence_probes`` are strings that
   must NOT occur in any extracted corpus text — the machine-checkable side of
@@ -30,7 +44,7 @@ checks in :mod:`tests.eval.benchmark.verify` prove.
 
 from __future__ import annotations
 
-import json
+import csv
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -52,6 +66,13 @@ Category = Literal[
     "keyword",
     "distractor",
     "multilingual",
+    "condition",
+    "set",
+    "comparison",
+    "post_processing",
+    "false_premise",
+    "procedural",
+    "navigation",
     "unanswerable",
 ]
 Difficulty = Literal["easy", "medium", "hard"]
@@ -64,6 +85,13 @@ _CATEGORIES: frozenset[str] = frozenset(
         "keyword",
         "distractor",
         "multilingual",
+        "condition",
+        "set",
+        "comparison",
+        "post_processing",
+        "false_premise",
+        "procedural",
+        "navigation",
         "unanswerable",
     }
 )
@@ -87,6 +115,13 @@ _MIN_PER_CATEGORY: dict[Category, int] = {
     "keyword": 4,
     "distractor": 4,
     "multilingual": 2,
+    "condition": 2,
+    "set": 2,
+    "comparison": 2,
+    "post_processing": 2,
+    "false_premise": 2,
+    "procedural": 2,
+    "navigation": 2,
     "unanswerable": 10,
 }
 # Unanswerable share of the whole bank (hallucination-pressure band).
@@ -130,43 +165,80 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+# The CSV schema: wide, Excel-friendly, one row per question. List cells are
+# " | "-separated (validation rejects '|' inside items); up to two evidence
+# spans per row (evidence1_*/evidence2_*) — enough for every current category,
+# and a structural nudge to keep gold evidence focused. UTF-8 with BOM so
+# Excel opens the curly quotes and the German text correctly.
+CSV_COLUMNS: tuple[str, ...] = (
+    "qid",
+    "category",
+    "difficulty",
+    "answerable",
+    "language",
+    "question",
+    "gold_answer",
+    "answer_facts",
+    "source_files",
+    "evidence1_file",
+    "evidence1_locator",
+    "evidence1_quote",
+    "evidence2_file",
+    "evidence2_locator",
+    "evidence2_quote",
+    "distractor_files",
+    "absence_probes",
+    "notes",
+)
+_LIST_SEPARATOR = " | "
+
+
+def _split_list(cell: str) -> tuple[str, ...]:
+    """Parse a ``|``-separated CSV list cell (empty cell -> empty tuple)."""
+    return tuple(item.strip() for item in cell.split("|") if item.strip())
+
+
 def load_questions(path: Path = QUESTIONS_PATH) -> tuple[BenchmarkQuestion, ...]:
-    """Parse ``questions.jsonl`` into typed questions (schema errors raise)."""
+    """Parse ``questions.csv`` into typed questions (schema errors raise)."""
     questions: list[BenchmarkQuestion] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"questions.jsonl line {line_no}: invalid JSON: {exc}") from exc
-        try:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or tuple(reader.fieldnames) != CSV_COLUMNS:
+            raise ValueError(
+                f"questions.csv header mismatch: expected {CSV_COLUMNS}, "
+                f"got {tuple(reader.fieldnames or ())}"
+            )
+        for row_no, raw in enumerate(reader, start=2):  # row 1 is the header
+            answerable_cell = raw["answerable"].strip().lower()
+            if answerable_cell not in {"yes", "no"}:
+                raise ValueError(f"questions.csv row {row_no}: answerable must be yes/no")
+            evidence: list[Evidence] = []
+            for slot in ("evidence1", "evidence2"):
+                if raw[f"{slot}_file"].strip() or raw[f"{slot}_quote"].strip():
+                    evidence.append(
+                        Evidence(
+                            file_id=raw[f"{slot}_file"].strip(),
+                            locator=raw[f"{slot}_locator"].strip(),
+                            quote=raw[f"{slot}_quote"],
+                        )
+                    )
             questions.append(
                 BenchmarkQuestion(
-                    qid=raw["qid"],
-                    question=raw["question"],
-                    category=raw["category"],
-                    difficulty=raw["difficulty"],
-                    answerable=raw["answerable"],
-                    gold_answer=raw.get("gold_answer", ""),
-                    answer_facts=tuple(raw.get("answer_facts", ())),
-                    source_files=tuple(raw.get("source_files", ())),
-                    evidence=tuple(
-                        Evidence(
-                            file_id=ev["file_id"],
-                            locator=ev.get("locator", ""),
-                            quote=ev["quote"],
-                        )
-                        for ev in raw.get("evidence", ())
-                    ),
-                    distractor_files=tuple(raw.get("distractor_files", ())),
-                    absence_probes=tuple(raw.get("absence_probes", ())),
-                    language=raw.get("language", "en"),
-                    notes=raw.get("notes", ""),
+                    qid=raw["qid"].strip(),
+                    question=raw["question"].strip(),
+                    category=raw["category"].strip(),  # type: ignore[arg-type]
+                    difficulty=raw["difficulty"].strip(),  # type: ignore[arg-type]
+                    answerable=answerable_cell == "yes",
+                    gold_answer=raw["gold_answer"].strip(),
+                    answer_facts=_split_list(raw["answer_facts"]),
+                    source_files=_split_list(raw["source_files"]),
+                    evidence=tuple(evidence),
+                    distractor_files=_split_list(raw["distractor_files"]),
+                    absence_probes=_split_list(raw["absence_probes"]),
+                    language=raw["language"].strip() or "en",
+                    notes=raw["notes"].strip(),
                 )
             )
-        except (KeyError, TypeError) as exc:
-            raise ValueError(f"questions.jsonl line {line_no}: bad shape: {exc}") from exc
     return tuple(questions)
 
 
