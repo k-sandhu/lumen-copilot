@@ -189,8 +189,12 @@ bm-074,condition,medium,yes,en,Can a patient whose eGFR is below 30 mL/min/1.73 
 PRECAUTIONS).",,,,,,
 bm-075,condition,medium,yes,en,"If an Intel processor is running in 64-bit mode, how many general-purpose registers are available?","16 GPRs, each 64 bits wide.",16,intel-sdm-vol1,intel-sdm-vol1,"Section 3.2.1, 64-bit mode execution environment","Basic program execution registers — The number of general-purpose registers (GPRs) available is 16. 
 GPRs are 64-bits wide and they support operations on byte, word, doubleword, and quadword integers.",,,,,,
-bm-076,set,medium,yes,en,What are the six pillars of the AWS Well-Architected Framework?,"Operational excellence, security, reliability, performance efficiency, cost optimization, and sustainability.",operational excellence | security | reliability | performance efficiency | cost optimization | sustainability,aws-well-architected,aws-well-architected,Introduction — the pillars,"The AWS Well-Architected Framework is based on six pillars — operational excellence, security, 
-reliability, performance eﬃciency, cost optimization, and sustainability.",,,,,,"The PDF ligature (eﬃciency) casefolds to 'efficiency', which the normalize() contract relies on."
+bm-076,set,medium,yes,en,Which categories of works does Copyright Circular 1 list as examples of copyrightable works?,"Literary works; musical works (including any accompanying words); dramatic works (including any accompanying music); pantomimes and choreographic works; and pictorial, graphic, and sculptural works.","Literary works | Musical works | Dramatic works | Pantomimes and choreographic works | Pictorial, graphic, and sculptural works",copyright-circular-1,copyright-circular-1,What Works Are Protected? — examples list,"Examples of copyrightable works include
+• Literary works
+• Musical works, including any accompanying words
+• Dramatic works, including any accompanying music
+• Pantomimes and choreographic works
+• Pictorial, graphic, and sculptural works",,,,,,"Re-homed from aws-well-architected in #516: that URL is a /latest/ alias AWS re-publishes, so it is now a rolling entry and outside the measured slice."
 bm-077,set,medium,yes,en,What are the first three EBOPS service categories listed in the UNSD trade-in-services deck?,1. Manufacturing services on physical inputs owned by others; 2. Maintenance and repair services n.i.e.; 3. Transport.,Manufacturing services | Maintenance and repair | Transport,unsd-trade-in-services,unsd-trade-in-services,Slide: the EBOPS classification,"1.Manufacturing services on physical inputs owned by others.
 2. Maintenance and repair services n.i.e.
 3. Transport.",,,,,,
@@ -240,7 +244,8 @@ Charlie Munger died on November 28, just 33 days before his 100th birthday.",,,,
 bm-095,single_hop,medium,yes,en,What operating earnings did Berkshire report for 2023?,$37.4 billion.,$37.4 billion,berkshire-2023-letter,berkshire-2023-letter,Operating earnings discussion,"Accordingly, Berkshire also reports to Bertie and you what we call 
 “operating earnings.” Here is the story they tell: $27.6 billion for 2021; $30.9 billion for 2022 and 
 $37.4 billion for 2023.",,,,,,
-bm-096,single_hop,medium,yes,en,"According to the Well-Architected Framework, which two pillars are generally not traded off against the others?",Security and operational excellence.,Security | operational excellence,aws-well-architected,aws-well-architected,The pillars — trade-offs,Security and operational excellence are generally not traded-oﬀ against the other pillars.,,,,,,
+bm-096,single_hop,medium,yes,en,"According to Copyright Circular 1, when does copyright protection in the United States begin?","Automatically, from the moment the original work of authorship is fixed in a tangible medium — no registration or publication is required for protection to exist.",automatically | the original work of authorship is fixed,copyright-circular-1,copyright-circular-1,Copyright protection — when it exists,"Copyright protection in the United States exists automatically 
+from the moment the original work of authorship is fixed.",,,,,,Re-homed from aws-well-architected in #516 (see bm-076).
 bm-097,single_hop,medium,yes,en,How many structural tokens does ECMA-404 say a JSON text's token set includes?,"Six structural tokens (plus strings, numbers, and three literal name tokens).",six structural tokens,ecma-404-json,ecma-404-json,"Section 4, JSON Text","The set of tokens includes six structural tokens, strings, numbers, and three  literal name tokens.",,,,,,
 bm-098,single_hop,medium,yes,en,What condition is the subject of the boxed warning on the Glucophage prescribing information?,Lactic acidosis (metformin-associated).,LACTIC ACIDOSIS,fda-metformin-label,fda-metformin-label,Boxed warning,"WARNING: LACTIC ACIDOSIS 
 Postmarketing cases of metformin -associated lactic acidosis have resulted in death, 

@@ -336,11 +336,21 @@ CORPUS: tuple[CorpusFile, ...] = (
             "wellarchitected-framework.pdf"
         ),
         mime_type=_PDF,
-        source="Amazon Web Services — Well-Architected Framework whitepaper",
+        source="Amazon Web Services — Well-Architected Framework whitepaper "
+        "(current revision; the URL is a ``/latest/`` alias)",
         license="© Amazon; public documentation (local benchmarking use only)",
         domain="cloud-architecture",
         description="~14 MB vendor architecture whitepaper — the large industry-PDF "
-        "case; pillar structure suits set/list questions.",
+        "case, and the pack's cloud-engineering reference.",
+        rolling=True,
+        notes="Rolling because AWS genuinely re-publishes it: the path says "
+        "``/latest/``, and the sha256 changed three times in five days "
+        "(d50e51… → 05c619… → 2691fe…) at a constant byte size, while dated "
+        "URLs (``/2023-10-03/`` etc.) 404. Pinning it produced a recurring "
+        "false 'upstream changed' failure that made `download` exit 1 for "
+        "everyone (#516); consecutive fetches ARE identical, so this is "
+        "publication churn, not per-request nondeterminism. Grounding moved "
+        "off it accordingly — see the questions.csv note in that change.",
     ),
     CorpusFile(
         file_id="ecma-404-json",
