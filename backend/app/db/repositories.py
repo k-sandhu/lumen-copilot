@@ -5729,6 +5729,28 @@ class CodeRunRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def count_executing(self) -> int:
+        """Runs EXECUTING right now — the `max_concurrency` admission gate (#519).
+
+        Deliberately not :meth:`count_active`, which also counts ``QUEUED``. A queued
+        run holds no runner thread and no runner memory, so counting it would refuse
+        work on the basis of a queue depth that costs nothing — and, because a run is
+        already ``QUEUED`` when its own admission check runs, it would count ITSELF and
+        make the gate off by one.
+
+        `max_concurrency` therefore means what an operator would assume: how many of
+        this tenant's runs may occupy the sandbox at the same moment.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.CodeRun)
+            .where(
+                models.CodeRun.tenant_id == self._tenant_id,
+                models.CodeRun.status == CodeRunStatus.RUNNING.value,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
     async def runtime_ms_since(self, since: datetime) -> int:
         """Sum duration for legacy ADR-0013 accounting; not an ADR-0020 gate."""
         stmt = select(func.coalesce(func.sum(models.CodeRun.duration_ms), 0)).where(

@@ -24,6 +24,7 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.code_execution import (
+    SANDBOX_REASON_CONCURRENCY_EXCEEDED,
     SANDBOX_REASON_PACKAGE_DENIED,
     SANDBOX_REASON_RUN_ERROR,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
@@ -644,6 +645,24 @@ class SandboxService:
         elif run.session_id is None:
             reason = SANDBOX_REASON_SESSION_REQUIRED
             denial = sandbox_reason_public_message(reason)
+        elif (in_flight := await runs.count_executing()) >= policy.max_concurrency:
+            # #519: `max_concurrency` was stored, clamped against the deploy ceiling,
+            # returned by the admin API and rendered in the UI — and read by NO runtime
+            # path. An operator who saw concurrent runs overwhelming the runner would
+            # reach for exactly this control, set it, and watch nothing change. Either
+            # enforce it or stop showing it; a limit that silently does nothing is the
+            # worst of the three options.
+            #
+            # Counted, not reserved: this is a coarse admission gate, and two runs
+            # racing the same check can both be admitted. That is acceptable here —
+            # the bound exists to stop runaway fan-out, not to be exact to one run —
+            # and a reservation would need a row lock on the hot path of every turn.
+            reason = SANDBOX_REASON_CONCURRENCY_EXCEEDED
+            denial = sandbox_reason_public_message(reason)
+            operator_detail = (
+                f"{in_flight} run(s) already in flight for this tenant; policy admits "
+                f"{policy.max_concurrency}."
+            )
         else:
             try:
                 # ``packages`` is what the runner must INSTALL — the requested

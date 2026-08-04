@@ -44,13 +44,12 @@ _OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
 #: event in the caller's transaction. Generous for a chat turn, fatal as a fan-out.
 _MAX_OUTPUT_MEMBERS = 64
 
-#: Cap on the stdout/stderr this process RETAINS and returns per execution.
-#: NOTE the honest limit: docker-py's non-streaming ``exec_run`` buffers the whole
-#: process output before returning, so this bounds the JSON payload and the result
-#: cache but NOT peak memory during the exec itself — ``print('x'*2_000_000_000)``
-#: is still a runner-side OOM risk. Bounding that needs the streaming low-level exec
-#: API, tracked separately; ADR-0013 §G7 and the runbook say so plainly rather than
-#: claiming a bound that does not exist.
+#: Cap on the stdout/stderr this process retains per execution — and, since #519,
+#: on what it ever HOLDS. Model-code execs stream through the low-level API and drop
+#: everything past this as chunks arrive, so ``print('x'*2_000_000_000)`` costs the
+#: cap plus one chunk instead of two gigabytes inside the Docker-socket holder. The
+#: comment that used to sit here admitted the opposite; ADR-0013 §G7 records the
+#: change.
 _MAX_STREAM_CHARS = 256 * 1024
 
 #: How many completed execution results are retained for idempotent re-reads. The
@@ -59,6 +58,28 @@ _MAX_STREAM_CHARS = 256 * 1024
 #: until close. Oldest-first eviction keeps it bounded; an evicted key simply
 #: re-executes rather than returning a stale answer.
 _MAX_CACHED_RESULTS = 64
+
+#: How many collections may run AT ONCE in this process (#519 part 2).
+#:
+#: Every bound above is per-EXECUTION. Locks are per-session, so executions in
+#: different sessions collect concurrently, and one max-size collection peaks at
+#: roughly 4x its byte budget (the raw member, the accumulated base64, the JSON
+#: string, and its encoded bytes) — ~256 MiB against the runner's 1 GiB compose
+#: limit. Three or four concurrent tenants at the ceiling therefore OOM the Docker
+#: socket holder: exactly the failure the per-execution budget was added to prevent,
+#: just reached from a different direction.
+#:
+#: A permit makes the process-wide peak a DECLARED number rather than an emergent one:
+#: at most this many collections are in flight, so peak collection memory is bounded
+#: by permits x per-execution peak regardless of how many tenants are running. Waiting
+#: for a permit costs latency on a turn that has already finished computing; running
+#: out of memory costs every tenant on the host.
+_MAX_CONCURRENT_COLLECTIONS = 3
+
+#: Process-wide, deliberately module-level: the engine is `lru_cache`d to one
+#: instance, but the bound must hold even if that ever changes — it is a property of
+#: the process's memory, not of an engine object.
+_collection_permits = threading.BoundedSemaphore(_MAX_CONCURRENT_COLLECTIONS)
 
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
@@ -398,16 +419,9 @@ class DockerSandboxEngine:
         env = {**request.env, "LUMEN_OUTPUT_DIR": output_dir}
         started = time.monotonic()
         try:
-            outcome = container.exec_run(
-                ["python", code_path],
-                workdir="/workspace",
-                environment=env,
-                demux=True,
+            exit_code, stdout, stderr = self._exec_streaming(
+                container, ["python", code_path], workdir="/workspace", environment=env
             )
-            exit_code = int(outcome.exit_code)
-            stdout_raw, stderr_raw = outcome.output or (b"", b"")
-            stdout = self._clip((stdout_raw or b"").decode("utf-8", errors="replace"))
-            stderr = self._clip((stderr_raw or b"").decode("utf-8", errors="replace"))
             if exit_code != 0 and not self._container_running(container):
                 # Docker returns exit 137 rather than raising when cancel removes a
                 # container during exec. Treat any non-zero outcome from a container
@@ -635,6 +649,68 @@ class DockerSandboxEngine:
             return _OUTPUT_BYTES_CEILING
         return min(value, _OUTPUT_BYTES_CEILING)
 
+    def _exec_streaming(
+        self, container: Any, command: list[str], *, workdir: str, environment: dict[str, str]
+    ) -> tuple[int, str, str]:
+        """Run MODEL code, draining its output through a bounded buffer (#519 part 1).
+
+        `container.exec_run(demux=True)` buffers the process's ENTIRE stdout/stderr
+        before returning, so `print("x" * 2_000_000_000)` allocated two gigabytes
+        inside the runner — the single Docker-socket holder, capped at 1 GiB in
+        compose — no matter what output cap was configured. The cap clipped what was
+        RETAINED, which is a different thing from what is READ, and ADR-0013 §G7's
+        memory bound was therefore qualified rather than met.
+
+        The low-level API streams instead: chunks arrive as they are produced, and
+        anything past the retention cap is discarded as it arrives rather than
+        accumulated and trimmed at the end. Peak is the cap plus one chunk.
+
+        Draining CONTINUES after the cap is reached rather than breaking out. Closing
+        the stream early would leave the daemon writing into a pipe nobody reads,
+        which blocks the model's process instead of letting it run to completion — a
+        run that printed too much would hang rather than finish with clipped output.
+        The bytes are read and dropped, which costs I/O but no memory.
+
+        Only the model-code exec uses this. Setup commands (`chmod`, `pip install`)
+        keep `exec_run`: their output is bounded by construction, and giving them the
+        streaming path would widen the seam every test fake has to implement for no
+        gain in safety.
+        """
+        api = self._client.api
+        handle = api.exec_create(
+            container.id,
+            command,
+            workdir=workdir,
+            environment=environment,
+            stdout=True,
+            stderr=True,
+        )
+        exec_id = handle["Id"] if isinstance(handle, dict) else handle
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        out_left = _MAX_STREAM_CHARS
+        err_left = _MAX_STREAM_CHARS
+        stream = api.exec_start(exec_id, stream=True, demux=True)
+        try:
+            for chunk in stream:
+                out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
+                if out_chunk and out_left > 0:
+                    text = out_chunk.decode("utf-8", errors="replace")[:out_left]
+                    out_parts.append(text)
+                    out_left -= len(text)
+                if err_chunk and err_left > 0:
+                    text = err_chunk.decode("utf-8", errors="replace")[:err_left]
+                    err_parts.append(text)
+                    err_left -= len(text)
+        finally:
+            # docker-py's stream generator owns a socket; an abandoned one leaks the
+            # connection and, with it, a daemon-side writer.
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        return exit_code, "".join(out_parts), "".join(err_parts)
+
     @staticmethod
     def _collect_outputs(
         container: Any, output_dir: str, byte_budget: int
@@ -648,6 +724,16 @@ class DockerSandboxEngine:
         delivered short — a truncated PNG or xlsx persisted as an artifact would be a
         silently corrupt deliverable — and the caller is told collection was partial.
         """
+        # Serialise against the process-wide permit BEFORE the archive stream opens:
+        # holding it only around the parse would leave the daemon's tar writer and
+        # this side's buffers outside the bound, which is most of the peak.
+        with _collection_permits:
+            return DockerSandboxEngine._collect_outputs_unlocked(container, output_dir, byte_budget)
+
+    @staticmethod
+    def _collect_outputs_unlocked(
+        container: Any, output_dir: str, byte_budget: int
+    ) -> tuple[list[dict[str, object]], bool]:
         try:
             stream, _ = container.get_archive(output_dir)
         except Exception:

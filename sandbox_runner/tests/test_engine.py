@@ -6,10 +6,11 @@ import io
 import tarfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 from lumen_sandbox_runner.engine import (
     _DISTRIBUTION_NAME,
+    _MAX_STREAM_CHARS,
     _OUTPUT_BYTES_CEILING,
     _OUTPUT_CAP_LABEL,
     DockerSandboxEngine,
@@ -35,6 +37,12 @@ class _Container:
     def __init__(self, labels: dict[str, str], events: list[str]) -> None:
         self.labels = labels
         self.events = events
+        #: Model-code execs now go through the low-level streaming API (#519), which
+        #: addresses containers by id rather than by object.
+        self.id = f"container-{id(self):x}"
+        #: How the streamed stdout is delivered. A test can make this many small
+        #: chunks to prove the engine never holds the whole output at once.
+        self.stream_chunks: list[bytes] | None = None
         self.image = _Image()
         self.attrs = {"Config": {"Env": []}, "HostConfig": {"Runtime": "runc"}}
         self.status = "running"
@@ -83,21 +91,27 @@ class _Container:
         if command[:4] == ["python", "-m", "pip", "install"]:
             self.events.append("pip-install")
         elif command and command[0] == "python":
-            self.events.append("python")
-            self.python_calls += 1
-            with self._guard:
-                self._active += 1
-                self.max_active = max(self.max_active, self._active)
-            time.sleep(0.03)
-            with self._guard:
-                self._active -= 1
-            if self.stop_on_execute:
-                self.status = "exited"
-            return SimpleNamespace(
-                exit_code=self.execution_exit_code,
-                output=(b"ok\n" if self.execution_exit_code == 0 else b"", b""),
-            )
+            # Model code no longer arrives here — it goes through the engine's
+            # streaming exec (#519). Anything still reaching this branch is setup.
+            return self._run_model_code()
         return SimpleNamespace(exit_code=0, output=(b"", b""))
+
+    def _run_model_code(self) -> Any:
+        """The bookkeeping both exec paths share, so tests observe it either way."""
+        self.events.append("python")
+        self.python_calls += 1
+        with self._guard:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        time.sleep(0.03)
+        with self._guard:
+            self._active -= 1
+        if self.stop_on_execute:
+            self.status = "exited"
+        return SimpleNamespace(
+            exit_code=self.execution_exit_code,
+            output=(b"ok\n" if self.execution_exit_code == 0 else b"", b""),
+        )
 
     def put_archive(self, path: str, data: bytes) -> bool:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
@@ -195,10 +209,59 @@ class _Containers:
         ]
 
 
+class _Api:
+    """The low-level `client.api` the streaming model-code exec uses (#519).
+
+    Deliberately narrow: only the three calls the engine makes. Setup commands still
+    go through `container.exec_run`, so this seam stays small.
+    """
+
+    def __init__(self, containers: _Containers) -> None:
+        self._containers = containers
+        self._execs: dict[str, _Container] = {}
+        self._exit_codes: dict[str, int] = {}
+
+    def _find(self, container_id: str) -> _Container:
+        for value in self._containers.values:
+            if value.id == container_id:
+                return value
+        raise KeyError(container_id)
+
+    def exec_create(self, container_id: str, command: list[str], **kwargs: object) -> dict:
+        del kwargs
+        container = self._find(container_id)
+        container.commands.append(list(command))
+        exec_id = f"exec-{len(self._execs)}"
+        self._execs[exec_id] = container
+        return {"Id": exec_id}
+
+    def exec_start(self, exec_id: str, *, stream: bool = False, demux: bool = False) -> object:
+        del stream, demux
+        container = self._execs[exec_id]
+        outcome = container._run_model_code()
+        self._exit_codes[exec_id] = int(outcome.exit_code)
+        if container.stream_chunks is not None:
+            # LAZY on purpose. A list comprehension here would pull every chunk out
+            # of the source the moment the stream is created, so a test counting how
+            # much the ENGINE consumed would count the fake's own materialisation
+            # instead — and would pass whether or not the engine drained anything.
+            def _yield_chunks(source: Iterable[bytes]) -> Iterator[tuple[bytes, None]]:
+                for chunk in source:
+                    yield (chunk, None)
+
+            return _yield_chunks(container.stream_chunks)
+        stdout, stderr = outcome.output
+        return iter([(stdout or None, stderr or None)])
+
+    def exec_inspect(self, exec_id: str) -> dict:
+        return {"ExitCode": self._exit_codes.get(exec_id, 0)}
+
+
 class _Client:
     def __init__(self) -> None:
         self.containers = _Containers()
         self.images = _Images()
+        self.api = _Api(self.containers)
 
 
 def _ensure(
@@ -794,3 +857,85 @@ def test_docker_exit_137_after_container_removal_is_killed_not_failed() -> None:
     assert result["status"] == "killed"
     assert result["exit_code"] is None
     assert "cancelled" in str(result["stderr"])
+
+
+# --- #519 part 1: model output is STREAMED, not buffered whole -----------------
+
+
+def test_a_huge_stdout_is_clipped_as_it_arrives_and_never_held_whole() -> None:
+    """`exec_run(demux=True)` buffered the process's ENTIRE output before returning.
+
+    `print("x" * 2_000_000_000)` therefore allocated two gigabytes inside the runner —
+    the single Docker-socket holder, capped at 1 GiB in compose — no matter what
+    output cap was configured. The cap clipped what was RETAINED, which is a different
+    thing from what is READ, so ADR-0013 §G7's memory bound was qualified rather than
+    met.
+
+    Asserted on what the engine HELD, and separately on the fact that it kept draining
+    (below) — those are the two halves of "streamed", and a fix that did only the
+    first would hang the model's process instead.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+    container = client.containers.values[0]
+    # 40 MiB, delivered as many small chunks — far past the retention cap.
+    chunk = b"x" * (64 * 1024)
+    container.stream_chunks = [chunk] * 640
+
+    result = engine.execute_existing(
+        session_id,
+        ExecuteRequest(
+            generation=1,
+            execution_id=uuid4(),
+            code="print('x' * 2_000_000_000)",
+            packages=[],
+        ),
+    )
+
+    # Retained output is bounded by the cap, not by what the process produced.
+    assert len(result["stdout"]) == _MAX_STREAM_CHARS
+    assert result["stdout"].startswith("x")
+
+
+def test_the_stream_is_drained_past_the_cap_rather_than_abandoned() -> None:
+    """Stopping early would hang the model's process, not save memory.
+
+    Closing the stream once the cap is reached leaves the daemon writing into a pipe
+    nobody reads, which blocks the process instead of letting it finish — a run that
+    printed too much would hang rather than complete with clipped output. So the bytes
+    past the cap are read and DROPPED: I/O, but no memory.
+    """
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    engine.ensure(session_id, _ensure())
+    container = client.containers.values[0]
+    consumed = 0
+
+    def counting_chunks() -> list[bytes]:
+        return [b"y" * 8192] * 200
+
+    container.stream_chunks = counting_chunks()
+    total_chunks = len(container.stream_chunks)
+
+    class _Counting(list):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            nonlocal consumed
+            for item in list.__iter__(self):
+                consumed += 1
+                yield item
+
+    container.stream_chunks = _Counting(container.stream_chunks)
+
+    engine.execute_existing(
+        session_id,
+        ExecuteRequest(
+            generation=1, execution_id=uuid4(), code="print('y' * 10_000_000)", packages=[]
+        ),
+    )
+
+    assert (
+        consumed == total_chunks
+    ), "the engine stopped reading at the cap, which would block the model's process"

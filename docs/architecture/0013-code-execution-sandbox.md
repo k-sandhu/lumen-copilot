@@ -104,8 +104,25 @@ The sandbox exists to make these guarantees **provable**. Each is enforced as ab
 | **G4 Metadata IP blocked** | no network; (with any allowlist) `169.254.169.254` never allowlistable | run code that GETs `http://169.254.169.254/…` → **unreachable**, even when an egress allowlist is configured |
 | **G5 No secret / env leakage** | minimal curated env; app secrets/DB creds never injected | run code that dumps `os.environ` / reads mounted secret paths → **no app secrets, DB URL, tokens, or object-store creds present** |
 | **G6 CPU / memory / pids / wall-clock enforced with kill** | `--cpus`, `--memory` (OOM-kill), `--pids-limit`, runner timeout SIGKILL | a busy-loop → **wall-clock-killed** (`status=timeout`); an over-allocation → **OOM-killed** (`status=killed`); a fork-bomb → **pids-capped** |
-| **G7 Output-size cap** | capped stdout/stderr + output-file collection | code that prints/writes beyond the cap → **truncated/failed**, host memory & storage bounded (no OOM of the runner) |
+| **G7 Output-size cap** | stdout/stderr **streamed** through a bounded buffer + budgeted output-file collection, with a process-wide cap on concurrent collections | code that prints/writes beyond the cap → **truncated**, host memory & storage bounded (no OOM of the runner) |
 | **G8 Fresh sandbox per run (no residue)** | new ephemeral container + fresh tmpfs each run; container destroyed after | run A writes scratch/leaves state → run B (esp. **another tenant**) **cannot see** any of it; each run starts from the pinned image only (INV-1 tenancy) |
+
+**Amendment ([#519](https://github.com/k-sandhu/lumen-copilot/issues/519), 2026-08-04) — G7's
+memory bound is now met rather than qualified.** It previously held only for what the runner
+*retained*: `exec_run(demux=True)` buffered a process's entire stdout/stderr before returning, so
+`print("x" * 2_000_000_000)` allocated two gigabytes inside the Docker-socket holder whatever the cap
+said, and the code carried a comment admitting it. Model-code execs now use the low-level streaming
+API and discard past the cap as chunks arrive, so peak is the cap plus one chunk. Draining continues
+past the cap deliberately — closing the stream early would block the model's process rather than let
+it finish with clipped output.
+
+Two adjacent bounds were per-execution only and are now process-wide: at most
+`_MAX_CONCURRENT_COLLECTIONS` output collections run at once (one max-size collection peaks at ~4x
+its byte budget, so a handful of concurrent tenants could OOM the runner without any single one
+exceeding its budget), and teardown (`close`/`cancel`) runs on a **separate thread pool** from
+execution. That last one is not merely a DoS fix: [ADR-0020](0020-reusable-root-sandbox-sessions.md)
+accepts unbounded execution *on the premise that cancellation is always available*, and a shared pool
+made that premise false.
 
 Testing note: G2/G3/G4 are validated with a policy fixture that simulates the deny-by-default and (separately) the admin-allowlist path; G4 asserts the metadata IP is **never** reachable even under an allowlist. These run against the compose `sandbox-runner`.
 

@@ -633,3 +633,62 @@ async def test_closing_a_sandbox_is_allowed_even_when_execution_is_disabled(
 
     assert runner.closed, "teardown was refused, stranding the container"
     assert "sandbox_session.closed" in await _actions(session, tenant)
+
+
+# --- #519 part 2: max_concurrency actually admits or refuses --------------------
+
+
+async def test_max_concurrency_refuses_a_run_once_the_tenant_is_at_its_limit(
+    session: AsyncSession,
+) -> None:
+    """The control was stored, clamped, returned by the admin API and rendered in the
+    UI — and read by NO runtime path (#519).
+
+    An operator watching concurrent runs overwhelm the runner would reach for exactly
+    this setting, change it, and watch nothing happen. A limit that silently does
+    nothing is worse than no limit: it consumes the attention that would otherwise go
+    to finding a control that works.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)  # max_concurrency=2 in the helper's policy
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+    runs = CodeRunRepository(session, tenant)
+
+    # Two runs already EXECUTING — the state the limit is about.
+    for _ in range(2):
+        occupied = await _run(session, tenant, owner, chat)
+        await runs.mark_running(occupied.id, started_at=datetime.now(UTC))
+    await session.commit()
+
+    third = await _run(session, tenant, owner, chat)
+    status = await service.execute(session, third.id)
+
+    assert status is CodeRunStatus.DENIED
+    persisted = await runs.get(third.id)
+    assert persisted is not None and persisted.status is CodeRunStatus.DENIED
+    # The refusal names ITSELF, not a package or a disabled switch, so an operator is
+    # not sent looking for a block that does not exist.
+    events = await AuditEventRepository(session, tenant).list_recent(limit=20)
+    denials = [e for e in events if e.metadata.get("reason_code") == "sandbox_concurrency_exceeded"]
+    assert denials, "the concurrency refusal did not name itself in the audit trail"
+
+
+async def test_a_queued_run_does_not_count_against_the_concurrency_limit(
+    session: AsyncSession,
+) -> None:
+    """`QUEUED` holds no runner thread and no runner memory, so it must not count.
+
+    Two reasons, and the second is the sharper one: a run is already `QUEUED` when its
+    OWN admission check runs, so counting queued work would make the gate off by one
+    and refuse the very first run on a limit of one. The first version of this fix did
+    exactly that and turned an unrelated test red.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+
+    # Three runs queued, none executing — well past `max_concurrency=2`.
+    queued = [await _run(session, tenant, owner, chat) for _ in range(3)]
+    await session.commit()
+
+    assert await service.execute(session, queued[0].id) is CodeRunStatus.SUCCEEDED
