@@ -1135,6 +1135,14 @@ class Settings(BaseSettings):
     sandbox_runner_url: str = Field(
         default="http://sandbox-runner:8000", alias="SANDBOX_RUNNER_URL"
     )
+    # The shared secret the API/worker present to that runner (#508). The runner holds
+    # the Docker socket — host-root-equivalent authority — and its API was previously
+    # UNAUTHENTICATED on the shared compose network, so an SSRF here or a compromised
+    # sibling container could have it execute arbitrary code. Empty by default so the
+    # offline suite and a sandbox-less deploy need no secret; the validator below
+    # requires one exactly when code execution is actually switched on, which is the
+    # only moment the credential can matter.
+    sandbox_runner_token: str = Field(default="", alias="SANDBOX_RUNNER_TOKEN")
     # The pinned image model-authored code EXECUTES in (curated Python + scientific
     # stack, ADR-0013 §3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
     # reproducibility (E3-7).
@@ -1186,8 +1194,7 @@ class Settings(BaseSettings):
             )
         if colon and not _SANDBOX_IMAGE_TAG.fullmatch(tag):
             raise ValueError(
-                f"SANDBOX_IMAGE is not a valid image reference: {tag!r} is not a "
-                "well-formed tag"
+                f"SANDBOX_IMAGE is not a valid image reference: {tag!r} is not a " "well-formed tag"
             )
         if not digest and not tag:
             raise ValueError(
@@ -1345,6 +1352,33 @@ class Settings(BaseSettings):
                 "SANDBOX_IMAGE must be digest-pinned ('name@sha256:<64 hex chars>') when "
                 "SANDBOX_ENABLED=true outside local development (ADR-0013 §3)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _sandbox_runner_token_when_enabled(self) -> Settings:
+        """An enabled sandbox must authenticate to the runner (#508).
+
+        Gated on ``sandbox_enabled`` — and on that alone, including local development.
+        The digest rule above exempts local because you built the image yourself on
+        your own daemon, which is a real reduction in risk. There is no equivalent
+        argument here: the runner holds the Docker socket on whatever machine it runs
+        on, and an unauthenticated API on a shared network is the same open command
+        channel in dev as in production. Exempting local would also mean the path
+        every developer exercises is the one path never tested.
+
+        Absent, this fails at STARTUP rather than at the first run — the runner
+        refuses to boot without the same secret, so a mismatch should surface at
+        `docker compose up`, where both halves are visible together.
+        """
+        if self.sandbox_enabled and not self.sandbox_runner_token.strip():
+            raise ValueError(
+                "SANDBOX_RUNNER_TOKEN must be set when SANDBOX_ENABLED=true: the "
+                "sandbox runner holds the Docker socket and authenticates every "
+                "request (#508). Use the SAME value on the API, the worker and the "
+                "sandbox-runner service."
+            )
+        if self.sandbox_enabled and len(self.sandbox_runner_token.strip()) < 32:
+            raise ValueError("SANDBOX_RUNNER_TOKEN must be at least 32 characters")
         return self
 
     # --- Chat-model picker registry (issue #47) ---

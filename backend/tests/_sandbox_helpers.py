@@ -17,6 +17,11 @@ def sandbox_settings(**overrides: object) -> Settings:
         "S3_BUCKET": "b",
         "OPENROUTER_API_KEY": "",
         "SANDBOX_ENABLED": "true",
+        # An enabled sandbox must authenticate to the Docker-socket holder (#508).
+        # Part of the baseline, not an opt-in: every caller of this helper builds an
+        # ENABLED sandbox, and one that could not talk to its runner is not a
+        # configuration any deployment can have.
+        "SANDBOX_RUNNER_TOKEN": "k" * 48,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]

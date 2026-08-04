@@ -74,6 +74,46 @@ The Docker baseline remains suitable only for local development. When sandbox ex
 is enabled outside `ENVIRONMENT=local`, configuration must require gVisor (`runsc`). A
 future microVM runner may implement the same session protocol without changing callers.
 
+**Amendment ([#508](https://github.com/k-sandhu/lumen-copilot/issues/508), 2026-08-04)
+— the trust boundary AROUND the runner, not only inside the session container.**
+
+Everything above describes what the *session* container is denied. It said nothing about
+who may command the runner, and the answer was: anything on the compose network. The
+runner holds the Docker socket — host-root-equivalent authority — and its internal API
+had no authentication, so an SSRF in the backend or one compromised sibling container
+could `PUT /sessions/<uuid>` and have the socket holder execute arbitrary code. Every
+containment property in this section is downstream of that call, so none of them
+constrained an attacker who could make it.
+
+Two independent controls now stand between a caller and the socket, because either alone
+is one mistake away from nothing:
+
+- **Authentication.** Every capability endpoint requires a shared secret
+  (`SANDBOX_RUNNER_TOKEN`, `X-Lumen-Runner-Token`), declared as a router-level
+  dependency so a newly added route is authenticated by construction. The runner
+  **refuses to start** without one configured, and the API/worker refuse to start with
+  `SANDBOX_ENABLED=true` and no token — including in local development, because the
+  socket is equally host-root-equivalent on a laptop, and exempting local would mean the
+  path every developer exercises is the one path never tested. A mismatch surfaces as
+  `sandbox_runner_unauthorized`, deliberately distinct from "unavailable" and "rejected"
+  so the operator message can say the service is up and only the credential is wrong.
+- **Network isolation.** `backend`, `worker` and `sandbox-runner` share a dedicated
+  compose network and the runner joins *no other*, so a container outside it cannot
+  resolve or reach the runner at all. Authentication answers "who is calling"; the
+  network answers "who can call".
+
+`/health` is deliberately unauthenticated: it returns a constant, grants no capability,
+and discloses nothing a 401 from any other route would not — while gating it would make
+container liveness depend on auth configuration, so a mistyped token would read as "the
+runner is down" rather than "the runner is misconfigured".
+
+**Residual risk.** The secret is a bearer credential in an environment variable, shared
+by three services. It is not rotated automatically, and any process that can read the
+API or worker environment can read it. That is a deliberate trade for the MVP: mTLS
+between the three would remove the shared bearer but adds certificate lifecycle to a
+compose stack an operator runs locally. Revisit if the runner is ever exposed beyond a
+single deployment's private network.
+
 ### 3. Governed package installation
 
 `run_python` gains an optional `packages` list. Package requirements are canonicalised

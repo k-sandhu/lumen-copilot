@@ -256,3 +256,67 @@ def test_extras_still_need_a_grant_because_the_image_ships_only_the_base() -> No
         validate_requested_packages(
             ("pandas[plot]",), allowed=(), denied=(), preinstalled=("pandas==3.0.5",)
         )
+
+
+# --- #508: the runner's network boundary, asserted rather than described --------
+
+
+def _compose() -> dict:
+    import yaml
+
+    return yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
+
+
+def _networks(service: dict) -> set[str]:
+    nets = service.get("networks") or []
+    return set(nets.keys()) if isinstance(nets, dict) else set(nets)
+
+
+def test_only_the_api_and_worker_share_the_runner_network() -> None:
+    """The second control behind the shared secret (#508, ADR-0020 §2).
+
+    The runner holds the Docker socket. Authentication answers "who is calling"; this
+    answers "who can call at all". Before this, every service in the project sat on
+    one default network, so `postgres`, `searxng` or the frontend could open a socket
+    to the Docker-socket holder — and a compromise of any of them was a compromise of
+    code execution.
+
+    Asserted from the compose file because a network boundary is not a property of any
+    Python module: nothing else in the suite notices when someone adds a service to
+    this network, and the harm of that is silent.
+    """
+    compose = _compose()
+    services = compose["services"]
+
+    assert "sandbox-net" in compose.get("networks", {}), "the dedicated network is gone"
+
+    on_net = {name for name, svc in services.items() if "sandbox-net" in _networks(svc)}
+    assert on_net == {"backend", "worker", "sandbox-runner"}, (
+        "exactly the API, the worker and the runner may share the runner's network; "
+        f"found {sorted(on_net)}"
+    )
+
+    # And the runner joins NOTHING else — being on `default` too would undo it.
+    assert _networks(services["sandbox-runner"]) == {"sandbox-net"}
+
+
+def test_the_runner_token_is_never_a_literal_in_the_committed_compose_file() -> None:
+    """A secret in a committed file is not a secret (#508).
+
+    Every service that needs it interpolates from the host shell or `.env`, both
+    uncommitted. Asserted on the RAW text rather than the parsed value because
+    interpolation is exactly what parsing would resolve away.
+    """
+    raw = _COMPOSE.read_text(encoding="utf-8")
+
+    for line in raw.splitlines():
+        if "SANDBOX_RUNNER_TOKEN:" in line:
+            value = line.split("SANDBOX_RUNNER_TOKEN:", 1)[1].strip()
+            assert value.startswith("${"), f"a literal token is committed: {line.strip()!r}"
+
+    # The runner and both callers must actually carry it, or the stack 401s at runtime.
+    services = _compose()["services"]
+    for name in ("backend", "worker", "sandbox-runner"):
+        assert "SANDBOX_RUNNER_TOKEN" in services[name].get(
+            "environment", {}
+        ), f"{name} does not receive the runner token"

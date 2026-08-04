@@ -77,6 +77,12 @@ SANDBOX_REASON_RUNNER_REJECTED = "sandbox_runner_rejected"
 #: The runner ANSWERED with an internal failure (5xx) — reachable, but it could not
 #: carry the run out (e.g. the execution image is missing from the host daemon).
 SANDBOX_REASON_RUNNER_ERROR = "sandbox_runner_error"
+#: The runner answered 401: the shared secret is missing or wrong (#508). Its own
+#: reason because the remedy shares nothing with the others — the service is up, it
+#: is reachable, and the request was well-formed; only the credential is wrong.
+#: Reporting it as "refused the request" would send an operator hunting a package
+#: resolution failure that never happened.
+SANDBOX_REASON_RUNNER_UNAUTHORIZED = "sandbox_runner_unauthorized"
 #: The run crashed for an unclassified reason inside the sandbox path.
 SANDBOX_REASON_RUN_ERROR = "sandbox_run_error"
 
@@ -114,6 +120,12 @@ SANDBOX_REASON_MESSAGES: dict[str, str] = {
         "The code sandbox service is unreachable, so the run could not start. "
         "Every policy already permits it — an operator must check that the "
         "sandbox-runner service is running and reachable."
+    ),
+    SANDBOX_REASON_RUNNER_UNAUTHORIZED: (
+        "The sandbox-runner service answered 401: the shared secret is missing or does "
+        "not match. Set the SAME SANDBOX_RUNNER_TOKEN on the API, the worker and the "
+        "sandbox-runner, then restart all three. The service is up and reachable — "
+        "only the credential is wrong."
     ),
     SANDBOX_REASON_RUNNER_REJECTED: (
         "The sandbox-runner service answered and REFUSED the request (4xx): a package "
@@ -162,6 +174,9 @@ SANDBOX_REASON_PUBLIC_MESSAGES: dict[str, str] = {
         "The code sandbox is temporarily unavailable, so the run could not start. "
         "Try again shortly."
     ),
+    SANDBOX_REASON_RUNNER_UNAUTHORIZED: (
+        "Code execution is not available right now. Ask an operator to check it."
+    ),
     SANDBOX_REASON_RUNNER_REJECTED: (
         "The code sandbox could not prepare this run. Try again without extra "
         "packages, or with different ones."
@@ -203,6 +218,7 @@ __all__ = [
     "SANDBOX_REASON_PUBLIC_MESSAGES",
     "SANDBOX_REASON_RUNNER_ERROR",
     "SANDBOX_REASON_RUNNER_REJECTED",
+    "SANDBOX_REASON_RUNNER_UNAUTHORIZED",
     "SANDBOX_REASON_RUNNER_UNAVAILABLE",
     "SANDBOX_REASON_RUN_ERROR",
     "SANDBOX_REASON_SESSION_REQUIRED",

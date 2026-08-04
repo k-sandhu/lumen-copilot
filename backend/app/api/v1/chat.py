@@ -430,7 +430,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
     )
     audit_kwargs: dict[str, object] = {}
@@ -463,7 +463,7 @@ def _build_sandbox_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
     )
 
@@ -962,7 +962,9 @@ def _build_sandbox_factory(
             sessionmaker=get_sessionmaker(),
             tenant_id=principal.tenant_id,
             owner_id=principal.user_id,
-            runner=HttpSandboxRunner(settings.sandbox_runner_url),
+            runner=HttpSandboxRunner(
+                settings.sandbox_runner_url, token=settings.sandbox_runner_token
+            ),
             object_store=ObjectStore(settings),
             settings=settings,
             backplane=backplane,

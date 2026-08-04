@@ -111,9 +111,7 @@ def _to_response(run: CodeRun) -> CodeRunResponse:
     )
 
 
-@router.get(
-    "/{code_run_id}", response_model=CodeRunResponse, response_model_exclude_none=True
-)
+@router.get("/{code_run_id}", response_model=CodeRunResponse, response_model_exclude_none=True)
 async def get_code_run(
     code_run_id: UUID,
     session: DbSession,
@@ -143,7 +141,7 @@ async def cancel_code_run(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
     )
     run = await service.cancel(code_run_id)

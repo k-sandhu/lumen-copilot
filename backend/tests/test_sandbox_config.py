@@ -176,6 +176,10 @@ _ENV_BOOT_MINIMUM = {
     "S3_BUCKET": "b",
     "OPENROUTER_API_KEY": "",
     "SANDBOX_ENABLED": "true",
+    # An enabled sandbox must authenticate to the Docker-socket holder (#508), so a
+    # token is part of the BOOT MINIMUM now — not an extra a test opts into. Tests
+    # that assert the refusal override it to "" explicitly.
+    "SANDBOX_RUNNER_TOKEN": "k" * 48,
 }
 
 
@@ -408,3 +412,53 @@ def test_a_bare_latest_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None
     """The control: relaxing the digest case must not relax the mutable one."""
     with pytest.raises(ValueError, match="latest"):
         _settings_from_env(monkeypatch, SANDBOX_IMAGE="lumen-sandbox-exec:latest")
+
+
+# --- #508: an enabled sandbox must authenticate to the runner ------------------
+
+
+def test_enabling_the_sandbox_without_a_runner_token_refuses_to_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner holds the Docker socket; an unauthenticated call to it executes code.
+
+    Fails at STARTUP rather than at the first run, and on both halves: the runner
+    refuses to boot without the secret too, so a mismatch surfaces at
+    `docker compose up` where both are visible together — not as a 401 the first time
+    a user asks for a chart.
+    """
+    with pytest.raises(ValueError, match="SANDBOX_RUNNER_TOKEN"):
+        _settings_from_env(monkeypatch, SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN="")
+
+
+def test_a_weak_runner_token_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guessable shared secret is worse than none: it reads as protection."""
+    with pytest.raises(ValueError, match="at least 32"):
+        _settings_from_env(monkeypatch, SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN="short")
+
+
+def test_the_token_is_required_in_local_development_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately NOT exempt where the digest-pin rule is (#508).
+
+    The digest rule exempts `ENVIRONMENT=local` because you built the image yourself
+    on your own daemon — a real reduction in risk. There is no equivalent argument
+    here: the runner holds the Docker socket on whatever machine it runs on, and an
+    unauthenticated API on a shared network is the same open command channel in dev
+    as in production. Exempting local would also mean the path every developer
+    exercises is the one path never tested.
+    """
+    with pytest.raises(ValueError, match="SANDBOX_RUNNER_TOKEN"):
+        _settings_from_env(
+            monkeypatch, ENVIRONMENT="local", SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN=""
+        )
+
+
+def test_a_disabled_sandbox_needs_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: a deploy that launches nothing is not held hostage to a secret
+    it never presents — and the offline suite must not need one."""
+    settings = _settings_from_env(monkeypatch, SANDBOX_ENABLED="false", SANDBOX_RUNNER_TOKEN="")
+
+    assert settings.sandbox_enabled is False
+    assert settings.sandbox_runner_token == ""

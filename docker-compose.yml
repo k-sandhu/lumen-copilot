@@ -149,6 +149,12 @@ services:
       # directly on the host. Inside Compose, callers must use the service DNS
       # name; keep an explicit deployment override as the highest precedence.
       WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
+      # Must match the sandbox-runner's value (#508); Settings refuses to start with
+      # SANDBOX_ENABLED=true and no token.
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-}
+    networks:
+      - default
+      - sandbox-net
     env_file:
       - .env
     ports:
@@ -203,6 +209,17 @@ services:
     # the old runtime. Same `.env` variable the backend validates.
     environment:
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runc}
+      # The shared secret every capability endpoint requires (#508). Interpolated
+      # from the host shell then .env — NEVER a literal here, because this file is
+      # committed. The runner refuses to start without it, so a missing value fails
+      # at `up`, not at the first execution.
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-}
+    # Second control, independent of the token: only the API and worker share this
+    # network, so nothing else in the project can open a socket to the Docker-socket
+    # holder at all. Auth answers "who is calling"; the network answers "who can
+    # call". Either alone is one mistake away from nothing.
+    networks:
+      - sandbox-net
     # The single Docker-socket holder. Socket authority is host-root-equivalent and
     # is confined here; the app/worker/session containers NEVER receive this mount.
     volumes:
@@ -269,6 +286,12 @@ services:
       # Scheduled/headless chat runs execute in the worker and need the same
       # Compose-network web-search endpoint as interactive backend turns.
       WEB_SEARCH_ENDPOINT: ${WEB_SEARCH_ENDPOINT:-http://searxng:8080}
+      # The same shared secret the runner requires (#508). The worker is the process
+      # that actually executes code runs, so without this every run fails 401.
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-}
+    networks:
+      - default
+      - sandbox-net
     env_file:
       - .env
     volumes:
@@ -335,6 +358,15 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+networks:
+  # The default bridge every service shares.
+  default:
+  # The sandbox trust boundary (#508, ADR-0020 §2): ONLY backend, worker and
+  # sandbox-runner join it. A container outside this network cannot resolve
+  # `sandbox-runner`, so reaching the Docker-socket holder requires being on it.
+  sandbox-net:
+    driver: bridge
 
 volumes:
   pgdata:

@@ -10,15 +10,20 @@ import pytest
 
 from app.core.errors import DependencyError
 from app.domain.code_execution import (
+    SANDBOX_REASON_MESSAGES,
+    SANDBOX_REASON_PUBLIC_MESSAGES,
     SANDBOX_REASON_RUNNER_ERROR,
     SANDBOX_REASON_RUNNER_REJECTED,
+    SANDBOX_REASON_RUNNER_UNAUTHORIZED,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
 )
 from app.domain.entities import CodeRunStatus
 from app.sandbox.runner import (
+    RUNNER_TOKEN_HEADER,
     HttpSandboxRunner,
     SandboxRunnerFailed,
     SandboxRunnerRejected,
+    SandboxRunnerUnauthorized,
     SandboxRunnerUnavailable,
 )
 from app.sandbox.spec import RunSpec, SandboxSessionSpec
@@ -215,3 +220,86 @@ def test_malformed_status_fails_closed() -> None:
     assert _map_status("succeeded") is CodeRunStatus.SUCCEEDED
     assert _map_status("nonsense") is CodeRunStatus.FAILED
     assert _map_status(None) is CodeRunStatus.FAILED
+
+
+# --- #508: the runner authenticates, and a 401 is its own remedy ---------------
+
+
+async def test_the_client_presents_the_shared_secret_on_every_request() -> None:
+    """The runner holds the Docker socket and now authenticates every endpoint.
+
+    Asserted across a MULTI-request operation (`execute` does a PUT then a POST)
+    because the header is set on the client, not per call site — and the whole point
+    of putting it there is that a newly added request cannot forget it.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get(RUNNER_TOKEN_HEADER))
+        if request.url.path.endswith("/executions"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 1,
+                    "image_digest": "sha256:abc",
+                    "output_files": [],
+                },
+            )
+        return httpx.Response(200, json={"status": "active"})
+
+    runner = HttpSandboxRunner(
+        "http://sandbox-runner:8000",
+        token="s" * 48,
+        transport=httpx.MockTransport(handler),
+    )
+    await runner.execute(_session(), RunSpec(code="print(1)"))
+
+    assert len(seen) >= 2, "expected at least the ensure + execute requests"
+    assert set(seen) == {"s" * 48}
+
+
+async def test_a_401_is_its_own_reason_not_a_generic_rejection() -> None:
+    """ "Wrong credential" and "refused your request" need different actions (#508).
+
+    A rejection means the runner examined a well-formed, authenticated request and
+    declined it — an unresolvable package, a stale generation — so the operator reads
+    the runner's log looking for the request. A 401 means it never got that far: the
+    service is up, reachable and working, and only the secret is wrong. Collapsing
+    them would send an operator hunting a package failure that never happened.
+    """
+    runner = HttpSandboxRunner(
+        "http://sandbox-runner:8000",
+        token="wrong-token-that-is-long-enough-to-pass",
+        transport=_answering(401, "sandbox runner token missing or invalid"),
+    )
+    with pytest.raises(SandboxRunnerUnauthorized) as refusal:
+        await runner.execute(_session(), RunSpec(code="print(1)"))
+
+    assert refusal.value.sandbox_reason == SANDBOX_REASON_RUNNER_UNAUTHORIZED
+    # Distinct from all three pre-existing outcomes, not merely a new label on one.
+    assert not isinstance(refusal.value, SandboxRunnerRejected)
+    assert not isinstance(refusal.value, SandboxRunnerUnavailable)
+    assert not isinstance(refusal.value, SandboxRunnerFailed)
+    # Still a DependencyError → 503: the caller's request was fine.
+    assert refusal.value.status == 503
+
+
+def test_the_operator_sentence_names_the_variable_and_the_public_one_does_not() -> None:
+    """The two-audience split spec 0004 §2.4 requires, applied to the new reason.
+
+    The operator sentence may name `SANDBOX_RUNNER_TOKEN` — it goes to the log, to
+    `audit_events.metadata` and to the runbook, all behind an operator boundary. The
+    public sentence reaches the model and the transcript, so it must name no
+    variable, no service and no topology: a user cannot fix a shared secret, and
+    telling them its name only discloses deployment shape.
+    """
+    operator = SANDBOX_REASON_MESSAGES[SANDBOX_REASON_RUNNER_UNAUTHORIZED]
+    public = SANDBOX_REASON_PUBLIC_MESSAGES[SANDBOX_REASON_RUNNER_UNAUTHORIZED]
+
+    assert "SANDBOX_RUNNER_TOKEN" in operator
+    for leak in ("SANDBOX_RUNNER_TOKEN", "sandbox-runner", "401", "secret", "token"):
+        assert leak not in public

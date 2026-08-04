@@ -15,10 +15,17 @@ from app.core.logging import get_logger
 from app.domain.code_execution import (
     SANDBOX_REASON_RUNNER_ERROR,
     SANDBOX_REASON_RUNNER_REJECTED,
+    SANDBOX_REASON_RUNNER_UNAUTHORIZED,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
+
+#: Mirrors `lumen_sandbox_runner.auth.TOKEN_HEADER`. Deliberately not
+#: `Authorization`: this is a service-to-service shared secret on an internal
+#: network, not a user credential, so nothing downstream should treat it as a bearer
+#: token to helpfully forward elsewhere.
+RUNNER_TOKEN_HEADER = "X-Lumen-Runner-Token"
 
 log = get_logger(__name__)
 
@@ -32,6 +39,22 @@ class SandboxRunnerUnavailable(DependencyError):
 
     code = "sandbox_runner_unavailable"
     sandbox_reason = SANDBOX_REASON_RUNNER_UNAVAILABLE
+
+
+class SandboxRunnerUnauthorized(DependencyError):
+    """The runner answered 401: the shared secret is missing or wrong (#508).
+
+    Its own type, not a :class:`SandboxRunnerRejected`, because the remedy shares
+    nothing with that one. A rejection means the runner examined a well-formed,
+    authenticated request and declined it — an unresolvable package, a stale
+    generation — so the operator reads the runner's log. A 401 means the request
+    never got that far: the service is up, reachable and working, and only the
+    credential is wrong. Collapsing the two would send an operator hunting a package
+    failure that never happened.
+    """
+
+    code = "sandbox_runner_unauthorized"
+    sandbox_reason = SANDBOX_REASON_RUNNER_UNAUTHORIZED
 
 
 class SandboxRunnerRejected(DependencyError):
@@ -149,10 +172,12 @@ class HttpSandboxRunner:
         self,
         base_url: str,
         *,
+        token: str = "",
         connect_timeout_seconds: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._token = token
         self._connect_timeout = connect_timeout_seconds
         self._transport = transport
 
@@ -166,7 +191,13 @@ class HttpSandboxRunner:
             pool=self._connect_timeout,
         )
         return httpx.AsyncClient(
-            base_url=self._base_url, timeout=timeout, transport=self._transport
+            base_url=self._base_url,
+            timeout=timeout,
+            transport=self._transport,
+            # The runner holds the Docker socket and authenticates every capability
+            # endpoint (#508). Set on the CLIENT rather than per call site so a new
+            # request cannot forget it.
+            headers={RUNNER_TOKEN_HEADER: self._token} if self._token else {},
         )
 
     async def ensure_session(self, session: SandboxSessionSpec) -> None:
@@ -254,6 +285,8 @@ class HttpSandboxRunner:
             # is the operator surface — so the specific sentence lives here.
             runner_detail=detail,
         )
+        if response.status_code == 401:
+            raise SandboxRunnerUnauthorized("the sandbox runner rejected our credential")
         if response.is_client_error:
             raise SandboxRunnerRejected("the sandbox runner refused the request")
         raise SandboxRunnerFailed("the sandbox runner failed the request")
