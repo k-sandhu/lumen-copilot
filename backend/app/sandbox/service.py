@@ -315,7 +315,7 @@ class SandboxSessionService:
 
     async def ensure(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id)
-        await self._require_enabled()
+        await self._require_enabled(chat_session_id, lifecycle="ensure")
         previous = await self._sessions.get_for_chat(chat_session_id)
         value = await self._sessions.get_or_create(
             owner_id=self._owner_id,
@@ -347,7 +347,7 @@ class SandboxSessionService:
 
     async def reset(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id)
-        await self._require_enabled()
+        await self._require_enabled(chat_session_id, lifecycle="reset")
         current = await self._sessions.get_for_chat(chat_session_id)
         if current is None:
             return await self.ensure(chat_session_id)
@@ -468,7 +468,7 @@ class SandboxSessionService:
         if chat is None or chat.owner_id != self._owner_id:
             raise NotFoundError("Chat session not found.")
 
-    async def _require_enabled(self) -> None:
+    async def _require_enabled(self, chat_session_id: UUID, *, lifecycle: str) -> None:
         """Refuse a lifecycle action when code execution is off — carrying the reason.
 
         The error CODE stays ``code_execution_disabled`` (a frozen contract value);
@@ -476,6 +476,17 @@ class SandboxSessionService:
         The ``detail`` is the **public** sentence: this error renders into an HTTP
         problem body for any workspace member, so it may not name the deploy
         kill-switch or the process topology (see ``domain/code_execution``).
+
+        The refusal is **audited** (#510). It used to emit only a structlog line, but
+        spec 0004 §2.4 puts ops telemetry outside the product audit trail explicitly,
+        so a caller hitting a disabled deploy got a 409 that left no trace — while
+        every neighbouring sandbox denial audited: the run path writes
+        ``code_run.denied`` with its reason code, and the tool runner funnels all four
+        refusal paths through ``_finalise``. Lifecycle was the one hole in INV-6.
+
+        ``permission.denied`` rather than a new action: it is already in the MVP
+        taxonomy and says exactly what happened — policy refused this action — so the
+        gap closes without widening the taxonomy for a single call site.
         """
         policy = await SandboxPolicyReader(
             self._session, tenant_id=self._tenant_id, settings=self._settings
@@ -483,6 +494,23 @@ class SandboxSessionService:
         if not policy.enabled:
             reason = policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED
             log.warning("sandbox.lifecycle_denied", reason_code=reason)
+            await self._audit_sink.emit(
+                action=AuditAction.PERMISSION_DENIED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="sandbox_session",
+                # No sandbox session exists to point at — the refusal is the reason
+                # there is none — so the chat session it was requested for is the
+                # resource an operator would search by.
+                resource_id=str(chat_session_id),
+                outcome=AuditOutcome.DENIED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "chat_session_id": str(chat_session_id),
+                    "lifecycle": lifecycle,
+                    "reason_code": reason,
+                },
+            )
             raise SandboxDisabledError(reason)
 
     def _spec(self, value: SandboxSession) -> SandboxSessionSpec:

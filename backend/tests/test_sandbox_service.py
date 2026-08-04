@@ -23,7 +23,12 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role, SandboxSessionStatus
-from app.sandbox.service import SandboxReadService, SandboxService, SandboxSessionService
+from app.sandbox.service import (
+    SandboxDisabledError,
+    SandboxReadService,
+    SandboxService,
+    SandboxSessionService,
+)
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.storage.keys import build_artifact_key
 from tests._sandbox_helpers import sandbox_settings
@@ -550,3 +555,81 @@ async def test_cross_tenant_and_non_owner_reads_are_404(session: AsyncSession) -
     )
     with pytest.raises(NotFoundError):
         await SandboxReadService(session, tenant_id=tenant_a, owner_id=other.id).get(run.id)
+
+
+# --- #510: a lifecycle refusal must leave a trace ------------------------------
+
+
+@pytest.mark.parametrize("lifecycle", ["ensure", "reset"])
+async def test_a_disabled_lifecycle_refusal_is_audited(
+    session: AsyncSession, lifecycle: str
+) -> None:
+    """INV-6: the 409 used to vanish without trace (spec 0004 §2.5).
+
+    `_require_enabled` emitted a structlog line and nothing else — and spec 0004
+    §2.4 puts ops telemetry explicitly OUTSIDE the product audit trail. Every
+    neighbouring denial audits: the run path writes `code_run.denied` with its
+    reason code, and the tool runner funnels all four refusal paths through
+    `_finalise`. Lifecycle was the one hole, so "who tried to start a sandbox while
+    execution was disabled, and when" was unanswerable from the trail.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    # Deliberately NOT enabled — this is the refusal path.
+    service = SandboxSessionService(
+        session,
+        tenant_id=tenant,
+        owner_id=owner,
+        runner=_FakeRunner(),
+        settings=sandbox_settings(),
+    )
+
+    with pytest.raises(SandboxDisabledError):
+        await getattr(service, lifecycle)(chat)
+
+    events = await AuditEventRepository(session, tenant).list_recent()
+    denials = [e for e in events if e.action == "permission.denied"]
+    assert denials, "a lifecycle refusal left no audit trace"
+    denial = denials[0]
+    assert denial.outcome.value == "denied"
+    assert denial.resource_type == "sandbox_session"
+    assert denial.resource_id == str(chat)
+    assert denial.metadata["lifecycle"] == lifecycle
+    # The reason code is what an operator surface reads to say WHY.
+    assert denial.metadata["reason_code"]
+
+
+async def test_closing_a_sandbox_is_allowed_even_when_execution_is_disabled(
+    session: AsyncSession,
+) -> None:
+    """The deliberate asymmetry, pinned so nobody "fixes" it into a gate.
+
+    `close` does not call `_require_enabled`, and must not: disabling code
+    execution would otherwise strand every live container with no way to tear it
+    down. Teardown is always permitted, and audits `sandbox_session.closed`.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    runner = _FakeRunner()
+    service = SandboxSessionService(
+        session, tenant_id=tenant, owner_id=owner, runner=runner, settings=sandbox_settings()
+    )
+    await service.ensure(chat)
+
+    # Execution goes off AFTER the session exists.
+    await TenantSandboxPolicyRepository(session, tenant).upsert(
+        enabled=False,
+        allowed_packages=(),
+        denied_packages=(),
+        egress_allowed=False,
+        egress_allowlist=(),
+        max_runtime_s=30,
+        max_memory_mb=512,
+        daily_runtime_cap_s=3600,
+        max_concurrency=2,
+        updated_by=None,
+    )
+
+    await service.close(chat)
+
+    assert runner.closed, "teardown was refused, stranding the container"
+    assert "sandbox_session.closed" in await _actions(session, tenant)
