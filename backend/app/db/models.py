@@ -596,6 +596,16 @@ class AuditEvent(TenantScopedMixin, Base):
         Index("ix_audit_events_tenant_action_ts", "tenant_id", "action", "ts"),
         Index("ix_audit_events_tenant_actor_ts", "tenant_id", "actor_id", "ts"),
         Index("ix_audit_events_tenant_resource_ts", "tenant_id", "resource_id", "ts"),
+        # `source_origin` and `source_ip` must agree (#546): an event claiming a
+        # client records that client's address, and an event that claims no client
+        # records none. Declared here as well as in migration 0041 so the rule holds
+        # in the SQLite test database too — a writer that gets the pair wrong should
+        # fail in the suite, not first in production.
+        CheckConstraint(
+            "(source_origin = 'client' AND source_ip IS NOT NULL) "
+            "OR (source_origin <> 'client' AND source_ip IS NULL)",
+            name="ck_audit_events_origin_ip_agree",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -613,6 +623,14 @@ class AuditEvent(TenantScopedMixin, Base):
     resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: Where the action came from — ``client`` / ``system`` / ``unknown`` (#546). The
+    #: typed companion to ``source_ip``, and required on every event: the envelope
+    #: always demanded a source, but a background task has no address, so callers
+    #: passed a sentinel that ``INET`` rejected — aborting the transaction the audit
+    #: write shares with the action it records.
+    source_origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: The peer address, non-null IFF ``source_origin == 'client'`` (a CHECK constraint
+    #: enforces the pair, so the invariant does not rely on the writer alone).
     source_ip: Mapped[str | None] = mapped_column(
         String(45).with_variant(INET(), "postgresql"), nullable=True
     )

@@ -21,6 +21,7 @@ touches several repositories commits atomically.
 
 from __future__ import annotations
 
+import ipaddress
 import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -35,7 +36,9 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db import models
+from app.domain.audit import AuditSourceOrigin
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
     Artifact,
@@ -483,6 +486,7 @@ def _to_audit_event(row: models.AuditEvent) -> AuditEvent:
         resource_id=row.resource_id,
         outcome=AuditOutcome(row.outcome),
         request_id=row.request_id,
+        source_origin=row.source_origin,
         source_ip=row.source_ip,
         metadata=dict(row.event_metadata),
         ts=row.ts,
@@ -4191,6 +4195,90 @@ class TenantAutonomyPolicyRepository(_TenantScopedRepository):
         return _to_tenant_autonomy_policy(row)
 
 
+log = get_logger(__name__)
+
+
+def _classify_source_ip(
+    value: str | None,
+) -> tuple[AuditSourceOrigin, str | None, str | None]:
+    """Decide an event's origin from whatever the caller offered as ``source_ip``.
+
+    Returns ``(origin, address_to_store, unrecognised_text)``. ``address_to_store`` is
+    non-None **iff** the origin is ``client`` — the pair the table's CHECK constraint
+    enforces — and ``unrecognised_text`` is non-None only when the caller sent
+    something that is neither an address nor a sentinel we ship, which the caller
+    should log.
+
+    **Why the origin is computed here rather than by the caller.** An earlier revision
+    returned ``(address, sentinel)`` and let ``record`` infer the origin from which was
+    None. That could not express the third case: *no value at all*. ``None`` and ``""``
+    both came back as ``(None, None)``, identical to a caller who had supplied a real
+    address — so the writer labelled them ``client`` with a NULL address, which is
+    exactly the pair the CHECK constraint forbids. Every ``/auth`` route reaches this
+    path with a bare ``None`` when ``request.client`` is unset (uvicorn over a UNIX
+    socket), so the audit insert would have aborted the login transaction it was
+    recording: the very failure this whole change exists to remove, moved from Celery
+    to the login endpoint. Returning the origin makes that state unrepresentable.
+
+    No address given is ``unknown``, not ``system``: something asked for this, we just
+    could not see from where. Only an explicit ``"system"`` sentinel means the platform
+    acted with no client at all.
+
+    **Python's parser is not Postgres's.** Two forms need care, both verified against
+    the live database rather than assumed:
+
+    * A ZONE-SCOPED address (``fe80::1%eth0``) parses happily in Python but
+      ``select 'fe80::1%eth0'::inet`` errors — so storing the raw text would reproduce
+      the exact rollback this function exists to prevent, for any link-local peer. The
+      zone is stripped before the address is stored.
+    * A BRACKETED or port-bearing form (``[2001:db8::1]:443``) is not an address to
+      Python, so it would silently become NULL and lose real audit fidelity. It is
+      unwrapped first, and only then parsed.
+    """
+    text = (value or "").strip()
+    if not text:
+        # Nothing was offered. `unknown` is the honest reading — and, unlike the
+        # `client`/NULL pair this used to produce, one the constraint accepts.
+        return AuditSourceOrigin.UNKNOWN, None, None
+
+    candidate = text
+    # `[v6]:port` / `[v6]` — unwrap before parsing so a real address is not lost.
+    if candidate.startswith("["):
+        closing = candidate.find("]")
+        if closing > 0:
+            candidate = candidate[1:closing]
+    # A zone id is meaningful to the OS, not to `inet`; drop it rather than fail.
+    zone_index = candidate.find("%")
+    if zone_index >= 0:
+        candidate = candidate[:zone_index]
+
+    # Parse to VALIDATE, but store the candidate text rather than `str(parsed)`.
+    # Python's canonical form is not Postgres's: `ipaddress` renders
+    # `::ffff:1.2.3.4` as `::ffff:102:304`, while `select '::ffff:1.2.3.4'::inet`
+    # keeps the dotted form. Normalising here would quietly rewrite the address an
+    # operator sees in the audit trail into a different spelling than the database
+    # itself would have stored. (Note `ip_address` PRESERVES a zone id, so the strip
+    # above — not the parse — is what keeps link-local addresses out of `INET`.)
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        try:
+            # `INET` also accepts CIDR (`10.0.0.0/8`) — a network, not an address.
+            ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            lowered = text.lower()
+            if lowered == AuditSourceOrigin.SYSTEM.value:
+                return AuditSourceOrigin.SYSTEM, None, None
+            if lowered == AuditSourceOrigin.UNKNOWN.value:
+                return AuditSourceOrigin.UNKNOWN, None, None
+            # Neither an address nor a sentinel we ship. Still recorded — an audit
+            # write must never crash the action it records — but handed back for the
+            # caller to log, because silently losing every address is how a
+            # misconfigured proxy destroys audit fidelity without anyone noticing.
+            return AuditSourceOrigin.UNKNOWN, None, text
+    return AuditSourceOrigin.CLIENT, candidate, None
+
+
 class AuditEventRepository(_TenantScopedRepository):
     """Append-only product-audit log within one tenant (spec 0004 §2.4).
 
@@ -4212,7 +4300,30 @@ class AuditEventRepository(_TenantScopedRepository):
         source_ip: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> AuditEvent:
+        # Every event records WHERE it came from (#546). The envelope has always
+        # required a source, but a background task has no client address — so callers
+        # passed a sentinel, `INET` rejected it, and because the emit rides the caller's
+        # transaction that rejection rolled back the ACTION being recorded. It took the
+        # rolling summariser with it: rows carried evidence (written in the answer
+        # transaction) but never a summary or a coverage cursor, and
+        # `session.summarized` was never once written. SQLite cannot catch that class at
+        # all — its `String(45)` variant accepts any text — so the offline suite stayed
+        # green while the feature was dead in every Postgres deployment.
+        #
+        # `source_origin` makes the contract stateable instead of exception-ridden:
+        # every event says where it came from, and an address is recorded exactly when
+        # there was a client to have one. A CHECK constraint enforces the pair, so the
+        # invariant does not rest on this method alone.
+        origin, stored_ip, unrecognised = _classify_source_ip(source_ip)
+        if unrecognised is not None:
+            log.warning(
+                "audit.source_ip_not_an_address",
+                action=action,
+                resource_type=resource_type,
+                value_length=len(unrecognised),
+            )
         row = models.AuditEvent(
+            source_origin=origin.value,
             tenant_id=self._tenant_id,
             actor_id=actor_id,
             action=action,
@@ -4220,7 +4331,7 @@ class AuditEventRepository(_TenantScopedRepository):
             resource_id=resource_id,
             outcome=outcome.value,
             request_id=request_id,
-            source_ip=source_ip,
+            source_ip=stored_ip,
             event_metadata=metadata or {},
         )
         self._session.add(row)

@@ -139,7 +139,7 @@ async def login(
         email=body.email,
         password=body.password,
         request_id=extract_request_id(request),
-        source_ip=request.client.host if request.client else None,
+        source_ip=request.client.host if request.client else "unknown",
     )
     await session.commit()
     _set_refresh_cookie(response, tokens, settings)
@@ -162,7 +162,7 @@ async def refresh(
     tokens = await service.refresh(
         raw_refresh_token=refresh_token,
         request_id=extract_request_id(request),
-        source_ip=request.client.host if request.client else None,
+        source_ip=request.client.host if request.client else "unknown",
     )
     await session.commit()
     _set_refresh_cookie(response, tokens, settings)
@@ -184,7 +184,7 @@ async def logout(
         principal,
         raw_refresh_token=refresh_token,
         request_id=extract_request_id(request),
-        source_ip=request.client.host if request.client else None,
+        source_ip=request.client.host if request.client else "unknown",
     )
     await session.commit()
     response.delete_cookie(key=_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)

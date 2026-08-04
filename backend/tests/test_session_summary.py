@@ -770,3 +770,234 @@ async def test_six_message_session_summarises_under_retuned_defaults(
         # keep=4 preserves the last 2 turns (messages 2-5) verbatim; turns 0-1
         # (messages 0-1) roll into the summary.
         assert row.covers_through_message_id == six_message_ctx.message_ids[1]
+
+
+# --- #541: a garbage completion must not advance the cursor -------------------
+
+
+class _GarbageGateway(_FakeGateway):
+    """A route that leaks chat-template scaffolding instead of writing a summary.
+
+    Not hypothetical: `openrouter/openai/gpt-oss-20b:free` returned exactly this for a
+    seven-turn batch on the live stack, and it was persisted as the session summary.
+    """
+
+    payload = "<|start|>spire"
+
+    async def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        await super().chat(messages, **kwargs)
+        return Completion(
+            content=self.payload,
+            model="fake",
+            usage=TokenUsage(prompt_tokens=50, completion_tokens=20, total_tokens=70),
+        )
+
+
+async def test_a_control_token_completion_is_refused_and_the_cursor_stays_put(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing is strictly better than accepting: the turns stay verbatim.
+
+    Accepting is NOT a no-op — `upsert_summary` advances `covers_through_message_id`,
+    so the covered turns stop riding verbatim and are represented only by what was
+    stored. A 14-character protocol artifact standing in for ten turns is silent,
+    irreversible context loss; leaving them verbatim merely costs tokens until the
+    next attempt succeeds.
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _GarbageGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+
+    assert outcome == "skipped_implausible_summary"
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
+        # No row at all, or one that never advanced — either way the turns are intact.
+        assert row is None or row.covers_through_message_id is None
+        # A refusal IS audited — but as an error carrying the reason, never as a
+        # successful summarisation (that distinction is the point: the operator can
+        # find a session burning tokens without producing a usable summary).
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        summarized = [e for e in recent if e.action == "session.summarized"]
+        assert summarized, "the refusal left no audit trail at all"
+        assert all(e.outcome == "error" for e in summarized)
+        assert all(e.metadata.get("refused") for e in summarized)
+
+
+async def test_a_completion_under_the_absolute_floor_is_refused(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No control token — just below the absolute character floor."""
+    from app.tasks import summarize as task_module
+
+    class _Tiny(_GarbageGateway):
+        payload = "ok"
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Tiny)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+
+async def test_a_completion_over_the_floor_but_tiny_for_many_turns_is_refused(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MULTI-TURN branch, which review found had no test reaching it at all.
+
+    Both other refusal tests trip earlier rules (control token, absolute floor), so
+    this branch was live code with no coverage. 20 chars clears the 16-char floor but
+    cannot represent ten turns.
+    """
+    from app.tasks import summarize as task_module
+
+    class _Terse(_GarbageGateway):
+        payload = "Talked about stuff"  # 18 chars: over the 16 floor, under the 32 multi-turn bar
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Terse)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+
+async def test_the_bar_never_exceeds_what_the_model_is_allowed_to_write(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compliant summary must pass no matter how LONG the covered turns were.
+
+    An earlier cut scaled the minimum against the covered TEXT (>=1% of input). At the
+    40-message batch cap with this deployment's p95 message length that demanded ~1,662
+    chars, while the prompt asks for "under 300 words" and `max_tokens=600` caps output
+    around 2,400 — so a compliant summary was refused, and past ~240k chars of input no
+    completion could pass at all, leaving the session permanently unsummarisable. The
+    bar is now fixed per turn-count, so enormous turns cannot move it.
+    """
+    from sqlalchemy import update as _upd
+
+    from app.db import models as _models
+    from app.tasks import summarize as task_module
+
+    # Make the covered turns enormous — the exact condition that broke the old rule.
+    async with ctx.sessionmaker() as session:
+        await session.execute(
+            _upd(_models.Message)
+            .where(_models.Message.session_id == ctx.session_id)
+            .values(content="x" * 6000)
+        )
+        await session.commit()
+
+    class _Compliant(_GarbageGateway):
+        # ~200 chars: far under "300 words", comfortably a real summary.
+        payload = (
+            "The user asked about regional revenue and the assistant walked through "
+            "the northern and southern figures, flagged one unresolved attribution "
+            "question, and agreed to follow up next week."
+        )
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Compliant)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "summarized", "a compliant summary was refused for long input"
+
+
+async def test_a_refused_summary_still_records_its_spend_and_audits(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal is not free, and it repeats — so it must be visible.
+
+    The completion was paid for, and because the cursor does not advance the same batch
+    is re-sent on every subsequent answer. Without a usage row and an audit event, a
+    tenant on a junk route pays a full summariser prompt per answer forever with
+    nothing to find it by (ADR-0016 §2.6: no invisible spend; spec 0004 §2.4 puts ops
+    logging outside the product audit trail).
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _GarbageGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_implausible_summary"
+
+    async with ctx.sessionmaker() as session:
+        usage = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert usage and usage[-1].total_tokens == 70, "refused spend went unrecorded"
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        refusals = [
+            e for e in recent if e.action == "session.summarized" and e.metadata.get("refused")
+        ]
+        assert refusals, "the refusal was invisible in the audit trail"
+        assert refusals[0].outcome == "error"
+
+
+async def test_a_genuine_summary_is_still_accepted(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the guard must not make the feature unusable.
+
+    Without this, "reject everything" would pass the two tests above.
+    """
+    from app.tasks import summarize as task_module
+
+    class _Real(_GarbageGateway):
+        payload = (
+            "The user asked about Q3 revenue across regions. The assistant reported a "
+            "12% rise in the northern region driven by two renewals, flat performance "
+            "in the south, and an unresolved question about west-region attribution."
+        )
+
+    monkeypatch.setattr(task_module, "LLMGateway", _Real)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "summarized"
+    async with ctx.sessionmaker() as session:
+        row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
+        assert row is not None and row.covers_through_message_id == ctx.message_ids[9]
+
+
+class _EmptyGateway(_GarbageGateway):
+    """A route that returns nothing at all — a truncated stream, a filtered response."""
+
+    payload = "   "
+
+
+async def test_an_empty_completion_is_as_expensive_as_a_refusal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit beside the quality gate had the same hole, and round 2 found it.
+
+    `_record_summary_spend` was wired to the implausible-summary branch alone. An empty
+    completion returned bare one line earlier: the prompt tokens were still paid, the
+    cursor still did not advance, so the same batch was re-sent on every answer — the
+    identical invisible-spend-plus-forever-retry the refusal path exists to close, left
+    open on the adjacent branch. A fix that covers one exit and not its neighbour is not
+    a fix; it just moves where the money disappears.
+    """
+    from app.tasks import summarize as task_module
+
+    monkeypatch.setattr(task_module, "LLMGateway", _EmptyGateway)
+    monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))
+
+    outcome = await task_module._summarize(ctx.tenant_id, ctx.session_id)  # noqa: SLF001
+    assert outcome == "skipped_empty_summary"
+
+    async with ctx.sessionmaker() as session:
+        usage = await LlmUsageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assert usage and usage[-1].total_tokens == 70, "an empty completion was billed to nobody"
+        recent = await AuditEventRepository(session, ctx.tenant_id).list_recent(limit=20)
+        refusals = [
+            e for e in recent if e.action == "session.summarized" and e.metadata.get("refused")
+        ]
+        assert refusals, "the empty completion was invisible in the audit trail"
+        assert refusals[0].outcome == "error"
+        assert "empty" in refusals[0].metadata["refused"]
+        # And the turns it failed to summarise are still riding verbatim.
+        summary = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(
+            ctx.session_id
+        )
+        assert summary is None or summary.covers_through_message_id is None
