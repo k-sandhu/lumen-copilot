@@ -51,8 +51,8 @@ Reversible: ``downgrade`` drops the constraint and the column. The append-only
 grant on ``audit_events`` permits ``ALTER TABLE``; no row is rewritten on the way
 back out.
 
-Revision ID: 0041_audit_source_origin
-Revises: 0040_gdrive_acl
+Revision ID: 0042_audit_source_origin
+Revises: 0041_groups
 Create Date: 2026-07-30 00:00:00+00:00
 """
 
@@ -61,8 +61,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0041_audit_source_origin"
-down_revision = "0040_gdrive_acl"
+revision = "0042_audit_source_origin"
+down_revision = "0041_groups"
 branch_labels = None
 depends_on = None
 
