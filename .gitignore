@@ -37,3 +37,7 @@ playwright-report/
 # Generated contract artifacts (regenerated from contracts/; never committed)
 frontend/src/api/generated/
 codex-*.md
+
+# RAG benchmark corpus — real files fetched by tests/eval/benchmark/download.py;
+# only the manifest + checksum pins are committed, never the binaries (#420)
+backend/tests/eval/benchmark/corpus/
