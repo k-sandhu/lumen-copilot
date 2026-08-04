@@ -256,21 +256,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # Ensure the selected files are on disk (checksum-verified against the pins);
-    # with --refresh, rolling entries re-fetch even when cached.
+    # Put EVERY selected file through fetch_entries, not just the missing ones.
+    # A cached file is only trustworthy if its bytes still match the pin, and
+    # fetch_entries is the single place that check lives — skipping it for
+    # anything already on disk is exactly how a previously-failed download could
+    # be uploaded as if it were corpus content.
     directory = corpus_dir()
-    missing = [e for e in selection if not (directory / e.filename).exists()]
     to_refresh = [
         e for e in selection if e.rolling and args.refresh and (directory / e.filename).exists()
     ]
-    if missing or to_refresh:
-        print(f"\ndownloading {len(missing)} missing, refreshing {len(to_refresh)} rolling…")
-        results = fetch_entries(missing, load_checksums(), dest_dir=directory)
-        results += fetch_entries(to_refresh, load_checksums(), dest_dir=directory, force=True)
-        failed = [r for r in results if r.status == "FAILED"]
-        if failed:
-            print(f"error: {len(failed)} download(s) failed; aborting", file=sys.stderr)
-            return 1
+    verify_first = [e for e in selection if e not in to_refresh]
+    print(f"\nverifying {len(verify_first)} file(s), refreshing {len(to_refresh)} rolling…")
+    results = fetch_entries(verify_first, load_checksums(), dest_dir=directory)
+    results += fetch_entries(to_refresh, load_checksums(), dest_dir=directory, force=True)
+    failed = [r for r in results if r.status == "FAILED"]
+    if failed:
+        print(
+            f"error: {len(failed)} file(s) failed download/verification; aborting "
+            f"({', '.join(r.entry.file_id for r in failed)})",
+            file=sys.stderr,
+        )
+        return 1
 
     with httpx.Client(timeout=httpx.Timeout(60.0, read=300.0)) as http:
         api = ApiClient(http, args.api, args.email, args.password)
@@ -278,17 +284,24 @@ def main(argv: list[str] | None = None) -> int:
         collection_id = api.ensure_collection(args.collection)
         print(f"\ncollection '{args.collection}': {collection_id}")
 
-        existing = api.existing_documents()
+        # Scoped to the target collection: a profile-wide map keyed by filename
+        # would let a same-named document in ANOTHER collection be mistaken for
+        # ours — skipped as "already there", or deleted during a refresh.
+        existing = api.existing_documents(collection_id=collection_id)
         uploaded: set[str] = set()
         replaced = 0
+        # Old rolling copies to retire, retired only AFTER their replacement is
+        # ingested and ready. Deleting first — as this used to — meant a failed
+        # upload or ingestion left the profile with nothing: old copy gone, no
+        # new one. The worst case now is a transient duplicate, which a re-run
+        # reconciles; the previous worst case was silent data loss.
+        supersede: dict[str, str] = {}
         for entry in selection:
             if entry.filename in existing:
                 if entry.rolling and args.refresh:
-                    # Rolling refresh: replace the profile's copy with the
-                    # freshly-fetched content (delete, then re-upload below).
-                    api.delete_document(str(existing[entry.filename]["id"]))
+                    supersede[entry.filename] = str(existing[entry.filename]["id"])
                     replaced += 1
-                    print(f"[replac] {entry.file_id}: refreshing rolling document")
+                    print(f"[replac] {entry.file_id}: uploading refreshed copy first")
                 else:
                     print(
                         f"[  skip] {entry.file_id}: already in profile "
@@ -316,8 +329,24 @@ def main(argv: list[str] | None = None) -> int:
             outcomes = api.wait_for_documents(uploaded, timeout_seconds=_INGEST_TIMEOUT_SECONDS)
             not_ready = {f: s for f, s in outcomes.items() if s != "ready"}
             if not_ready:
+                # Leave every superseded document in place: the refreshed copies
+                # are not usable, so deleting the old ones now would destroy the
+                # only working content the profile has.
                 print(f"error: not ready: {not_ready}", file=sys.stderr)
+                if supersede:
+                    print(
+                        f"note: {len(supersede)} superseded document(s) left in place "
+                        "(their replacements are not ready) — re-run to reconcile",
+                        file=sys.stderr,
+                    )
                 return 1
+
+        # Only now, with every replacement ingested and ready, retire the copies
+        # they supersede.
+        for filename, document_id in supersede.items():
+            api.delete_document(document_id)
+            print(f"[retire] {filename}: previous copy removed")
+
         print(
             f"\ndone — {len(selection)} file(s) in your profile "
             f"({len(uploaded) - replaced} new, {replaced} refreshed)"

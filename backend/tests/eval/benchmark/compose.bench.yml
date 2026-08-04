@@ -13,9 +13,24 @@
 #   # one-time on the fresh bench DB: widen the pgvector column to this
 #   # embedding model's 2048 dims (migration 0002 pins the 1024 default; its
 #   # docstring defers a dim change to a follow-up migration — this is that
-#   # change, applied bench-locally):
-#   docker compose -p lumen-bench exec postgres \
-#     psql -U lumen -d lumen -c "ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(2048);"
+#   # change, applied bench-locally).
+#   #
+#   # The DROP INDEX is REQUIRED, not tidiness: migration 0002 creates an HNSW
+#   # index on `chunks.embedding`, and pgvector's HNSW cannot index more than
+#   # 2000 dimensions. Altering the column while that index exists makes
+#   # Postgres try to rebuild it at 2048 dims, so the statement FAILS — leaving
+#   # a 1024-dim column under workers configured for 2048, which then fails at
+#   # ingest time rather than here. Retrieval reads OpenSearch (ADR-0010), so
+#   # dropping the index affects only transitional pgvector storage.
+#   #
+#   # Run both statements, in this order, BEFORE starting the workers:
+#   docker compose -p lumen-bench exec postgres psql -U lumen -d lumen -c \
+#     "DROP INDEX IF EXISTS ix_chunks_embedding_hnsw; \
+#      ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(2048);"
+#
+#   # verify it took (expect 2048, and no hnsw index on chunks):
+#   docker compose -p lumen-bench exec postgres psql -U lumen -d lumen -c \
+#     "SELECT atttypmod FROM pg_attribute WHERE attrelid='chunks'::regclass AND attname='embedding';"
 #
 #   # seed the bench login:
 #   docker compose -p lumen-bench exec backend \

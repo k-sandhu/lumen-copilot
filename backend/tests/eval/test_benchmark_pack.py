@@ -20,7 +20,7 @@ from tests.eval.benchmark.bank import (
 )
 from tests.eval.benchmark.client import ApiClient
 from tests.eval.benchmark.load_pack import FORMAT_MIME, select_from_pack, select_pack
-from tests.eval.benchmark.manifest import CORPUS, manifest_issues
+from tests.eval.benchmark.manifest import CORPUS, extracted_dir, manifest_issues
 from tests.eval.benchmark.packs import (
     PACKS,
     TAX_TOPICS,
@@ -30,9 +30,25 @@ from tests.eval.benchmark.packs import (
     pack_files,
     pack_files_for_topic,
     pack_issues,
+    tax_coverage_evidence_issues,
     tax_packs,
     topics_of,
 )
+
+
+def _tax_corpus_ready() -> bool:
+    """True when every tax-pack file has been extracted (the packs' own slice)."""
+    from tests.eval.benchmark.packs import tax_packs as _packs
+
+    wanted = {fid for p in _packs() for fid in p.file_ids}
+    return bool(wanted) and all((extracted_dir() / f"{fid}.txt").exists() for fid in wanted)
+
+
+needs_tax_corpus = pytest.mark.skipif(
+    not _tax_corpus_ready(),
+    reason=("tax-pack corpus not extracted — run `download --only <tax ids>` then `extract`"),
+)
+
 
 # --- Deterministic selection ---------------------------------------------------
 
@@ -352,3 +368,82 @@ def test_client_relogs_in_once_on_401() -> None:
         "POST /api/v1/auth/login",  # transparent re-login
         "GET /api/v1/documents",  # replay succeeds
     ]
+
+
+# --- Tax coverage: structural non-degeneracy + parser-grounded evidence ---------
+
+
+def test_degenerate_coverage_mapping_is_rejected() -> None:
+    """One broad document standing in for the whole taxonomy is not coverage.
+
+    ``pack_issues`` can prove a mapping is complete and consistent, but it never
+    reads a document — so on its own it would accept "point every topic at the
+    federal tax guide". Keyword evidence alone does not save it either: a 480 KB
+    comprehensive guide genuinely does mention withholding, GST, trusts,
+    penalties and rates. The structural non-degeneracy rules are what actually
+    reject it, so this pins them.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    first = pack.file_ids[0]
+    rest = tuple(f for f in pack.file_ids if f != first)
+    degenerate = tuple(
+        TaxCoverage(topic, (first,) + (rest if topic == "personal_income" else ()))
+        for topic in TAX_TOPICS
+    )
+
+    issues = pack_issues((replace(pack, tax_coverage=degenerate),))
+    assert any("claimed for" in i.problem for i in issues), "over-claimed file not caught"
+    assert any("identical file set" in i.problem for i in issues), "duplicate topic sets not caught"
+
+
+def test_a_file_may_serve_a_couple_of_topics() -> None:
+    """The bound must not punish legitimate multi-topic files.
+
+    New York's IT-112-R really is both ``cross_border`` and
+    ``credits_deductions``; both real packs top out at two topics per file.
+    """
+    for pack in tax_packs():
+        per_file: dict[str, int] = {}
+        for coverage in pack.tax_coverage:
+            for fid in coverage.file_ids:
+                per_file[fid] = per_file.get(fid, 0) + 1
+        assert max(per_file.values()) <= 2, f"{pack.pack_id} exceeds the observed spread"
+    assert pack_issues() == []
+
+
+@needs_tax_corpus
+def test_every_tax_topic_is_evidenced_by_its_own_files() -> None:
+    """The semantic half: each topic's mapped files really discuss that topic.
+
+    Checked against the text the REAL ingestion parsers produce, not the
+    manifest — a mapping to a document that never mentions the topic fails here
+    even though it is structurally perfect.
+    """
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    for pack in tax_packs():
+        issues = tax_coverage_evidence_issues(pack, texts)
+        assert issues == [], "\n".join(f"{i.pack_id}: {i.problem}" for i in issues)
+
+
+@needs_tax_corpus
+def test_coverage_evidence_rejects_an_unrelated_document() -> None:
+    """The negative: mapping a topic to a document about something else fails.
+
+    Uses a real corpus file from a different domain, so this is a genuine
+    "wrong document" case rather than a synthetic string.
+    """
+    pack = pack_by_id("tax-research-ontario")
+    texts = {p.stem: p.read_text(encoding="utf-8") for p in extracted_dir().glob("*.txt")}
+    # The Ontario corporate-tax-calculation schedule genuinely says nothing
+    # about sales tax or GST/HST — verified against the extracted text, rather
+    # than assumed (the first candidate tried, P148, does mention GST/HST
+    # because objections cover it).
+    unrelated = "cra-t2sch500-ontario-tax-2023"
+    swapped = tuple(
+        TaxCoverage("consumption_tax", (unrelated,)) if c.topic == "consumption_tax" else c
+        for c in pack.tax_coverage
+    )
+    issues = tax_coverage_evidence_issues(replace(pack, tax_coverage=swapped), texts)
+    assert any(
+        "consumption_tax" in i.problem for i in issues
+    ), "a topic mapped to an unrelated document must not pass evidence checking"

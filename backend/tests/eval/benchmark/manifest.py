@@ -82,6 +82,14 @@ class CorpusFile:
     # failure, and benchmark questions may never cite them (grounding stays on
     # immutable files only — enforced in bank/manifest validation).
     rolling: bool = False
+    # Whether this entry belongs to the **measured benchmark slice** — the
+    # immutable corpus the question bank is authored against and the live runner
+    # uploads. ``False`` marks a *pack-only* entry: real content a data pack can
+    # seed into a profile, but deliberately NOT a retrieval competitor for the
+    # benchmark, because adding documents silently changes ranks and can make an
+    # "unanswerable" question answerable. Grew relevant when the tax packs took
+    # the corpus from ~40 to ~100 entries (#517).
+    benchmark: bool = True
     notes: str = ""
 
 
@@ -589,6 +597,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 17 — Your Federal Income Tax, tax year 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The individual filer's reference manual: income, deductions, "
         "credits, filing status, and dependents in one long PDF.",
     ),
@@ -600,6 +610,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Form 1120 (US Corporation Income Tax Return) instructions, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Corporate return instructions: schedules, due dates, and the "
         "line-by-line computation of taxable income.",
     ),
@@ -611,6 +623,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Form 1065 (US Return of Partnership Income) instructions, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Partnership return instructions, including Schedule K-1 "
         "reporting for each partner's distributive share.",
     ),
@@ -622,6 +636,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Form 1120-S (S Corporation Income Tax Return) instructions, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="S-corporation return instructions: shareholder basis, "
         "built-in gains, and pass-through reporting.",
         notes="Distractor pair with irs-i1065-partnership-2024 — adjacent "
@@ -635,6 +651,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Schedule C (Profit or Loss From Business) instructions, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Sole-proprietor business income: expense categories, "
         "business-use-of-home, and the material-participation tests.",
     ),
@@ -646,6 +664,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 15 (Circular E) — Employer's Tax Guide, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Employer payroll obligations: withholding, FICA, deposit "
         "schedules, and the penalty rules for late deposits.",
     ),
@@ -657,6 +677,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — General Instructions for Forms W-2 and W-3, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Wage-statement reporting: box-by-box codes, correction "
         "procedure, and information-return penalties.",
     ),
@@ -668,6 +690,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 946 — How To Depreciate Property, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="MACRS recovery periods, section 179 expensing, bonus "
         "depreciation, and the percentage tables.",
     ),
@@ -679,6 +703,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 505 — Tax Withholding and Estimated Tax, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Quarterly instalments, safe-harbour percentages, and the "
         "underpayment-penalty computation.",
     ),
@@ -690,6 +716,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 519 — US Tax Guide for Aliens, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Residency tests (substantial presence, green card), "
         "dual-status years, and treaty-based return positions.",
     ),
@@ -701,6 +729,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Form 1041 (Income Tax Return for Estates and Trusts) " "instructions, 2024",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Fiduciary return instructions: distributable net income, "
         "the 65-day rule, and Schedule K-1 beneficiary reporting.",
     ),
@@ -712,6 +742,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Internal Revenue Bulletin No. 2025-1 (30 December 2024)",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Primary authority as tax researchers cite it: revenue "
         "rulings, revenue procedures, notices, and Treasury decisions — including "
         "Rev. Proc. 2025-1 on letter rulings.",
@@ -725,6 +757,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS — Revenue Procedure 2024-40, inflation-adjusted amounts for 2025",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The annual indexation tables: bracket thresholds, standard "
         "deduction, and dozens of dollar limits for tax year 2025.",
         notes="Dense exact-figure tables — the lookup shape tax questions take.",
@@ -737,6 +771,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Statistics of Income — New York individual income tax returns, 2022",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Real tax spreadsheet: New York returns by AGI band, with "
         "counts and dollar amounts per line item.",
         notes="The tax packs' aggregation/table case — a genuine XLSX, not prose.",
@@ -750,6 +786,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Claims for Refund (current revision)",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Audit process, the 30-day letter, Appeals conferences, and "
         "refund-claim limitation periods.",
         rolling=True,
@@ -765,6 +803,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="IRS Publication 1 — Your Rights as a Taxpayer (current revision)",
         license="Public domain (US federal government work)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The Taxpayer Bill of Rights: ten enumerated rights plus the "
         "examination, collection, and appeal safeguards.",
         rolling=True,
@@ -787,6 +827,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Resident Income Tax Return instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The New York resident return: state tax tables, NYC and "
         "Yonkers resident surcharges, and the state credit schedule.",
         notes="Distractor pair with nys-it203i-nonresident-2024 — resident vs "
@@ -801,6 +843,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Nonresident and Part-Year Resident Income Tax Return instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="New York source income allocation for nonresidents and "
         "part-year residents — the commuter and relocation case.",
     ),
@@ -813,6 +857,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Partnership Return instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Partnership filing duty, New York apportionment, and the "
         "partner schedules a New York partnership must issue.",
     ),
@@ -825,6 +871,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Business Corporation Franchise Tax Return instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Post-reform New York franchise tax: the business income "
         "base, capital base, fixed dollar minimum, and apportionment.",
     ),
@@ -837,6 +885,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "S Corporation Franchise Tax Return instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="New York S-corporation election, the fixed dollar minimum, "
         "and shareholder pass-through reporting.",
     ),
@@ -849,6 +899,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "State Modifications instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Every addition and subtraction modification code that moves "
         "federal income to New York income — a pure code-lookup document.",
     ),
@@ -861,6 +913,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "State Resident Credit instructions, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Credit for income tax paid to another state — the "
         "double-taxation relief computation for cross-border earners.",
     ),
@@ -873,6 +927,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Tax Payment instructions for individuals, 2024",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="New York instalment due dates, the annualized-income option, "
         "and estimated-tax penalty exceptions.",
     ),
@@ -885,6 +941,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Pass-Through Entity Tax (25 August 2021)",
         license="New York State government work (official technical memorandum)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The Department's own interpretation of Article 24-A PTET: "
         "who may elect, the irrevocable annual election, and the partner credit.",
         notes="A technical memorandum is dated and never revised in place — "
@@ -898,6 +956,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="NYS Publication 750 — A Guide to Sales Tax in New York State " "(current revision)",
         license="New York State government work (freely distributable publication)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Vendor registration, what is taxable, exemption "
         "certificates, and the sales-tax filing calendar.",
         rolling=True,
@@ -912,6 +972,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Jurisdiction (current revision)",
         license="New York State government work (freely distributable publication)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Combined state/local rate and reporting code for every New "
         "York county and city — the rate-lookup table.",
         rolling=True,
@@ -926,6 +988,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Sales and Use Tax Return instructions (current period)",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Quarterly sales-tax filing mechanics: jurisdiction reporting, "
         "vendor collection credit, and prepaid-tax schedules.",
         rolling=True,
@@ -940,6 +1004,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Combined Withholding, Wage Reporting and UI Return instructions (current)",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The single New York employer return: unemployment insurance "
         "contributions, wage reporting, and withholding reconciliation.",
         rolling=True,
@@ -953,6 +1019,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Tables and Methods (current revision)",
         license="New York State government work (freely distributable publication)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Payroll withholding tables and the exact-calculation method "
         "by payroll frequency — dense numeric tables.",
         rolling=True,
@@ -966,6 +1034,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "State Estate Tax Return instructions (current revision)",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="New York estate tax: the basic exclusion amount, the "
         "three-year gift add-back, and the exclusion cliff.",
         rolling=True,
@@ -979,6 +1049,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Estate Transfer Tax Return instructions (current revision)",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Transfer tax on conveyances, the mansion tax, and the "
         "exemptions claimed at closing.",
         rolling=True,
@@ -992,6 +1064,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Partial Exemption from Property Taxes in New York State (current revision)",
         license="New York State government work (freely distributable publication)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The three veterans' property-tax exemptions, their eligibility "
         "tests and application mechanics — the local-tax layer a New York filer "
         "also meets.",
@@ -1007,6 +1081,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "instructions (current revision)",
         license="New York State government work (freely distributable tax form)",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The MCTMT: which employers in the MCTD owe it, the two zones, "
         "the payroll-expense thresholds, and the rates.",
         rolling=True,
@@ -1030,6 +1106,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA 5000-G — Federal Income Tax and Benefit Guide, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The T1 line-by-line guide every Canadian filer works from, "
         "including what changed for the year.",
     ),
@@ -1041,6 +1119,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA 5006-PC — Ontario Information Guide (T1 Ontario package), 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Ontario-specific personal credits, the Ontario surtax, and "
         "the province's own benefit programs.",
     ),
@@ -1052,6 +1132,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA 5006-C — Form ON428, Ontario Tax, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The Ontario tax calculation itself: bracket rates, surtax "
         "thresholds, and non-refundable credit amounts.",
     ),
@@ -1063,6 +1145,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4012 — T2 Corporation Income Tax Guide, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Corporate filing in Canada: schedules, the small business "
         "deduction, and provincial tax including Ontario.",
     ),
@@ -1074,6 +1158,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T2 Schedule 500 — Ontario Corporation Tax Calculation, 2023",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="How Ontario corporate tax is computed on the federal T2: "
         "basic rate, the small business deduction, and rate reductions.",
     ),
@@ -1085,6 +1171,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T2 Schedule 510 — Ontario Corporate Minimum Tax, 2014 revision",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Ontario's corporate minimum tax under section 55 of the "
         "Taxation Act, 2007 (Ontario): the total-assets and revenue thresholds "
         "that trigger it, and the CMT credit carry-forward.",
@@ -1101,6 +1189,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Farming and Fishing Income, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Unincorporated business income: the T2125 statement, "
         "capital cost allowance classes, and deductible expenses.",
     ),
@@ -1112,6 +1202,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4068 — Guide for the Partnership Information Return " "(T5013 forms), 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Which partnerships must file a T5013, the allocation "
         "schedules, and the late-filing penalties.",
     ),
@@ -1123,6 +1215,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4001 — Employers' Guide: Payroll Deductions and Remittances, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="CPP, EI and income tax at source: remitter types, due "
         "dates, and the penalties for late remittance.",
     ),
@@ -1134,6 +1228,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4130 — Employers' Guide: Taxable Benefits and Allowances, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Which benefits are taxable, the automobile-benefit formulas, "
         "and GST/HST on benefits.",
     ),
@@ -1145,6 +1241,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA RC4110 — Employee or Self-employed?, 2023",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The worker-classification tests CRA applies, and the "
         "consequences of getting the relationship wrong.",
     ),
@@ -1156,6 +1254,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA RC4022 — General Information for GST/HST Registrants, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Ontario's 13% HST in practice: registration thresholds, "
         "input tax credits, place-of-supply rules, and filing periods.",
     ),
@@ -1167,6 +1267,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA RC4058 — Quick Method of Accounting for GST/HST, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The simplified HST remittance election: eligibility, the "
         "Ontario remittance rates, and the 1% credit.",
     ),
@@ -1178,6 +1280,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA RC4028 — GST/HST New Housing Rebate, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The federal and Ontario new-housing rebates: eligibility, "
         "the price thresholds, and the claim deadlines.",
     ),
@@ -1189,6 +1293,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4037 — Capital Gains, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Adjusted cost base, the inclusion rate, the principal "
         "residence exemption, and the lifetime capital gains exemption.",
     ),
@@ -1200,6 +1306,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4036 — Rental Income, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Rental operations on the T776: current vs capital expenses, "
         "CCA restrictions, and co-ownership reporting.",
     ),
@@ -1211,6 +1319,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4044 — Employment Expenses, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Employee deductions on the T777, including work-space-in-"
         "the-home and the employer's T2200 certification.",
     ),
@@ -1222,6 +1332,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4013 — T3 Trust Guide, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Trust and estate returns: the expanded reporting rules, "
         "graduated rate estates, and beneficiary allocations.",
     ),
@@ -1233,6 +1345,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4058 — Non-Residents and Income Tax, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Residency determination, Part XIII withholding, and which "
         "Canadian-source income a non-resident must report.",
     ),
@@ -1244,6 +1358,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA T4144 — Income Tax Guide for Electing Under Section 216, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Non-resident owners of Canadian rental property: the "
         "section 216 election, NR6, and the withholding mechanics.",
     ),
@@ -1255,6 +1371,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         source="CRA P105 — Students and Income Tax, 2024",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Tuition and education amounts, scholarship exemptions, and "
         "student loan interest — a common individual filing scenario.",
     ),
@@ -1267,6 +1385,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Under the Income Tax Act, 2025",
         license="Government of Canada — non-commercial reproduction permitted",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Notice of objection deadlines, the appeals process, and "
         "onward appeal to the Tax Court of Canada.",
     ),
@@ -1280,6 +1400,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         license="Reproduction of federal law permitted (Reproduction of Federal "
         "Law Order, SI/97-5) without charge or further permission",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="The statute itself — the largest entry in the corpus and the "
         "ultimate authority behind every Canadian filing answer.",
         rolling=True,
@@ -1296,6 +1418,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         license="Reproduction of federal law permitted (Reproduction of Federal "
         "Law Order, SI/97-5) without charge or further permission",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="GST/HST law in its statutory form — Part IX is the authority "
         "behind Ontario's 13% HST.",
         rolling=True,
@@ -1312,6 +1436,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "Tax (EHT) Return (Central Forms Repository 013-2272)",
         license="© King's Printer for Ontario — reproduction permitted for " "non-commercial use",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="A payroll tax Ontario administers itself: the exemption "
         "threshold, associated-employer rules, and instalment duty.",
         rolling=True,
@@ -1330,6 +1456,8 @@ CORPUS: tuple[CorpusFile, ...] = (
         "(Central Forms Repository 013-0449)",
         license="© King's Printer for Ontario — reproduction permitted for " "non-commercial use",
         domain="tax",
+        # Pack-only: seeded by the tax packs, never a benchmark competitor.
+        benchmark=False,
         description="Ontario land transfer tax at closing: the rate bands, the "
         "value-of-consideration statements, and the exemption codes.",
         rolling=True,
@@ -1362,6 +1490,25 @@ CORPUS: tuple[CorpusFile, ...] = (
         expected_ingest="rejected_type",
     ),
 )
+
+
+def benchmark_corpus(corpus: tuple[CorpusFile, ...] = CORPUS) -> tuple[CorpusFile, ...]:
+    """The immutable slice the benchmark measures — one definition, used everywhere.
+
+    Excludes, deliberately:
+
+    * **pack-only** entries (``benchmark=False``) — real documents a pack seeds,
+      but not retrieval competitors for the scored run;
+    * **rolling** entries — their bytes may change between runs, so a result
+      grounded in one is not reproducible;
+    * the deliberate **negative-format** entries — those are uploaded by the
+      live runner on purpose to prove the 415 path, never as corpus content.
+
+    Every consumer of "the benchmark corpus" (the live runner's uploads, the
+    golden-document adapter, grounding and absence-probe verification) reads
+    this, so the measured set cannot drift between them.
+    """
+    return tuple(e for e in corpus if e.benchmark and e.expected_ingest == "ok" and not e.rolling)
 
 
 def entry_by_id(file_id: str) -> CorpusFile:
@@ -1498,6 +1645,7 @@ __all__ = [
     "ManifestIssue",
     "SizeClass",
     "TextQuality",
+    "benchmark_corpus",
     "corpus_dir",
     "entry_by_id",
     "extracted_dir",

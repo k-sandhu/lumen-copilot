@@ -82,6 +82,44 @@ TAX_TOPIC_LABELS: dict[TaxTopic, str] = {
 
 TAX_TOPICS: tuple[TaxTopic, ...] = tuple(TAX_TOPIC_LABELS)
 
+# Terms that must actually appear in the extracted text of at least one file a
+# pack maps to each topic. This is what turns the coverage claim from
+# self-attestation into evidence: `pack_issues` can only prove the MAPPING is
+# complete and internally consistent (every topic named, every file used, every
+# id resolving) — it cannot tell whether the document behind a mapping says
+# anything about the topic, because it never reads the document. A reviewer
+# spotted that the validation was checking the same assertions it derived
+# "coverage" from, so the semantic half is checked separately, against real
+# parser output, by `tax_coverage_evidence_issues` below (corpus-dependent, so
+# it runs as a test that skips when the corpus is not downloaded).
+#
+# Terms are lowercase and matched case-insensitively against the extracted text;
+# a topic passes when ANY of its terms appears in ANY of its mapped files.
+TAX_TOPIC_TERMS: dict[TaxTopic, tuple[str, ...]] = {
+    "personal_income": ("income tax", "taxable income", "individual"),
+    "business_income": ("corporation", "business income", "self-employ"),
+    "pass_through": ("partnership", "s corporation", "flow-through", "pass-through"),
+    "payroll_withholding": ("withholding", "payroll", "remit", "employer"),
+    "consumption_tax": ("sales tax", "gst", "hst", "use tax"),
+    "property_transfer": ("property", "land transfer", "real estate", "real property"),
+    "credits_deductions": ("deduction", "credit", "depreciat", "capital cost"),
+    "cross_border": ("nonresident", "non-resident", "resident of another", "alien"),
+    "estates_trusts": ("estate", "trust", "beneficiar"),
+    "filing_procedure": ("due date", "file", "instal", "estimated tax"),
+    "disputes_penalties": ("penalt", "appeal", "objection", "interest"),
+    "primary_authority": ("section", "act", "regulation", "revenue procedure", "ruling"),
+    "reference_data": ("rate", "table", "threshold", "amount"),
+}
+
+# A file may legitimately serve a couple of topics (New York's IT-112-R is both
+# `cross_border` and `credits_deductions`), but not many: both real packs top out
+# at 2, so a file claimed for more than this is the signature of a mapping that
+# was filled in rather than curated. Bounding it is what actually defeats the
+# degenerate "point every topic at one comprehensive document" case — keyword
+# evidence alone cannot, because a 480 KB federal tax guide genuinely does
+# mention withholding, GST, trusts, penalties and rates.
+_MAX_TOPICS_PER_FILE = 3
+
 # Pack families. ``tax-research`` packs must satisfy the topic-coverage contract;
 # ``industry`` packs are curated by domain and declare no coverage.
 PackFamily = Literal["industry", "tax-research"]
@@ -590,6 +628,40 @@ def _tax_coverage_issues(pack: IndustryPack) -> list[PackIssue]:
     for fid in pack.file_ids:
         if fid not in covered_files:
             issues.append(PackIssue(pack.pack_id, f"{fid!r} serves no declared tax topic"))
+
+    # --- non-degeneracy -----------------------------------------------------
+    # The checks above prove the mapping is COMPLETE and CONSISTENT. They cannot
+    # prove a document substantively covers a topic — nothing here reads the
+    # document. What they can do is reject a mapping that is complete on paper
+    # but vacuous in fact, which is the realistic failure: reusing one broad
+    # document for everything.
+    per_file: dict[str, int] = {}
+    for coverage in pack.tax_coverage:
+        for fid in coverage.file_ids:
+            per_file[fid] = per_file.get(fid, 0) + 1
+    for fid, count in sorted(per_file.items()):
+        if count > _MAX_TOPICS_PER_FILE:
+            issues.append(
+                PackIssue(
+                    pack.pack_id,
+                    f"{fid!r} is claimed for {count} topics (max {_MAX_TOPICS_PER_FILE}) — "
+                    "one document standing in for most of the taxonomy is not coverage",
+                )
+            )
+    seen_sets: dict[frozenset[str], str] = {}
+    for coverage in pack.tax_coverage:
+        key = frozenset(coverage.file_ids)
+        if key in seen_sets:
+            issues.append(
+                PackIssue(
+                    pack.pack_id,
+                    f"topics {seen_sets[key]!r} and {coverage.topic!r} map to an identical "
+                    "file set — two aspects of filing backed by exactly the same documents "
+                    "means at least one is not really covered",
+                )
+            )
+        else:
+            seen_sets[key] = coverage.topic
     return issues
 
 
@@ -649,10 +721,50 @@ def pack_issues(
     return issues
 
 
+def tax_coverage_evidence_issues(pack: IndustryPack, extracted: dict[str, str]) -> list[PackIssue]:
+    """Check each topic's mapping against the REAL extracted text (ADR-0021).
+
+    ``pack_issues`` proves the coverage mapping is structurally complete; this
+    proves it is not fiction. For every topic, at least one of the files the
+    pack maps to it must contain one of :data:`TAX_TOPIC_TERMS` for that topic
+    in the text the ingestion parsers actually produce. Mapping every topic to
+    the same arbitrary document — the concrete way a reviewer showed the
+    structural check could be satisfied while the claim was false — fails here.
+
+    ``extracted`` maps ``file_id -> extracted text``; files absent from it are
+    skipped (the caller decides how much of the corpus is downloaded), and a
+    topic whose files are ALL absent is reported as unverified rather than
+    silently passing.
+    """
+    issues: list[PackIssue] = []
+    for coverage in pack.tax_coverage:
+        terms = TAX_TOPIC_TERMS.get(coverage.topic, ())
+        if not terms:
+            continue
+        available = [f for f in coverage.file_ids if f in extracted]
+        if not available:
+            issues.append(
+                PackIssue(pack.pack_id, f"topic {coverage.topic!r}: no mapped file extracted")
+            )
+            continue
+        if not any(
+            term in extracted[file_id].casefold() for file_id in available for term in terms
+        ):
+            issues.append(
+                PackIssue(
+                    pack.pack_id,
+                    f"topic {coverage.topic!r} is not evidenced by any of its files "
+                    f"{available!r} — none mentions any of {list(terms)!r}",
+                )
+            )
+    return issues
+
+
 __all__ = [
     "PACKS",
     "TAX_FAMILY",
     "TAX_TOPICS",
+    "TAX_TOPIC_TERMS",
     "TAX_TOPIC_LABELS",
     "IndustryPack",
     "PackFamily",
@@ -663,6 +775,7 @@ __all__ = [
     "pack_files",
     "pack_files_for_topic",
     "pack_issues",
+    "tax_coverage_evidence_issues",
     "tax_packs",
     "topics_of",
 ]

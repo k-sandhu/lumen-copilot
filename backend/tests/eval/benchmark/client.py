@@ -68,18 +68,34 @@ class ApiClient:
         created.raise_for_status()
         return str(created.json()["id"])
 
-    def existing_documents(self) -> dict[str, dict[str, object]]:
-        """Map filename -> document row for everything visible to the caller."""
+    def existing_documents(
+        self, *, collection_id: str | None = None
+    ) -> dict[str, dict[str, object]]:
+        """Map filename -> document row, **scoped to one collection** when given.
+
+        A profile-wide map keyed only by filename is dangerous for the callers
+        that act on a match: the same filename can legitimately exist in another
+        collection, and treating that row as "ours" means skipping an upload
+        that never happened — or, worse, deleting someone else's document during
+        a rolling refresh. Callers that are about to mutate MUST pass
+        ``collection_id``; rows outside it are then invisible.
+        """
         docs: dict[str, dict[str, object]] = {}
         cursor: str | None = None
         while True:
             params: dict[str, str] = {"limit": "100"}
+            if collection_id:
+                params["collection_id"] = collection_id
             if cursor:
                 params["cursor"] = cursor
             response = self.request("GET", "/api/v1/documents", params=params)
             response.raise_for_status()
             payload = response.json()
             for item in payload.get("items", []):
+                # Belt and braces: even with the server-side filter, never let a
+                # row from another collection into a map the caller may delete from.
+                if collection_id and str(item.get("collection_id", "")) != collection_id:
+                    continue
                 docs[str(item["filename"])] = item
             cursor = payload.get("next_cursor")
             if not cursor:
