@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -200,3 +201,60 @@ def test_concurrent_collections_cannot_exceed_the_declared_budget() -> None:
     finally:
         hold.set()
         engine_module.DockerSandboxEngine._collect_outputs_unlocked = original
+
+
+# --- #554 review: the result cache was bounded by COUNT, not memory ------------
+
+
+def test_the_result_cache_is_bounded_by_bytes_not_only_entries() -> None:
+    """#519 bounded what is IN FLIGHT; this bounds what the process goes on HOLDING.
+
+    Each cached result retains its collected output as base64 — up to ~4/3 of the
+    output cap, which defaults to 32 MiB — so a 64-ENTRY bound is ~2.7 GiB against the
+    runner's 1 GiB container limit. One user looping ~23 max-output executions in a
+    single chat OOMs the Docker-socket holder, taking code execution down for every
+    tenant. Sequential, needing no concurrency, and completely untouched by the
+    collection permit.
+    """
+    from lumen_sandbox_runner import engine as engine_module
+
+    engine = engine_module.DockerSandboxEngine.__new__(engine_module.DockerSandboxEngine)
+    engine._results = {}
+    engine._result_bytes = {}
+
+    # Each result carries 8 MiB of base64 — far fewer than 64 entries fit in the budget.
+    chunk = "A" * (8 * 1024 * 1024)
+    for _ in range(40):
+        engine._remember(
+            (uuid4(), 1, uuid4()),
+            {"stdout": "", "stderr": "", "output_files": [{"data_b64": chunk}]},
+        )
+
+    retained = sum(engine._result_bytes.values())
+    assert retained <= engine_module._MAX_CACHED_RESULT_BYTES, (
+        f"cache retained {retained} bytes, above the declared "
+        f"{engine_module._MAX_CACHED_RESULT_BYTES}"
+    )
+    # It kept SOMETHING — a cache that evicts everything is not a cache, and the
+    # idempotent re-read this exists for would never hit.
+    assert engine._results
+    # The bookkeeping does not leak: one size per retained entry, no orphans.
+    assert set(engine._result_bytes) == set(engine._results)
+
+
+def test_the_entry_bound_still_applies_to_small_results() -> None:
+    """The control: bytes did not REPLACE the count bound, it joined it.
+
+    Thousands of tiny results would sit far under the byte ceiling while still growing
+    without limit, so both bounds have to hold.
+    """
+    from lumen_sandbox_runner import engine as engine_module
+
+    engine = engine_module.DockerSandboxEngine.__new__(engine_module.DockerSandboxEngine)
+    engine._results = {}
+    engine._result_bytes = {}
+
+    for _ in range(engine_module._MAX_CACHED_RESULTS + 25):
+        engine._remember((uuid4(), 1, uuid4()), {"stdout": "ok", "stderr": ""})
+
+    assert len(engine._results) == engine_module._MAX_CACHED_RESULTS

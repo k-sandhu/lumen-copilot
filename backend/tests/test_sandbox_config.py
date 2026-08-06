@@ -462,3 +462,48 @@ def test_a_disabled_sandbox_needs_no_token(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert settings.sandbox_enabled is False
     assert settings.sandbox_runner_token == ""
+
+
+@pytest.mark.parametrize(
+    ("variable", "expected"),
+    [
+        ("UPLOAD_ALLOWED_CONTENT_TYPES", frozenset({"application/pdf", "text/plain"})),
+        ("ARTIFACT_ALLOWED_CONTENT_TYPES", frozenset({"application/pdf", "text/plain"})),
+        ("LOGO_ALLOWED_CONTENT_TYPES", frozenset({"application/pdf", "text/plain"})),
+        ("MCP_ENDPOINT_ALLOWLIST", frozenset({"application/pdf", "text/plain"})),
+    ],
+)
+def test_the_json_env_form_still_works_after_nodecode(
+    monkeypatch: pytest.MonkeyPatch, variable: str, expected: frozenset[str]
+) -> None:
+    """#511's fix silently corrupted the form that ALREADY worked (#554 review).
+
+    Before #511, the JSON array was the *only* form `pydantic-settings` accepted for
+    these — the documented comma form raised `SettingsError`. `NoDecode` hands the raw
+    string to the splitter instead, so a deploy already setting
+    `'["application/pdf", "text/plain"]'` got `{'["application/pdf"', '"text/plain"]'}`:
+    boot SUCCEEDS, `Settings` looks valid, and every upload is then rejected because no
+    real content type matches the garbage.
+
+    Silently corrupting a working configuration is a worse failure than the one #511
+    set out to fix, and it would have been invisible until a user reported that uploads
+    stopped. Both forms are supported deliberately — a deploy should not have to know
+    which release it is on.
+    """
+    settings = _settings_from_env(monkeypatch, **{variable: '["application/pdf", "text/plain"]'})
+
+    assert getattr(settings, variable.lower()) == expected
+
+
+def test_a_malformed_json_looking_value_falls_back_rather_than_exploding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`[typo` is far likelier a botched comma list than a broken JSON document.
+
+    Raising here would turn a typo into a boot failure with a JSON parse error the
+    operator never asked for; the comma split then yields one odd entry, which the
+    field validators reject with a message that names the setting.
+    """
+    settings = _settings_from_env(monkeypatch, UPLOAD_ALLOWED_CONTENT_TYPES="[application/pdf")
+
+    assert settings.upload_allowed_content_types == frozenset({"[application/pdf"})
