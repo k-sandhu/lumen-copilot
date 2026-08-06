@@ -1,13 +1,32 @@
 /**
- * Human copy for a failed group WRITE (#540, ADR-0022). PanelState's own
- * `describeError` covers READ failures ("Couldn't load this panel"); a write
- * that fails needs its own sentence next to the control that failed, so an
- * admin learns what to do rather than watching the pane change.
+ * Human copy for a failed group WRITE (#540, ADR-0022), plus the shared notion
+ * of a read failure no retry can fix. PanelState's own `describeError` covers
+ * READ failures ("Couldn't load this panel"); a write that fails needs its own
+ * sentence next to the control that failed, so an admin learns what to do
+ * rather than watching the pane change.
  *
  * The 409s are the interesting ones: the service distinguishes three conflicts
  * by RFC-9457 `code`, and status alone cannot tell them apart.
  */
 import { ApiError } from '@/api';
+
+/**
+ * Read failures a Retry could never fix on this surface. 403/401 are the
+ * role-gated pair (INV-5 / INV-4). 404 joins them for a per-group read: the
+ * group is gone, and refetching a deleted id will only 404 again.
+ */
+export const READ_DEAD_ENDS = [401, 403];
+export const GROUP_READ_DEAD_ENDS = [401, 403, 404];
+
+/** True when the caller is not allowed here — so a write would be refused too. */
+export function isDeadEnd(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+/** True when the thing being written to no longer exists. */
+export function isGone(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
 
 /** The tenant's derived group is managed by the server, not by an admin. */
 const SYSTEM_IMMUTABLE = 'The tenant-wide group is managed automatically and can’t be changed.';
@@ -16,7 +35,7 @@ export function describeGroupWriteError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 403) return 'You need the admin role to manage groups.';
     if (error.status === 401) return 'Your session has expired. Sign in again.';
-    if (error.status === 404) return 'That group no longer exists.';
+    if (error.status === 404) return 'That group no longer exists — someone else deleted it.';
     if (error.status === 409) {
       if (error.problem?.code === 'group_name_taken') {
         return 'A group with that name already exists.';
@@ -33,7 +52,7 @@ export function describeGroupWriteError(error: unknown): string {
   return 'Something went wrong. Please try again.';
 }
 
-/** Same mapping, but the 404 means the *user* — a member write names two things. */
+/** Same mapping, but a member write names two things, so the 404 is ambiguous. */
 export function describeMemberWriteError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 404) return 'That group or user no longer exists in this tenant.';

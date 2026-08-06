@@ -16,25 +16,27 @@
  * States (frontend/AGENTS.md "every state, not just success"): loading skeleton,
  * empty ("No groups yet"), read error with Retry, and — because this read is
  * role-gated — a 403 (INV-5) / 401 (INV-4) rendered as an honest dead end with
- * NO retry button, since reloading would only fetch the same refusal. Write
+ * NO retry button AND no create form, since neither could succeed. Write
  * failures render inline (a dismissible toast, or inside the confirm dialog)
- * and are never discarded. Deleting a group also drops every grant naming it,
- * so it is confirmed first.
+ * and are never discarded — including the typed name, which survives a rejected
+ * create so the admin can correct it rather than retype it.
+ *
+ * Concurrency is assumed, not hoped for: another admin can delete a group
+ * between this render and a click. Every write that comes back 404 refreshes
+ * the list (in the hook) so the stale row disappears, and a delete that 404s is
+ * treated as the outcome the admin wanted — the group is gone.
  *
  * Tenant-scoped throughout (INV-1): an unknown or cross-tenant group is 404,
  * never 403.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { StatusDot } from '@/ui';
 import type { Group } from '@/api';
 import { useCreateGroup, useDeleteGroup, useGroups, useRenameGroup } from '../model/queries';
 import { GroupMembersSection } from './GroupMembersSection';
-import { describeGroupWriteError } from './groupErrors';
+import { READ_DEAD_ENDS, describeGroupWriteError, isDeadEnd, isGone } from './groupErrors';
 import { PanelBody } from './PanelState';
-
-/** A role-gated read: neither 403 nor 401 is fixable by fetching again. */
-const READ_DEAD_ENDS = [401, 403];
 
 const MAX_NAME_LENGTH = 120;
 
@@ -52,9 +54,7 @@ function MemberCount({ group }: { group: Group }) {
     return <StatusDot tone="ok" label="Everyone in this tenant" />;
   }
   const n = group.member_count;
-  return (
-    <span className="text-foreground-muted">{n === 1 ? '1 member' : `${n} members`}</span>
-  );
+  return <span className="text-foreground-muted">{n === 1 ? '1 member' : `${n} members`}</span>;
 }
 
 /** Inline rename form for one row — replaces the name cell while editing. */
@@ -134,6 +134,16 @@ function GroupRow({
   onToggleMembers: () => void;
 }) {
   const isSystem = group.kind === 'system';
+  // `autoFocus` moves focus INTO the rename form; nothing moved it back out, so
+  // saving or cancelling dropped focus to <body>. Return it to the control that
+  // opened the form (frontend/AGENTS.md: managed focus on async updates).
+  const renameRef = useRef<HTMLButtonElement>(null);
+  const wasEditing = useRef(editing);
+  useEffect(() => {
+    if (wasEditing.current && !editing) renameRef.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+
   const action =
     'rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50';
 
@@ -141,12 +151,7 @@ function GroupRow({
     <tr className="border-b border-border/60 last:border-0">
       <td className="px-4 py-3 align-middle">
         {editing ? (
-          <RenameForm
-            group={group}
-            busy={busy}
-            onSubmit={onRename}
-            onCancel={onCancelRename}
-          />
+          <RenameForm group={group} busy={busy} onSubmit={onRename} onCancel={onCancelRename} />
         ) : (
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-foreground">{group.name}</span>
@@ -165,9 +170,7 @@ function GroupRow({
         {isSystem ? (
           // Nothing to manage: membership is derived, so there is no roster to
           // edit and no name to change (ADR-0022 §3).
-          <span className="text-xs text-foreground-muted">
-            Every member of this tenant, always
-          </span>
+          <span className="text-xs text-foreground-muted">Every member of this tenant, always</span>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -180,6 +183,7 @@ function GroupRow({
               {selected ? 'Hide members' : 'Manage members'}
             </button>
             <button
+              ref={renameRef}
               type="button"
               onClick={onStartRename}
               disabled={editing || busy}
@@ -204,7 +208,14 @@ function GroupRow({
   );
 }
 
-function CreateGroupForm({ busy, onCreate }: { busy: boolean; onCreate: (name: string) => void }) {
+function CreateGroupForm({
+  busy,
+  onCreate,
+}: {
+  busy: boolean;
+  /** Resolves true when the group was created, so a rejected name survives. */
+  onCreate: (name: string) => Promise<boolean>;
+}) {
   const [name, setName] = useState('');
   const trimmed = name.trim();
   const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_NAME_LENGTH && !busy;
@@ -216,8 +227,11 @@ function CreateGroupForm({ busy, onCreate }: { busy: boolean; onCreate: (name: s
       onSubmit={(event) => {
         event.preventDefault();
         if (!canSubmit) return;
-        onCreate(trimmed);
-        setName('');
+        // Clear only once the server has accepted it — a 409 on a duplicate
+        // name must leave the text there to correct, not force a retype.
+        void onCreate(trimmed).then((created) => {
+          if (created) setName('');
+        });
       }}
     >
       <label
@@ -258,56 +272,83 @@ export function GroupsPanel() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Group | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Which rows have a write in flight. A Set rather than one id because two
+  // rows can be mid-flight at once, and each call must own its own outcome.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
 
   // A group can vanish under us (another admin deleted it), so resolve the
   // selection against the live list rather than trusting the stored id.
   const selected = groups.find((g) => g.id === selectedId) ?? null;
 
-  const busyId = rename.isPending ? (rename.variables?.groupId ?? null) : null;
+  // A read the caller is not allowed to make: creating would be refused too, so
+  // the form is not offered. The 403 on a write stays a backstop for a race.
+  const readForbidden = isDeadEnd(query.error);
 
-  const handleCreate = (name: string) => {
+  const markBusy = (id: string, busy: boolean) =>
+    setBusyIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  const handleCreate = async (name: string): Promise<boolean> => {
     setToast(null);
-    create.mutate(
-      { name },
-      {
-        onSuccess: (group) => setToast({ kind: 'ok', message: `Created ${group.name}.` }),
-        onError: (error) =>
-          setToast({ kind: 'error', message: describeGroupWriteError(error) }),
-      },
-    );
+    try {
+      const group = await create.mutateAsync({ name });
+      setToast({ kind: 'ok', message: `Created ${group.name}.` });
+      return true;
+    } catch (error) {
+      setToast({ kind: 'error', message: describeGroupWriteError(error) });
+      return false;
+    }
   };
 
-  const handleRename = (group: Group, name: string) => {
+  const handleRename = async (group: Group, name: string) => {
     setToast(null);
-    rename.mutate(
-      { groupId: group.id, name },
-      {
-        onSuccess: (updated) => {
-          setEditingId(null);
-          setToast({ kind: 'ok', message: `Renamed to ${updated.name}.` });
-        },
-        onError: (error) =>
-          setToast({ kind: 'error', message: describeGroupWriteError(error) }),
-      },
-    );
+    markBusy(group.id, true);
+    try {
+      const updated = await rename.mutateAsync({ groupId: group.id, name });
+      // Only close the form belonging to THIS group — a slower rename must not
+      // discard a draft the admin has since opened on another row.
+      setEditingId((current) => (current === group.id ? null : current));
+      setToast({ kind: 'ok', message: `Renamed to ${updated.name}.` });
+    } catch (error) {
+      setToast({ kind: 'error', message: describeGroupWriteError(error) });
+    } finally {
+      markBusy(group.id, false);
+    }
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (pendingDelete === null) return;
     const group = pendingDelete;
     setDeleteError(null);
-    remove.mutate(group.id, {
-      onSuccess: () => {
-        setPendingDelete(null);
-        if (selectedId === group.id) setSelectedId(null);
-        setToast({
-          kind: 'ok',
-          message: `Deleted ${group.name}. Anything shared with it is no longer reachable through it.`,
-        });
-      },
-      // Keep the dialog open so the failure lands where the action was taken.
-      onError: (error) => setDeleteError(describeGroupWriteError(error)),
-    });
+    markBusy(group.id, true);
+    const finish = (message: string) => {
+      setPendingDelete(null);
+      setSelectedId((current) => (current === group.id ? null : current));
+      setEditingId((current) => (current === group.id ? null : current));
+      setToast({ kind: 'ok', message });
+    };
+    try {
+      await remove.mutateAsync(group.id);
+      finish(
+        `Deleted ${group.name}. Anything shared with it is no longer reachable through it.`,
+      );
+    } catch (error) {
+      // A 404 means someone else already deleted it — that IS the outcome the
+      // admin asked for, so report it as done rather than as a failure they
+      // must act on. The hook has already refreshed the list.
+      if (isGone(error)) {
+        finish(`${group.name} was already deleted.`);
+      } else {
+        // Keep the dialog open so the failure lands where the action was taken.
+        setDeleteError(describeGroupWriteError(error));
+      }
+    } finally {
+      markBusy(group.id, false);
+    }
   };
 
   return (
@@ -377,9 +418,9 @@ export function GroupsPanel() {
                   key={group.id}
                   group={group}
                   editing={editingId === group.id}
-                  busy={busyId === group.id}
+                  busy={busyIds.has(group.id)}
                   selected={selectedId === group.id}
-                  onRename={(name) => handleRename(group, name)}
+                  onRename={(name) => void handleRename(group, name)}
                   onStartRename={() => {
                     setToast(null);
                     setEditingId(group.id);
@@ -402,11 +443,20 @@ export function GroupsPanel() {
 
       {/*
         Outside PanelBody on purpose: an admin needs the create form in exactly
-        the states PanelBody replaces — the empty list most of all.
+        the states PanelBody replaces — the empty list most of all. But not when
+        the read was REFUSED: offering a write that can only be refused too is
+        the same dead end the retry button would have been.
       */}
-      <CreateGroupForm busy={create.isPending} onCreate={handleCreate} />
+      {readForbidden ? null : (
+        <CreateGroupForm busy={create.isPending} onCreate={handleCreate} />
+      )}
 
-      {selected !== null ? <GroupMembersSection group={selected} /> : null}
+      {/*
+        Keyed by group id so switching selection REMOUNTS the section. Without
+        it the previous group's picker choice and inline errors would carry over
+        and could be submitted against the newly selected group.
+      */}
+      {selected !== null ? <GroupMembersSection key={selected.id} group={selected} /> : null}
 
       <ConfirmDialog
         open={pendingDelete !== null}
@@ -416,7 +466,7 @@ export function GroupsPanel() {
         busyLabel="Deleting…"
         busy={remove.isPending}
         error={deleteError}
-        onConfirm={handleDelete}
+        onConfirm={() => void handleDelete()}
         onCancel={() => {
           setPendingDelete(null);
           setDeleteError(null);

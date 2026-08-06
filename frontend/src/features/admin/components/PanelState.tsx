@@ -70,11 +70,17 @@ export function PanelError({
 }) {
   const { message, status } = describeError(error);
   const deadEnd = status !== undefined && deadEndStatuses.includes(status);
+  // A dead end is not always an access problem: a caller that opts 404 in means
+  // the thing is gone, and "you don't have access" would misdescribe it. Only
+  // reachable for opt-in callers, so no existing panel's copy changes.
+  const headline = !deadEnd
+    ? 'Couldn’t load this panel'
+    : status === 404
+      ? 'This is no longer available'
+      : 'You don’t have access to this panel';
   return (
     <div role="alert" className="m-4 rounded-md border border-danger/40 bg-danger/5 p-4 text-sm">
-      <p className="font-medium text-foreground">
-        {deadEnd ? 'You don’t have access to this panel' : 'Couldn’t load this panel'}
-      </p>
+      <p className="font-medium text-foreground">{headline}</p>
       <p className="mt-1 text-foreground-muted">{message}</p>
       {deadEnd ? null : (
         <button

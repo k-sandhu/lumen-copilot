@@ -15,12 +15,16 @@
  * `error` (a typed `ApiError`), which each panel renders as an actionable state.
  */
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { ApiError } from '@/api';
 import {
   addGroupMember,
   attestMemberIdentity,
@@ -122,6 +126,41 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
 }
 
 /**
+ * The full member roster, page by page — the source for the group member picker.
+ * `useMembers` deliberately reads only the first page (the roster table shows
+ * one page); a picker that did the same could not offer the 21st member of a
+ * tenant, so this one follows the cursor.
+ *
+ * The key nests under `membersQueryKey`, so anything that invalidates the
+ * roster refreshes the picker too.
+ */
+export const memberRosterQueryKey = [...membersQueryKey, 'roster'] as const;
+
+export function useMemberRoster(): UseInfiniteQueryResult<InfiniteData<MemberList>> {
+  return useInfiniteQuery<MemberList, Error, InfiniteData<MemberList>, typeof memberRosterQueryKey, string | undefined>({
+    queryKey: memberRosterQueryKey,
+    queryFn: ({ pageParam, signal }) =>
+      listMembers(pageParam === undefined ? {} : { cursor: pageParam }, signal),
+    initialPageParam: undefined,
+    // `next_cursor` is absent or null on the last page; either ends the walk.
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * A group write that 404s means the group is already gone — another admin
+ * deleted it. Refresh the list so the stale row disappears instead of sitting
+ * there offering the same doomed action. This does NOT swallow the error: the
+ * rejection still reaches the caller, which maps it for the user.
+ */
+function reconcileIfVanished(qc: ReturnType<typeof useQueryClient>, error: unknown): void {
+  if (error instanceof ApiError && error.status === 404) {
+    void qc.invalidateQueries({ queryKey: groupKeys.list() });
+  }
+}
+
+/**
  * Every group in this tenant (admin only, ADR-0022). Not paginated — a tenant
  * has few groups — and the derived "All members" group sorts first.
  */
@@ -177,6 +216,7 @@ export function useRenameGroup(): UseMutationResult<
   const qc = useQueryClient();
   return useMutation<Group, unknown, { groupId: string; name: string }>({
     mutationFn: ({ groupId, name }) => renameGroup(groupId, { name }),
+    onError: (error) => reconcileIfVanished(qc, error),
     onSuccess: (group) => {
       qc.setQueryData<GroupList>(groupKeys.list(), (prev) =>
         prev ? { ...prev, items: prev.items.map((g) => (g.id === group.id ? group : g)) } : prev,
@@ -195,6 +235,7 @@ export function useDeleteGroup(): UseMutationResult<void, unknown, string> {
   const qc = useQueryClient();
   return useMutation<void, unknown, string>({
     mutationFn: (groupId) => deleteGroup(groupId),
+    onError: (error) => reconcileIfVanished(qc, error),
     onSuccess: (_data, groupId) => {
       // Drop the dead group's member cache too, so re-creating a group with the
       // same name can never show the deleted one's roster.
@@ -217,6 +258,7 @@ export function useAddGroupMember(): UseMutationResult<
   const qc = useQueryClient();
   return useMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => addGroupMember(groupId, { user_id: userId }),
+    onError: (error) => reconcileIfVanished(qc, error),
     onSuccess: (_data, { groupId }) => {
       void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
       void qc.invalidateQueries({ queryKey: groupKeys.list() });
@@ -237,6 +279,7 @@ export function useRemoveGroupMember(): UseMutationResult<
   const qc = useQueryClient();
   return useMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => removeGroupMember(groupId, userId),
+    onError: (error) => reconcileIfVanished(qc, error),
     onSuccess: (_data, { groupId }) => {
       void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
       void qc.invalidateQueries({ queryKey: groupKeys.list() });

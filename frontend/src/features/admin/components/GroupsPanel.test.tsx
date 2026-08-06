@@ -264,6 +264,137 @@ describe('GroupsPanel', () => {
     expect(screen.getByText('Tax Team')).toBeInTheDocument();
   });
 
+  it('keeps the typed name when creation is rejected, so it can be corrected', async () => {
+    createGroup.mockRejectedValue(
+      new ApiError('conflict', 409, {
+        type: 'about:blank',
+        title: 'Conflict',
+        status: 409,
+        code: 'group_name_taken',
+      }),
+    );
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    const field = screen.getByLabelText(/^group name$/i);
+    await userEvent.type(field, 'Tax Team');
+    await userEvent.click(screen.getByRole('button', { name: /create group/i }));
+
+    await screen.findByText(/already exists/i);
+    expect(field).toHaveValue('Tax Team');
+  });
+
+  it('clears the field only after a create actually succeeds', async () => {
+    createGroup.mockResolvedValue({ ...TAX_TEAM, id: 'g-new', name: 'Payroll', member_count: 0 });
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    const field = screen.getByLabelText(/^group name$/i);
+    await userEvent.type(field, 'Payroll');
+    await userEvent.click(screen.getByRole('button', { name: /create group/i }));
+
+    await screen.findByText(/created payroll/i);
+    expect(field).toHaveValue('');
+  });
+
+  it('offers no create form when the read was refused (403)', async () => {
+    listGroups.mockRejectedValue(new ApiError('forbidden', 403));
+    renderWithQuery(<GroupsPanel />);
+
+    await screen.findByText(/need the admin role/i);
+    // A write that could only be refused is the same dead end as the retry.
+    expect(screen.queryByRole('form', { name: /create group/i })).toBeNull();
+    expect(screen.queryByLabelText(/^group name$/i)).toBeNull();
+  });
+
+  it('keeps the create form on an ordinary read failure, which a write may survive', async () => {
+    listGroups.mockRejectedValue(new ApiError('boom', 500));
+    renderWithQuery(<GroupsPanel />);
+
+    await screen.findByText(/couldn’t load this panel/i);
+    expect(screen.getByRole('form', { name: /create group/i })).toBeInTheDocument();
+  });
+
+  it('treats a delete that 404s as the outcome the admin wanted', async () => {
+    deleteGroup.mockRejectedValue(new ApiError('gone', 404));
+    listGroups.mockResolvedValueOnce(GROUPS).mockResolvedValue({ items: [SYSTEM_GROUP] });
+
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    await userEvent.click(screen.getByRole('button', { name: /delete tax team/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: /delete group/i }));
+
+    // Already gone is done, not a failure to act on: dialog closes, list refreshes.
+    expect(await screen.findByText(/was already deleted/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+  });
+
+  it('does not let a slower rename close a draft opened on another row', async () => {
+    const OTHER: Group = { ...TAX_TEAM, id: 'g-fin', name: 'Finance' };
+    listGroups.mockResolvedValue({ items: [SYSTEM_GROUP, TAX_TEAM, OTHER] });
+    let settleTax: (g: Group) => void = () => {};
+    renameGroup.mockImplementation(
+      () => new Promise<Group>((resolve) => { settleTax = resolve; }),
+    );
+
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Finance');
+
+    // Start renaming Tax Team, leave it in flight, then open Finance's draft.
+    await userEvent.click(screen.getByRole('button', { name: /rename tax team/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /rename finance/i }));
+    expect(screen.getByLabelText(/new name for finance/i)).toBeInTheDocument();
+
+    settleTax({ ...TAX_TEAM, name: 'Tax Team' });
+
+    // Tax's completion must not discard the draft the admin is now typing in.
+    await screen.findByText(/renamed to tax team/i);
+    expect(screen.getByLabelText(/new name for finance/i)).toBeInTheDocument();
+  });
+
+  it('returns focus to Rename when the inline form closes, rather than dropping it', async () => {
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    const renameButton = screen.getByRole('button', { name: /rename tax team/i });
+    await userEvent.click(renameButton);
+    expect(screen.getByLabelText(/new name for tax team/i)).toHaveFocus();
+
+    await userEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    // Without a managed return, focus would fall to <body> when the form unmounts.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /rename tax team/i })).toHaveFocus(),
+    );
+  });
+
+  it('does not carry one group’s picker choice across to another group', async () => {
+    const OTHER: Group = { ...TAX_TEAM, id: 'g-fin', name: 'Finance' };
+    listGroups.mockResolvedValue({ items: [SYSTEM_GROUP, TAX_TEAM, OTHER] });
+    listGroupMembers.mockResolvedValue({ items: [] });
+    listMembers.mockResolvedValue({
+      items: [{ id: 'u9', email: 'ada@acme.test', role: ['member'], email_attested_at: null }],
+      next_cursor: null,
+    });
+
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Finance');
+
+    await userEvent.click(screen.getByRole('button', { name: /manage members of tax team/i }));
+    const taxPicker = await screen.findByLabelText(/add member/i);
+    await userEvent.selectOptions(taxPicker, 'u9');
+    expect(taxPicker).toHaveValue('u9');
+
+    // Switching selection must remount the section, not re-prop it: a choice
+    // made for Tax Team could otherwise be submitted against Finance.
+    await userEvent.click(screen.getByRole('button', { name: /manage members of finance/i }));
+    const finPicker = await screen.findByLabelText(/add member/i);
+    expect(finPicker).toHaveValue('');
+    expect(await screen.findByRole('heading', { name: /members of finance/i })).toBeInTheDocument();
+  });
+
   it('opens the member roster for a user group only when asked', async () => {
     renderWithQuery(<GroupsPanel />);
     await screen.findByText('Tax Team');
