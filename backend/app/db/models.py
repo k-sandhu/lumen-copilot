@@ -1880,6 +1880,12 @@ class CodeRun(TenantScopedMixin, Base):
     # The exact Python source executed — inspectable (E15-7/E6-5), reproducible.
     code: Mapped[str] = mapped_column(Text, nullable=False)
     requested_packages: Mapped[list[str]] = mapped_column(StringArray, nullable=False, default=list)
+    #: What the run ACTUALLY installed, transitive dependencies included, with the
+    #: sha256 of each artefact (#509). ``requested_packages`` above is only what the
+    #: model asked for, so a run that pulled in thirty distributions audited as one.
+    #: Nullable: NULL means "predates this column", which is a different fact from an
+    #: empty list ("this run installed nothing").
+    resolved_packages: Mapped[list[dict[str, str]] | None] = mapped_column(_JSON, nullable=True)
     # Captured output. Default empty (never null) so a queued run already has readable
     # output fields.
     stdout: Mapped[str] = mapped_column(Text, nullable=False, default="")

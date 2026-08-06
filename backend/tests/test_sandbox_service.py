@@ -692,3 +692,90 @@ async def test_a_queued_run_does_not_count_against_the_concurrency_limit(
     await session.commit()
 
     assert await service.execute(session, queued[0].id) is CodeRunStatus.SUCCEEDED
+
+
+# --- #509: the deny list reaches the resolver, and the manifest comes back ------
+
+
+async def test_the_tenant_deny_list_is_forwarded_to_the_runner(session: AsyncSession) -> None:
+    """This layer only ever checked what the model ASKED for (#509).
+
+    `pip install --find-links` takes the whole resolved wheelhouse, so a denied
+    distribution can arrive as a dependency of an allowed one — deny `urllib3`, allow
+    `requests`, ask for `requests`, get `urllib3` anyway. Only the runner sees the
+    resolution, so it can only enforce a list it is actually given.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=("requests",), denied=("urllib3",))
+    runner = _FakeRunner()
+    service = _service(tenant, owner, runner, _FakeStore())
+    run = await _run(session, tenant, owner, chat, packages=("requests",))
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    assert runner.executions, "the run never reached the runner"
+    _, spec = runner.executions[-1]
+    assert spec.denied_packages == ("urllib3",)
+
+
+async def test_the_install_manifest_is_persisted_on_the_run(session: AsyncSession) -> None:
+    """`requested_packages` recorded one name for a whole dependency tree (#509).
+
+    Without the resolved set an operator cannot answer "did any run install the
+    distribution that was later found to be malicious?" — the audit row named only the
+    top-level request.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=("requests",))
+    manifest = (
+        {"name": "requests", "version": "2.32.3", "sha256": "a" * 64},
+        {"name": "urllib3", "version": "2.2.2", "sha256": "b" * 64},
+    )
+    runner = _FakeRunner(
+        result=RunResult(
+            status=CodeRunStatus.SUCCEEDED,
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_ms=5,
+            image_digest="python@sha256:runtime",
+            resolved_packages=manifest,
+            resource_usage=ResourceUsage(output_bytes=1),
+        )
+    )
+    service = _service(tenant, owner, runner, _FakeStore())
+    run = await _run(session, tenant, owner, chat, packages=("requests",))
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    persisted = await CodeRunRepository(session, tenant).get(run.id)
+    assert persisted is not None
+    assert persisted.resolved_packages is not None
+    names = {entry["name"] for entry in persisted.resolved_packages}
+    # The transitive dependency the request never mentioned is on the record.
+    assert names == {"requests", "urllib3"}
+    assert persisted.requested_packages == ("requests",)
+
+
+async def test_a_run_that_reported_no_manifest_records_null_not_empty(
+    session: AsyncSession,
+) -> None:
+    """ "We did not learn what this installed" is a different fact from "nothing".
+
+    Writing `[]` unconditionally would put a false statement in the record that exists
+    to answer exactly that question — and every row predating the column would claim
+    to have installed nothing.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+    run = await _run(session, tenant, owner, chat)
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    persisted = await CodeRunRepository(session, tenant).get(run.id)
+    assert persisted is not None
+    assert persisted.resolved_packages is None

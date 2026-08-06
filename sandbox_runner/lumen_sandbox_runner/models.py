@@ -93,6 +93,17 @@ class ExecuteRequest(BaseModel):
     execution_id: UUID
     code: str = Field(min_length=1)
     packages: list[PackageRequirement] = Field(default_factory=list, max_length=50)
+    #: The tenant's deny list, so the RESOLVED dependency tree can be checked against
+    #: it (#509). The backend applies it to the top-level request, but only the runner
+    #: ever sees what pip actually resolves — and `pip install` takes the whole
+    #: wheelhouse, so a denied distribution could arrive as a dependency of an allowed
+    #: one. Deny `urllib3`, allow `requests`, and `urllib3` was installed anyway.
+    #:
+    #: Sent rather than configured on the runner because it is TENANT policy and the
+    #: runner is tenant-agnostic. Empty means "no denials", which is the default state
+    #: and must not be confused with "the caller forgot" — the backend always sends the
+    #: resolved policy, so an empty list is a real answer.
+    denied_packages: list[PackageRequirement] = Field(default_factory=list, max_length=200)
     env: dict[str, str] = Field(default_factory=dict)
     inputs: list[StagedInputRequest] = Field(default_factory=list)
 

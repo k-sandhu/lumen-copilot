@@ -268,6 +268,21 @@ def validate_requested_packages(
             continue
         if "*" not in allowed_names and name not in allowed_names:
             raise PackagePolicyError(_install_refusal(name, value, shipped_version))
+        if name not in allowed_names:
+            # Admitted only because `*` is set (ADR-0020 §3's allow-all grant), so the
+            # MODEL just chose a distribution name off the public index and this deploy
+            # fetched it (#509). That is a real posture — some tenants want it — but it
+            # should be visible in the ops log rather than inferred from a policy row
+            # nobody reads. Deliberately not an audit event: nothing was denied and the
+            # run is legitimate; this is telemetry about how permissive the grant is.
+            log.warning(
+                "sandbox.package_admitted_by_wildcard",
+                package=name,
+                detail=(
+                    "allowed_packages contains '*', so any public distribution name "
+                    "the model asks for is fetched and installed"
+                ),
+            )
         if name in seen:
             continue
         seen.add(name)
@@ -758,6 +773,10 @@ class SandboxService:
             execution_id=run.id,
             code=run.code,
             packages=packages,
+            # The runner re-applies these to the RESOLVED tree (#509): this layer only
+            # ever saw the top-level request, and `pip install` takes the whole
+            # wheelhouse, so a denied distribution could arrive as a dependency.
+            denied_packages=policy.denied_packages,
             inputs=inputs,
             env=(("LUMEN_OUTPUT_DIR", f"/workspace/.lumen/runs/{run.id}/output"),),
         )
@@ -788,6 +807,7 @@ class SandboxService:
             resource_usage=result.resource_usage,
             image_digest=result.image_digest or sandbox.image_digest,
             artifact_ids=artifact_ids,
+            resolved_packages=result.resolved_packages or None,
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
         await SandboxSessionRepository(session, self._tenant_id).touch(sandbox.id)

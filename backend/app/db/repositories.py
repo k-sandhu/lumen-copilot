@@ -653,6 +653,9 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         stderr=row.stderr,
         artifact_ids=[UUID(x) for x in (row.artifact_ids or [])],
         requested_packages=tuple(row.requested_packages or []),
+        resolved_packages=(
+            tuple(row.resolved_packages) if row.resolved_packages is not None else None
+        ),
         session_id=row.session_id,
         sandbox_session_id=row.sandbox_session_id,
         sandbox_generation=row.sandbox_generation,
@@ -5810,6 +5813,7 @@ class CodeRunRepository(_TenantScopedRepository):
         resource_usage: ResourceUsage | None = None,
         image_digest: str | None = None,
         artifact_ids: list[UUID] | None = None,
+        resolved_packages: tuple[dict[str, str], ...] | None = None,
     ) -> CodeRun | None:
         """Write a run's terminal status + captured result (ADR-0013 §4/§5), tenant-scoped.
 
@@ -5834,6 +5838,12 @@ class CodeRunRepository(_TenantScopedRepository):
         }
         if image_digest is not None:
             values["image_digest"] = image_digest
+        if resolved_packages is not None:
+            # Only written when the runner reported one. Writing `[]` unconditionally
+            # would turn "we did not learn what this run installed" into "this run
+            # installed nothing" — a false statement in the record that exists to
+            # answer that exact question (#509).
+            values["resolved_packages"] = [dict(entry) for entry in resolved_packages]
         stmt = (
             update(models.CodeRun)
             .where(

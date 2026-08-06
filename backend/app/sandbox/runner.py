@@ -215,6 +215,9 @@ class HttpSandboxRunner:
                 "execution_id": str(run.execution_id),
                 "code": run.code,
                 "packages": list(run.packages),
+                # Forwarded so the runner can refuse a denied TRANSITIVE dependency
+                # (#509) — the check here only ever saw the top-level request.
+                "denied_packages": list(run.denied_packages),
                 "env": dict(run.env),
                 # Packages are acquired/installed by the runner before these tenant
                 # bytes are staged, so package resolution never sees tenant data.
@@ -349,8 +352,37 @@ class HttpSandboxRunner:
             duration_ms=raw_duration if isinstance(raw_duration, int) else 0,
             output_files=output_files,
             image_digest=raw_digest if isinstance(raw_digest, str) else None,
+            resolved_packages=_resolved_packages(body.get("resolved_packages")),
             resource_usage=ResourceUsage.from_dict(body.get("resource_usage")),
         )
+
+
+def _resolved_packages(raw: object) -> tuple[dict[str, str], ...]:
+    """The runner's install manifest, defensively parsed (#509).
+
+    Shape-checked rather than trusted: this is the audit record of what a run
+    installed, and a malformed entry silently becoming `{}` would make the trail
+    quietly wrong — which is worse than it being absent. Unknown keys are dropped so a
+    future runner field cannot widen what is persisted without a deliberate change
+    here.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "version": str(entry.get("version") or ""),
+                "sha256": str(entry.get("sha256") or ""),
+            }
+        )
+    return tuple(out)
 
 
 def _b64(data: bytes) -> str:
