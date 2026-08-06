@@ -15,20 +15,31 @@
  * `error` (a typed `ApiError`), which each panel renders as an actionable state.
  */
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { ApiError } from '@/api';
 import {
+  addGroupMember,
   attestMemberIdentity,
+  createGroup,
+  deleteGroup,
   getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
   getSandboxPolicy,
   getToolPolicy,
+  listGroupMembers,
+  listGroups,
   listMembers,
+  removeGroupMember,
+  renameGroup,
   updateAutonomyPolicy,
   updateSandboxPolicy,
   updateToolPolicy,
@@ -49,6 +60,10 @@ import type {
   TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
+  Group,
+  GroupCreate,
+  GroupList,
+  GroupMemberList,
   Member,
   MemberList,
   ModelGovernance,
@@ -60,6 +75,16 @@ import type {
 } from '@/api';
 
 export const membersQueryKey = ['admin', 'members'] as const;
+/**
+ * Groups have a list AND a per-group sub-resource, so they get a key factory
+ * (the other admin surfaces are singleton reads and use flat consts). Never
+ * invalidate the bare `['admin']` prefix — every admin key lives under it.
+ */
+export const groupKeys = {
+  all: ['admin', 'groups'] as const,
+  list: () => [...groupKeys.all, 'list'] as const,
+  members: (groupId: string) => [...groupKeys.all, 'members', groupId] as const,
+};
 export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
@@ -96,6 +121,188 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
           : prev,
       );
       void qc.invalidateQueries({ queryKey: membersQueryKey });
+    },
+  });
+}
+
+/**
+ * The full member roster, page by page — the source for the group member picker.
+ * `useMembers` deliberately reads only the first page (the roster table shows
+ * one page); a picker that did the same could not offer the 21st member of a
+ * tenant, so this one follows the cursor.
+ *
+ * The key nests under `membersQueryKey`, so anything that invalidates the
+ * roster refreshes the picker too.
+ */
+export const memberRosterQueryKey = [...membersQueryKey, 'roster'] as const;
+
+export function useMemberRoster(): UseInfiniteQueryResult<InfiniteData<MemberList>> {
+  return useInfiniteQuery<MemberList, Error, InfiniteData<MemberList>, typeof memberRosterQueryKey, string | undefined>({
+    queryKey: memberRosterQueryKey,
+    queryFn: ({ pageParam, signal }) =>
+      listMembers(pageParam === undefined ? {} : { cursor: pageParam }, signal),
+    initialPageParam: undefined,
+    // `next_cursor` is absent or null on the last page; either ends the walk.
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * A group write that 404s means the group is already gone — another admin
+ * deleted it. Refresh the list so the stale row disappears instead of sitting
+ * there offering the same doomed action. This does NOT swallow the error: the
+ * rejection still reaches the caller, which maps it for the user.
+ */
+function reconcileIfVanished(
+  qc: ReturnType<typeof useQueryClient>,
+  error: unknown,
+  ...alsoInvalidate: readonly (readonly unknown[])[]
+): void {
+  if (!(error instanceof ApiError) || error.status !== 404) return;
+  void qc.invalidateQueries({ queryKey: groupKeys.list() });
+  // A member write names TWO things, so its 404 may mean the USER vanished -
+  // refreshing only the group list would keep offering that user in the picker.
+  for (const queryKey of alsoInvalidate) void qc.invalidateQueries({ queryKey });
+}
+
+/** Drop a group from the cached list at once, so no stale row stays clickable
+ *  in the window before an invalidation's refetch lands (or never lands). */
+function dropGroupFromList(qc: ReturnType<typeof useQueryClient>, groupId: string): void {
+  qc.setQueryData<GroupList>(groupKeys.list(), (prev) =>
+    prev ? { ...prev, items: prev.items.filter((g) => g.id !== groupId) } : prev,
+  );
+}
+
+/**
+ * Every group in this tenant (admin only, ADR-0022). Not paginated — a tenant
+ * has few groups — and the derived "All members" group sorts first.
+ */
+export function useGroups(): UseQueryResult<GroupList> {
+  return useQuery<GroupList>({
+    queryKey: groupKeys.list(),
+    queryFn: ({ signal }) => listGroups(signal),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * The users explicitly in one group. Gated on a selection: with no group open
+ * the query stays disabled rather than firing a request for a sentinel id.
+ * The system group is never passed here — its membership is derived, so there
+ * is nothing to enumerate (ADR-0022 §3).
+ */
+export function useGroupMembers(groupId: string | null): UseQueryResult<GroupMemberList> {
+  return useQuery<GroupMemberList>({
+    // The `∅` sentinel only ever appears while the query is disabled, so it
+    // never becomes a real cache entry.
+    queryKey: groupKeys.members(groupId ?? '∅'),
+    queryFn: ({ signal }) => listGroupMembers(groupId as string, signal),
+    enabled: groupId !== null,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Create a user group (audited `group.created`). A duplicate name → 409
+ * `group_name_taken`, the reserved "All members" → 409 `group_name_reserved`,
+ * a blank/over-long name → 422 — all propagate as a typed `ApiError` for the
+ * panel to map; they are NOT swallowed here.
+ */
+export function useCreateGroup(): UseMutationResult<Group, unknown, GroupCreate> {
+  const qc = useQueryClient();
+  return useMutation<Group, unknown, GroupCreate>({
+    mutationFn: (body) => createGroup(body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: groupKeys.list() }),
+  });
+}
+
+/**
+ * Rename a user group (audited `group.updated`). The response is authoritative,
+ * so we patch the cached list first — the row keeps its new name instead of
+ * flashing back to the old one — and then invalidate.
+ */
+export function useRenameGroup(): UseMutationResult<
+  Group,
+  unknown,
+  { groupId: string; name: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<Group, unknown, { groupId: string; name: string }>({
+    mutationFn: ({ groupId, name }) => renameGroup(groupId, { name }),
+    onError: (error) => reconcileIfVanished(qc, error),
+    onSuccess: (group) => {
+      qc.setQueryData<GroupList>(groupKeys.list(), (prev) =>
+        prev ? { ...prev, items: prev.items.map((g) => (g.id === group.id ? group : g)) } : prev,
+      );
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Delete a user group (audited `group.deleted`). The server also drops the
+ * group's memberships and every grant naming it, so anything shared with the
+ * group stops resolving — which is why the panel confirms first.
+ */
+export function useDeleteGroup(): UseMutationResult<void, unknown, string> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, string>({
+    mutationFn: (groupId) => deleteGroup(groupId),
+    onError: (error, groupId) => {
+      if (error instanceof ApiError && error.status === 404) dropGroupFromList(qc, groupId);
+      reconcileIfVanished(qc, error);
+    },
+    onSuccess: (_data, groupId) => {
+      dropGroupFromList(qc, groupId);
+      // Drop the dead group's member cache too, so re-creating a group with the
+      // same name can never show the deleted one's roster.
+      qc.removeQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Add a user to a group (audited `group.member_added`; idempotent). Invalidates
+ * the group's roster AND the group list, because `member_count` on the list row
+ * just changed.
+ */
+export function useAddGroupMember(): UseMutationResult<
+  void,
+  unknown,
+  { groupId: string; userId: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, { groupId: string; userId: string }>({
+    mutationFn: ({ groupId, userId }) => addGroupMember(groupId, { user_id: userId }),
+    onError: (error, { groupId: id }) =>
+      reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
+    onSuccess: (_data, { groupId }) => {
+      void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Remove a user from a group (audited `group.member_removed`; idempotent).
+ * Takes effect on that user's next request — membership is re-read per request
+ * and never cached in their token (ADR-0022 §7).
+ */
+export function useRemoveGroupMember(): UseMutationResult<
+  void,
+  unknown,
+  { groupId: string; userId: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, { groupId: string; userId: string }>({
+    mutationFn: ({ groupId, userId }) => removeGroupMember(groupId, userId),
+    onError: (error, { groupId: id }) =>
+      reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
+    onSuccess: (_data, { groupId }) => {
+      void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
     },
   });
 }

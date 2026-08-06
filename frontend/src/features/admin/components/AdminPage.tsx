@@ -8,9 +8,11 @@
  * labelled by its tab. The page body scrolls independently of the pinned shell
  * chrome (min-h-0 + contained overflow).
  *
- * Read-only for v1: there are deliberately NO mutating controls anywhere on this
- * screen — no invite, no enable/default switches, no policy toggles, no
- * approve/deny. The screen nests inside the shell-aware PageChrome, so the top
+ * Most surfaces are read-only, but the console is no longer read-only overall:
+ * Tool / Sandbox / Autonomy governance, Branding, LLM providers and Groups each
+ * carry audited writes, while Members & roles, Model governance, Approvals &
+ * risk and Data minimization stay read-only (no invite, no role edit, no
+ * approve/deny). The screen nests inside the shell-aware PageChrome, so the top
  * bar / nav / account menu / theme are the SHELL's; this file refines CONTENT
  * only. Each panel reads admin-only, tenant-scoped data through the api/ boundary;
  * a non-admin caller (403, INV-5) or an expired session (401, INV-4) sees an
@@ -24,6 +26,7 @@ import { AdminHeader } from './AdminHeader';
 import { AdminTabs, type AdminTab } from './AdminTabs';
 import { adminTabIds } from './tabIds';
 import { MembersPanel } from './MembersPanel';
+import { GroupsPanel } from './GroupsPanel';
 import { ModelGovernancePanel } from './ModelGovernancePanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import { RiskTierPanel } from './RiskTierPanel';
@@ -35,10 +38,21 @@ import { BrandingPanel } from './BrandingPanel';
 
 const TAB_PREFIX = 'admin';
 
-type TabId = 'members' | 'models' | 'providers' | 'approvals' | 'tools' | 'sandbox' | 'autonomy' | 'data' | 'branding';
+type TabId =
+  | 'members'
+  | 'groups'
+  | 'models'
+  | 'providers'
+  | 'approvals'
+  | 'tools'
+  | 'sandbox'
+  | 'autonomy'
+  | 'data'
+  | 'branding';
 
 const TABS: AdminTab[] = [
   { id: 'members', label: 'Members & roles', icon: 'user' },
+  { id: 'groups', label: 'Groups', icon: 'lock' },
   { id: 'models', label: 'Model governance', icon: 'database' },
   { id: 'providers', label: 'LLM providers', icon: 'plug' },
   { id: 'approvals', label: 'Approvals & risk', icon: 'shield-check' },
@@ -51,6 +65,7 @@ const TABS: AdminTab[] = [
 
 const PANELS: Record<TabId, { label: string; render: () => ReactNode }> = {
   members: { label: 'Members', render: () => <MembersPanel /> },
+  groups: { label: 'Groups', render: () => <GroupsPanel /> },
   models: { label: 'Model governance', render: () => <ModelGovernancePanel /> },
   providers: { label: 'LLM providers', render: () => <ProvidersPanel /> },
   approvals: { label: 'Risk tiers', render: () => <RiskTierPanel /> },

@@ -4,11 +4,19 @@
  * (contracts/openapi.yaml §admin, M2 #80 + #223). Restricted to the `admin` role;
  * any other role receives 403 (INV-5), and all are tenant-scoped (INV-1):
  *
- *   GET   /admin/members          ?cursor&limit → MemberList
- *   GET   /admin/model-governance               → ModelGovernance
- *   GET   /admin/risk-tiers                      → RiskTierList
- *   GET   /admin/tool-policy                      → ToolPolicy
- *   PATCH /admin/tool-policy      {tool_name,…}   → ToolPolicy
+ *   GET    /admin/members         ?cursor&limit → MemberList
+ *   GET    /admin/model-governance              → ModelGovernance
+ *   GET    /admin/risk-tiers                     → RiskTierList
+ *   GET    /admin/tool-policy                     → ToolPolicy
+ *   PATCH  /admin/tool-policy     {tool_name,…}   → ToolPolicy
+ *   GET    /admin/groups                          → GroupList
+ *   POST   /admin/groups          {name}          → Group
+ *   GET    /admin/groups/{id}                     → Group
+ *   PATCH  /admin/groups/{id}     {name}          → Group
+ *   DELETE /admin/groups/{id}                     → 204
+ *   GET    /admin/groups/{id}/members             → GroupMemberList
+ *   POST   /admin/groups/{id}/members {user_id}   → 204
+ *   DELETE /admin/groups/{id}/members/{userId}    → 204
  *
  * The tool-policy PATCH (issue #223) is the one governance WRITE here — a
  * tenant-scoped T1 action, audited server-side; an unknown tool name → 422 (INV-8).
@@ -30,6 +38,12 @@ import type {
   CertificationState,
   GovernedAssistant,
   GovernedAssistantList,
+  Group,
+  GroupCreate,
+  GroupList,
+  GroupMemberAdd,
+  GroupMemberList,
+  GroupUpdate,
   Member,
   MemberList,
   ModelGovernance,
@@ -70,6 +84,77 @@ export function listMembers(page: PageQuery = {}, signal?: AbortSignal): Promise
  */
 export function attestMemberIdentity(memberId: string): Promise<Member> {
   return request<Member>(`/admin/members/${memberId}/attest-identity`, { method: 'POST' });
+}
+
+/**
+ * Every group in this tenant — the derived "All members" group first, then user
+ * groups by name (ADR-0022). Not paginated: a tenant has few groups.
+ */
+export function listGroups(signal?: AbortSignal): Promise<GroupList> {
+  return request<GroupList>('/admin/groups', { signal });
+}
+
+/**
+ * Create a user group (admin only, audited as `group.created`). Names are
+ * trimmed and unique per tenant case-insensitively → 409 `group_name_taken`;
+ * "All members" is reserved for the derived tenant-wide group → 409
+ * `group_name_reserved`. A blank or over-long (>120) name → 422 (INV-8).
+ */
+export function createGroup(body: GroupCreate): Promise<Group> {
+  return request<Group>('/admin/groups', { method: 'POST', json: body });
+}
+
+/** One group in this tenant; unknown or cross-tenant → 404, never 403 (INV-1). */
+export function getGroup(groupId: string, signal?: AbortSignal): Promise<Group> {
+  return request<Group>(`/admin/groups/${groupId}`, { signal });
+}
+
+/**
+ * Rename a user group (admin only, audited as `group.updated`). The derived
+ * system group is immutable → 409 `system_group_immutable`; a colliding name →
+ * 409 `group_name_taken`; the reserved name → 409 `group_name_reserved`.
+ */
+export function renameGroup(groupId: string, body: GroupUpdate): Promise<Group> {
+  return request<Group>(`/admin/groups/${groupId}`, { method: 'PATCH', json: body });
+}
+
+/**
+ * Delete a user group (admin only, audited as `group.deleted`). Also drops its
+ * memberships AND every grant naming it, so the access it conferred stops
+ * immediately. The system group cannot be deleted → 409 `system_group_immutable`.
+ */
+export function deleteGroup(groupId: string): Promise<void> {
+  return request<void>(`/admin/groups/${groupId}`, { method: 'DELETE' });
+}
+
+/**
+ * The users explicitly in a group, ordered by email. Empty for the system
+ * group, whose membership is derived rather than enumerated (ADR-0022 §3).
+ */
+export function listGroupMembers(
+  groupId: string,
+  signal?: AbortSignal,
+): Promise<GroupMemberList> {
+  return request<GroupMemberList>(`/admin/groups/${groupId}/members`, { signal });
+}
+
+/**
+ * Add a user to a group (admin only, audited as `group.member_added`).
+ * Idempotent — re-adding an existing member succeeds silently. The user must be
+ * in the caller's tenant, else 404 (INV-1); the system group cannot be
+ * populated → 409 `system_group_immutable`.
+ */
+export function addGroupMember(groupId: string, body: GroupMemberAdd): Promise<void> {
+  return request<void>(`/admin/groups/${groupId}/members`, { method: 'POST', json: body });
+}
+
+/**
+ * Remove a user from a group (admin only, audited as `group.member_removed`).
+ * Idempotent. Membership is re-read per request and never cached in the token,
+ * so the user loses group-granted access on their NEXT request (ADR-0022 §7).
+ */
+export function removeGroupMember(groupId: string, memberId: string): Promise<void> {
+  return request<void>(`/admin/groups/${groupId}/members/${memberId}`, { method: 'DELETE' });
 }
 
 /** Which models are allowed, by governance tier (admin only). */
