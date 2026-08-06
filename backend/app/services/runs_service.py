@@ -72,10 +72,10 @@ from app.domain.escalation import classify_terminal, is_transient, normalize_rea
 from app.llm import LLMGateway
 from app.llm.context import ContextConfig
 from app.retrieval.permissions import AllowSet
-from app.retrieval.queries import permitted_document_ids
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
+from app.services.citation_access import audit_withholding, resolve_permitted_documents
 from app.services.mcp_servers_service import build_mcp_servers_service
 from app.services.models_service import ChatModelService, is_allowed_model
 from app.services.provider_models import build_model_route_resolver
@@ -710,7 +710,16 @@ class RunsReadService:
     or owned by another user is **404** (existence non-disclosure), never 403.
     """
 
-    def __init__(self, session: AsyncSession, *, tenant_id: UUID, owner_id: UUID) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        owner_id: UUID,
+        audit: AuditSink | None = None,
+        request_id: str = "unknown",
+        source_ip: str = "unknown",
+    ) -> None:
         self._session = session
         self._runs = RunRepository(session, tenant_id)
         self._steps = RunStepRepository(session, tenant_id)
@@ -719,6 +728,9 @@ class RunsReadService:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._allow_set: AllowSet | None = None
+        self._audit = audit
+        self._request_id = request_id
+        self._source_ip = source_ip
 
     async def list_(
         self,
@@ -765,10 +777,40 @@ class RunsReadService:
         # finished would otherwise keep serving the passage here forever — and this
         # surface has TWO copies of it, the citation list and the durable step
         # transcript, so redacting one alone would be decorative.
+        requested = self._cited_document_ids(citations, steps)
         permitted = await self._permitted_documents(citations, steps)
         citations = [c if c.document_id in permitted else c.redact() for c in citations]
-        steps = [_redact_step(step, permitted) for step in steps]
-        return RunDetail(run=run, steps=steps, citations=citations)
+        redacted_steps = [_redact_step(step, permitted) for step in steps]
+        # INV-6: a read that withheld content is a permission-relevant event, and
+        # both copies count — a step blanked without its citation still withheld
+        # something. Counts only; the trail never carries what it just withheld.
+        # The ROUTE commits: `AuditSink.emit` flushes but does not commit.
+        withheld = sum(1 for c in citations if c.redacted) + sum(
+            1 for before, after in zip(steps, redacted_steps, strict=True) if before is not after
+        )
+        await audit_withholding(
+            self._audit,
+            actor_id=self._owner_id,
+            surface="run",
+            resource_type="run",
+            resource_id=str(run.id),
+            requested_documents=len(requested),
+            permitted_documents=len(permitted),
+            redacted=withheld,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+        )
+        return RunDetail(run=run, steps=redacted_steps, citations=citations)
+
+    @staticmethod
+    def _cited_document_ids(citations: list[CitationView], steps: list[RunStep]) -> set[UUID]:
+        """Every document this response would disclose, across both copies."""
+        ids = {c.document_id for c in citations}
+        for step in steps:
+            document_id = _step_document_id(step)
+            if document_id is not None:
+                ids.add(document_id)
+        return ids
 
     async def _permitted_documents(
         self, citations: list[CitationView], steps: list[RunStep]
@@ -779,11 +821,7 @@ class RunsReadService:
         INV-2 chokepoint retrieval uses — so connector-ACL mode and ADR-0022 group
         principals are inherited rather than re-implemented.
         """
-        ids = {c.document_id for c in citations}
-        for step in steps:
-            document_id = _step_document_id(step)
-            if document_id is not None:
-                ids.add(document_id)
+        ids = self._cited_document_ids(citations, steps)
         if not ids:
             return set()
         if self._allow_set is None:
@@ -791,8 +829,8 @@ class RunsReadService:
             self._allow_set = AllowSet.for_user(
                 tenant_id=self._tenant_id, user_id=self._owner_id, group_ids=group_ids
             )
-        return await permitted_document_ids(
-            self._session, allow_set=self._allow_set, document_ids=sorted(ids)
+        return await resolve_permitted_documents(
+            self._session, allow_set=self._allow_set, document_ids=ids
         )
 
 

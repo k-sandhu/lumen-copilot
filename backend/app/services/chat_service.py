@@ -54,10 +54,8 @@ from app.db.repositories import (
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
-from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
     AssistantStatus,
-    AuditOutcome,
     ChatSession,
     LlmUsageRecord,
     LlmUsageTotals,
@@ -68,9 +66,9 @@ from app.domain.entities import (
 from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.retrieval.permissions import AllowSet
-from app.retrieval.queries import permitted_document_ids
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
+from app.services.citation_access import enforce_citation_permissions
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
     is_allowed_provider_model,
@@ -520,60 +518,22 @@ class ChatService:
     ) -> dict[uuid.UUID, list[CitationView]]:
         """Re-check every hydrated citation against CURRENT permissions (#536, INV-2).
 
-        The hydration join is tenant-scoped only. A citation is written only for a
-        passage the asker could retrieve, but that is a fact about **write** time:
-        revoke the grant afterwards and the row — including the full ``chunks.text``
-        — keeps coming back on every transcript read. The answer path already
-        re-checks (evidence carry-forward stores ids and rehydrates under current
-        permissions) and the summariser redacts cited spans out of summary prose;
-        the transcript was the one surface still serving the passage itself.
-
-        Redacted rather than dropped: removing the citation outright would erase a
-        settled claim's provenance, which is its own kind of dishonesty. The shell
-        stays so the UI can say "source no longer available".
-
-        One extra query per page, over the page's distinct document ids.
+        The rule itself lives in ``services.citation_access``: the agent-run detail
+        serves the same stored evidence and must withhold the same things (#558),
+        and a second copy here is how the two would drift.
         """
-        if not citations_by_message:
-            return citations_by_message
-        document_ids = {c.document_id for cites in citations_by_message.values() for c in cites}
-        if not document_ids:
-            return citations_by_message
-        permitted = await permitted_document_ids(
+        return await enforce_citation_permissions(
             self._session,
             allow_set=await self._resolve_allow_set(),
-            document_ids=sorted(document_ids),
+            citations_by_key=citations_by_message,
+            surface="transcript",
+            resource_type="session",
+            resource_id=str(session_id),
+            actor_id=self._owner_id,
+            audit=self._audit,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
         )
-        redacted_count = 0
-        filtered: dict[uuid.UUID, list[CitationView]] = {}
-        for message_id, cites in citations_by_message.items():
-            out = []
-            for c in cites:
-                if c.document_id in permitted:
-                    out.append(c)
-                else:
-                    out.append(c.redact())
-                    redacted_count += 1
-            filtered[message_id] = out
-        if redacted_count and self._audit is not None:
-            # INV-6: a read that withheld content is a permission-relevant event.
-            # Counts only — never which passage, and never its text.
-            await self._audit.emit(
-                action=AuditAction.EVIDENCE_REHYDRATED,
-                actor=AuditActor.user(self._owner_id),
-                resource_type="session",
-                resource_id=str(session_id),
-                outcome=AuditOutcome.ALLOWED,
-                request_id=self._request_id,
-                source_ip=self._source_ip,
-                metadata={
-                    "surface": "transcript",
-                    "requested_documents": len(document_ids),
-                    "permitted_documents": len(permitted),
-                    "redacted_citations": redacted_count,
-                },
-            )
-        return filtered
 
     async def list_messages(
         self, session_id: UUID, *, cursor: str | None, limit: int | None
