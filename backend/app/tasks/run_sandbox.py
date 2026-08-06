@@ -52,7 +52,7 @@ async def execute_code_run_async(
     principal, read from the durable row inside the scope (never request input) — the
     sandbox runs code on that user's behalf. Returns the terminal status.
     """
-    runner = HttpSandboxRunner(settings.sandbox_runner_url)
+    runner = HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token)
     object_store = ObjectStore(settings)
     async with tenant_session_scope(tenant_id) as session:
         run = await CodeRunRepository(session, tenant_id).get(code_run_id)

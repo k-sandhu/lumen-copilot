@@ -286,7 +286,29 @@ What contains it today, all of it deliberate:
 - withholding the runner's outbound network entirely, which is the intended
   locked-down posture and makes the pre-installed stack the whole story.
 
-A hash-pinned internal mirror remains the right fix and is **not** in this PR.
+A hash-pinned internal mirror remains the right fix. **As of #509 the mechanism
+exists but is off unless you configure it:**
+
+* `SANDBOX_PACKAGE_INDEX_URL` — pin where wheels come from. Replaces the default
+  index rather than adding to it, so the mirror is exclusive.
+* `SANDBOX_PACKAGE_HASH_FILE` — a requirements file of `--hash=` lines. With it, pip
+  runs under `--require-hashes` and refuses any artefact whose digest is not listed,
+  transitive dependencies included. A mismatch fails the run with its own reason
+  (`a package failed hash verification against the configured pins`) so you can tell
+  a supply-chain event from a flaky network.
+
+With **neither** set the fetch is exactly as described above: default public index,
+no verification. Setting them is a deployment act — this runbook does not claim the
+ADR-0013 §3 clause is satisfied until you have done both.
+
+Two things #509 *did* close without any configuration:
+
+* **A denied distribution can no longer arrive as a transitive dependency.** The deny
+  list is re-applied to the resolved wheelhouse on the runner, before anything is
+  staged into the container, and a match refuses the run.
+* **`code_runs.resolved_packages` records what actually installed** — name, version
+  and sha256 per wheel — so you can answer "did any run install X?" from the trail
+  instead of guessing from the top-level request.
 
 ### What this does NOT bound
 

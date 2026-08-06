@@ -408,6 +408,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A source the reader has lost access to (#536). Muted and italic so it reads as
+   an absence rather than a filename, while still holding its place in the list. */
+.lc-source-row__title--redacted {
+  color: var(--text-muted);
+  font-style: italic;
+  font-weight: 460;
+}
+.lc-source-row__num-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .lc-source-row__sub {
   display: flex;
   align-items: center;

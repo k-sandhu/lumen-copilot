@@ -24,6 +24,7 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.code_execution import (
+    SANDBOX_REASON_CONCURRENCY_EXCEEDED,
     SANDBOX_REASON_PACKAGE_DENIED,
     SANDBOX_REASON_RUN_ERROR,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
@@ -267,6 +268,21 @@ def validate_requested_packages(
             continue
         if "*" not in allowed_names and name not in allowed_names:
             raise PackagePolicyError(_install_refusal(name, value, shipped_version))
+        if name not in allowed_names:
+            # Admitted only because `*` is set (ADR-0020 §3's allow-all grant), so the
+            # MODEL just chose a distribution name off the public index and this deploy
+            # fetched it (#509). That is a real posture — some tenants want it — but it
+            # should be visible in the ops log rather than inferred from a policy row
+            # nobody reads. Deliberately not an audit event: nothing was denied and the
+            # run is legitimate; this is telemetry about how permissive the grant is.
+            log.warning(
+                "sandbox.package_admitted_by_wildcard",
+                package=name,
+                detail=(
+                    "allowed_packages contains '*', so any public distribution name "
+                    "the model asks for is fetched and installed"
+                ),
+            )
         if name in seen:
             continue
         seen.add(name)
@@ -315,7 +331,7 @@ class SandboxSessionService:
 
     async def ensure(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id)
-        await self._require_enabled()
+        await self._require_enabled(chat_session_id, lifecycle="ensure")
         previous = await self._sessions.get_for_chat(chat_session_id)
         value = await self._sessions.get_or_create(
             owner_id=self._owner_id,
@@ -347,7 +363,7 @@ class SandboxSessionService:
 
     async def reset(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id)
-        await self._require_enabled()
+        await self._require_enabled(chat_session_id, lifecycle="reset")
         current = await self._sessions.get_for_chat(chat_session_id)
         if current is None:
             return await self.ensure(chat_session_id)
@@ -468,7 +484,7 @@ class SandboxSessionService:
         if chat is None or chat.owner_id != self._owner_id:
             raise NotFoundError("Chat session not found.")
 
-    async def _require_enabled(self) -> None:
+    async def _require_enabled(self, chat_session_id: UUID, *, lifecycle: str) -> None:
         """Refuse a lifecycle action when code execution is off — carrying the reason.
 
         The error CODE stays ``code_execution_disabled`` (a frozen contract value);
@@ -476,6 +492,17 @@ class SandboxSessionService:
         The ``detail`` is the **public** sentence: this error renders into an HTTP
         problem body for any workspace member, so it may not name the deploy
         kill-switch or the process topology (see ``domain/code_execution``).
+
+        The refusal is **audited** (#510). It used to emit only a structlog line, but
+        spec 0004 §2.4 puts ops telemetry outside the product audit trail explicitly,
+        so a caller hitting a disabled deploy got a 409 that left no trace — while
+        every neighbouring sandbox denial audited: the run path writes
+        ``code_run.denied`` with its reason code, and the tool runner funnels all four
+        refusal paths through ``_finalise``. Lifecycle was the one hole in INV-6.
+
+        ``permission.denied`` rather than a new action: it is already in the MVP
+        taxonomy and says exactly what happened — policy refused this action — so the
+        gap closes without widening the taxonomy for a single call site.
         """
         policy = await SandboxPolicyReader(
             self._session, tenant_id=self._tenant_id, settings=self._settings
@@ -483,6 +510,23 @@ class SandboxSessionService:
         if not policy.enabled:
             reason = policy.disabled_reason or SANDBOX_REASON_TENANT_DISABLED
             log.warning("sandbox.lifecycle_denied", reason_code=reason)
+            await self._audit_sink.emit(
+                action=AuditAction.PERMISSION_DENIED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="sandbox_session",
+                # No sandbox session exists to point at — the refusal is the reason
+                # there is none — so the chat session it was requested for is the
+                # resource an operator would search by.
+                resource_id=str(chat_session_id),
+                outcome=AuditOutcome.DENIED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "chat_session_id": str(chat_session_id),
+                    "lifecycle": lifecycle,
+                    "reason_code": reason,
+                },
+            )
             raise SandboxDisabledError(reason)
 
     def _spec(self, value: SandboxSession) -> SandboxSessionSpec:
@@ -616,6 +660,24 @@ class SandboxService:
         elif run.session_id is None:
             reason = SANDBOX_REASON_SESSION_REQUIRED
             denial = sandbox_reason_public_message(reason)
+        elif (in_flight := await runs.count_executing()) >= policy.max_concurrency:
+            # #519: `max_concurrency` was stored, clamped against the deploy ceiling,
+            # returned by the admin API and rendered in the UI — and read by NO runtime
+            # path. An operator who saw concurrent runs overwhelming the runner would
+            # reach for exactly this control, set it, and watch nothing change. Either
+            # enforce it or stop showing it; a limit that silently does nothing is the
+            # worst of the three options.
+            #
+            # Counted, not reserved: this is a coarse admission gate, and two runs
+            # racing the same check can both be admitted. That is acceptable here —
+            # the bound exists to stop runaway fan-out, not to be exact to one run —
+            # and a reservation would need a row lock on the hot path of every turn.
+            reason = SANDBOX_REASON_CONCURRENCY_EXCEEDED
+            denial = sandbox_reason_public_message(reason)
+            operator_detail = (
+                f"{in_flight} run(s) already in flight for this tenant; policy admits "
+                f"{policy.max_concurrency}."
+            )
         else:
             try:
                 # ``packages`` is what the runner must INSTALL — the requested
@@ -711,6 +773,10 @@ class SandboxService:
             execution_id=run.id,
             code=run.code,
             packages=packages,
+            # The runner re-applies these to the RESOLVED tree (#509): this layer only
+            # ever saw the top-level request, and `pip install` takes the whole
+            # wheelhouse, so a denied distribution could arrive as a dependency.
+            denied_packages=policy.denied_packages,
             inputs=inputs,
             env=(("LUMEN_OUTPUT_DIR", f"/workspace/.lumen/runs/{run.id}/output"),),
         )
@@ -741,6 +807,7 @@ class SandboxService:
             resource_usage=result.resource_usage,
             image_digest=result.image_digest or sandbox.image_digest,
             artifact_ids=artifact_ids,
+            resolved_packages=result.resolved_packages or None,
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
         await SandboxSessionRepository(session, self._tenant_id).touch(sandbox.id)

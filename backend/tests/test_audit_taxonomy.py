@@ -289,3 +289,39 @@ def test_validate_envelope_accepts_action_as_string_in_taxonomy() -> None:
     kwargs = _valid_kwargs()
     kwargs["action"] = "answer.generated"
     validate_envelope(**kwargs)  # type: ignore[arg-type]
+
+
+# --- #545: the contract must declare every action the backend can emit ---------
+
+
+def test_the_contract_declares_exactly_the_actions_the_backend_can_emit() -> None:
+    """`AuditEventType` is a CLOSED enum, so drift silently breaks the API (#545).
+
+    `GET /audit?type=` is typed by this enum, and clients are generated from it. It
+    had drifted to 19 of 84 values — so 65 emitted actions were unfilterable through
+    the documented API and invisible to every generated client, while the events
+    themselves were being written all along. A closed enum that omits two thirds of
+    its domain is worse than an open one: it looks authoritative.
+
+    Both directions are asserted deliberately. Missing values are the bug that was
+    filed; EXTRA values would be the opposite and worse — a contract advertising a
+    filter that can never match anything, which reads to a client author as "this
+    event type exists but never happens".
+
+    The taxonomy only ever grows, so this test failing means one thing: add the new
+    action to `contracts/openapi.yaml` in the same change that adds it here.
+    """
+    import pathlib
+
+    import yaml
+
+    spec_path = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    declared = set(spec["components"]["schemas"]["AuditEventType"]["enum"])
+    emittable = {action.value for action in AuditAction}
+
+    assert declared - emittable == set(), "the contract declares actions nothing emits"
+    assert emittable - declared == set(), (
+        "the backend emits actions the contract does not declare — they are "
+        "unfilterable through GET /audit and absent from generated clients"
+    )

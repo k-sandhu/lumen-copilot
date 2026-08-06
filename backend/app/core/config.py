@@ -152,6 +152,31 @@ _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES: tuple[str, ...] = (
 # daemon between two sessions of the same deploy.
 _SANDBOX_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
+# The reference GRAMMAR, transcribed from `distribution/reference` (#520). Rejecting
+# `:latest` and requiring a digest says nothing about whether the rest of the string
+# is a reference at all: `@sha256:<hex>`, `repo name:tag`, `:tag`, `repo:tag:extra`
+# and `name:-badtag` all passed the earlier checks. Each of those fails closed later
+# — the runner cannot resolve them — but "the daemon will reject it eventually" is a
+# worse error than "your config is malformed", and it fails at first EXECUTION rather
+# than at boot.
+_REF_DOMAIN_COMPONENT = r"(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])"
+# A leading component is a REGISTRY HOST only if it looks like one — it contains a
+# `.` or a `:port`, or it is exactly `localhost`. Otherwise Docker reads it as a
+# path component, which must be lowercase. Without this, `UPPER/name:1.0` parses as
+# host `UPPER` and is wrongly accepted; a real daemon rejects it.
+_REF_DOMAIN = (
+    rf"(?:{_REF_DOMAIN_COMPONENT}(?:\.{_REF_DOMAIN_COMPONENT})+(?::[0-9]+)?"
+    rf"|{_REF_DOMAIN_COMPONENT}:[0-9]+"
+    r"|localhost(?::[0-9]+)?)"
+)
+#: Lowercase only, with `.`/`_`/`__`/`-` separators between alphanumeric runs.
+_REF_PATH_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*"
+_REF_NAME = rf"(?:{_REF_DOMAIN}/)?{_REF_PATH_COMPONENT}(?:/{_REF_PATH_COMPONENT})*"
+#: A tag starts with a word character — `:-badtag` is not a tag — and is ≤128 chars.
+_REF_TAG = r"[\w][\w.-]{0,127}"
+_SANDBOX_IMAGE_NAME = re.compile(_REF_NAME)
+_SANDBOX_IMAGE_TAG = re.compile(_REF_TAG)
+
 
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration, sourced from the environment.
@@ -312,7 +337,7 @@ class Settings(BaseSettings):
     # against this set before storing. NOTE: a client-declared content-type is
     # not a security guarantee — sniffing/parsing-sandbox hardening is CC-5/OD-4,
     # fenced OUT of #22. Comma-separated override via UPLOAD_ALLOWED_CONTENT_TYPES.
-    upload_allowed_content_types: frozenset[str] = Field(
+    upload_allowed_content_types: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(
             {
                 "application/pdf",
@@ -348,7 +373,7 @@ class Settings(BaseSettings):
     # this set before storing (a client-declared type is a usability/allowlist
     # check, not a security guarantee — sniffing is fenced OUT, OD-4). Comma-
     # separated override via ARTIFACT_ALLOWED_CONTENT_TYPES.
-    artifact_allowed_content_types: frozenset[str] = Field(
+    artifact_allowed_content_types: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(
             {
                 "text/csv",
@@ -392,7 +417,7 @@ class Settings(BaseSettings):
     max_logo_bytes: int = Field(default=1 * 1024 * 1024, alias="MAX_LOGO_BYTES")
     # Allowlisted logo content-types: the raster + vector marks a browser renders
     # inline. Comma-separated override via LOGO_ALLOWED_CONTENT_TYPES.
-    logo_allowed_content_types: frozenset[str] = Field(
+    logo_allowed_content_types: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset({"image/png", "image/jpeg", "image/svg+xml"}),
         alias="LOGO_ALLOWED_CONTENT_TYPES",
     )
@@ -945,7 +970,7 @@ class Settings(BaseSettings):
     # ship in v1 (ADR-0012 §1); stdio/local-process is deferred behind the
     # code-execution sandbox and is not even a valid value. Comma-separated
     # override; an unknown transport name fails fast at startup.
-    mcp_allowed_transports: frozenset[str] = Field(
+    mcp_allowed_transports: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset({"streamable_http", "sse"}),
         alias="MCP_ALLOWED_TRANSPORTS",
     )
@@ -967,7 +992,7 @@ class Settings(BaseSettings):
     # (the SSRF guard is the mandatory control). An allowlist only *narrows*
     # (deny-by-default on top of SSRF), never widens — an allowlisted host still
     # passes the full range check. Not required for v1.
-    mcp_endpoint_allowlist: frozenset[str] = Field(
+    mcp_endpoint_allowlist: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(), alias="MCP_ENDPOINT_ALLOWLIST"
     )
 
@@ -1110,6 +1135,14 @@ class Settings(BaseSettings):
     sandbox_runner_url: str = Field(
         default="http://sandbox-runner:8000", alias="SANDBOX_RUNNER_URL"
     )
+    # The shared secret the API/worker present to that runner (#508). The runner holds
+    # the Docker socket — host-root-equivalent authority — and its API was previously
+    # UNAUTHENTICATED on the shared compose network, so an SSRF here or a compromised
+    # sibling container could have it execute arbitrary code. Empty by default so the
+    # offline suite and a sandbox-less deploy need no secret; the validator below
+    # requires one exactly when code execution is actually switched on, which is the
+    # only moment the credential can matter.
+    sandbox_runner_token: str = Field(default="", alias="SANDBOX_RUNNER_TOKEN")
     # The pinned image model-authored code EXECUTES in (curated Python + scientific
     # stack, ADR-0013 §3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
     # reproducibility (E3-7).
@@ -1146,18 +1179,34 @@ class Settings(BaseSettings):
         reference = value.strip()
         if not reference:
             raise ValueError("SANDBOX_IMAGE must name the sandbox execution image")
-        name, _, digest = reference.partition("@")
+        name_and_tag, _, digest = reference.partition("@")
         if digest and not _SANDBOX_IMAGE_DIGEST.fullmatch(digest):
             raise ValueError("SANDBOX_IMAGE digest must be 'sha256:<64 hex chars>' (ADR-0013 §3)")
         # Docker allows a port in the registry host (``host:5000/name``), so the tag
         # is only the colon inside the FINAL path segment.
-        _, _, tag = name.rsplit("/", 1)[-1].partition(":")
+        head, slash, last = name_and_tag.rpartition("/")
+        component, colon, tag = last.partition(":")
+        name = f"{head}{slash}{component}"
+        if not _SANDBOX_IMAGE_NAME.fullmatch(name):
+            raise ValueError(
+                f"SANDBOX_IMAGE is not a valid image reference: {name!r} is not a "
+                "well-formed name (lowercase path components, optional registry host)"
+            )
+        if colon and not _SANDBOX_IMAGE_TAG.fullmatch(tag):
+            raise ValueError(
+                f"SANDBOX_IMAGE is not a valid image reference: {tag!r} is not a " "well-formed tag"
+            )
         if not digest and not tag:
             raise ValueError(
                 "SANDBOX_IMAGE must be pinned to an exact tag or digest, not a bare "
                 "image name (ADR-0013 §3, ADR-0005: no floating references)"
             )
-        if tag == "latest":
+        # `:latest` is only mutable when it is what resolves the image. With a digest
+        # present the daemon resolves BY digest and the tag is a human-readable label,
+        # so `name:latest@sha256:…` is exactly as immutable as `name@sha256:…` — and
+        # it is the form `docker pull` prints, so rejecting it punished the most
+        # explicit possible pin (#520).
+        if tag == "latest" and not digest:
             raise ValueError("SANDBOX_IMAGE must not use the ':latest' tag (ADR-0013 §3)")
         return reference
 
@@ -1305,13 +1354,40 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _sandbox_runner_token_when_enabled(self) -> Settings:
+        """An enabled sandbox must authenticate to the runner (#508).
+
+        Gated on ``sandbox_enabled`` — and on that alone, including local development.
+        The digest rule above exempts local because you built the image yourself on
+        your own daemon, which is a real reduction in risk. There is no equivalent
+        argument here: the runner holds the Docker socket on whatever machine it runs
+        on, and an unauthenticated API on a shared network is the same open command
+        channel in dev as in production. Exempting local would also mean the path
+        every developer exercises is the one path never tested.
+
+        Absent, this fails at STARTUP rather than at the first run — the runner
+        refuses to boot without the same secret, so a mismatch should surface at
+        `docker compose up`, where both halves are visible together.
+        """
+        if self.sandbox_enabled and not self.sandbox_runner_token.strip():
+            raise ValueError(
+                "SANDBOX_RUNNER_TOKEN must be set when SANDBOX_ENABLED=true: the "
+                "sandbox runner holds the Docker socket and authenticates every "
+                "request (#508). Use the SAME value on the API, the worker and the "
+                "sandbox-runner service."
+            )
+        if self.sandbox_enabled and len(self.sandbox_runner_token.strip()) < 32:
+            raise ValueError("SANDBOX_RUNNER_TOKEN must be at least 32 characters")
+        return self
+
     # --- Chat-model picker registry (issue #47) ---
     # The curated set the picker offers (GET /models), grouped by tier. Config,
     # not a router constant (AC-2): the default seed lives in code as the typed
     # _DEFAULT_CHAT_MODEL_REGISTRY; override the whole list via the
     # CHAT_MODEL_REGISTRY env var as a JSON array of objects matching
     # ChatModelSetting. Invariant (AC-1): non-empty, with EXACTLY ONE is_default.
-    chat_model_registry: tuple[ChatModelSetting, ...] = Field(
+    chat_model_registry: Annotated[tuple[ChatModelSetting, ...], NoDecode] = Field(
         default=_DEFAULT_CHAT_MODEL_REGISTRY,
         alias="CHAT_MODEL_REGISTRY",
     )

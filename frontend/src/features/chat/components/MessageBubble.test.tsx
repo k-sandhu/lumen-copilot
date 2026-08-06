@@ -21,6 +21,19 @@ const CITATION: UiCitation = {
   charEnd: 140,
 };
 
+/** A citation whose document the reader has since lost access to (#536). */
+const REDACTED_CITATION: UiCitation = {
+  id: 'c2',
+  documentId: 'doc-gone',
+  // The server sends these EMPTY — the filename is itself disclosing.
+  documentName: '',
+  chunkId: 'k2',
+  snippet: '',
+  charStart: 0,
+  charEnd: 40,
+  redacted: true,
+};
+
 const WEB_CITATION: UiCitation = {
   id: 'w1',
   documentId: '',
@@ -90,7 +103,12 @@ describe('MessageBubble', () => {
       charEnd: i * 10 + 5,
     }));
     render(
-      <MessageBubble role="assistant" content="Answer." citations={many} onOpenCitation={() => {}} />,
+      <MessageBubble
+        role="assistant"
+        content="Answer."
+        citations={many}
+        onOpenCitation={() => {}}
+      />,
     );
     const list = screen.getByRole('list');
     expect(within(list).getAllByRole('listitem')).toHaveLength(1); // one document card
@@ -346,5 +364,31 @@ describe('MessageBubble', () => {
     // a web source at all, and certainly no outbound link is produced.
     expect(screen.queryByText('Web sources')).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /open .* in a new tab/i })).not.toBeInTheDocument();
+  });
+
+  it('shows a revoked source as unavailable instead of dropping it (#536)', async () => {
+    const onOpenCitation = vi.fn();
+    render(
+      <MessageBubble
+        role="assistant"
+        content="The bands are set."
+        citations={[REDACTED_CITATION]}
+        onOpenCitation={onOpenCitation}
+      />,
+    );
+
+    // The row holds its place: the answer really was grounded, and silently
+    // dropping the source would make a sourced claim look unsourced.
+    expect(screen.getByText('Sources used')).toBeInTheDocument();
+    expect(screen.getByText('Source no longer available')).toBeInTheDocument();
+
+    // Nothing about the withheld document leaks through the accessible name.
+    const button = screen.getByRole('button', {
+      name: 'Citation 1: source no longer available',
+    });
+    // And the passage does not open — there is nothing behind it to show.
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(onOpenCitation).not.toHaveBeenCalled();
   });
 });

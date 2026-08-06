@@ -1519,6 +1519,11 @@ class CodeRun:
     image_digest: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: The install manifest the runner reported (#509) — what actually landed,
+    #: transitive dependencies included. `requested_packages` above is only what the
+    #: model asked for. ``None`` means the run predates the column, which is a
+    #: different fact from an empty tuple ("this run installed nothing").
+    resolved_packages: tuple[dict[str, str], ...] | None = None
 
     @property
     def is_terminal(self) -> bool:

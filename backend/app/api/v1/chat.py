@@ -48,7 +48,7 @@ from app.domain.llm import ChatMessage, Role
 from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
-from app.sandbox.service import SandboxSessionService
+from app.sandbox.service import SandboxDisabledError, SandboxSessionService
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime, SandboxContext
@@ -156,6 +156,10 @@ class CitationResponse(BaseModel):
     char_start: int
     char_end: int
     score: float | None = None
+    #: True when the caller may no longer retrieve the cited document (#536), in
+    #: which case `snippet` and `document_name` are empty. The row is kept so a
+    #: settled claim's provenance stays visible instead of silently disappearing.
+    redacted: bool = False
 
 
 class MessageToolInvocationResponse(BaseModel):
@@ -323,6 +327,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         char_start=view.char_start,
         char_end=view.char_end,
         score=view.score,
+        redacted=view.redacted,
     )
 
 
@@ -412,20 +417,38 @@ def _build_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    request: Request | None = None,
 ) -> ChatService:
+    """Assemble the per-request chat service.
+
+    ``request`` is optional and only the transcript read supplies it: that path
+    re-checks citation permissions and audits when it withholds content (#536),
+    which needs the correlation context. Every other caller has nothing to audit
+    here, so threading a request through all nine would be noise.
+    """
     lifecycle = SandboxSessionService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
     )
+    audit_kwargs: dict[str, object] = {}
+    if request is not None:
+        audit_kwargs = {
+            "audit": AuditSink(AuditEventRepository(session, tenant_id)),
+            # The envelope requires a non-empty request_id / source_ip (spec 0004
+            # §2.4); fall back to a sentinel when the client supplied neither.
+            "request_id": extract_request_id(request) or "unknown",
+            "source_ip": request.client.host if request.client else "unknown",
+        }
     return ChatService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         settings=settings,
         sandbox_lifecycle=lifecycle,
+        **audit_kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -435,13 +458,25 @@ def _build_sandbox_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    request: Request,
 ) -> SandboxSessionService:
+    """Assemble the per-request sandbox lifecycle service.
+
+    ``request`` is required rather than optional: every lifecycle route can audit
+    (the disabled refusal, #510), and the service's ``"sandbox-request"`` /
+    ``"system"`` defaults exist for the background task that has no client — not
+    for an HTTP caller that does. Passing the real correlation context is what
+    makes the refusal traceable back to the request that provoked it.
+    """
     return SandboxSessionService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        runner=HttpSandboxRunner(settings.sandbox_runner_url),
+        runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
+        # Mirrors _build_service: the envelope requires both (spec 0004 §2.4).
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
     )
 
 
@@ -630,6 +665,7 @@ async def delete_session(
 )
 async def get_sandbox_session(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
@@ -637,7 +673,11 @@ async def get_sandbox_session(
 ) -> SandboxSessionResponse:
     """Inspect this visible chat's reusable sandbox state."""
     service = _build_sandbox_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
     )
     value = await service.get(session_id)
     return _sandbox_response(value, enabled=await service.is_enabled())
@@ -650,6 +690,7 @@ async def get_sandbox_session(
 )
 async def reset_sandbox_session(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
@@ -657,7 +698,11 @@ async def reset_sandbox_session(
 ) -> SandboxSessionResponse:
     """Destroy prior state and start a clean sandbox generation."""
     service = _build_sandbox_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
     )
     try:
         value = await service.reset(session_id)
@@ -667,6 +712,13 @@ async def reset_sandbox_session(
         # the old container; rolling back would falsely report the old state active.
         await session.commit()
         raise
+    except SandboxDisabledError:
+        # The refusal IS the record (#510): `AuditSink.emit` flushes but never
+        # commits — the caller owns the transaction — so without this the
+        # `permission.denied` row unwinds with the request and a refused caller
+        # leaves no trace, which is the entirety of what #510 fixes.
+        await session.commit()
+        raise
     await session.commit()
     return _sandbox_response(value, enabled=True)
 
@@ -674,6 +726,7 @@ async def reset_sandbox_session(
 @router.delete("/sessions/{session_id}/sandbox", status_code=status.HTTP_204_NO_CONTENT)
 async def close_sandbox_session(
     session_id: UUID,
+    request: Request,
     response: Response,
     session: DbSession,
     principal: CurrentUser,
@@ -682,7 +735,11 @@ async def close_sandbox_session(
 ) -> Response:
     """Idempotently close and destroy a visible chat's reusable sandbox."""
     service = _build_sandbox_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
     )
     await service.close(session_id)
     await session.commit()
@@ -700,6 +757,7 @@ async def close_sandbox_session(
 )
 async def list_messages(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
@@ -709,11 +767,22 @@ async def list_messages(
 ) -> MessageListResponse:
     """Message history for a session (oldest → newest), citations on assistant turns."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
     )
     page = await service.list_messages(session_id, cursor=cursor, limit=limit)
     if page is None:
         raise NotFoundError("Chat session not found.")
+    # This read AUDITS when it withholds a citation the caller may no longer see
+    # (#536). `AuditSink.emit` flushes but does not commit, so an audited read
+    # has to close its own transaction or the row rolls back when the
+    # request-scoped session ends — the same reason `search` and
+    # `document.viewed` commit. The redaction happens either way; the INV-6
+    # record is what is lost.
+    await session.commit()
     return _message_list_to_response(page)
 
 
@@ -934,7 +1003,9 @@ def _build_sandbox_factory(
             sessionmaker=get_sessionmaker(),
             tenant_id=principal.tenant_id,
             owner_id=principal.user_id,
-            runner=HttpSandboxRunner(settings.sandbox_runner_url),
+            runner=HttpSandboxRunner(
+                settings.sandbox_runner_url, token=settings.sandbox_runner_token
+            ),
             object_store=ObjectStore(settings),
             settings=settings,
             backplane=backplane,

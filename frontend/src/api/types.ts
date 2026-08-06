@@ -255,6 +255,10 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 /**
  * A clickable, passage-level reference (spec 0004 INV-3). Resolves to a document
  * the caller is permitted to see and a character span within it.
+ *
+ * Permission is re-checked on every read, not only when the citation was written
+ * (#536): when the caller can no longer retrieve the cited document, `redacted`
+ * is true and `snippet`/`document_name` come back empty.
  */
 export interface Citation {
   id: string;
@@ -267,6 +271,12 @@ export interface Citation {
   char_end: number;
   /** Optional retrieval/rerank score. */
   score?: number;
+  /**
+   * True when the caller may no longer retrieve the cited document, in which case
+   * `snippet` and `document_name` are empty. The shell is kept so a settled
+   * claim's provenance stays visible instead of silently disappearing.
+   */
+  redacted?: boolean;
 }
 
 /**
@@ -528,22 +538,100 @@ export interface SearchQuery {
 
 // --- Audit (contracts/openapi.yaml §audit, M2 #80) ---
 
-/** Audit event taxonomy (spec 0004 §2.4). */
+/**
+ * Audit event taxonomy (spec 0004 §2.4) — all 84 actions the backend can
+ * emit. This had drifted to 14 (#545), so most emitted actions were untypeable
+ * here and unfilterable through `GET /audit?type=`.
+ *
+ * Kept in lockstep by `src/api/audit-taxonomy.test.ts`, which reads
+ * `contracts/openapi.yaml` directly — the taxonomy only ever grows, so a failure
+ * there means "add the new action to this union too".
+ */
 export type AuditEventType =
+  | 'action.approved'
+  | 'action.executed'
+  | 'action.requested'
+  | 'answer.generated'
+  | 'artifact.created'
+  | 'artifact.deleted'
+  | 'artifact.downloaded'
+  | 'assistant.certified'
+  | 'assistant.created'
+  | 'assistant.deleted'
+  | 'assistant.deprecated'
+  | 'assistant.disabled'
+  | 'assistant.drafted'
+  | 'assistant.featured'
+  | 'assistant.ownership_transferred'
+  | 'assistant.published'
+  | 'assistant.rolled_back'
+  | 'assistant.tested'
+  | 'assistant.updated'
   | 'auth.login'
   | 'auth.login_failed'
   | 'auth.logout'
+  | 'autonomy_cap.updated'
+  | 'code_run.cancelled'
+  | 'code_run.denied'
+  | 'code_run.finished'
+  | 'code_run.started'
   | 'collection.created'
+  | 'document.deleted'
+  | 'document.downloaded'
   | 'document.uploaded'
   | 'document.viewed'
-  | 'document.downloaded'
-  | 'document.deleted'
-  | 'retrieval.query'
-  | 'answer.generated'
+  | 'group.created'
+  | 'group.deleted'
+  | 'group.member_added'
+  | 'group.member_removed'
+  | 'group.updated'
+  | 'llm_provider.created'
+  | 'llm_provider.deleted'
+  | 'llm_provider.discovered'
+  | 'llm_provider.updated'
+  | 'mcp_server.deleted'
+  | 'mcp_server.registered'
+  | 'mcp_server.tested'
+  | 'mcp_server.updated'
   | 'permission.denied'
-  | 'action.requested'
-  | 'action.approved'
-  | 'action.executed';
+  | 'permission.granted'
+  | 'permission.revoked'
+  | 'retrieval.evidence_rehydrated'
+  | 'retrieval.query'
+  | 'run.cancelled'
+  | 'run.delivered'
+  | 'run.delivery_read'
+  | 'run.digest_sent'
+  | 'run.escalated'
+  | 'run.finished'
+  | 'run.rerouted'
+  | 'run.resumed'
+  | 'run.started'
+  | 'sandbox_policy.updated'
+  | 'sandbox_session.closed'
+  | 'sandbox_session.created'
+  | 'sandbox_session.reset'
+  | 'schedule.created'
+  | 'schedule.deleted'
+  | 'schedule.paused'
+  | 'schedule.resumed'
+  | 'schedule.run_now'
+  | 'schedule.updated'
+  | 'secret.accessed'
+  | 'secret.created'
+  | 'secret.deleted'
+  | 'session.summarized'
+  | 'source.added'
+  | 'source.connected'
+  | 'source.deleted'
+  | 'source.synced'
+  | 'tenant.branding_updated'
+  | 'tenant.settings_updated'
+  | 'tool.invoked'
+  | 'tool.result'
+  | 'tool_policy.updated'
+  | 'user.avatar_updated'
+  | 'user.identity_attested';
 
 /** The outcome recorded for an audit event (spec 0004 §2.4). */
 export type AuditDecision = 'allowed' | 'denied' | 'error';

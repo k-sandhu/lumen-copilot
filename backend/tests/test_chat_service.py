@@ -26,7 +26,13 @@ from app.core.errors import ValidationError
 from app.db import models as db_models
 from app.db.base import Base
 from app.db.repositories import (
+    AuditEventRepository,
     ChatSessionRepository,
+    ChunkRepository,
+    CitationRepository,
+    CollectionRepository,
+    DocumentRepository,
+    GrantRepository,
     LlmProviderRepository,
     MessageRepository,
     TenantRepository,
@@ -34,8 +40,16 @@ from app.db.repositories import (
     UserPreferenceRepository,
     UserRepository,
 )
-from app.domain.entities import LlmProviderStatus, MessageRole, Role
+from app.domain.entities import (
+    GrantPrincipalType,
+    GrantResourceType,
+    GrantRole,
+    LlmProviderStatus,
+    MessageRole,
+    Role,
+)
 from app.realtime.backplane import InMemoryBackplane
+from app.services.audit import AuditSink
 from app.services.chat_service import ChatService
 from app.services.provider_models import make_provider_model_id
 
@@ -956,3 +970,143 @@ async def test_send_without_summary_row_is_unchanged(
     assert result is not None
     assert result.summary is None
     assert result.evidence == ()
+
+
+# --- #536: a transcript read re-checks permission, it does not trust the row ---
+
+#: The passage the fix must stop serving once the reader loses access.
+_SECRET = "TOP SECRET: the 2026 compensation bands."
+
+
+async def _cited_answer(
+    session: AsyncSession, world: _World, *, svc: ChatService
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Bob owns a document, grants it to Alice, and Alice's answer cites it.
+
+    Returns ``(chat_session_id, document_id, answer_message_id)``.
+    """
+    created = await svc.create_session(title="t", model=None)
+    coll = await CollectionRepository(session, world.tenant_a).create(
+        owner_id=world.bob, name="bob-private"
+    )
+    doc = await DocumentRepository(session, world.tenant_a).create(
+        owner_id=world.bob,
+        collection_id=coll.id,
+        filename="bob-salaries.pdf",
+        mime_type="application/pdf",
+        size_bytes=10,
+        storage_key=f"{world.tenant_a}/bob-salaries.pdf",
+        acl_enforced=False,
+    )
+    chunk = await ChunkRepository(session, world.tenant_a).add(
+        document_id=doc.id,
+        ord=0,
+        text=_SECRET,
+        char_start=0,
+        char_end=len(_SECRET),
+    )
+    await GrantRepository(session, world.tenant_a).create(
+        resource_type=GrantResourceType.DOCUMENT,
+        resource_id=doc.id,
+        principal_type=GrantPrincipalType.USER,
+        principal_id=world.alice,
+        role=GrantRole.VIEWER,
+        granted_by=world.bob,
+    )
+    answer = await MessageRepository(session, world.tenant_a).add(
+        session_id=created.session.id, role=MessageRole.ASSISTANT, content="The bands are set."
+    )
+    await CitationRepository(session, world.tenant_a).add(
+        message_id=answer.id, chunk_id=chunk.id, char_start=0, char_end=len(_SECRET), score=0.9
+    )
+    await session.commit()
+    return created.session.id, doc.id, answer.id
+
+
+async def test_a_revoked_grant_stops_the_transcript_disclosing_the_passage(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """INV-2 holds at READ time, not only when the citation was written (#536).
+
+    A citation is only ever written for a passage the asker could retrieve. But
+    that is a fact about write time: revoke the grant afterwards and the row stays.
+    The hydration join is tenant-scoped only, so before this fix every subsequent
+    transcript read kept serving the full `chunks.text` of a document the reader
+    had lost access to — indefinitely, and with no audit trace.
+    """
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        chat_id, doc_id, answer_id = await _cited_answer(session, world, svc=svc)
+
+        # While the grant stands, Alice sees the passage — the fix must not
+        # redact what she is still entitled to.
+        page = await svc.list_messages(chat_id, cursor=None, limit=20)
+        assert page is not None
+        cite = next(c for v in page.items for c in v.citations)
+        assert cite.snippet == _SECRET
+        assert cite.document_name == "bob-salaries.pdf"
+        assert cite.redacted is False
+
+        # Bob revokes.
+        assert await GrantRepository(session, world.tenant_a).revoke(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc_id,
+            principal_type=GrantPrincipalType.USER,
+            principal_id=world.alice,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        page = await svc.list_messages(chat_id, cursor=None, limit=20)
+        assert page is not None
+        cite = next(c for v in page.items for c in v.citations)
+        # The passage is gone…
+        assert cite.snippet == ""
+        # …and so is the filename, which is itself disclosing.
+        assert cite.document_name == ""
+        assert cite.redacted is True
+        # …but the shell survives, so the answer's provenance is still visible
+        # as "source no longer available" rather than the claim going bare.
+        assert cite.id is not None
+        assert cite.document_id == doc_id
+        assert (cite.char_start, cite.char_end) == (0, len(_SECRET))
+
+
+async def test_withholding_a_passage_is_audited(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """INV-6: a read that withheld content leaves a trace — counts, never content."""
+    world, factory = world_and_factory
+    async with factory() as session:
+        svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        chat_id, doc_id, _ = await _cited_answer(session, world, svc=svc)
+        await GrantRepository(session, world.tenant_a).revoke(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc_id,
+            principal_type=GrantPrincipalType.USER,
+            principal_id=world.alice,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        audited = ChatService(
+            session,
+            tenant_id=world.tenant_a,
+            owner_id=world.alice,
+            settings=_settings(),
+            audit=AuditSink(AuditEventRepository(session, world.tenant_a)),
+            request_id="req-1",
+            source_ip="203.0.113.10",
+        )
+        await audited.list_messages(chat_id, cursor=None, limit=20)
+        await session.commit()
+
+        events = await AuditEventRepository(session, world.tenant_a).list_recent(limit=20)
+        withheld = [e for e in events if e.metadata.get("surface") == "transcript"]
+        assert withheld, "withholding a passage left no audit trace"
+        assert withheld[0].metadata["redacted_citations"] == 1
+        assert withheld[0].metadata["permitted_documents"] == 0
+        # Counts only — the trail must never carry the text it just withheld.
+        assert "TOP SECRET" not in str(withheld[0].metadata)

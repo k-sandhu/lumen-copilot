@@ -3409,6 +3409,15 @@ components:
       description: >
         A clickable, passage-level reference (spec 0004 INV-3). Resolves to a
         document the caller is permitted to see and a character span within it.
+
+
+        Permission is re-checked on every READ, not only at the time the citation
+        was written (#536): a grant revoked after the answer was produced must not
+        keep disclosing the passage through the transcript. When the caller can no
+        longer retrieve the cited document, `redacted` is true and the disclosing
+        fields (`snippet`, `document_name`) come back empty — the shell is kept so
+        a claim's provenance is still visible as "source no longer available"
+        rather than the citation silently vanishing.
       required: [id, document_id, document_name, chunk_id, snippet, char_start, char_end]
       properties:
         id: { type: string, format: uuid }
@@ -3421,6 +3430,13 @@ components:
         score:
           type: number
           description: Optional retrieval/rerank score.
+        redacted:
+          type: boolean
+          default: false
+          description: >
+            True when the caller may no longer retrieve the cited document, in
+            which case `snippet` and `document_name` are empty. Optional and
+            defaulting to false so existing clients are unaffected.
 
     MessageToolInvocation:
       type: object
@@ -3797,27 +3813,102 @@ components:
     # --- Audit (M2, #80) ----------------------------------------------------
     AuditEventType:
       type: string
-      description: Audit event taxonomy (spec 0004 §2.4).
+      description: >
+        Audit event taxonomy (spec 0004 §2.4). This enum is GENERATED from
+        `app.domain.audit.AuditAction`, the single source of truth, and
+        `backend/tests/test_audit_taxonomy.py` fails if the two drift. It had
+        drifted to 19 of 84 values (#545), so 65 emitted actions were
+        unfilterable through the documented `GET /audit?type=` and absent from
+        every generated client.
+
+
+        The taxonomy only ever GROWS — deny-by-default is preserved and no action
+        is ever relaxed or removed — so widening this enum cannot loosen a check.
       enum:
+        - action.approved
+        - action.executed
+        - action.requested
+        - answer.generated
+        - artifact.created
+        - artifact.deleted
+        - artifact.downloaded
+        - assistant.certified
+        - assistant.created
+        - assistant.deleted
+        - assistant.deprecated
+        - assistant.disabled
+        - assistant.drafted
+        - assistant.featured
+        - assistant.ownership_transferred
+        - assistant.published
+        - assistant.rolled_back
+        - assistant.tested
+        - assistant.updated
         - auth.login
         - auth.login_failed
         - auth.logout
+        - autonomy_cap.updated
+        - code_run.cancelled
+        - code_run.denied
+        - code_run.finished
+        - code_run.started
         - collection.created
+        - document.deleted
+        - document.downloaded
         - document.uploaded
         - document.viewed
-        - document.downloaded
-        - document.deleted
-        - retrieval.query
-        - answer.generated
-        - permission.denied
         - group.created
-        - group.updated
         - group.deleted
         - group.member_added
         - group.member_removed
-        - action.requested
-        - action.approved
-        - action.executed
+        - group.updated
+        - llm_provider.created
+        - llm_provider.deleted
+        - llm_provider.discovered
+        - llm_provider.updated
+        - mcp_server.deleted
+        - mcp_server.registered
+        - mcp_server.tested
+        - mcp_server.updated
+        - permission.denied
+        - permission.granted
+        - permission.revoked
+        - retrieval.evidence_rehydrated
+        - retrieval.query
+        - run.cancelled
+        - run.delivered
+        - run.delivery_read
+        - run.digest_sent
+        - run.escalated
+        - run.finished
+        - run.rerouted
+        - run.resumed
+        - run.started
+        - sandbox_policy.updated
+        - sandbox_session.closed
+        - sandbox_session.created
+        - sandbox_session.reset
+        - schedule.created
+        - schedule.deleted
+        - schedule.paused
+        - schedule.resumed
+        - schedule.run_now
+        - schedule.updated
+        - secret.accessed
+        - secret.created
+        - secret.deleted
+        - session.summarized
+        - source.added
+        - source.connected
+        - source.deleted
+        - source.synced
+        - tenant.branding_updated
+        - tenant.settings_updated
+        - tool.invoked
+        - tool.result
+        - tool_policy.updated
+        - user.avatar_updated
+        - user.identity_attested
 
     AuditDecision:
       type: string

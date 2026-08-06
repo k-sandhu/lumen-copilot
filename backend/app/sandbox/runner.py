@@ -15,10 +15,17 @@ from app.core.logging import get_logger
 from app.domain.code_execution import (
     SANDBOX_REASON_RUNNER_ERROR,
     SANDBOX_REASON_RUNNER_REJECTED,
+    SANDBOX_REASON_RUNNER_UNAUTHORIZED,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
+
+#: Mirrors `lumen_sandbox_runner.auth.TOKEN_HEADER`. Deliberately not
+#: `Authorization`: this is a service-to-service shared secret on an internal
+#: network, not a user credential, so nothing downstream should treat it as a bearer
+#: token to helpfully forward elsewhere.
+RUNNER_TOKEN_HEADER = "X-Lumen-Runner-Token"
 
 log = get_logger(__name__)
 
@@ -32,6 +39,22 @@ class SandboxRunnerUnavailable(DependencyError):
 
     code = "sandbox_runner_unavailable"
     sandbox_reason = SANDBOX_REASON_RUNNER_UNAVAILABLE
+
+
+class SandboxRunnerUnauthorized(DependencyError):
+    """The runner answered 401: the shared secret is missing or wrong (#508).
+
+    Its own type, not a :class:`SandboxRunnerRejected`, because the remedy shares
+    nothing with that one. A rejection means the runner examined a well-formed,
+    authenticated request and declined it — an unresolvable package, a stale
+    generation — so the operator reads the runner's log. A 401 means the request
+    never got that far: the service is up, reachable and working, and only the
+    credential is wrong. Collapsing the two would send an operator hunting a package
+    failure that never happened.
+    """
+
+    code = "sandbox_runner_unauthorized"
+    sandbox_reason = SANDBOX_REASON_RUNNER_UNAUTHORIZED
 
 
 class SandboxRunnerRejected(DependencyError):
@@ -149,10 +172,12 @@ class HttpSandboxRunner:
         self,
         base_url: str,
         *,
+        token: str = "",
         connect_timeout_seconds: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._token = token
         self._connect_timeout = connect_timeout_seconds
         self._transport = transport
 
@@ -166,7 +191,13 @@ class HttpSandboxRunner:
             pool=self._connect_timeout,
         )
         return httpx.AsyncClient(
-            base_url=self._base_url, timeout=timeout, transport=self._transport
+            base_url=self._base_url,
+            timeout=timeout,
+            transport=self._transport,
+            # The runner holds the Docker socket and authenticates every capability
+            # endpoint (#508). Set on the CLIENT rather than per call site so a new
+            # request cannot forget it.
+            headers={RUNNER_TOKEN_HEADER: self._token} if self._token else {},
         )
 
     async def ensure_session(self, session: SandboxSessionSpec) -> None:
@@ -184,6 +215,9 @@ class HttpSandboxRunner:
                 "execution_id": str(run.execution_id),
                 "code": run.code,
                 "packages": list(run.packages),
+                # Forwarded so the runner can refuse a denied TRANSITIVE dependency
+                # (#509) — the check here only ever saw the top-level request.
+                "denied_packages": list(run.denied_packages),
                 "env": dict(run.env),
                 # Packages are acquired/installed by the runner before these tenant
                 # bytes are staged, so package resolution never sees tenant data.
@@ -254,6 +288,8 @@ class HttpSandboxRunner:
             # is the operator surface — so the specific sentence lives here.
             runner_detail=detail,
         )
+        if response.status_code == 401:
+            raise SandboxRunnerUnauthorized("the sandbox runner rejected our credential")
         if response.is_client_error:
             raise SandboxRunnerRejected("the sandbox runner refused the request")
         raise SandboxRunnerFailed("the sandbox runner failed the request")
@@ -316,8 +352,37 @@ class HttpSandboxRunner:
             duration_ms=raw_duration if isinstance(raw_duration, int) else 0,
             output_files=output_files,
             image_digest=raw_digest if isinstance(raw_digest, str) else None,
+            resolved_packages=_resolved_packages(body.get("resolved_packages")),
             resource_usage=ResourceUsage.from_dict(body.get("resource_usage")),
         )
+
+
+def _resolved_packages(raw: object) -> tuple[dict[str, str], ...]:
+    """The runner's install manifest, defensively parsed (#509).
+
+    Shape-checked rather than trusted: this is the audit record of what a run
+    installed, and a malformed entry silently becoming `{}` would make the trail
+    quietly wrong — which is worse than it being absent. Unknown keys are dropped so a
+    future runner field cannot widen what is persisted without a deliberate change
+    here.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "version": str(entry.get("version") or ""),
+                "sha256": str(entry.get("sha256") or ""),
+            }
+        )
+    return tuple(out)
 
 
 def _b64(data: bytes) -> str:

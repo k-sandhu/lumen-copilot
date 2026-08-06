@@ -23,7 +23,12 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role, SandboxSessionStatus
-from app.sandbox.service import SandboxReadService, SandboxService, SandboxSessionService
+from app.sandbox.service import (
+    SandboxDisabledError,
+    SandboxReadService,
+    SandboxService,
+    SandboxSessionService,
+)
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.storage.keys import build_artifact_key
 from tests._sandbox_helpers import sandbox_settings
@@ -550,3 +555,227 @@ async def test_cross_tenant_and_non_owner_reads_are_404(session: AsyncSession) -
     )
     with pytest.raises(NotFoundError):
         await SandboxReadService(session, tenant_id=tenant_a, owner_id=other.id).get(run.id)
+
+
+# --- #510: a lifecycle refusal must leave a trace ------------------------------
+
+
+@pytest.mark.parametrize("lifecycle", ["ensure", "reset"])
+async def test_a_disabled_lifecycle_refusal_is_audited(
+    session: AsyncSession, lifecycle: str
+) -> None:
+    """INV-6: the 409 used to vanish without trace (spec 0004 §2.5).
+
+    `_require_enabled` emitted a structlog line and nothing else — and spec 0004
+    §2.4 puts ops telemetry explicitly OUTSIDE the product audit trail. Every
+    neighbouring denial audits: the run path writes `code_run.denied` with its
+    reason code, and the tool runner funnels all four refusal paths through
+    `_finalise`. Lifecycle was the one hole, so "who tried to start a sandbox while
+    execution was disabled, and when" was unanswerable from the trail.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    # Deliberately NOT enabled — this is the refusal path.
+    service = SandboxSessionService(
+        session,
+        tenant_id=tenant,
+        owner_id=owner,
+        runner=_FakeRunner(),
+        settings=sandbox_settings(),
+    )
+
+    with pytest.raises(SandboxDisabledError):
+        await getattr(service, lifecycle)(chat)
+
+    events = await AuditEventRepository(session, tenant).list_recent()
+    denials = [e for e in events if e.action == "permission.denied"]
+    assert denials, "a lifecycle refusal left no audit trace"
+    denial = denials[0]
+    assert denial.outcome.value == "denied"
+    assert denial.resource_type == "sandbox_session"
+    assert denial.resource_id == str(chat)
+    assert denial.metadata["lifecycle"] == lifecycle
+    # The reason code is what an operator surface reads to say WHY.
+    assert denial.metadata["reason_code"]
+
+
+async def test_closing_a_sandbox_is_allowed_even_when_execution_is_disabled(
+    session: AsyncSession,
+) -> None:
+    """The deliberate asymmetry, pinned so nobody "fixes" it into a gate.
+
+    `close` does not call `_require_enabled`, and must not: disabling code
+    execution would otherwise strand every live container with no way to tear it
+    down. Teardown is always permitted, and audits `sandbox_session.closed`.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    runner = _FakeRunner()
+    service = SandboxSessionService(
+        session, tenant_id=tenant, owner_id=owner, runner=runner, settings=sandbox_settings()
+    )
+    await service.ensure(chat)
+
+    # Execution goes off AFTER the session exists.
+    await TenantSandboxPolicyRepository(session, tenant).upsert(
+        enabled=False,
+        allowed_packages=(),
+        denied_packages=(),
+        egress_allowed=False,
+        egress_allowlist=(),
+        max_runtime_s=30,
+        max_memory_mb=512,
+        daily_runtime_cap_s=3600,
+        max_concurrency=2,
+        updated_by=None,
+    )
+
+    await service.close(chat)
+
+    assert runner.closed, "teardown was refused, stranding the container"
+    assert "sandbox_session.closed" in await _actions(session, tenant)
+
+
+# --- #519 part 2: max_concurrency actually admits or refuses --------------------
+
+
+async def test_max_concurrency_refuses_a_run_once_the_tenant_is_at_its_limit(
+    session: AsyncSession,
+) -> None:
+    """The control was stored, clamped, returned by the admin API and rendered in the
+    UI — and read by NO runtime path (#519).
+
+    An operator watching concurrent runs overwhelm the runner would reach for exactly
+    this setting, change it, and watch nothing happen. A limit that silently does
+    nothing is worse than no limit: it consumes the attention that would otherwise go
+    to finding a control that works.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)  # max_concurrency=2 in the helper's policy
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+    runs = CodeRunRepository(session, tenant)
+
+    # Two runs already EXECUTING — the state the limit is about.
+    for _ in range(2):
+        occupied = await _run(session, tenant, owner, chat)
+        await runs.mark_running(occupied.id, started_at=datetime.now(UTC))
+    await session.commit()
+
+    third = await _run(session, tenant, owner, chat)
+    status = await service.execute(session, third.id)
+
+    assert status is CodeRunStatus.DENIED
+    persisted = await runs.get(third.id)
+    assert persisted is not None and persisted.status is CodeRunStatus.DENIED
+    # The refusal names ITSELF, not a package or a disabled switch, so an operator is
+    # not sent looking for a block that does not exist.
+    events = await AuditEventRepository(session, tenant).list_recent(limit=20)
+    denials = [e for e in events if e.metadata.get("reason_code") == "sandbox_concurrency_exceeded"]
+    assert denials, "the concurrency refusal did not name itself in the audit trail"
+
+
+async def test_a_queued_run_does_not_count_against_the_concurrency_limit(
+    session: AsyncSession,
+) -> None:
+    """`QUEUED` holds no runner thread and no runner memory, so it must not count.
+
+    Two reasons, and the second is the sharper one: a run is already `QUEUED` when its
+    OWN admission check runs, so counting queued work would make the gate off by one
+    and refuse the very first run on a limit of one. The first version of this fix did
+    exactly that and turned an unrelated test red.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+
+    # Three runs queued, none executing — well past `max_concurrency=2`.
+    queued = [await _run(session, tenant, owner, chat) for _ in range(3)]
+    await session.commit()
+
+    assert await service.execute(session, queued[0].id) is CodeRunStatus.SUCCEEDED
+
+
+# --- #509: the deny list reaches the resolver, and the manifest comes back ------
+
+
+async def test_the_tenant_deny_list_is_forwarded_to_the_runner(session: AsyncSession) -> None:
+    """This layer only ever checked what the model ASKED for (#509).
+
+    `pip install --find-links` takes the whole resolved wheelhouse, so a denied
+    distribution can arrive as a dependency of an allowed one — deny `urllib3`, allow
+    `requests`, ask for `requests`, get `urllib3` anyway. Only the runner sees the
+    resolution, so it can only enforce a list it is actually given.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=("requests",), denied=("urllib3",))
+    runner = _FakeRunner()
+    service = _service(tenant, owner, runner, _FakeStore())
+    run = await _run(session, tenant, owner, chat, packages=("requests",))
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    assert runner.executions, "the run never reached the runner"
+    _, spec = runner.executions[-1]
+    assert spec.denied_packages == ("urllib3",)
+
+
+async def test_the_install_manifest_is_persisted_on_the_run(session: AsyncSession) -> None:
+    """`requested_packages` recorded one name for a whole dependency tree (#509).
+
+    Without the resolved set an operator cannot answer "did any run install the
+    distribution that was later found to be malicious?" — the audit row named only the
+    top-level request.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant, allowed=("requests",))
+    manifest = (
+        {"name": "requests", "version": "2.32.3", "sha256": "a" * 64},
+        {"name": "urllib3", "version": "2.2.2", "sha256": "b" * 64},
+    )
+    runner = _FakeRunner(
+        result=RunResult(
+            status=CodeRunStatus.SUCCEEDED,
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_ms=5,
+            image_digest="python@sha256:runtime",
+            resolved_packages=manifest,
+            resource_usage=ResourceUsage(output_bytes=1),
+        )
+    )
+    service = _service(tenant, owner, runner, _FakeStore())
+    run = await _run(session, tenant, owner, chat, packages=("requests",))
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    persisted = await CodeRunRepository(session, tenant).get(run.id)
+    assert persisted is not None
+    assert persisted.resolved_packages is not None
+    names = {entry["name"] for entry in persisted.resolved_packages}
+    # The transitive dependency the request never mentioned is on the record.
+    assert names == {"requests", "urllib3"}
+    assert persisted.requested_packages == ("requests",)
+
+
+async def test_a_run_that_reported_no_manifest_records_null_not_empty(
+    session: AsyncSession,
+) -> None:
+    """ "We did not learn what this installed" is a different fact from "nothing".
+
+    Writing `[]` unconditionally would put a false statement in the record that exists
+    to answer exactly that question — and every row predating the column would claim
+    to have installed nothing.
+    """
+    tenant, owner, chat = await _principal_chat(session)
+    await _enable(session, tenant)
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+    run = await _run(session, tenant, owner, chat)
+    await session.commit()
+
+    await service.execute(session, run.id)
+
+    persisted = await CodeRunRepository(session, tenant).get(run.id)
+    assert persisted is not None
+    assert persisted.resolved_packages is None

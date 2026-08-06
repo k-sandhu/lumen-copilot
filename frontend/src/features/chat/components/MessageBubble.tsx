@@ -30,10 +30,7 @@ import { AskUserOptions } from './AskUserOptions';
 import { StepTimeline } from './StepTimeline';
 import { CodeRunPanel } from '@/features/codeRuns';
 import { artifactHref } from '@/features/artifacts';
-import type {
-  ToolActivity as ToolActivityItem,
-  CodeRunActivity,
-} from '../model/streamReducer';
+import type { ToolActivity as ToolActivityItem, CodeRunActivity } from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
 export interface SourceMeta {
@@ -236,8 +233,19 @@ function MessageBubbleComponent({
                     return (
                       <li key={group.documentId} className="lc-source-row">
                         <span className="lc-source-row__main">
-                          <span className="lc-source-row__title" title={group.documentName}>
-                            {group.documentName}
+                          {/* A revoked source keeps its place in the list: the
+                              answer was genuinely grounded in it, and quietly
+                              dropping the row would make the claim look
+                              unsourced (#536). */}
+                          <span
+                            className={
+                              group.redacted
+                                ? 'lc-source-row__title lc-source-row__title--redacted'
+                                : 'lc-source-row__title'
+                            }
+                            title={group.redacted ? undefined : group.documentName}
+                          >
+                            {group.redacted ? 'Source no longer available' : group.documentName}
                           </span>
                           {meta?.freshness && (
                             <span className="lc-source-row__sub">
@@ -251,23 +259,34 @@ function MessageBubbleComponent({
                         <span
                           className="lc-source-row__passages"
                           role="group"
-                          aria-label={`Cited passages from ${group.documentName}`}
+                          aria-label={
+                            group.redacted
+                              ? 'Cited passages from a source you can no longer access'
+                              : `Cited passages from ${group.documentName}`
+                          }
                         >
                           {group.passages.map((p) => (
                             <button
                               key={p.citation.id}
                               type="button"
                               className="lc-source-row__num-btn"
-                              aria-label={`Citation ${p.number}: ${group.documentName}`}
+                              disabled={group.redacted}
+                              aria-label={
+                                group.redacted
+                                  ? `Citation ${p.number}: source no longer available`
+                                  : `Citation ${p.number}: ${group.documentName}`
+                              }
                               onClick={() => onOpenCitation(p.citation, meta)}
                             >
                               {p.number}
                             </button>
                           ))}
                         </span>
-                        {/* Honest by construction: the backend only returns sources
-                            the caller may see (spec 0004 INV-2), so a cited source
-                            is one this user has access to. */}
+                        {/* Honest by construction: the backend re-checks INV-2 on
+                            every READ, not just when the citation was written
+                            (#536), so a source shown with its name is one this
+                            user may still see — and one they may not comes back
+                            stripped, flagged, and rendered as unavailable. */}
                         <PermissionPill level="granted" />
                       </li>
                     );

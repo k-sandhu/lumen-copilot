@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import io
 import mimetypes
 import os
@@ -44,13 +45,12 @@ _OUTPUT_BYTES_CEILING = 64 * 1024 * 1024
 #: event in the caller's transaction. Generous for a chat turn, fatal as a fan-out.
 _MAX_OUTPUT_MEMBERS = 64
 
-#: Cap on the stdout/stderr this process RETAINS and returns per execution.
-#: NOTE the honest limit: docker-py's non-streaming ``exec_run`` buffers the whole
-#: process output before returning, so this bounds the JSON payload and the result
-#: cache but NOT peak memory during the exec itself — ``print('x'*2_000_000_000)``
-#: is still a runner-side OOM risk. Bounding that needs the streaming low-level exec
-#: API, tracked separately; ADR-0013 §G7 and the runbook say so plainly rather than
-#: claiming a bound that does not exist.
+#: Cap on the stdout/stderr this process retains per execution — and, since #519,
+#: on what it ever HOLDS. Model-code execs stream through the low-level API and drop
+#: everything past this as chunks arrive, so ``print('x'*2_000_000_000)`` costs the
+#: cap plus one chunk instead of two gigabytes inside the Docker-socket holder. The
+#: comment that used to sit here admitted the opposite; ADR-0013 §G7 records the
+#: change.
 _MAX_STREAM_CHARS = 256 * 1024
 
 #: How many completed execution results are retained for idempotent re-reads. The
@@ -59,6 +59,28 @@ _MAX_STREAM_CHARS = 256 * 1024
 #: until close. Oldest-first eviction keeps it bounded; an evicted key simply
 #: re-executes rather than returning a stale answer.
 _MAX_CACHED_RESULTS = 64
+
+#: How many collections may run AT ONCE in this process (#519 part 2).
+#:
+#: Every bound above is per-EXECUTION. Locks are per-session, so executions in
+#: different sessions collect concurrently, and one max-size collection peaks at
+#: roughly 4x its byte budget (the raw member, the accumulated base64, the JSON
+#: string, and its encoded bytes) — ~256 MiB against the runner's 1 GiB compose
+#: limit. Three or four concurrent tenants at the ceiling therefore OOM the Docker
+#: socket holder: exactly the failure the per-execution budget was added to prevent,
+#: just reached from a different direction.
+#:
+#: A permit makes the process-wide peak a DECLARED number rather than an emergent one:
+#: at most this many collections are in flight, so peak collection memory is bounded
+#: by permits x per-execution peak regardless of how many tenants are running. Waiting
+#: for a permit costs latency on a turn that has already finished computing; running
+#: out of memory costs every tenant on the host.
+_MAX_CONCURRENT_COLLECTIONS = 3
+
+#: Process-wide, deliberately module-level: the engine is `lru_cache`d to one
+#: instance, but the bound must hold even if that ever changes — it is a property of
+#: the process's memory, not of an engine object.
+_collection_permits = threading.BoundedSemaphore(_MAX_CONCURRENT_COLLECTIONS)
 
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
@@ -78,6 +100,34 @@ _DISTRIBUTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: shipped pip: ``pip download -- --index-url=…`` reports an *invalid requirement*,
 #: while the same argv without the separator consumes it as an option).
 _END_OF_OPTIONS = "--"
+
+#: Where wheels are fetched from (#509). ADR-0013 §3 conditions install-based package
+#: expansion on "an admin-allowlisted, hash-pinned internal mirror"; leaving the index
+#: implicit meant an allow-list grant trusted whatever the public PyPI served at that
+#: moment, with no way for a deploy to point elsewhere without patching code. Unset
+#: keeps pip's default (public PyPI) so nothing changes for an existing deploy — and
+#: the honesty note below still applies to that case.
+_INDEX_URL_ENV = "SANDBOX_PACKAGE_INDEX_URL"
+
+#: A requirements file with `--hash=` lines. When configured, the download runs under
+#: ``--require-hashes`` and pip refuses any artefact whose digest is not listed, which
+#: is the verification ADR-0013 §3 asks for. Unset leaves the fetch unverified — the
+#: deviation the runbook documents.
+_HASH_FILE_ENV = "SANDBOX_PACKAGE_HASH_FILE"
+
+
+def _wheel_distribution(filename: str) -> str:
+    """The distribution name encoded in a wheel filename (PEP 427).
+
+    ``{distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl`` — so the
+    name is everything before the first hyphen, with PEP 503 canonicalisation applied
+    so ``Foo_Bar`` and ``foo-bar`` compare equal. Reading the FILENAME rather than the
+    wheel metadata is deliberate: the filename is what pip resolves and installs by,
+    it needs no unzip, and a mismatch between the two would be its own problem.
+    """
+    stem = filename[:-4] if filename.endswith(".whl") else filename
+    name = stem.split("-", 1)[0]
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 class RunnerError(RuntimeError):
@@ -363,11 +413,17 @@ class DockerSandboxEngine:
         output_dir = f"{run_root}/output"
         self._exec_checked(container, ["mkdir", "-p", output_dir, "/workspace/inputs"])
 
+        resolved_packages: list[dict[str, str]] = []
         if request.packages:
             packages = self._validated_packages(tuple(request.packages))
             with tempfile.TemporaryDirectory(prefix="lumen-wheels-") as temp:
                 wheelhouse = Path(temp)
                 self._download(packages, wheelhouse)
+                # Both of these read the resolved wheelhouse and must happen BEFORE a
+                # single wheel is staged into the container: a denied dependency that
+                # is copied in and then refused has already crossed the boundary.
+                self._refuse_denied_dependencies(wheelhouse, tuple(request.denied_packages))
+                resolved_packages = self._resolved_wheelhouse(wheelhouse)
                 self._put_directory(container, wheelhouse, f"{run_root}/wheelhouse")
             self._exec_checked(
                 container,
@@ -398,16 +454,9 @@ class DockerSandboxEngine:
         env = {**request.env, "LUMEN_OUTPUT_DIR": output_dir}
         started = time.monotonic()
         try:
-            outcome = container.exec_run(
-                ["python", code_path],
-                workdir="/workspace",
-                environment=env,
-                demux=True,
+            exit_code, stdout, stderr = self._exec_streaming(
+                container, ["python", code_path], workdir="/workspace", environment=env
             )
-            exit_code = int(outcome.exit_code)
-            stdout_raw, stderr_raw = outcome.output or (b"", b"")
-            stdout = self._clip((stdout_raw or b"").decode("utf-8", errors="replace"))
-            stderr = self._clip((stderr_raw or b"").decode("utf-8", errors="replace"))
             if exit_code != 0 and not self._container_running(container):
                 # Docker returns exit 137 rather than raising when cancel removes a
                 # container during exec. Treat any non-zero outcome from a container
@@ -447,6 +496,10 @@ class DockerSandboxEngine:
             "duration_ms": duration_ms,
             "image_digest": self._image_digest(container),
             "output_files": output_files,
+            # What was actually installed, transitive dependencies included (#509).
+            # `code_runs.requested_packages` records only what the model ASKED for, so
+            # a run that pulled in thirty distributions audited as one.
+            "resolved_packages": resolved_packages,
             "resource_usage": {"output_bytes": output_bytes},
         }
 
@@ -554,14 +607,22 @@ class DockerSandboxEngine:
     def _download_binary_packages(packages: tuple[str, ...], destination: Path) -> None:
         """Fetch binary wheels for admitted requirements.
 
-        **This is the unverified half of the supply chain, and it is worth naming.**
-        The fetch goes to the DEFAULT PUBLIC index with no ``--require-hashes``, no
-        ``--index-url`` pin and no lockfile: ADR-0013 §3 conditions install-based
-        expansion on "an admin-allowlisted, hash-pinned internal mirror", and that
-        mirror is not implemented. An allow-list grant therefore trusts whatever PyPI
-        serves at that moment. A locked-down deploy is expected to withhold this
-        service's outbound network and live on the execution image's manifest.
+        **The verification story, stated plainly (#509).** ADR-0013 3 conditions
+        install-based expansion on "an admin-allowlisted, hash-pinned internal mirror".
+        Two knobs now exist so a deploy can actually have one:
+
+        * ``SANDBOX_PACKAGE_INDEX_URL`` pins WHERE wheels come from.
+        * ``SANDBOX_PACKAGE_HASH_FILE`` points at a requirements file carrying
+          ``--hash=`` lines; with it, pip runs under ``--require-hashes`` and refuses
+          any artefact whose digest is not listed.
+
+        With NEITHER set the fetch is still the default public index with no hashes —
+        unchanged from before, and still the deviation the runbook documents. The
+        mechanism is here; supplying the mirror and the lockfile is a deployment act,
+        and this docstring must not claim otherwise until one ships.
         """
+        index_url = os.environ.get(_INDEX_URL_ENV, "").strip()
+        hash_file = os.environ.get(_HASH_FILE_ENV, "").strip()
         command = [
             sys.executable,
             "-m",
@@ -570,15 +631,90 @@ class DockerSandboxEngine:
             "--only-binary=:all:",
             "--dest",
             os.fspath(destination),
-            _END_OF_OPTIONS,
-            *packages,
         ]
+        if index_url:
+            # `--index-url` REPLACES the default rather than adding to it, so a pinned
+            # mirror is exclusive. `--no-index` would be wrong here: that disables
+            # fetching altogether, which is the install step's flag, not this one's.
+            command += ["--index-url", index_url]
+        if hash_file:
+            if not Path(hash_file).is_file():
+                raise RunnerError("the configured package hash file is missing", status_code=500)
+            # `--require-hashes` makes pip refuse ANY requirement without a matching
+            # digest, transitive ones included — which is the point: an unpinned
+            # dependency is exactly the hole a lockfile exists to close.
+            command += ["--require-hashes", "--requirement", hash_file]
+        command += [_END_OF_OPTIONS, *packages]
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)  # noqa: S603
         except subprocess.CalledProcessError as exc:
+            if hash_file and "hash" in (exc.stderr or "").lower():
+                # Distinguish "the artefact did not match its pin" from "the download
+                # failed": one is a supply-chain event an operator must look at, the
+                # other is a flaky network.
+                raise RunnerError(
+                    "a package failed hash verification against the configured pins",
+                    status_code=422,
+                ) from exc
             raise RunnerError(
                 "an approved package could not be downloaded", status_code=422
             ) from exc
+
+    @staticmethod
+    def _resolved_wheelhouse(destination: Path) -> list[dict[str, str]]:
+        """Every distribution pip actually resolved, with the digest of its artefact.
+
+        The wheelhouse IS the install manifest: ``pip install --no-index --find-links``
+        takes what is here, so this is the only accurate answer to "what did this run
+        install". ``code_runs.requested_packages`` recorded only the TOP-LEVEL names, so
+        a run that pulled in thirty transitive distributions audited as one (#509).
+
+        The digest is recorded whether or not hashes were pre-pinned. Without a
+        lockfile it does not PROVE the artefact was the intended one — nothing here can
+        — but it makes the run reproducible and lets an operator answer "was this the
+        wheel later found to be malicious?" after the fact.
+        """
+        resolved: list[dict[str, str]] = []
+        for wheel in sorted(destination.glob("*.whl")):
+            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            parts = wheel.name[:-4].split("-")
+            resolved.append(
+                {
+                    "name": _wheel_distribution(wheel.name),
+                    "version": parts[1] if len(parts) > 1 else "",
+                    "sha256": digest,
+                }
+            )
+        return resolved
+
+    @staticmethod
+    def _refuse_denied_dependencies(destination: Path, denied: tuple[str, ...]) -> None:
+        """Refuse the run if a DENIED distribution was resolved, at any depth (#509).
+
+        The backend applies the deny list to what the model ASKED for. This applies it
+        to what pip actually RESOLVED, which is a different set and the one that gets
+        installed. The concrete case from the issue: an admin denies ``urllib3`` to keep
+        a known-vulnerable version out and allows ``requests``; the model requests
+        ``requests``; ``urllib3`` arrives as a dependency and is installed anyway, and
+        the audit row says only ``["requests"]``.
+
+        Refuses the whole run rather than dropping the offending wheel: removing one
+        distribution from a resolved set produces a broken install, and handing the
+        model a half-working environment is worse than a clear refusal.
+        """
+        if not denied:
+            return
+        denied_names = {
+            re.sub(r"[-_.]+", "-", value.strip()).lower() for value in denied if value.strip()
+        }
+        for wheel in sorted(destination.glob("*.whl")):
+            name = _wheel_distribution(wheel.name)
+            if name in denied_names:
+                raise RunnerError(
+                    f"package {name!r} is denied for this tenant and was resolved as a "
+                    "dependency",
+                    status_code=422,
+                )
 
     @staticmethod
     def _safe_input_path(raw: str) -> str:
@@ -635,6 +771,68 @@ class DockerSandboxEngine:
             return _OUTPUT_BYTES_CEILING
         return min(value, _OUTPUT_BYTES_CEILING)
 
+    def _exec_streaming(
+        self, container: Any, command: list[str], *, workdir: str, environment: dict[str, str]
+    ) -> tuple[int, str, str]:
+        """Run MODEL code, draining its output through a bounded buffer (#519 part 1).
+
+        `container.exec_run(demux=True)` buffers the process's ENTIRE stdout/stderr
+        before returning, so `print("x" * 2_000_000_000)` allocated two gigabytes
+        inside the runner — the single Docker-socket holder, capped at 1 GiB in
+        compose — no matter what output cap was configured. The cap clipped what was
+        RETAINED, which is a different thing from what is READ, and ADR-0013 §G7's
+        memory bound was therefore qualified rather than met.
+
+        The low-level API streams instead: chunks arrive as they are produced, and
+        anything past the retention cap is discarded as it arrives rather than
+        accumulated and trimmed at the end. Peak is the cap plus one chunk.
+
+        Draining CONTINUES after the cap is reached rather than breaking out. Closing
+        the stream early would leave the daemon writing into a pipe nobody reads,
+        which blocks the model's process instead of letting it run to completion — a
+        run that printed too much would hang rather than finish with clipped output.
+        The bytes are read and dropped, which costs I/O but no memory.
+
+        Only the model-code exec uses this. Setup commands (`chmod`, `pip install`)
+        keep `exec_run`: their output is bounded by construction, and giving them the
+        streaming path would widen the seam every test fake has to implement for no
+        gain in safety.
+        """
+        api = self._client.api
+        handle = api.exec_create(
+            container.id,
+            command,
+            workdir=workdir,
+            environment=environment,
+            stdout=True,
+            stderr=True,
+        )
+        exec_id = handle["Id"] if isinstance(handle, dict) else handle
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        out_left = _MAX_STREAM_CHARS
+        err_left = _MAX_STREAM_CHARS
+        stream = api.exec_start(exec_id, stream=True, demux=True)
+        try:
+            for chunk in stream:
+                out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
+                if out_chunk and out_left > 0:
+                    text = out_chunk.decode("utf-8", errors="replace")[:out_left]
+                    out_parts.append(text)
+                    out_left -= len(text)
+                if err_chunk and err_left > 0:
+                    text = err_chunk.decode("utf-8", errors="replace")[:err_left]
+                    err_parts.append(text)
+                    err_left -= len(text)
+        finally:
+            # docker-py's stream generator owns a socket; an abandoned one leaks the
+            # connection and, with it, a daemon-side writer.
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        return exit_code, "".join(out_parts), "".join(err_parts)
+
     @staticmethod
     def _collect_outputs(
         container: Any, output_dir: str, byte_budget: int
@@ -648,6 +846,16 @@ class DockerSandboxEngine:
         delivered short — a truncated PNG or xlsx persisted as an artifact would be a
         silently corrupt deliverable — and the caller is told collection was partial.
         """
+        # Serialise against the process-wide permit BEFORE the archive stream opens:
+        # holding it only around the parse would leave the daemon's tar writer and
+        # this side's buffers outside the bound, which is most of the peak.
+        with _collection_permits:
+            return DockerSandboxEngine._collect_outputs_unlocked(container, output_dir, byte_budget)
+
+    @staticmethod
+    def _collect_outputs_unlocked(
+        container: Any, output_dir: str, byte_budget: int
+    ) -> tuple[list[dict[str, object]], bool]:
         try:
             stream, _ = container.get_archive(output_dir)
         except Exception:

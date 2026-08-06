@@ -46,6 +46,13 @@ export interface UiCitation {
    * `documentName` is reused for the primary label either way.
    */
   webTitle?: string;
+  /**
+   * The reader has lost access to the cited document since the answer was written
+   * (#536), so the server withheld the passage and the filename. Render the
+   * reference as unavailable rather than dropping it — the claim was genuinely
+   * grounded, just not in something this reader may still see.
+   */
+  redacted?: boolean;
 }
 
 /**
@@ -115,6 +122,7 @@ export function fromRestCitation(c: Citation & WebCitationExtras): UiCitation {
     charStart: c.char_start,
     charEnd: c.char_end,
     ...(c.score !== undefined ? { score: c.score } : {}),
+    ...(c.redacted ? { redacted: true } : {}),
     ...webExtras(c),
   };
 }

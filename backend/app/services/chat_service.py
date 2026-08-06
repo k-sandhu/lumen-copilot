@@ -46,6 +46,7 @@ from app.db.repositories import (
     ChatSessionRepository,
     CitationRepository,
     CitationView,
+    GroupRepository,
     LlmProviderRepository,
     LlmUsageRepository,
     MessageRepository,
@@ -53,8 +54,10 @@ from app.db.repositories import (
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
+from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
     AssistantStatus,
+    AuditOutcome,
     ChatSession,
     LlmUsageRecord,
     LlmUsageTotals,
@@ -64,7 +67,10 @@ from app.domain.entities import (
 )
 from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
+from app.retrieval.permissions import AllowSet
+from app.retrieval.queries import permitted_document_ids
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
+from app.services.audit import AuditSink
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
     is_allowed_provider_model,
@@ -226,6 +232,9 @@ class ChatService:
         owner_id: UUID,
         settings: Settings,
         sandbox_lifecycle: SandboxLifecycle | None = None,
+        audit: AuditSink | None = None,
+        request_id: str = "unknown",
+        source_ip: str = "unknown",
     ) -> None:
         self._sessions = ChatSessionRepository(session, tenant_id)
         self._messages = MessageRepository(session, tenant_id)
@@ -240,10 +249,18 @@ class ChatService:
         # in this tenant with the raw id in its discovered snapshot (PR 2a, INV-1).
         self._providers = LlmProviderRepository(session, tenant_id)
         self._usage = LlmUsageRepository(session, tenant_id)
+        self._groups = GroupRepository(session, tenant_id)
+        self._session = session
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._settings = settings
         self._sandbox_lifecycle = sandbox_lifecycle
+        # Optional so the many tests that construct this service directly need no
+        # change; a transcript read that redacts nothing emits nothing either way.
+        self._audit = audit
+        self._request_id = request_id
+        self._source_ip = source_ip
+        self._allow_set_cache: AllowSet | None = None
 
     # --- model selection ----------------------------------------------------
 
@@ -389,9 +406,7 @@ class ChatService:
         # One grouped count for the whole page (no per-row COUNT — #396); the
         # single-session paths keep `_view`.
         counts = await self._sessions.count_for_sessions([s.id for s in page])
-        items = [
-            SessionView(session=s, message_count=counts.get(s.id, 0)) for s in page
-        ]
+        items = [SessionView(session=s, message_count=counts.get(s.id, 0)) for s in page]
         return SessionPage(items=items, next_cursor=next_cursor)
 
     async def get_session(self, session_id: UUID) -> SessionView | None:
@@ -482,6 +497,84 @@ class ChatService:
 
     # --- message use-cases --------------------------------------------------
 
+    async def _resolve_allow_set(self) -> AllowSet:
+        """The requester's read allow-set, including their group principals.
+
+        Mirrors ``DocumentService._resolve_allow_set``: membership is resolved per
+        request and never cached across them, so removing someone from a group
+        revokes on the next read. A user in no groups narrows to ownership plus
+        their own user grants — fail closed.
+        """
+        if self._allow_set_cache is None:
+            group_ids = await self._groups.group_ids_for_user(self._owner_id)
+            self._allow_set_cache = AllowSet.for_user(
+                tenant_id=self._tenant_id, user_id=self._owner_id, group_ids=group_ids
+            )
+        return self._allow_set_cache
+
+    async def _filter_citations(
+        self,
+        citations_by_message: dict[uuid.UUID, list[CitationView]],
+        *,
+        session_id: UUID,
+    ) -> dict[uuid.UUID, list[CitationView]]:
+        """Re-check every hydrated citation against CURRENT permissions (#536, INV-2).
+
+        The hydration join is tenant-scoped only. A citation is written only for a
+        passage the asker could retrieve, but that is a fact about **write** time:
+        revoke the grant afterwards and the row — including the full ``chunks.text``
+        — keeps coming back on every transcript read. The answer path already
+        re-checks (evidence carry-forward stores ids and rehydrates under current
+        permissions) and the summariser redacts cited spans out of summary prose;
+        the transcript was the one surface still serving the passage itself.
+
+        Redacted rather than dropped: removing the citation outright would erase a
+        settled claim's provenance, which is its own kind of dishonesty. The shell
+        stays so the UI can say "source no longer available".
+
+        One extra query per page, over the page's distinct document ids.
+        """
+        if not citations_by_message:
+            return citations_by_message
+        document_ids = {c.document_id for cites in citations_by_message.values() for c in cites}
+        if not document_ids:
+            return citations_by_message
+        permitted = await permitted_document_ids(
+            self._session,
+            allow_set=await self._resolve_allow_set(),
+            document_ids=sorted(document_ids),
+        )
+        redacted_count = 0
+        filtered: dict[uuid.UUID, list[CitationView]] = {}
+        for message_id, cites in citations_by_message.items():
+            out = []
+            for c in cites:
+                if c.document_id in permitted:
+                    out.append(c)
+                else:
+                    out.append(c.redact())
+                    redacted_count += 1
+            filtered[message_id] = out
+        if redacted_count and self._audit is not None:
+            # INV-6: a read that withheld content is a permission-relevant event.
+            # Counts only — never which passage, and never its text.
+            await self._audit.emit(
+                action=AuditAction.EVIDENCE_REHYDRATED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "surface": "transcript",
+                    "requested_documents": len(document_ids),
+                    "permitted_documents": len(permitted),
+                    "redacted_citations": redacted_count,
+                },
+            )
+        return filtered
+
     async def list_messages(
         self, session_id: UUID, *, cursor: str | None, limit: int | None
     ) -> MessagePage | None:
@@ -506,6 +599,10 @@ class ChatService:
         )
         citations_by_message = await self._citations.list_for_messages_hydrated(
             [m.id for m in page]
+        )
+        # INV-2 on the READ, not only at write time (#536).
+        citations_by_message = await self._filter_citations(
+            citations_by_message, session_id=session_id
         )
         # The governed tool trace per assistant message (#377) — batched like
         # citations (no N+1); user messages simply have no rows.

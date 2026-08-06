@@ -154,6 +154,11 @@ class RunSpec:
     code: str
     execution_id: UUID = field(default_factory=uuid4)
     packages: tuple[str, ...] = ()
+    #: The tenant's deny list, forwarded so the runner can apply it to the RESOLVED
+    #: dependency tree (#509). This layer only ever checked what the model ASKED for,
+    #: and `pip install` takes the whole wheelhouse — so a denied distribution could
+    #: arrive as a dependency of an allowed one. Only the runner sees the resolution.
+    denied_packages: tuple[str, ...] = ()
     # Kept optional for source compatibility with historical callers. ADR-0020
     # never populates or enforces automatic run limits.
     limits: RunLimits | None = None
@@ -196,4 +201,8 @@ class RunResult:
     duration_ms: int
     output_files: tuple[OutputFile, ...] = ()
     image_digest: str | None = None
+    #: What was actually installed — transitive dependencies included — with the
+    #: sha256 of each artefact (#509). `requested_packages` records only the top-level
+    #: names, so a run that pulled in thirty distributions audited as one.
+    resolved_packages: tuple[dict[str, str], ...] = ()
     resource_usage: ResourceUsage | None = None

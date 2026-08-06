@@ -160,6 +160,9 @@ def test_non_local_enabled_sandbox_requires_gvisor() -> None:
         # execution image, so the minimal production env carries one (the tag-only
         # default is refused — see test_sandbox_config).
         "SANDBOX_IMAGE": "lumen-sandbox-exec@sha256:" + "a" * 64,
+        # ADR-0020 §2 (#508): an enabled sandbox authenticates to the runner that
+        # holds the Docker socket, so a token is part of the minimal boot env too.
+        "SANDBOX_RUNNER_TOKEN": "p" * 48,
     }
     with pytest.raises(ValidationError, match="runsc"):
         Settings(**common, SANDBOX_RUNTIME="runc")  # type: ignore[arg-type]

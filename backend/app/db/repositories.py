@@ -24,7 +24,7 @@ from __future__ import annotations
 import ipaddress
 import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -653,6 +653,9 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         stderr=row.stderr,
         artifact_ids=[UUID(x) for x in (row.artifact_ids or [])],
         requested_packages=tuple(row.requested_packages or []),
+        resolved_packages=(
+            tuple(row.resolved_packages) if row.resolved_packages is not None else None
+        ),
         session_id=row.session_id,
         sandbox_session_id=row.sandbox_session_id,
         sandbox_generation=row.sandbox_generation,
@@ -2846,8 +2849,12 @@ class CitationView:
     ``document_id`` / ``document_name`` and the ``snippet`` text. This view is the
     citation row joined (tenant-scoped) to its chunk and that chunk's document, so
     ``GET .../messages`` can render a deep-linkable reference (CC-11 AC-2/AC-3)
-    without a per-row N+1. A citation only exists for a permitted passage (INV-3),
-    so the join never reveals foreign content.
+    without a per-row N+1.
+
+    A citation was only ever WRITTEN for a permitted passage (INV-3), but that is a
+    fact about write time, not read time: a grant revoked afterwards leaves the row
+    in place. This join is tenant-scoped only, so callers on a read path must
+    re-check permission and :meth:`redacted` the ones that no longer pass (#536).
     """
 
     id: UUID
@@ -2859,6 +2866,14 @@ class CitationView:
     char_start: int
     char_end: int
     score: float | None
+    #: True when the reader may no longer retrieve the cited document, in which
+    #: case ``snippet`` and ``document_name`` have been emptied. The row itself is
+    #: kept so a claim's provenance stays visible rather than silently vanishing.
+    redacted: bool = False
+
+    def redact(self) -> CitationView:
+        """This citation with everything disclosing removed, shell intact."""
+        return replace(self, snippet="", document_name="", redacted=True)
 
 
 class CitationRepository(_TenantScopedRepository):
@@ -5717,6 +5732,28 @@ class CodeRunRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def count_executing(self) -> int:
+        """Runs EXECUTING right now — the `max_concurrency` admission gate (#519).
+
+        Deliberately not :meth:`count_active`, which also counts ``QUEUED``. A queued
+        run holds no runner thread and no runner memory, so counting it would refuse
+        work on the basis of a queue depth that costs nothing — and, because a run is
+        already ``QUEUED`` when its own admission check runs, it would count ITSELF and
+        make the gate off by one.
+
+        `max_concurrency` therefore means what an operator would assume: how many of
+        this tenant's runs may occupy the sandbox at the same moment.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.CodeRun)
+            .where(
+                models.CodeRun.tenant_id == self._tenant_id,
+                models.CodeRun.status == CodeRunStatus.RUNNING.value,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
     async def runtime_ms_since(self, since: datetime) -> int:
         """Sum duration for legacy ADR-0013 accounting; not an ADR-0020 gate."""
         stmt = select(func.coalesce(func.sum(models.CodeRun.duration_ms), 0)).where(
@@ -5776,6 +5813,7 @@ class CodeRunRepository(_TenantScopedRepository):
         resource_usage: ResourceUsage | None = None,
         image_digest: str | None = None,
         artifact_ids: list[UUID] | None = None,
+        resolved_packages: tuple[dict[str, str], ...] | None = None,
     ) -> CodeRun | None:
         """Write a run's terminal status + captured result (ADR-0013 §4/§5), tenant-scoped.
 
@@ -5800,6 +5838,12 @@ class CodeRunRepository(_TenantScopedRepository):
         }
         if image_digest is not None:
             values["image_digest"] = image_digest
+        if resolved_packages is not None:
+            # Only written when the runner reported one. Writing `[]` unconditionally
+            # would turn "we did not learn what this run installed" into "this run
+            # installed nothing" — a false statement in the record that exists to
+            # answer that exact question (#509).
+            values["resolved_packages"] = [dict(entry) for entry in resolved_packages]
         stmt = (
             update(models.CodeRun)
             .where(

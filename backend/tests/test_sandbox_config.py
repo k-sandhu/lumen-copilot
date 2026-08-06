@@ -176,6 +176,10 @@ _ENV_BOOT_MINIMUM = {
     "S3_BUCKET": "b",
     "OPENROUTER_API_KEY": "",
     "SANDBOX_ENABLED": "true",
+    # An enabled sandbox must authenticate to the Docker-socket holder (#508), so a
+    # token is part of the BOOT MINIMUM now — not an extra a test opts into. Tests
+    # that assert the refusal override it to "" explicitly.
+    "SANDBOX_RUNNER_TOKEN": "k" * 48,
 }
 
 
@@ -230,3 +234,231 @@ def test_unset_manifest_keeps_the_shipped_image_default(
     settings = _settings_from_env(monkeypatch)
 
     assert settings.sandbox_preinstalled_packages == _DEFAULT_SANDBOX_PREINSTALLED_PACKAGES
+
+
+# --- #511: the same env-decode trap, on every complex-typed setting -------------
+
+
+@pytest.mark.parametrize(
+    ("variable", "comma_form", "expected"),
+    [
+        (
+            "UPLOAD_ALLOWED_CONTENT_TYPES",
+            "application/pdf, text/plain",
+            frozenset({"application/pdf", "text/plain"}),
+        ),
+        (
+            "ARTIFACT_ALLOWED_CONTENT_TYPES",
+            "text/csv,image/png",
+            frozenset({"text/csv", "image/png"}),
+        ),
+        (
+            "LOGO_ALLOWED_CONTENT_TYPES",
+            "image/png",
+            frozenset({"image/png"}),
+        ),
+        (
+            "MCP_ALLOWED_TRANSPORTS",
+            "sse, streamable_http",
+            frozenset({"sse", "streamable_http"}),
+        ),
+        (
+            "MCP_ENDPOINT_ALLOWLIST",
+            "https://a.example,https://b.example",
+            frozenset({"https://a.example", "https://b.example"}),
+        ),
+    ],
+)
+def test_every_complex_setting_accepts_its_documented_comma_form_from_the_env(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    comma_form: str,
+    expected: frozenset[str],
+) -> None:
+    """#511: the trap was never sandbox-specific, it was inherited by five settings.
+
+    ``pydantic-settings`` JSON-decodes a complex-typed env value inside
+    ``EnvSettingsSource`` — BEFORE any validator runs — so a ``mode="before"``
+    splitter is dead code for env input and the documented comma form raises
+    ``SettingsError`` at import. #507 fixed the sandbox instance with ``NoDecode``;
+    every sibling with the same shape was still broken, which is to say **the
+    documented way to configure uploads, artifacts, branding and MCP did not work
+    at all** and took the process down at boot rather than failing visibly.
+
+    Parametrised deliberately: the next complex-typed setting someone adds should
+    show up here as a missing row, not as a support ticket.
+    """
+    settings = _settings_from_env(monkeypatch, **{variable: comma_form})
+
+    assert getattr(settings, variable.lower()) == expected
+
+
+def test_an_empty_complex_setting_means_empty_rather_than_crashing_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worst case of #511: a copied `.env` with a blank line took the app down.
+
+    Blank now means what it says — an empty allow-list, which for uploads is a
+    deny-everything posture the operator chose. It is not a decode failure that
+    prevents the API and the worker from starting.
+    """
+    settings = _settings_from_env(monkeypatch, UPLOAD_ALLOWED_CONTENT_TYPES="")
+
+    assert settings.upload_allowed_content_types == frozenset()
+
+
+def test_a_blank_model_registry_falls_back_to_the_default_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CHAT_MODEL_REGISTRY`'s documented blank fallback was unreachable (#511).
+
+    Its validator has always claimed "a blank string falls back to the default
+    seed", but the JSON decode happened first, so blank raised `SettingsError`
+    before that branch could run. The JSON form keeps working — this is additive.
+    """
+    settings = _settings_from_env(monkeypatch, CHAT_MODEL_REGISTRY="")
+
+    assert len(settings.chat_model_registry) >= 1
+    assert sum(1 for m in settings.chat_model_registry if m.is_default) == 1
+
+
+def test_the_registry_still_takes_its_documented_json_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the above: NoDecode must not break the JSON that works."""
+    settings = _settings_from_env(
+        monkeypatch,
+        CHAT_MODEL_REGISTRY=(
+            '[{"id": "openrouter/x/y", "label": "Y", "provider": "openrouter", '
+            '"tier": "frontier", "is_default": true}]'
+        ),
+    )
+
+    assert [m.id for m in settings.chat_model_registry] == ["openrouter/x/y"]
+
+
+# --- #520: the image reference must be a reference, not merely un-mutable -------
+
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        f"@{_DIGEST}",  # empty name
+        "repo name:tag",  # embedded space
+        ":tag",  # empty name segment
+        "/name:1.0",  # empty leading segment
+        "repo:tag:extra",  # second colon is not a tag
+        "name:-badtag",  # a tag may not start with '-'
+        "UPPER/name:1.0",  # a path component must be lowercase…
+        "Name:1.0",  # …including the only one
+    ],
+)
+def test_a_malformed_reference_is_refused_at_boot(
+    monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    """#520: "not `:latest`" and "has a digest" say nothing about being parseable.
+
+    Each of these was accepted by the earlier validator. They all fail closed
+    eventually — the runner cannot resolve them — but "the daemon rejected your
+    image" at the first execution is a far worse error than "your config is
+    malformed" at boot, and it surfaces to a user mid-task rather than to the
+    operator mid-deploy.
+    """
+    with pytest.raises(ValueError, match="SANDBOX_IMAGE"):
+        _settings_from_env(monkeypatch, SANDBOX_IMAGE=reference)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "lumen-sandbox-exec:0.1.1",
+        f"name@{_DIGEST}",
+        "registry.internal:5000/name:1.0",  # a registry PORT is not a tag
+        f"registry.internal:5000/team/name@{_DIGEST}",
+        "ghcr.io/org/sub_path.name:v1.2.3-rc1",
+        "localhost:5000/name:1.0",
+        "localhost/name:1.0",
+    ],
+)
+def test_a_well_formed_reference_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    settings = _settings_from_env(monkeypatch, SANDBOX_IMAGE=reference)
+
+    assert settings.sandbox_image == reference
+
+
+def test_a_digest_pinned_latest_is_immutable_and_must_not_be_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#520's false rejection — and it punished the most explicit possible pin.
+
+    `:latest` is mutable only when it is what RESOLVES the image. With a digest
+    present the daemon resolves by digest and the tag is a human-readable label, so
+    `name:latest@sha256:…` is exactly as immutable as `name@sha256:…`. It is also
+    the form `docker pull` echoes back, so an operator copying what Docker printed
+    hit a boot failure telling them to stop using a tag they had already pinned.
+    """
+    reference = f"lumen-sandbox-exec:latest@{_DIGEST}"
+
+    settings = _settings_from_env(monkeypatch, SANDBOX_IMAGE=reference)
+
+    assert settings.sandbox_image == reference
+
+
+def test_a_bare_latest_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: relaxing the digest case must not relax the mutable one."""
+    with pytest.raises(ValueError, match="latest"):
+        _settings_from_env(monkeypatch, SANDBOX_IMAGE="lumen-sandbox-exec:latest")
+
+
+# --- #508: an enabled sandbox must authenticate to the runner ------------------
+
+
+def test_enabling_the_sandbox_without_a_runner_token_refuses_to_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner holds the Docker socket; an unauthenticated call to it executes code.
+
+    Fails at STARTUP rather than at the first run, and on both halves: the runner
+    refuses to boot without the secret too, so a mismatch surfaces at
+    `docker compose up` where both are visible together — not as a 401 the first time
+    a user asks for a chart.
+    """
+    with pytest.raises(ValueError, match="SANDBOX_RUNNER_TOKEN"):
+        _settings_from_env(monkeypatch, SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN="")
+
+
+def test_a_weak_runner_token_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guessable shared secret is worse than none: it reads as protection."""
+    with pytest.raises(ValueError, match="at least 32"):
+        _settings_from_env(monkeypatch, SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN="short")
+
+
+def test_the_token_is_required_in_local_development_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately NOT exempt where the digest-pin rule is (#508).
+
+    The digest rule exempts `ENVIRONMENT=local` because you built the image yourself
+    on your own daemon — a real reduction in risk. There is no equivalent argument
+    here: the runner holds the Docker socket on whatever machine it runs on, and an
+    unauthenticated API on a shared network is the same open command channel in dev
+    as in production. Exempting local would also mean the path every developer
+    exercises is the one path never tested.
+    """
+    with pytest.raises(ValueError, match="SANDBOX_RUNNER_TOKEN"):
+        _settings_from_env(
+            monkeypatch, ENVIRONMENT="local", SANDBOX_ENABLED="true", SANDBOX_RUNNER_TOKEN=""
+        )
+
+
+def test_a_disabled_sandbox_needs_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: a deploy that launches nothing is not held hostage to a secret
+    it never presents — and the offline suite must not need one."""
+    settings = _settings_from_env(monkeypatch, SANDBOX_ENABLED="false", SANDBOX_RUNNER_TOKEN="")
+
+    assert settings.sandbox_enabled is False
+    assert settings.sandbox_runner_token == ""
