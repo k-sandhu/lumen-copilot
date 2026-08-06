@@ -34,7 +34,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -51,6 +51,7 @@ from app.db.repositories import (
     ChatSessionRepository,
     CitationRepository,
     CitationView,
+    GroupRepository,
     RunRepository,
     RunStepRepository,
     UserRepository,
@@ -64,11 +65,14 @@ from app.domain.entities import (
     RunError,
     RunStatus,
     RunStep,
+    RunStepKind,
     RunTrigger,
 )
 from app.domain.escalation import classify_terminal, is_transient, normalize_reason
 from app.llm import LLMGateway
 from app.llm.context import ContextConfig
+from app.retrieval.permissions import AllowSet
+from app.retrieval.queries import permitted_document_ids
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime
@@ -656,6 +660,47 @@ def _question_from_inputs(config: AssistantRunConfig, inputs: dict[str, object])
 # --- Read service (GET /runs list + GET /runs/{id} detail) ------------------
 
 
+def _step_document_id(step: RunStep) -> UUID | None:
+    """The document a persisted citation step refers to, if it is one.
+
+    ``run_steps.payload`` is the raw WS envelope ``data`` (``run_sink.persist``), so a
+    citation step carries ``documentId``/``snippet``/``documentName`` verbatim. Parsed
+    defensively: a payload that does not look like a citation is simply not one, and a
+    malformed id must not crash a transcript read.
+    """
+    if step.kind is not RunStepKind.CITATION or not isinstance(step.payload, dict):
+        return None
+    raw = step.payload.get("documentId")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
+def _redact_step(step: RunStep, permitted: set[UUID]) -> RunStep:
+    """Blank a citation step's disclosing fields when the reader lost access (#554).
+
+    The durable transcript re-serves the passage independently of ``RunDetail.citations``
+    — ``GET /runs/{id}`` returns every step payload raw — so redacting the citation list
+    alone would leave the identical text one field away in the same response.
+
+    Structure is preserved (the step, its kind, its ordering) for the same reason the
+    chat transcript keeps the citation shell: a settled answer really was grounded, and
+    erasing the evidence of that is its own kind of dishonesty.
+    """
+    document_id = _step_document_id(step)
+    if document_id is None or document_id in permitted:
+        return step
+    payload = dict(step.payload)
+    for field in ("snippet", "documentName", "text"):
+        if field in payload:
+            payload[field] = ""
+    payload["redacted"] = True
+    return replace(step, payload=payload)
+
+
 class RunsReadService:
     """List the caller's runs + read one run's detail, owner- and tenant-scoped (#235).
 
@@ -666,11 +711,14 @@ class RunsReadService:
     """
 
     def __init__(self, session: AsyncSession, *, tenant_id: UUID, owner_id: UUID) -> None:
+        self._session = session
         self._runs = RunRepository(session, tenant_id)
         self._steps = RunStepRepository(session, tenant_id)
         self._citations = CitationRepository(session, tenant_id)
+        self._groups = GroupRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._allow_set: AllowSet | None = None
 
     async def list_(
         self,
@@ -712,7 +760,40 @@ class RunsReadService:
         citations: list[CitationView] = []
         if run.message_id is not None:
             citations = await self._citations.list_for_message_hydrated(run.message_id)
+        # INV-2 on the READ, exactly as the chat transcript does (#536). The
+        # hydration join is tenant-scoped only, so a grant revoked after the run
+        # finished would otherwise keep serving the passage here forever — and this
+        # surface has TWO copies of it, the citation list and the durable step
+        # transcript, so redacting one alone would be decorative.
+        permitted = await self._permitted_documents(citations, steps)
+        citations = [c if c.document_id in permitted else c.redact() for c in citations]
+        steps = [_redact_step(step, permitted) for step in steps]
         return RunDetail(run=run, steps=steps, citations=citations)
+
+    async def _permitted_documents(
+        self, citations: list[CitationView], steps: list[RunStep]
+    ) -> set[UUID]:
+        """Which cited documents the CALLER may still retrieve (#536, #554 review).
+
+        One query over the union of the two surfaces' document ids, through the same
+        INV-2 chokepoint retrieval uses — so connector-ACL mode and ADR-0022 group
+        principals are inherited rather than re-implemented.
+        """
+        ids = {c.document_id for c in citations}
+        for step in steps:
+            document_id = _step_document_id(step)
+            if document_id is not None:
+                ids.add(document_id)
+        if not ids:
+            return set()
+        if self._allow_set is None:
+            group_ids = await self._groups.group_ids_for_user(self._owner_id)
+            self._allow_set = AllowSet.for_user(
+                tenant_id=self._tenant_id, user_id=self._owner_id, group_ids=group_ids
+            )
+        return await permitted_document_ids(
+            self._session, allow_set=self._allow_set, document_ids=sorted(ids)
+        )
 
 
 # --- Control service (POST /runs/{id}/resume|cancel|reroute) ----------------
@@ -845,9 +926,7 @@ class RunsControlService:
             )
         return run
 
-    async def _emit(
-        self, action: AuditAction, run: Run, *, metadata: dict[str, object]
-    ) -> None:
+    async def _emit(self, action: AuditAction, run: Run, *, metadata: dict[str, object]) -> None:
         """Audit a human handoff on the escalated run (INV-6), actor = the caller."""
         await self._audit.emit(
             action=action,

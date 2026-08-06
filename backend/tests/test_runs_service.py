@@ -22,9 +22,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.db import models
 from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
@@ -906,3 +908,69 @@ async def test_reroute_to_unknown_target_is_404(ctx: _Ctx, monkeypatch: pytest.M
             await _control_service(ctx, session, owner_id=ctx.alice_id).reroute(
                 run_id, to_owner_id=uuid.uuid4()
             )
+
+
+async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#536 closed the chat transcript; `GET /runs/{id}` had the same leak, twice.
+
+    The citation hydration join is tenant-scoped only, so a grant revoked after the run
+    finished kept serving the full passage indefinitely — and this surface carries the
+    text TWICE: once in `RunDetail.citations`, and again in the durable `run_steps`
+    transcript, whose payload is the raw citation envelope (`documentName`, `snippet`)
+    returned verbatim by the API. Redacting one alone would leave the identical text
+    one field away in the same response.
+
+    Found by review of #554, after that PR's contract schema had already begun claiming
+    "permission is re-checked on every READ" — which was true of the chat transcript and
+    false here.
+    """
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
+    await runs_service.execute_run(run_id, ctx.tenant_a)
+
+    # While alice can still retrieve it, both surfaces carry the passage.
+    async with ctx.sessionmaker() as session:
+        before = await runs_service.RunsReadService(
+            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
+        ).get(run_id)
+        assert "14,600" in before.citations[0].snippet
+        cited_steps = [s for s in before.steps if s.kind is RunStepKind.CITATION]
+        assert cited_steps, "the fixture should produce a citation step"
+        assert "14,600" in str(cited_steps[0].payload)
+
+    # Alice loses access: the document moves to bob, with no grant back.
+    async with ctx.sessionmaker() as session:
+        await session.execute(
+            update(models.Document)
+            .where(models.Document.id == ctx.document_id)
+            .values(owner_id=ctx.bob_id)
+        )
+        await session.commit()
+
+    async with ctx.sessionmaker() as session:
+        after = await runs_service.RunsReadService(
+            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
+        ).get(run_id)
+
+        # Surface 1: the citation list.
+        cite = after.citations[0]
+        assert cite.snippet == ""
+        assert cite.document_name == ""
+        assert cite.redacted is True
+        # …the shell survives, so the answer's provenance is still visible.
+        assert cite.document_id == ctx.document_id
+
+        # Surface 2: the durable step transcript — the one redacting alone would miss.
+        steps = [s for s in after.steps if s.kind is RunStepKind.CITATION]
+        assert steps
+        for step in steps:
+            assert "14,600" not in str(step.payload), "the passage survived in run_steps"
+            assert "taxes.pdf" not in str(step.payload)
+            assert step.payload.get("redacted") is True
+
+        # A non-citation step is untouched — this redacts a document, not a transcript.
+        others = [s for s in after.steps if s.kind is not RunStepKind.CITATION]
+        assert others, "the fixture should produce non-citation steps too"
+        assert all("redacted" not in (s.payload or {}) for s in others)
