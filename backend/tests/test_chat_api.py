@@ -43,13 +43,15 @@ from app.db.repositories import (
     AuditEventRepository,
     ChunkInput,
     ChunkRepository,
+    CitationRepository,
     CollectionRepository,
     DocumentRepository,
     LlmProviderRepository,
+    MessageRepository,
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import LlmProviderStatus, Role, SecretKind
+from app.domain.entities import LlmProviderStatus, MessageRole, Role, SecretKind
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.main import _drain_answer_tasks, create_app, lifespan
@@ -1329,3 +1331,108 @@ async def test_session_usage_budget_follows_last_answer_model(
     assert body["model"] != default_model
     assert body["window_known"] is True  # gpt-4o is in the local model map
     assert body["last"]["context_prompt_tokens"] == 80
+
+
+# --- Audited routes must COMMIT their audit row (#536 / #510) ---------------
+#
+# `AuditSink.emit` flushes but does not commit — the caller owns the transaction
+# (see its docstring). A route that audits and then returns without committing
+# loses the row when the request-scoped session closes, and the INV-6 half of the
+# feature silently does not exist in production.
+#
+# These two tests are deliberately ROUTE-level and read through a SEPARATE
+# session opened after the response. That is the only way to observe this class:
+# a unit test that commits by hand, or reads back through the same session, sees
+# the flushed row either way and stays green while the real path drops it.
+
+
+async def test_transcript_withholding_audit_survives_the_request(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    """#536: the withholding record must outlive the request that made it."""
+    token = await _login(client, seeded.alice_email)
+    created = await client.post("/api/v1/chat/sessions", json={}, headers=_auth(token))
+    assert created.status_code == 201, created.text
+    chat_id = created.json()["id"]
+
+    # A document nobody may retrieve: `acl_enforced=True` with no mirrored
+    # principals admits no one, the owner included (ADR-0019 §2). Citing it makes
+    # the transcript read withhold, which is what audits.
+    async with sessionmaker() as setup:
+        coll = await CollectionRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id, name="managed"
+        )
+        doc = await DocumentRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id,
+            collection_id=coll.id,
+            filename="managed.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            storage_key=f"{seeded.tenant_a}/managed.pdf",
+            acl_enforced=True,
+        )
+        chunks = await ChunkRepository(setup, seeded.tenant_a).replace_for_document(
+            doc.id,
+            [ChunkInput(text="TOP SECRET rate table.", char_start=0, char_end=22)],
+        )
+        message = await MessageRepository(setup, seeded.tenant_a).add(
+            session_id=uuid.UUID(chat_id), role=MessageRole.ASSISTANT, content="answer"
+        )
+        await CitationRepository(setup, seeded.tenant_a).add(
+            message_id=message.id, chunk_id=chunks[0].id, char_start=0, char_end=22
+        )
+        await setup.commit()
+
+    resp = await client.get(f"/api/v1/chat/sessions/{chat_id}/messages", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    citations = [c for item in resp.json()["items"] for c in item["citations"]]
+    assert citations, "the seeded citation did not come back at all"
+    assert citations[0]["redacted"] is True
+    assert citations[0]["snippet"] == ""
+    assert "TOP SECRET" not in resp.text
+
+    # The point of the test: a FRESH session, after the request-scoped one closed.
+    # Without the route's commit the flushed row rolled back and this is empty.
+    async with sessionmaker() as after:
+        events = await AuditEventRepository(after, seeded.tenant_a).list_recent(limit=50)
+    withheld = [e for e in events if e.metadata.get("surface") == "transcript"]
+    assert withheld, "the withholding audit row did not survive the request"
+    assert withheld[0].metadata["redacted_citations"] == 1
+    # Counts only — the trail must never carry the text it just withheld.
+    assert "TOP SECRET" not in str(withheld[0].metadata)
+
+
+async def test_sandbox_lifecycle_refusal_audit_survives_the_request(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    """#510: the refusal IS the record, so it has to commit before the 409.
+
+    `SandboxDisabledError` is a `ConflictError`, which the route's
+    `except DependencyError` never caught — so the trailing commit was skipped
+    and the `permission.denied` row unwound with the request. Sandbox execution
+    is off by default in the suite's env, so this is the ordinary path.
+    """
+    token = await _login(client, seeded.alice_email)
+    created = await client.post("/api/v1/chat/sessions", json={}, headers=_auth(token))
+    assert created.status_code == 201, created.text
+    chat_id = created.json()["id"]
+
+    resp = await client.post(f"/api/v1/chat/sessions/{chat_id}/sandbox/reset", headers=_auth(token))
+    assert resp.status_code == 409, resp.text
+
+    async with sessionmaker() as after:
+        events = await AuditEventRepository(after, seeded.tenant_a).list_recent(limit=50)
+    denials = [e for e in events if e.action == "permission.denied"]
+    assert denials, "the refusal audit row did not survive the request"
+    denial = denials[0]
+    assert denial.outcome.value == "denied"
+    assert denial.resource_type == "sandbox_session"
+    assert denial.resource_id == chat_id
+    assert denial.metadata["lifecycle"] == "reset"
+    # The real correlation context, not the background-task sentinels: an
+    # operator has to be able to tie the refusal to the request that caused it.
+    assert denial.request_id != "sandbox-request"
