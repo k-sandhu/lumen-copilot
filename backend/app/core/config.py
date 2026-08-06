@@ -178,6 +178,40 @@ _SANDBOX_IMAGE_NAME = re.compile(_REF_NAME)
 _SANDBOX_IMAGE_TAG = re.compile(_REF_TAG)
 
 
+def _string_set(value: object) -> object:
+    """Parse a set-valued setting from an env string — BOTH the comma and JSON forms.
+
+    ``NoDecode`` (#511) hands the raw string here instead of letting
+    ``pydantic-settings`` JSON-decode it first, which is what made the documented
+    comma form work. But the JSON form was the only form that worked BEFORE that
+    change, so a deploy already setting ``'["application/pdf", "text/plain"]'`` would
+    have had it split on commas into ``{'["application/pdf"', '"text/plain"]'}`` —
+    boot succeeds, `Settings` looks valid, and every upload is then rejected because
+    no real content type matches the garbage (#554 review). A silent corruption of a
+    working configuration is a worse failure than the one #511 fixed.
+
+    So: a value that looks like a JSON array is parsed as one, anything else splits on
+    commas. Both forms are supported deliberately and permanently — there is no reason
+    to break either, and a deploy should not have to know which release it is on.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            # Not valid JSON after all. Fall through to the comma split rather than
+            # raising: a value like `[weird` is more likely a typo in a comma list
+            # than a broken JSON document, and the field validators below reject
+            # anything genuinely unusable with a message naming the setting.
+            pass
+        else:
+            if isinstance(decoded, list):
+                return frozenset(str(item).strip() for item in decoded if str(item).strip())
+    return frozenset(item.strip() for item in text.split(",") if item.strip())
+
+
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration, sourced from the environment.
 
@@ -355,9 +389,7 @@ class Settings(BaseSettings):
     @classmethod
     def _split_content_types(cls, value: object) -> object:
         """Accept a comma-separated env string as the content-type allowlist."""
-        if isinstance(value, str):
-            return frozenset(item.strip() for item in value.split(",") if item.strip())
-        return value
+        return _string_set(value)
 
     # --- Artifact store (CC-12 / issue #208) --------------------------------
     # Files agents/runs *produce* (distinct from uploaded documents): stored via
@@ -401,9 +433,7 @@ class Settings(BaseSettings):
     @classmethod
     def _split_artifact_content_types(cls, value: object) -> object:
         """Accept a comma-separated env string as the artifact content-type allowlist."""
-        if isinstance(value, str):
-            return frozenset(item.strip() for item in value.split(",") if item.strip())
-        return value
+        return _string_set(value)
 
     # --- Per-tenant application logo (admin branding) -----------------------
     # A tenant ADMIN uploads a brand mark that replaces the default "Lumen /
@@ -426,9 +456,7 @@ class Settings(BaseSettings):
     @classmethod
     def _split_logo_content_types(cls, value: object) -> object:
         """Accept a comma-separated env string as the logo content-type allowlist."""
-        if isinstance(value, str):
-            return frozenset(item.strip() for item in value.split(",") if item.strip())
-        return value
+        return _string_set(value)
 
     @field_validator("artifact_retention_days")
     @classmethod
@@ -1000,9 +1028,7 @@ class Settings(BaseSettings):
     @classmethod
     def _split_mcp_sets(cls, value: object) -> object:
         """Accept a comma-separated env string for the MCP transport/allowlist sets."""
-        if isinstance(value, str):
-            return frozenset(item.strip() for item in value.split(",") if item.strip())
-        return value
+        return _string_set(value)
 
     @field_validator("mcp_allowed_transports")
     @classmethod

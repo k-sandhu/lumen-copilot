@@ -6,6 +6,7 @@ import io
 import tarfile
 import threading
 import time
+import tracemalloc
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -862,41 +863,68 @@ def test_docker_exit_137_after_container_removal_is_killed_not_failed() -> None:
 # --- #519 part 1: model output is STREAMED, not buffered whole -----------------
 
 
-def test_a_huge_stdout_is_clipped_as_it_arrives_and_never_held_whole() -> None:
-    """`exec_run(demux=True)` buffered the process's ENTIRE output before returning.
+def test_a_huge_stdout_never_accumulates_beyond_the_cap() -> None:
+    """#519's actual claim: bounded PEAK, not merely a bounded return value.
 
-    `print("x" * 2_000_000_000)` therefore allocated two gigabytes inside the runner —
-    the single Docker-socket holder, capped at 1 GiB in compose — no matter what
-    output cap was configured. The cap clipped what was RETAINED, which is a different
-    thing from what is READ, so ADR-0013 §G7's memory bound was qualified rather than
-    met.
+    `exec_run(demux=True)` buffered a process's ENTIRE output before returning, so
+    `print("x" * 2_000_000_000)` allocated two gigabytes inside the runner — capped at
+    1 GiB in compose — whatever output cap was configured. ADR-0013 §G7 now claims
+    "peak is the cap plus one chunk".
 
-    Asserted on what the engine HELD, and separately on the fact that it kept draining
-    (below) — those are the two halves of "streamed", and a fix that did only the
-    first would hang the model's process instead.
+    MEASURED, because the obvious assertion cannot see the bug. An earlier version of
+    this test asserted only `len(stdout) == cap`, and a review demonstrated that the
+    bug-shaped regression — accumulate every chunk, slice once at the join — satisfies
+    that and passed the entire suite. Result length says nothing about peak; only
+    watching allocation does.
+
+    `tracemalloc` starts AFTER the fixture is built and the chunks are generated
+    lazily, so what it measures is what the ENGINE retained while draining, not what
+    the test allocated to feed it.
     """
     client = _Client()
     engine = DockerSandboxEngine(client)
     session_id = uuid4()
     engine.ensure(session_id, _ensure())
     container = client.containers.values[0]
-    # 40 MiB, delivered as many small chunks — far past the retention cap.
-    chunk = b"x" * (64 * 1024)
-    container.stream_chunks = [chunk] * 640
 
-    result = engine.execute_existing(
-        session_id,
-        ExecuteRequest(
-            generation=1,
-            execution_id=uuid4(),
-            code="print('x' * 2_000_000_000)",
-            packages=[],
-        ),
+    chunk_size = 64 * 1024
+    chunk_count = 640  # 40 MiB streamed, ~160x the retention cap
+
+    class _LazyChunks:
+        """Generates each chunk on demand, so retention is the engine's alone."""
+
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(chunk_count):
+                yield b"x" * chunk_size
+
+    container.stream_chunks = _LazyChunks()  # type: ignore[assignment]
+
+    tracemalloc.start()
+    try:
+        result = engine.execute_existing(
+            session_id,
+            ExecuteRequest(
+                generation=1,
+                execution_id=uuid4(),
+                code="print('x' * 2_000_000_000)",
+                packages=[],
+            ),
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    streamed = chunk_size * chunk_count
+    # The bound ADR-0013 §G7 states: the cap plus about one chunk. A generous ceiling
+    # (cap + 16 chunks) still fails a buffering implementation by a factor of ~30, so
+    # this is decisive without being brittle about interpreter overhead.
+    ceiling = _MAX_STREAM_CHARS + 16 * chunk_size
+    assert peak < ceiling, (
+        f"peak retention {peak} exceeded {ceiling} while draining {streamed} bytes — "
+        "the stream is being buffered, not discarded past the cap"
     )
-
-    # Retained output is bounded by the cap, not by what the process produced.
+    # …and the returned value is still correct, which is what the old test checked.
     assert len(result["stdout"]) == _MAX_STREAM_CHARS
-    assert result["stdout"].startswith("x")
 
 
 def test_the_stream_is_drained_past_the_cap_rather_than_abandoned() -> None:

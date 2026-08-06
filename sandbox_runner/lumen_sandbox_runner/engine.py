@@ -60,6 +60,19 @@ _MAX_STREAM_CHARS = 256 * 1024
 #: re-executes rather than returning a stale answer.
 _MAX_CACHED_RESULTS = 64
 
+#: …and a byte ceiling on the same cache, because the entry count alone does not bound
+#: it (#554 review). Each retained result carries its collected output as base64 — up to
+#: ~4/3 of the output cap, which defaults to 32 MiB — so 64 entries is ~2.7 GiB against
+#: the runner's 1 GiB compose limit. One user looping ~23 max-output executions in a
+#: single chat OOMs the Docker-socket holder and takes code execution down for every
+#: tenant. Sequential, no concurrency needed, and the #519 collection permit does
+#: nothing against it: that bounds what is IN FLIGHT, this bounds what the process goes
+#: on HOLDING.
+#:
+#: 128 MiB is comfortably above one max-size result (so idempotent re-reads still work
+#: for the case they exist for) and comfortably below the container limit.
+_MAX_CACHED_RESULT_BYTES = 128 * 1024 * 1024
+
 #: How many collections may run AT ONCE in this process (#519 part 2).
 #:
 #: Every bound above is per-EXECUTION. Locks are per-session, so executions in
@@ -109,12 +122,6 @@ _END_OF_OPTIONS = "--"
 #: the honesty note below still applies to that case.
 _INDEX_URL_ENV = "SANDBOX_PACKAGE_INDEX_URL"
 
-#: A requirements file with `--hash=` lines. When configured, the download runs under
-#: ``--require-hashes`` and pip refuses any artefact whose digest is not listed, which
-#: is the verification ADR-0013 §3 asks for. Unset leaves the fetch unverified — the
-#: deviation the runbook documents.
-_HASH_FILE_ENV = "SANDBOX_PACKAGE_HASH_FILE"
-
 
 def _wheel_distribution(filename: str) -> str:
     """The distribution name encoded in a wheel filename (PEP 427).
@@ -128,6 +135,23 @@ def _wheel_distribution(filename: str) -> str:
     stem = filename[:-4] if filename.endswith(".whl") else filename
     name = stem.split("-", 1)[0]
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _result_size(result: dict[str, object]) -> int:
+    """Roughly how much memory a cached result retains (#554 review).
+
+    Dominated by the base64 of collected output files; stdout/stderr are already capped
+    at ``_MAX_STREAM_CHARS`` each but are counted anyway so the estimate never runs
+    under. Approximate on purpose — this drives eviction, not accounting, and walking
+    the structure precisely on every execution would cost more than it saves.
+    """
+    total = len(str(result.get("stdout", ""))) + len(str(result.get("stderr", "")))
+    files = result.get("output_files")
+    if isinstance(files, list):
+        for entry in files:
+            if isinstance(entry, dict):
+                total += len(str(entry.get("data_b64", "")))
+    return total
 
 
 class RunnerError(RuntimeError):
@@ -207,6 +231,9 @@ class DockerSandboxEngine:
         self._locks = SessionLocks()
         self._download = package_downloader or self._download_binary_packages
         self._results: dict[tuple[UUID, int, UUID], dict[str, object]] = {}
+        #: Retained bytes per cached key, so eviction can bound memory
+        #: rather than only entry count.
+        self._result_bytes: dict[tuple[UUID, int, UUID], int] = {}
         self._runtime = self._configured_runtime(runtime)
 
     @staticmethod
@@ -225,10 +252,25 @@ class DockerSandboxEngine:
         )
 
     def _remember(self, key: tuple[UUID, int, UUID], result: dict[str, object]) -> None:
-        """Cache a completed result, evicting oldest-first past the bound."""
+        """Cache a completed result, evicting oldest-first past BOTH bounds.
+
+        Count alone was not a bound on memory: a result retains its collected output as
+        base64, so 64 of them can exceed the runner's container limit several times over
+        and OOM the Docker-socket holder — see ``_MAX_CACHED_RESULT_BYTES``. Evicting on
+        retained bytes as well makes the cache's footprint a declared number.
+
+        An evicted key simply re-executes rather than returning a stale answer, so
+        eviction costs work, never correctness.
+        """
         self._results[key] = result
-        while len(self._results) > _MAX_CACHED_RESULTS:
-            self._results.pop(next(iter(self._results)), None)
+        self._result_bytes[key] = _result_size(result)
+        while self._results and (
+            len(self._results) > _MAX_CACHED_RESULTS
+            or sum(self._result_bytes.values()) > _MAX_CACHED_RESULT_BYTES
+        ):
+            oldest = next(iter(self._results))
+            self._results.pop(oldest, None)
+            self._result_bytes.pop(oldest, None)
 
     @staticmethod
     def _container_runtime(container: Any) -> str | None:
@@ -607,22 +649,30 @@ class DockerSandboxEngine:
     def _download_binary_packages(packages: tuple[str, ...], destination: Path) -> None:
         """Fetch binary wheels for admitted requirements.
 
-        **The verification story, stated plainly (#509).** ADR-0013 3 conditions
-        install-based expansion on "an admin-allowlisted, hash-pinned internal mirror".
-        Two knobs now exist so a deploy can actually have one:
+        **The verification story, stated plainly.** ADR-0013 §3 conditions install-based
+        expansion on "an admin-allowlisted, hash-pinned internal mirror".
+        ``SANDBOX_PACKAGE_INDEX_URL`` supplies the *allowlisted mirror* half: it pins
+        WHERE wheels come from, replacing the default index rather than adding to it, so
+        a configured mirror is exclusive.
 
-        * ``SANDBOX_PACKAGE_INDEX_URL`` pins WHERE wheels come from.
-        * ``SANDBOX_PACKAGE_HASH_FILE`` points at a requirements file carrying
-          ``--hash=`` lines; with it, pip runs under ``--require-hashes`` and refuses
-          any artefact whose digest is not listed.
+        **The hash-pinned half is NOT implemented**, and the runbook says so. A first
+        attempt at it (#509) shipped a ``SANDBOX_PACKAGE_HASH_FILE`` knob that passed
+        ``--require-hashes --requirement <lockfile>`` alongside the model's packages as
+        command-line arguments. Verified against real pip, that combination can never
+        succeed: an unpinned CLI requirement fails with *"all requirements must have
+        their versions pinned with =="*, and a pinned one fails with *"Hashes are
+        required in --require-hashes mode"* — a command-line requirement cannot carry a
+        ``--hash``. So every install-bearing run failed the moment an operator turned the
+        knob on, and because both pip messages contain the word "hash" the error was
+        reported as a supply-chain verification failure: a false alarm on top of an
+        outage. It has been removed rather than left as a trap.
 
-        With NEITHER set the fetch is still the default public index with no hashes —
-        unchanged from before, and still the deviation the runbook documents. The
-        mechanism is here; supplying the mirror and the lockfile is a deployment act,
-        and this docstring must not claim otherwise until one ships.
+        Doing it properly means resolving the request against the lockfile and passing
+        the requested closure as a requirements file with no CLI packages at all —
+        tracked as its own issue. Until then this fetch is unverified beyond the index
+        pin, which is exactly what ADR-0013 §3 and the runbook now say.
         """
         index_url = os.environ.get(_INDEX_URL_ENV, "").strip()
-        hash_file = os.environ.get(_HASH_FILE_ENV, "").strip()
         command = [
             sys.executable,
             "-m",
@@ -637,25 +687,10 @@ class DockerSandboxEngine:
             # mirror is exclusive. `--no-index` would be wrong here: that disables
             # fetching altogether, which is the install step's flag, not this one's.
             command += ["--index-url", index_url]
-        if hash_file:
-            if not Path(hash_file).is_file():
-                raise RunnerError("the configured package hash file is missing", status_code=500)
-            # `--require-hashes` makes pip refuse ANY requirement without a matching
-            # digest, transitive ones included — which is the point: an unpinned
-            # dependency is exactly the hole a lockfile exists to close.
-            command += ["--require-hashes", "--requirement", hash_file]
         command += [_END_OF_OPTIONS, *packages]
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)  # noqa: S603
         except subprocess.CalledProcessError as exc:
-            if hash_file and "hash" in (exc.stderr or "").lower():
-                # Distinguish "the artefact did not match its pin" from "the download
-                # failed": one is a supply-chain event an operator must look at, the
-                # other is a flaky network.
-                raise RunnerError(
-                    "a package failed hash verification against the configured pins",
-                    status_code=422,
-                ) from exc
             raise RunnerError(
                 "an approved package could not be downloaded", status_code=422
             ) from exc
