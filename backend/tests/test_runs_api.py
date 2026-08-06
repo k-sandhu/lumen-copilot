@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -35,6 +36,15 @@ from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
+    AuditEventRepository,
+    ChatSessionRepository,
+    ChunkInput,
+    ChunkRepository,
+    CitationRepository,
+    CollectionRepository,
+    DocumentRepository,
+    GrantRepository,
+    MessageRepository,
     RunRepository,
     RunStepRepository,
     TenantRepository,
@@ -43,7 +53,11 @@ from app.db.repositories import (
 from app.domain.entities import (
     AssistantStatus,
     AutonomyLevel,
+    GrantPrincipalType,
+    GrantResourceType,
+    GrantRole,
     KnowledgeScope,
+    MessageRole,
     Role,
     RunError,
     RunStatus,
@@ -128,85 +142,118 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             await assistants.update(assistant.id, fields={"status": AssistantStatus.PUBLISHED})
             published = await assistants.get(assistant.id)
             version = await AssistantVersionRepository(seed, ta.id).add(
-                assistant_id=assistant.id, version=1, author_id=alice.id,
+                assistant_id=assistant.id,
+                version=1,
+                author_id=alice.id,
                 config=config_from_assistant(published),
             )
             # A Globex assistant so carol's run pins a version in her tenant.
             b_assistants = AssistantRepository(seed, tb.id)
             b_assistant = await b_assistants.create(
-                owner_id=carol.id, name="Globex", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=None,
+                owner_id=carol.id,
+                name="Globex",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=None,
             )
 
             runs_a = RunRepository(seed, ta.id)
             steps_a = RunStepRepository(seed, ta.id)
             # Alice: a succeeded run with a transcript, and a failed run.
             alice_run = await runs_a.create(
-                owner_id=alice.id, assistant_id=assistant.id,
-                assistant_version_id=version.id, trigger=RunTrigger.MANUAL,
+                owner_id=alice.id,
+                assistant_id=assistant.id,
+                assistant_version_id=version.id,
+                trigger=RunTrigger.MANUAL,
                 inputs={"prompt": "Summarize Q3"},
             )
             await runs_a.mark_terminal(
-                alice_run.id, status=RunStatus.SUCCEEDED,
-                finished_at=alice_run.created_at, summary="Q3 summary ready.",
+                alice_run.id,
+                status=RunStatus.SUCCEEDED,
+                finished_at=alice_run.created_at,
+                summary="Q3 summary ready.",
             )
             await steps_a.add(
                 run_id=alice_run.id, seq=0, kind=RunStepKind.DELTA, payload={"text": "Q3 summary."}
             )
             alice_failed = await runs_a.create(
-                owner_id=alice.id, assistant_id=assistant.id,
-                assistant_version_id=version.id, trigger=RunTrigger.SCHEDULE,
+                owner_id=alice.id,
+                assistant_id=assistant.id,
+                assistant_version_id=version.id,
+                trigger=RunTrigger.SCHEDULE,
             )
             await runs_a.mark_terminal(
-                alice_failed.id, status=RunStatus.FAILED, finished_at=alice_failed.created_at,
+                alice_failed.id,
+                status=RunStatus.FAILED,
+                finished_at=alice_failed.created_at,
                 error=RunError(code="model_unavailable", message="The model was unavailable."),
             )
             # Alice: an ESCALATED run awaiting a human decision (resume/cancel/reroute).
             alice_escalated = await runs_a.create(
-                owner_id=alice.id, assistant_id=assistant.id,
-                assistant_version_id=version.id, trigger=RunTrigger.SCHEDULE,
+                owner_id=alice.id,
+                assistant_id=assistant.id,
+                assistant_version_id=version.id,
+                trigger=RunTrigger.SCHEDULE,
             )
             await runs_a.mark_terminal(
-                alice_escalated.id, status=RunStatus.ESCALATED,
+                alice_escalated.id,
+                status=RunStatus.ESCALATED,
                 finished_at=alice_escalated.created_at,
                 error=RunError(code="restricted_data", message="A human must decide."),
             )
             # Bob: a run in the same tenant, owned by a different user; + an escalated one.
             bob_run = await runs_a.create(
-                owner_id=bob.id, assistant_id=assistant.id,
-                assistant_version_id=version.id, trigger=RunTrigger.MANUAL,
+                owner_id=bob.id,
+                assistant_id=assistant.id,
+                assistant_version_id=version.id,
+                trigger=RunTrigger.MANUAL,
             )
             bob_escalated = await runs_a.create(
-                owner_id=bob.id, assistant_id=assistant.id,
-                assistant_version_id=version.id, trigger=RunTrigger.MANUAL,
+                owner_id=bob.id,
+                assistant_id=assistant.id,
+                assistant_version_id=version.id,
+                trigger=RunTrigger.MANUAL,
             )
             await runs_a.mark_terminal(
-                bob_escalated.id, status=RunStatus.ESCALATED,
+                bob_escalated.id,
+                status=RunStatus.ESCALATED,
                 finished_at=bob_escalated.created_at,
                 error=RunError(code="ambiguous", message="A human must decide."),
             )
             # Carol: a run in another tenant; + an escalated one.
             runs_b = RunRepository(seed, tb.id)
             carol_run = await runs_b.create(
-                owner_id=carol.id, assistant_id=b_assistant.id,
-                assistant_version_id=None, trigger=RunTrigger.MANUAL,
+                owner_id=carol.id,
+                assistant_id=b_assistant.id,
+                assistant_version_id=None,
+                trigger=RunTrigger.MANUAL,
             )
             carol_escalated = await runs_b.create(
-                owner_id=carol.id, assistant_id=b_assistant.id,
-                assistant_version_id=None, trigger=RunTrigger.MANUAL,
+                owner_id=carol.id,
+                assistant_id=b_assistant.id,
+                assistant_version_id=None,
+                trigger=RunTrigger.MANUAL,
             )
             await runs_b.mark_terminal(
-                carol_escalated.id, status=RunStatus.ESCALATED,
+                carol_escalated.id,
+                status=RunStatus.ESCALATED,
                 finished_at=carol_escalated.created_at,
                 error=RunError(code="tool_failed", message="A human must decide."),
             )
             await seed.commit()
             factory.lumen_seeded = _Seeded(  # type: ignore[attr-defined]
-                tenant_a=ta.id, alice_id=alice.id, bob_id=bob.id, assistant_id=assistant.id,
-                alice_run=alice_run.id, alice_run_failed=alice_failed.id,
+                tenant_a=ta.id,
+                alice_id=alice.id,
+                bob_id=bob.id,
+                assistant_id=assistant.id,
+                alice_run=alice_run.id,
+                alice_run_failed=alice_failed.id,
                 alice_run_escalated=alice_escalated.id,
-                bob_run=bob_run.id, bob_run_escalated=bob_escalated.id,
-                carol_run=carol_run.id, carol_run_escalated=carol_escalated.id,
+                bob_run=bob_run.id,
+                bob_run_escalated=bob_escalated.id,
+                carol_run=carol_run.id,
+                carol_run_escalated=carol_escalated.id,
             )
         yield factory
     finally:
@@ -324,9 +371,7 @@ async def test_get_run_detail_has_transcript_and_status(
     assert body["steps"][0]["kind"] == "delta"
 
 
-async def test_get_failed_run_detail_has_typed_error(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_get_failed_run_detail_has_typed_error(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/runs/{seeded.alice_run_failed}", headers=_auth(token))
     assert resp.status_code == 200
@@ -418,9 +463,7 @@ async def test_owner_reroutes_escalated_run(client: AsyncClient, seeded: _Seeded
 async def test_resume_non_escalated_run_is_409(client: AsyncClient, seeded: _Seeded) -> None:
     """INV-8: resuming a run that is not escalated is an illegal transition → 409."""
     token = await _login(client, seeded.alice_email)
-    resp = await client.post(
-        f"/api/v1/runs/{seeded.alice_run_failed}/resume", headers=_auth(token)
-    )
+    resp = await client.post(f"/api/v1/runs/{seeded.alice_run_failed}/resume", headers=_auth(token))
     assert resp.status_code == 409, resp.text
 
 
@@ -476,3 +519,186 @@ async def test_escalation_actions_require_a_token(client: AsyncClient, seeded: _
     assert (
         await client.post(f"/api/v1/runs/{rid}/reroute", json={"to_owner_id": str(seeded.bob_id)})
     ).status_code == 401
+
+
+# --- INV-2 read-time re-check on the run detail (#558) ----------------------
+
+
+async def test_run_detail_withholds_a_passage_after_the_grant_is_revoked(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    """Grant -> read (passage visible) -> revoke -> re-read (passage withheld).
+
+    A citation is written only for a passage the asker could retrieve, but that
+    is a fact about WRITE time. The hydration join is tenant-scoped only, so
+    before #558 the row - full ``chunks.text`` included - kept coming back on
+    every later run-detail read. This drives the real route both times, so the
+    re-check is exercised where it actually has to hold.
+    """
+    secret = "Confidential margin table for bob only."
+    # Bob's document, reachable by alice ONLY through a grant, so revoking it
+    # flips permission cleanly (ownership would keep admitting her).
+    async with sessionmaker() as setup:
+        coll = await CollectionRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.bob_id, name="bob-private"
+        )
+        doc = await DocumentRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.bob_id,
+            collection_id=coll.id,
+            filename="margins.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            storage_key=f"{seeded.tenant_a}/margins.pdf",
+            acl_enforced=False,
+        )
+        chunks = await ChunkRepository(setup, seeded.tenant_a).replace_for_document(
+            doc.id, [ChunkInput(text=secret, char_start=0, char_end=len(secret))]
+        )
+        chat = await ChatSessionRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id, model="gpt-4o-mini", title="run"
+        )
+        message = await MessageRepository(setup, seeded.tenant_a).add(
+            session_id=chat.id, role=MessageRole.ASSISTANT, content="grounded answer"
+        )
+        await CitationRepository(setup, seeded.tenant_a).add(
+            message_id=message.id, chunk_id=chunks[0].id, char_start=0, char_end=len(secret)
+        )
+        await RunRepository(setup, seeded.tenant_a).mark_terminal(
+            seeded.alice_run,
+            status=RunStatus.SUCCEEDED,
+            finished_at=datetime.now(UTC),
+            message_id=message.id,
+            session_id=chat.id,
+        )
+        await GrantRepository(setup, seeded.tenant_a).create(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc.id,
+            principal_type=GrantPrincipalType.USER,
+            principal_id=seeded.alice_id,
+            role=GrantRole.VIEWER,
+            granted_by=seeded.bob_id,
+        )
+        await setup.commit()
+
+    token = await _login(client, seeded.alice_email)
+
+    # 1. Granted: the passage is hers to see, and nothing is redacted.
+    before = await client.get(f"/api/v1/runs/{seeded.alice_run}", headers=_auth(token))
+    assert before.status_code == 200, before.text
+    granted = before.json()["citations"]
+    assert len(granted) == 1
+    assert granted[0]["snippet"] == secret
+    assert granted[0]["redacted"] is False
+
+    # 2. Revoked out from under the stored citation.
+    async with sessionmaker() as revoke:
+        removed = await GrantRepository(revoke, seeded.tenant_a).revoke(
+            resource_type=GrantResourceType.DOCUMENT,
+            resource_id=doc.id,
+            principal_type=GrantPrincipalType.USER,
+            principal_id=seeded.alice_id,
+        )
+        assert removed is True
+        await revoke.commit()
+
+    # 3. The same read now withholds the text but keeps the provenance shell.
+    after = await client.get(f"/api/v1/runs/{seeded.alice_run}", headers=_auth(token))
+    assert after.status_code == 200, after.text
+    withheld = after.json()["citations"]
+    assert len(withheld) == 1, "the citation was dropped instead of redacted"
+    assert withheld[0]["redacted"] is True
+    assert withheld[0]["snippet"] == ""
+    assert withheld[0]["document_name"] == ""
+    assert secret not in after.text
+
+    # 4. INV-6, read through a SEPARATE session: the record has to survive the
+    #    request that made it, which only a committed row does.
+    async with sessionmaker() as check:
+        events = await AuditEventRepository(check, seeded.tenant_a).list_recent(limit=50)
+    runs_surface = [e for e in events if e.metadata.get("surface") == "run"]
+    assert runs_surface, "the withholding audit row did not survive the request"
+    assert runs_surface[0].resource_type == "run"
+    assert runs_surface[0].resource_id == str(seeded.alice_run)
+    assert runs_surface[0].metadata["redacted_citations"] == 1
+    # Counts only - the trail must never carry the text it just withheld.
+    assert secret not in str(runs_surface[0].metadata)
+
+
+async def test_run_detail_keeps_permitted_citations_untouched(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+) -> None:
+    """The re-check must not redact what the caller can still read (no over-blocking)."""
+    text = "A note alice owns outright."
+    async with sessionmaker() as setup:
+        coll = await CollectionRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id, name="alice-own"
+        )
+        doc = await DocumentRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id,
+            collection_id=coll.id,
+            filename="note.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            storage_key=f"{seeded.tenant_a}/note.pdf",
+            acl_enforced=False,
+        )
+        chunks = await ChunkRepository(setup, seeded.tenant_a).replace_for_document(
+            doc.id, [ChunkInput(text=text, char_start=0, char_end=len(text))]
+        )
+        chat = await ChatSessionRepository(setup, seeded.tenant_a).create(
+            owner_id=seeded.alice_id, model="gpt-4o-mini", title="run"
+        )
+        message = await MessageRepository(setup, seeded.tenant_a).add(
+            session_id=chat.id, role=MessageRole.ASSISTANT, content="grounded answer"
+        )
+        await CitationRepository(setup, seeded.tenant_a).add(
+            message_id=message.id, chunk_id=chunks[0].id, char_start=0, char_end=len(text)
+        )
+        await RunRepository(setup, seeded.tenant_a).mark_terminal(
+            seeded.alice_run,
+            status=RunStatus.SUCCEEDED,
+            finished_at=datetime.now(UTC),
+            message_id=message.id,
+            session_id=chat.id,
+        )
+        await setup.commit()
+
+    token = await _login(client, seeded.alice_email)
+    resp = await client.get(f"/api/v1/runs/{seeded.alice_run}", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    citations = resp.json()["citations"]
+    assert len(citations) == 1
+    assert citations[0]["snippet"] == text
+    assert citations[0]["redacted"] is False
+
+    # Nothing was withheld, so there is nothing to record.
+    async with sessionmaker() as check:
+        events = await AuditEventRepository(check, seeded.tenant_a).list_recent(limit=50)
+    assert not [e for e in events if e.metadata.get("surface") == "run"]
+
+
+def test_run_and_chat_citation_shapes_stay_identical() -> None:
+    """Both routers project `#/components/schemas/Citation` from their own copy.
+
+    They had already drifted: the runs copy was missing `redacted` for the entire
+    life of #536, so a run detail could not express a withheld citation even once
+    the service knew how to withhold one (#558). Nothing in the repo compared the
+    two, and there is no CI, so the divergence was invisible until a test asked
+    for the field. This pins them together.
+    """
+    from pydantic import BaseModel
+
+    from app.api.v1.chat import CitationResponse as ChatCitation
+    from app.api.v1.runs import CitationResponse as RunCitation
+
+    def shape(model: type[BaseModel]) -> dict[str, tuple[object, bool]]:
+        return {
+            name: (field.annotation, field.is_required())
+            for name, field in model.model_fields.items()
+        }
+
+    assert shape(RunCitation) == shape(ChatCitation)

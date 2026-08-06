@@ -85,6 +85,12 @@ class CitationResponse(BaseModel):
     char_start: int
     char_end: int
     score: float | None = None
+    #: True when the caller may no longer retrieve the cited document (#558), in
+    #: which case `snippet` and `document_name` are empty. The row is kept so a
+    #: settled claim's provenance stays visible instead of silently disappearing.
+    #: Mirrors the chat transcript's field — both project the SAME contract
+    #: schema (`#/components/schemas/Citation`), and a parity test pins them.
+    redacted: bool = False
 
 
 class RunResponse(BaseModel):
@@ -149,6 +155,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         char_start=view.char_start,
         char_end=view.char_end,
         score=view.score,
+        redacted=view.redacted,
     )
 
 
@@ -200,9 +207,34 @@ def _detail_to_response(detail: RunDetail) -> RunResponse:
 
 
 def _build_service(
-    *, session: DbSession, principal: CurrentUser, tenant_id: CurrentTenant
+    *,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory | None = None,
+    request: Request | None = None,
 ) -> RunsReadService:
-    return RunsReadService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    """Assemble the run read service, with its audit seam when the caller audits.
+
+    Only the DETAIL read can audit: it re-checks stored evidence against current
+    permissions and records when it withholds some (#558, INV-6). The inbox list
+    serves no citations, so threading a sink through it would be noise — the same
+    split ``chat._build_service`` makes for the transcript.
+    """
+    audit_kwargs: dict[str, object] = {}
+    if make_audit_sink is not None and request is not None:
+        audit_kwargs = {
+            "audit": make_audit_sink(tenant_id),
+            # The envelope requires both (spec 0004 section 2.4).
+            "request_id": extract_request_id(request) or "unknown",
+            "source_ip": request.client.host if request.client else "unknown",
+        }
+    return RunsReadService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        **audit_kwargs,  # type: ignore[arg-type]
+    )
 
 
 def _build_control_service(
@@ -258,13 +290,27 @@ async def list_runs(
 @router.get("/{run_id}", response_model=RunResponse, response_model_exclude_none=True)
 async def get_run(
     run_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> RunResponse:
     """Run detail — status, inputs, transcript, citations, error; not visible → 404."""
-    service = _build_service(session=session, principal=principal, tenant_id=tenant_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     detail = await service.get(run_id)
+    # This read AUDITS when it withholds evidence the caller may no longer see
+    # (#558). `AuditSink.emit` flushes but does not commit — the caller owns the
+    # transaction — so an audited read must close its own or the row rolls back
+    # with the request-scoped session (the #554 review's finding, on the
+    # sibling surface).
+    await session.commit()
     return _detail_to_response(detail)
 
 
