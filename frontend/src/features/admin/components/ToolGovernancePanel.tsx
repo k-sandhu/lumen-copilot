@@ -138,7 +138,22 @@ function ToolRow({
                 No approver exists yet, so this <strong>refuses every call</strong> for the whole
                 tenant. Clear it to pre-approve the tool.
               </p>
-            ) : null}
+            ) : (
+              /*
+                Issue #518: the other half of the same honesty. Spec 0004 §2.5 was
+                amended so that clearing this counts as INV-7's "recorded approval" —
+                which means it is recorded AGAINST THIS ADMIN, and it authorises the
+                tool rather than any particular call. Nothing asks per invocation, so a
+                call a retrieved document induces the model into making also runs. The
+                admin deciding now is the person who should read that, not the operator
+                who finds it in the audit later.
+              */
+              <p className="mt-1 max-w-[22rem] text-xs text-foreground-muted" role="note">
+                Pre-approved for the whole tenant and <strong>recorded against you</strong>. Calls
+                are not reviewed one by one, including ones the assistant is talked into by document
+                content.
+              </p>
+            )}
           </>
         ) : (
           <span className="text-xs text-foreground-muted">n/a</span>
