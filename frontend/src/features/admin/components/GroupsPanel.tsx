@@ -140,7 +140,12 @@ function GroupRow({
   const renameRef = useRef<HTMLButtonElement>(null);
   const wasEditing = useRef(editing);
   useEffect(() => {
-    if (wasEditing.current && !editing) renameRef.current?.focus();
+    // Only when focus actually fell to <body> — if the admin opened another
+    // row's editor, that input now holds focus and must keep it.
+    const dropped =
+      typeof document !== 'undefined' &&
+      (document.activeElement === null || document.activeElement === document.body);
+    if (wasEditing.current && !editing && dropped) renameRef.current?.focus();
     wasEditing.current = editing;
   }, [editing]);
 
@@ -228,9 +233,12 @@ function CreateGroupForm({
         event.preventDefault();
         if (!canSubmit) return;
         // Clear only once the server has accepted it — a 409 on a duplicate
-        // name must leave the text there to correct, not force a retype.
+        // name must leave the text there to correct, not force a retype. And
+        // only if the field still holds what was submitted: the input stays
+        // editable while the request is in flight, so a newer draft wins.
+        const submitted = name;
         void onCreate(trimmed).then((created) => {
-          if (created) setName('');
+          if (created) setName((current) => (current === submitted ? '' : current));
         });
       }}
     >

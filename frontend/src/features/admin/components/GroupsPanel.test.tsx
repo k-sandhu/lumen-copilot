@@ -326,9 +326,54 @@ describe('GroupsPanel', () => {
     const dialog = await screen.findByRole('alertdialog');
     await userEvent.click(within(dialog).getByRole('button', { name: /delete group/i }));
 
-    // Already gone is done, not a failure to act on: dialog closes, list refreshes.
+    // Already gone is done, not a failure to act on: dialog closes…
     expect(await screen.findByText(/was already deleted/i)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    // …and the phantom row goes with it, rather than sitting there clickable.
+    // Asserting the toast alone would pass with no reconciliation at all.
+    await waitFor(() => expect(screen.queryByText('Tax Team')).not.toBeInTheDocument());
+    expect(listGroups.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('drops the row immediately, without waiting on the refetch', async () => {
+    deleteGroup.mockResolvedValue(undefined);
+    // The refetch never resolves: the row must still go, from the cache write.
+    listGroups.mockResolvedValueOnce(GROUPS).mockReturnValue(new Promise(() => {}));
+
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    await userEvent.click(screen.getByRole('button', { name: /delete tax team/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: /delete group/i }));
+
+    await waitFor(() => expect(screen.queryByText('Tax Team')).not.toBeInTheDocument());
+  });
+
+  it('does not wipe a newer draft when an earlier create succeeds', async () => {
+    let finish: (g: Group) => void = () => {};
+    createGroup.mockImplementation(
+      () =>
+        new Promise<Group>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Tax Team');
+
+    const field = screen.getByLabelText(/^group name$/i);
+    await userEvent.type(field, 'Payroll');
+    await userEvent.click(screen.getByRole('button', { name: /create group/i }));
+
+    // The field stays editable while the request is in flight.
+    await userEvent.clear(field);
+    await userEvent.type(field, 'Accounting');
+
+    finish({ ...TAX_TEAM, id: 'g-new', name: 'Payroll', member_count: 0 });
+    await screen.findByText(/created payroll/i);
+
+    // Clearing on success must not discard what the admin has since typed.
+    expect(field).toHaveValue('Accounting');
   });
 
   it('does not let a slower rename close a draft opened on another row', async () => {
@@ -368,6 +413,19 @@ describe('GroupsPanel', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /rename tax team/i })).toHaveFocus(),
     );
+  });
+
+  it('does not steal focus back when the admin opens another row’s editor', async () => {
+    const OTHER: Group = { ...TAX_TEAM, id: 'g-fin', name: 'Finance' };
+    listGroups.mockResolvedValue({ items: [SYSTEM_GROUP, TAX_TEAM, OTHER] });
+    renderWithQuery(<GroupsPanel />);
+    await screen.findByText('Finance');
+
+    await userEvent.click(screen.getByRole('button', { name: /rename tax team/i }));
+    // Switching editors closes Tax's form, but Finance's input now owns focus.
+    await userEvent.click(screen.getByRole('button', { name: /rename finance/i }));
+
+    await waitFor(() => expect(screen.getByLabelText(/new name for finance/i)).toHaveFocus());
   });
 
   it('does not carry one group’s picker choice across to another group', async () => {

@@ -84,15 +84,24 @@ export function GroupMembersSection({ group }: { group: Group }) {
   // control that had focus, so the outcome has to be spoken.
   const [announcement, setAnnouncement] = useState('');
   const pickerRef = useRef<HTMLSelectElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   const memberIds = new Set(members.map((m) => m.id));
   const rosterMembers = (roster.data?.pages ?? []).flatMap((page) => page.items);
   const candidates = rosterMembers.filter((m) => !memberIds.has(m.id));
   const morePages = roster.hasNextPage === true;
+  // Until the group's own roster resolves, `members` is empty and every
+  // candidate looks addable — including people already in the group. Withhold
+  // the choice rather than offer a no-op.
+  const membershipUnknown = query.isLoading || query.error !== null;
 
   // Neither a refusal nor a deleted group can be fixed by trying again, so the
-  // write controls go away with the retry button.
-  const writesBlocked = isDeadEnd(query.error) || isGone(query.error);
+  // write controls go away with the retry button. A refusal on the ROSTER read
+  // counts too: /admin/members and the member writes sit behind the same admin
+  // gate, so cached candidates from an earlier page are not permission to act.
+  const rosterForbidden = isDeadEnd(roster.error);
+  const writesBlocked = isDeadEnd(query.error) || isGone(query.error) || rosterForbidden;
 
   const setRemoving = (id: string, busy: boolean) =>
     setRemovingIds((prev) => {
@@ -133,8 +142,18 @@ export function GroupMembersSection({ group }: { group: Group }) {
       await remove.mutateAsync({ groupId: group.id, userId: member.id });
       setAnnouncement(`Removed ${member.email} from ${group.name}.`);
       // The row — and the button holding focus — is about to unmount. Land
-      // focus on the picker rather than letting it fall to <body>.
-      pickerRef.current?.focus();
+      // focus somewhere real, but only if the admin is still HERE: if they
+      // moved on while the request ran, yanking focus back is worse than the
+      // drop it prevents.
+      // Sampled HERE, not at click time: the row has not unmounted yet, so
+      // focus still sits on its Remove button if the admin stayed put — and
+      // sits elsewhere if they moved on, which we must not undo.
+      const stillHere = sectionRef.current?.contains(document.activeElement) ?? false;
+      if (stillHere) {
+        const picker = pickerRef.current;
+        if (picker !== null && !picker.disabled) picker.focus();
+        else headingRef.current?.focus();
+      }
     } catch (error) {
       setRemoveErrors((prev) => ({ ...prev, [member.id]: describeMemberWriteError(error) }));
     } finally {
@@ -144,6 +163,7 @@ export function GroupMembersSection({ group }: { group: Group }) {
 
   return (
     <section
+      ref={sectionRef}
       aria-labelledby={`group-members-${group.id}`}
       className="border-t border-border bg-surface-muted/20"
     >
@@ -151,7 +171,12 @@ export function GroupMembersSection({ group }: { group: Group }) {
         {announcement}
       </p>
       <header className="px-4 py-3">
-        <h3 id={`group-members-${group.id}`} className="text-sm font-semibold text-foreground">
+        <h3
+          id={`group-members-${group.id}`}
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
           Members of {group.name}
         </h3>
         <p className="mt-0.5 text-xs text-foreground-muted">
@@ -183,6 +208,13 @@ export function GroupMembersSection({ group }: { group: Group }) {
         </ul>
       </PanelBody>
 
+      {rosterForbidden ? (
+        <p role="alert" className="border-t border-border px-4 py-3 text-xs text-danger">
+          You need the admin role to list this tenant&rsquo;s members, so there is no one to choose
+          from.
+        </p>
+      ) : null}
+
       {writesBlocked ? null : (
         <form
           aria-label={`Add a member to ${group.name}`}
@@ -198,8 +230,8 @@ export function GroupMembersSection({ group }: { group: Group }) {
               id={`add-member-${group.id}`}
               ref={pickerRef}
               value={choice}
-              disabled={roster.isLoading || candidates.length === 0}
-              aria-busy={roster.isLoading}
+              disabled={roster.isLoading || membershipUnknown || candidates.length === 0}
+              aria-busy={roster.isLoading || membershipUnknown}
               onChange={(event) => setChoice(event.target.value)}
               className="w-64 rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
             >
@@ -223,7 +255,7 @@ export function GroupMembersSection({ group }: { group: Group }) {
             <button
               type="button"
               onClick={() => void roster.fetchNextPage()}
-              disabled={roster.isFetchingNextPage}
+              disabled={roster.isFetching}
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
             >
               {roster.isFetchingNextPage ? 'Loading…' : 'Load more members'}
@@ -231,20 +263,21 @@ export function GroupMembersSection({ group }: { group: Group }) {
           ) : null}
 
           {roster.error !== null ? (
+            // A refusal never reaches here — it withholds this whole form and
+            // renders its own note above — so this error is worth retrying.
             <p role="alert" className="basis-full text-xs text-danger">
-              {isDeadEnd(roster.error)
-                ? 'You need the admin role to list this tenant’s members, so there is no one to choose from.'
-                : 'Couldn’t load the member roster, so there is no one to choose from.'}{' '}
-              {/* Same rule as the panel body: a refusal is a dead end, not a retry. */}
-              {isDeadEnd(roster.error) ? null : (
-                <button
-                  type="button"
-                  onClick={() => void roster.refetch()}
-                  className="underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                >
-                  Retry
-                </button>
-              )}
+              Couldn&rsquo;t load the member roster, so there is no one to choose from.{' '}
+              <button
+                type="button"
+                onClick={() => void roster.refetch()}
+                className="underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                Retry
+              </button>
+            </p>
+          ) : membershipUnknown ? (
+            <p className="basis-full text-xs text-foreground-muted" role="status">
+              Loading this group&rsquo;s members…
             </p>
           ) : roster.isLoading ? (
             <p className="basis-full text-xs text-foreground-muted" role="status">

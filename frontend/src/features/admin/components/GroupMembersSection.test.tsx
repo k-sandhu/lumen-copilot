@@ -263,11 +263,20 @@ describe('GroupMembersSection', () => {
     expect(screen.queryByRole('form', { name: /add a member/i })).toBeNull();
   });
 
-  it('keeps two overlapping removals from borrowing each other’s outcome', async () => {
+  it('keeps two genuinely overlapping removals from borrowing each other’s outcome', async () => {
     listGroupMembers.mockResolvedValue({ items: [ADA, GRACE] });
-    // Ada's removal fails; Grace's succeeds. Each must land on its own row.
+    // Deferred on purpose: both removals must be IN FLIGHT at once, or a shared
+    // mutation observer would never get the chance to lose the first outcome.
+    let rejectAda: (e: unknown) => void = () => {};
+    let resolveGrace: () => void = () => {};
     removeGroupMember.mockImplementation((_g: string, userId: string) =>
-      userId === 'u1' ? Promise.reject(new ApiError('forbidden', 403)) : Promise.resolve(undefined),
+      userId === 'u1'
+        ? new Promise((_res, rej) => {
+            rejectAda = rej;
+          })
+        : new Promise<void>((res) => {
+            resolveGrace = () => res();
+          }),
     );
     renderWithQuery(<GroupMembersSection group={GROUP} />);
     await screen.findByText('ada@acme.test');
@@ -275,12 +284,93 @@ describe('GroupMembersSection', () => {
     await userEvent.click(screen.getByRole('button', { name: /remove ada@acme.test/i }));
     await userEvent.click(screen.getByRole('button', { name: /remove grace@acme.test/i }));
 
-    const adaRow = (await screen.findByText('ada@acme.test')).closest('li') as HTMLElement;
-    const graceRow = (await screen.findByText('grace@acme.test')).closest('li') as HTMLElement;
+    // Both pending simultaneously — each row shows its own busy label.
+    const adaRow = screen.getByText('ada@acme.test').closest('li') as HTMLElement;
+    const graceRow = screen.getByText('grace@acme.test').closest('li') as HTMLElement;
+    expect(within(adaRow).getByRole('button', { name: /remove ada/i })).toHaveTextContent(
+      /removing/i,
+    );
+    expect(within(graceRow).getByRole('button', { name: /remove grace/i })).toHaveTextContent(
+      /removing/i,
+    );
+
+    // Settle out of order: the later call finishes first.
+    resolveGrace();
+    await waitFor(() =>
+      expect(within(graceRow).getByRole('button', { name: /remove grace/i })).toHaveTextContent(
+        /^remove$/i,
+      ),
+    );
+    rejectAda(new ApiError('forbidden', 403));
+
+    // Ada's failure must still arrive, on Ada's row only.
     expect(
       await within(adaRow).findByText(/need the admin role to manage groups/i),
     ).toBeInTheDocument();
-    // Grace succeeded, so her row carries no error of Ada's.
     expect(within(graceRow).queryByRole('alert')).toBeNull();
+  });
+
+  it('withholds the picker while the group’s own membership is still unknown', async () => {
+    // The roster resolves first; the group's members are still in flight, so
+    // every candidate would look addable — including people already in it.
+    listGroupMembers.mockReturnValue(new Promise(() => {}));
+    renderWithQuery(<GroupMembersSection group={GROUP} />);
+
+    const picker = await screen.findByLabelText(/add member/i);
+    // Wait for the TENANT roster to land — options only exist once it has — so
+    // `disabled` can no longer be explained by the roster still loading. The
+    // only remaining reason is that this group's membership is unknown.
+    await waitFor(() => expect(within(picker).getAllByRole('option').length).toBeGreaterThan(1));
+    expect(picker).toBeDisabled();
+    expect(await screen.findByText(/loading this group’s members/i)).toBeInTheDocument();
+  });
+
+  it('blocks member writes when the ROSTER read is refused, even with a page cached', async () => {
+    // Page one loads, page two 403s: cached candidates are not permission.
+    let call = 0;
+    listMembers.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? Promise.resolve({ items: [GRACE], next_cursor: 'page2' })
+        : Promise.reject(new ApiError('forbidden', 403));
+    });
+    renderWithQuery(<GroupMembersSection group={GROUP} />);
+    await screen.findByText('ada@acme.test');
+
+    await userEvent.click(await screen.findByRole('button', { name: /load more members/i }));
+
+    expect(
+      await screen.findByText(/need the admin role to list this tenant’s members/i),
+    ).toBeInTheDocument();
+    // The whole write surface goes, not just the retry.
+    expect(screen.queryByRole('form', { name: /add a member/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^add$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+  });
+
+  it('does not steal focus back if the admin moved on during a removal', async () => {
+    listGroupMembers.mockResolvedValueOnce(MEMBERS).mockResolvedValue({ items: [] });
+    let finish: () => void = () => {};
+    removeGroupMember.mockImplementation(
+      () =>
+        new Promise<void>((res) => {
+          finish = () => res();
+        }),
+    );
+    renderWithQuery(
+      <>
+        <GroupMembersSection group={GROUP} />
+        <button type="button">Somewhere else</button>
+      </>,
+    );
+    await screen.findByText('ada@acme.test');
+
+    await userEvent.click(screen.getByRole('button', { name: /remove ada@acme.test/i }));
+    const elsewhere = screen.getByRole('button', { name: /somewhere else/i });
+    elsewhere.focus();
+    finish();
+
+    await screen.findByText(/removed ada@acme.test/i);
+    expect(elsewhere).toHaveFocus();
   });
 });

@@ -154,10 +154,24 @@ export function useMemberRoster(): UseInfiniteQueryResult<InfiniteData<MemberLis
  * there offering the same doomed action. This does NOT swallow the error: the
  * rejection still reaches the caller, which maps it for the user.
  */
-function reconcileIfVanished(qc: ReturnType<typeof useQueryClient>, error: unknown): void {
-  if (error instanceof ApiError && error.status === 404) {
-    void qc.invalidateQueries({ queryKey: groupKeys.list() });
-  }
+function reconcileIfVanished(
+  qc: ReturnType<typeof useQueryClient>,
+  error: unknown,
+  ...alsoInvalidate: readonly (readonly unknown[])[]
+): void {
+  if (!(error instanceof ApiError) || error.status !== 404) return;
+  void qc.invalidateQueries({ queryKey: groupKeys.list() });
+  // A member write names TWO things, so its 404 may mean the USER vanished -
+  // refreshing only the group list would keep offering that user in the picker.
+  for (const queryKey of alsoInvalidate) void qc.invalidateQueries({ queryKey });
+}
+
+/** Drop a group from the cached list at once, so no stale row stays clickable
+ *  in the window before an invalidation's refetch lands (or never lands). */
+function dropGroupFromList(qc: ReturnType<typeof useQueryClient>, groupId: string): void {
+  qc.setQueryData<GroupList>(groupKeys.list(), (prev) =>
+    prev ? { ...prev, items: prev.items.filter((g) => g.id !== groupId) } : prev,
+  );
 }
 
 /**
@@ -235,8 +249,12 @@ export function useDeleteGroup(): UseMutationResult<void, unknown, string> {
   const qc = useQueryClient();
   return useMutation<void, unknown, string>({
     mutationFn: (groupId) => deleteGroup(groupId),
-    onError: (error) => reconcileIfVanished(qc, error),
+    onError: (error, groupId) => {
+      if (error instanceof ApiError && error.status === 404) dropGroupFromList(qc, groupId);
+      reconcileIfVanished(qc, error);
+    },
     onSuccess: (_data, groupId) => {
+      dropGroupFromList(qc, groupId);
       // Drop the dead group's member cache too, so re-creating a group with the
       // same name can never show the deleted one's roster.
       qc.removeQueries({ queryKey: groupKeys.members(groupId) });
@@ -258,7 +276,8 @@ export function useAddGroupMember(): UseMutationResult<
   const qc = useQueryClient();
   return useMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => addGroupMember(groupId, { user_id: userId }),
-    onError: (error) => reconcileIfVanished(qc, error),
+    onError: (error, { groupId: id }) =>
+      reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
     onSuccess: (_data, { groupId }) => {
       void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
       void qc.invalidateQueries({ queryKey: groupKeys.list() });
@@ -279,7 +298,8 @@ export function useRemoveGroupMember(): UseMutationResult<
   const qc = useQueryClient();
   return useMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => removeGroupMember(groupId, userId),
-    onError: (error) => reconcileIfVanished(qc, error),
+    onError: (error, { groupId: id }) =>
+      reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
     onSuccess: (_data, { groupId }) => {
       void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
       void qc.invalidateQueries({ queryKey: groupKeys.list() });
