@@ -107,8 +107,21 @@ class _FakeStore:
 
 
 @pytest_asyncio.fixture
-async def sessionmaker_fixture() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    database_file = Path.cwd() / f".test-sandbox-api-{uuid4()}.sqlite3"
+async def sessionmaker_fixture(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A file-backed SQLite database for the durability tests.
+
+    File-backed rather than in-memory on purpose: these assert a run SURVIVES the
+    connection that started it, which an in-memory database cannot express.
+
+    It lives under pytest's `tmp_path`, not `Path.cwd()`. Two reasons, and the second
+    is why this changed: writing scratch databases into the repo root is untidy, and
+    the explicit `unlink` in teardown raced aiosqlite's worker thread on Windows —
+    `PermissionError: [WinError 32] ... used by another process` — which failed a test
+    whose body had already passed. It surfaced only under full-suite load, which is
+    the worst way for it to surface. pytest owns the lifecycle of `tmp_path` and does
+    not fail a test when cleanup lags behind a background thread.
+    """
+    database_file = tmp_path / f".test-sandbox-api-{uuid4()}.sqlite3"
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database_file.as_posix()}",
         connect_args={"check_same_thread": False},
@@ -168,7 +181,6 @@ async def sessionmaker_fixture() -> AsyncIterator[async_sessionmaker[AsyncSessio
         yield factory
     finally:
         await engine.dispose()
-        database_file.unlink(missing_ok=True)
 
 
 @pytest.fixture
