@@ -16,8 +16,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
 from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
@@ -125,6 +128,93 @@ class SandboxToolRunner(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class RecalledTurn:
+    """One turn read back out of the conversation's compacted range (#569).
+
+    Deliberately **not** a :class:`~app.domain.entities.Message`: recall must not
+    hand a tool handler a row it could render fields off blindly. It carries the
+    three things a recalled turn is *for* — who spoke, when, and what was said —
+    plus ``cited_document_ids``, the ids of the documents that turn's citations
+    point at.
+
+    Those ids are the whole permission story. A stored assistant turn quotes
+    documents inline, so replaying one verbatim re-serves text whose grant may
+    since have been revoked (epic #533 design rule 1; the same class of leak as
+    #536, reached from a third direction). The seam therefore reports the ids and
+    the *handler* re-checks them against the caller's CURRENT permissions before
+    any of the turn's text reaches the model.
+    """
+
+    role: str
+    created_at: datetime
+    content: str
+    cited_document_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RecallOutcome:
+    """What a transcript read found — or why it deliberately found nothing (#569).
+
+    ``turns`` is chronological (oldest → newest) so the handler renders in
+    reading order. ``refusal`` is set instead when the seam declined: the
+    per-answer call budget is spent, or this exact query was already asked this
+    turn. It is a *sentence for the model*, not an exception — an exhausted
+    budget must end the recall loop, not the answer.
+
+    ``compaction_started`` is False while the whole conversation is still in the
+    live window. That is the structural stopping rule: there is nothing to
+    recall because the model can already see everything, and saying so plainly
+    beats returning an empty list the model will read as "search harder".
+    """
+
+    turns: tuple[RecalledTurn, ...] = ()
+    compaction_started: bool = True
+    refusal: str | None = None
+
+
+@runtime_checkable
+class TranscriptReader(Protocol):
+    """The narrow own-conversation read seam ``read_conversation`` reads through (#569).
+
+    Constructed by the chat runtime already bound to ONE session and the caller's
+    principal, so the tool cannot name a session — there is no session argument to
+    smuggle one through. That binding is load-bearing: RLS on ``chat_sessions`` /
+    ``messages`` is **tenant-only** (``20260624_0000-0007_tenancy_rls.py``), so a
+    cross-tenant read is stopped by the database but a *same-tenant, wrong-owner*
+    read is not. Ownership rests on one app-layer predicate, and a tool handler
+    does not route through :class:`~app.services.chat_service.ChatService` — so
+    the implementation re-checks ownership itself rather than trusting that its
+    constructor was called from the right place.
+
+    The seam also owns the **stopping rule** (the per-answer call budget and the
+    repeat-query short-circuit): a bound the model is *told about* in a
+    description is a suggestion, whereas one enforced in the only object that can
+    reach the messages table is a bound.
+    """
+
+    async def recall(self, *, query: str | None, limit: int) -> RecallOutcome:
+        """Read the compacted range of the bound session, newest matches first."""
+        ...
+
+    def for_session(self, session: AsyncSession) -> TranscriptReader:
+        """A view on the same conversation bound to an ISOLATED DB session (#412).
+
+        A read-only tool joins the turn's **concurrent** batch, and every
+        collaborator that closes over the runtime's ``AsyncSession`` must be
+        rebound before its handler overlaps with anything else — an
+        ``AsyncSession`` used from two coroutines at once is a race, which is
+        exactly why ``artifacts``/``sandbox`` are stripped and ``retrieval`` is
+        rebuilt in the call scope. A transcript reader is the first *read* seam
+        that is not ``retrieval``, so it carries its own rebind.
+
+        The returned view **shares this one's budget and asked-set**: fan-out
+        must not be a way to buy extra recall calls by issuing them at the same
+        moment.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class ToolContext:
     """The permission-scoped context a tool handler runs against (issue #207).
 
@@ -176,6 +266,12 @@ class ToolContext:
     session_id: UUID | None = None
     simulate_writes: bool = False
     sandbox: SandboxToolRunner | None = None
+    #: The #569 own-conversation read seam ``read_conversation`` reads through,
+    #: pre-bound to this run's session + principal. ``None`` outside interactive
+    #: chat (a sub-agent, a headless run — contexts with no conversation to
+    #: recall); the handler then reports a typed ``ok=False`` instead of
+    #: crashing, exactly as ``sandbox=None`` does for ``run_python``.
+    transcript: TranscriptReader | None = None
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and
@@ -355,9 +451,12 @@ __all__ = [
     "ApprovalRequest",
     "ArtifactWriter",
     "DenyAllApprovalGate",
+    "RecallOutcome",
+    "RecalledTurn",
     "SandboxRun",
     "SandboxToolRunner",
     "ToolContext",
     "ToolDefinition",
     "ToolHandler",
+    "TranscriptReader",
 ]

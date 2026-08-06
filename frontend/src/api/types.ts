@@ -1866,6 +1866,7 @@ export type ChatTool =
   | 'search_documents'
   | 'list_documents'
   | 'get_document'
+  | 'read_conversation'
   | 'web_search';
 
 /** `event.data` for name=tool_call — the agent invoked a retrieval tool. */
