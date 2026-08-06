@@ -1,0 +1,427 @@
+/**
+ * GroupsPanel — the admin's group management surface (#540, ADR-0022). A group
+ * is the tenant-scoped membership primitive that a source grant can name:
+ * sharing with "Tax Team" reaches whoever is in Tax Team *at request time*, so
+ * adding and removing people here is how access is widened and revoked.
+ *
+ * Two kinds of row, and the difference is load-bearing:
+ *   - `user` groups an admin creates, renames, deletes and populates.
+ *   - the single `system` group ("All members"), which expresses tenant-wide
+ *     visibility. Its membership is DERIVED, not stored, so it has no roster to
+ *     edit and no count to show — `member_count: null` means *everyone*, not
+ *     zero, and this panel says "Everyone in this tenant" rather than "0".
+ *     It renders read-only: no rename, no delete, no member controls (ADR-0022
+ *     §3). The server enforces the same thing with 409 `system_group_immutable`.
+ *
+ * States (frontend/AGENTS.md "every state, not just success"): loading skeleton,
+ * empty ("No groups yet"), read error with Retry, and — because this read is
+ * role-gated — a 403 (INV-5) / 401 (INV-4) rendered as an honest dead end with
+ * NO retry button, since reloading would only fetch the same refusal. Write
+ * failures render inline (a dismissible toast, or inside the confirm dialog)
+ * and are never discarded. Deleting a group also drops every grant naming it,
+ * so it is confirmed first.
+ *
+ * Tenant-scoped throughout (INV-1): an unknown or cross-tenant group is 404,
+ * never 403.
+ */
+import { useState } from 'react';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { StatusDot } from '@/ui';
+import type { Group } from '@/api';
+import { useCreateGroup, useDeleteGroup, useGroups, useRenameGroup } from '../model/queries';
+import { GroupMembersSection } from './GroupMembersSection';
+import { describeGroupWriteError } from './groupErrors';
+import { PanelBody } from './PanelState';
+
+/** A role-gated read: neither 403 nor 401 is fixable by fetching again. */
+const READ_DEAD_ENDS = [401, 403];
+
+const MAX_NAME_LENGTH = 120;
+
+interface Toast {
+  kind: 'ok' | 'error';
+  message: string;
+}
+
+/**
+ * How many people this group reaches. The system group's `null` count is the
+ * whole tenant — rendering it as a number would state the opposite of the truth.
+ */
+function MemberCount({ group }: { group: Group }) {
+  if (group.member_count === null) {
+    return <StatusDot tone="ok" label="Everyone in this tenant" />;
+  }
+  const n = group.member_count;
+  return (
+    <span className="text-foreground-muted">{n === 1 ? '1 member' : `${n} members`}</span>
+  );
+}
+
+/** Inline rename form for one row — replaces the name cell while editing. */
+function RenameForm({
+  group,
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  group: Group;
+  busy: boolean;
+  onSubmit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(group.name);
+  const trimmed = name.trim();
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_NAME_LENGTH && !busy;
+
+  return (
+    <form
+      aria-label={`Rename ${group.name}`}
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) onSubmit(trimmed);
+      }}
+    >
+      <label className="sr-only" htmlFor={`rename-${group.id}`}>
+        New name for {group.name}
+      </label>
+      <input
+        id={`rename-${group.id}`}
+        value={name}
+        autoFocus
+        maxLength={MAX_NAME_LENGTH}
+        onChange={(event) => setName(event.target.value)}
+        className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      />
+      <button
+        type="submit"
+        disabled={!canSubmit}
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+      >
+        {busy ? 'Saving…' : 'Save'}
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={busy}
+        className="rounded-md px-2 py-1 text-xs text-foreground-muted hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+      >
+        Cancel
+      </button>
+    </form>
+  );
+}
+
+function GroupRow({
+  group,
+  editing,
+  busy,
+  selected,
+  onRename,
+  onStartRename,
+  onCancelRename,
+  onDelete,
+  onToggleMembers,
+}: {
+  group: Group;
+  editing: boolean;
+  busy: boolean;
+  selected: boolean;
+  onRename: (name: string) => void;
+  onStartRename: () => void;
+  onCancelRename: () => void;
+  onDelete: () => void;
+  onToggleMembers: () => void;
+}) {
+  const isSystem = group.kind === 'system';
+  const action =
+    'rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50';
+
+  return (
+    <tr className="border-b border-border/60 last:border-0">
+      <td className="px-4 py-3 align-middle">
+        {editing ? (
+          <RenameForm
+            group={group}
+            busy={busy}
+            onSubmit={onRename}
+            onCancel={onCancelRename}
+          />
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">{group.name}</span>
+            {isSystem ? (
+              <span className="rounded-full border border-border px-2 py-0.5 text-xs text-foreground-muted">
+                Managed automatically
+              </span>
+            ) : null}
+          </div>
+        )}
+      </td>
+      <td className="px-4 py-3 align-middle">
+        <MemberCount group={group} />
+      </td>
+      <td className="px-4 py-3 align-middle">
+        {isSystem ? (
+          // Nothing to manage: membership is derived, so there is no roster to
+          // edit and no name to change (ADR-0022 §3).
+          <span className="text-xs text-foreground-muted">
+            Every member of this tenant, always
+          </span>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onToggleMembers}
+              aria-expanded={selected}
+              aria-label={`${selected ? 'Hide' : 'Manage'} members of ${group.name}`}
+              className={action}
+            >
+              {selected ? 'Hide members' : 'Manage members'}
+            </button>
+            <button
+              type="button"
+              onClick={onStartRename}
+              disabled={editing || busy}
+              aria-label={`Rename ${group.name}`}
+              className={action}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={busy}
+              aria-label={`Delete ${group.name}`}
+              className={`${action} text-danger`}
+            >
+              Delete
+            </button>
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function CreateGroupForm({ busy, onCreate }: { busy: boolean; onCreate: (name: string) => void }) {
+  const [name, setName] = useState('');
+  const trimmed = name.trim();
+  const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_NAME_LENGTH && !busy;
+
+  return (
+    <form
+      aria-label="Create group"
+      className="flex flex-wrap items-end gap-3 border-t border-border bg-surface-muted/40 px-4 py-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!canSubmit) return;
+        onCreate(trimmed);
+        setName('');
+      }}
+    >
+      <label
+        htmlFor="new-group-name"
+        className="flex flex-col gap-1 text-xs font-medium text-foreground-muted"
+      >
+        Group name
+        <input
+          id="new-group-name"
+          value={name}
+          maxLength={MAX_NAME_LENGTH}
+          placeholder="Tax Team"
+          onChange={(event) => setName(event.target.value)}
+          className="w-64 rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={!canSubmit}
+        className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm font-medium hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+      >
+        {busy ? 'Creating…' : 'Create group'}
+      </button>
+    </form>
+  );
+}
+
+export function GroupsPanel() {
+  const query = useGroups();
+  const create = useCreateGroup();
+  const rename = useRenameGroup();
+  const remove = useDeleteGroup();
+
+  const groups = query.data?.items ?? [];
+
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Group | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // A group can vanish under us (another admin deleted it), so resolve the
+  // selection against the live list rather than trusting the stored id.
+  const selected = groups.find((g) => g.id === selectedId) ?? null;
+
+  const busyId = rename.isPending ? (rename.variables?.groupId ?? null) : null;
+
+  const handleCreate = (name: string) => {
+    setToast(null);
+    create.mutate(
+      { name },
+      {
+        onSuccess: (group) => setToast({ kind: 'ok', message: `Created ${group.name}.` }),
+        onError: (error) =>
+          setToast({ kind: 'error', message: describeGroupWriteError(error) }),
+      },
+    );
+  };
+
+  const handleRename = (group: Group, name: string) => {
+    setToast(null);
+    rename.mutate(
+      { groupId: group.id, name },
+      {
+        onSuccess: (updated) => {
+          setEditingId(null);
+          setToast({ kind: 'ok', message: `Renamed to ${updated.name}.` });
+        },
+        onError: (error) =>
+          setToast({ kind: 'error', message: describeGroupWriteError(error) }),
+      },
+    );
+  };
+
+  const handleDelete = () => {
+    if (pendingDelete === null) return;
+    const group = pendingDelete;
+    setDeleteError(null);
+    remove.mutate(group.id, {
+      onSuccess: () => {
+        setPendingDelete(null);
+        if (selectedId === group.id) setSelectedId(null);
+        setToast({
+          kind: 'ok',
+          message: `Deleted ${group.name}. Anything shared with it is no longer reachable through it.`,
+        });
+      },
+      // Keep the dialog open so the failure lands where the action was taken.
+      onError: (error) => setDeleteError(describeGroupWriteError(error)),
+    });
+  };
+
+  return (
+    <section aria-labelledby="admin-groups-heading" className="rounded-lg border border-border">
+      <header className="border-b border-border px-4 py-3">
+        <h2 id="admin-groups-heading" className="text-sm font-semibold text-foreground">
+          Groups
+        </h2>
+        <p className="mt-0.5 text-xs text-foreground-muted">
+          Groups are how a source is shared with a set of people. A grant to a group applies to
+          whoever is in it at the time of the request, so adding someone here grants access
+          immediately and removing them revokes it on their next request. Membership alone confers
+          nothing — roles still decide what a person may do.
+        </p>
+      </header>
+
+      {toast !== null ? (
+        <div
+          role={toast.kind === 'error' ? 'alert' : 'status'}
+          className={`flex items-start justify-between gap-3 border-b border-border px-4 py-2 text-sm ${
+            toast.kind === 'error' ? 'bg-danger/10 text-danger' : 'bg-surface-muted text-foreground'
+          }`}
+        >
+          <span>{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="rounded-md px-2 py-0.5 text-xs hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
+      <PanelBody
+        label="groups"
+        isLoading={query.isLoading}
+        error={query.error}
+        isEmpty={groups.length === 0}
+        emptyMessage="No groups yet. Create one below to share sources with a set of people."
+        onRetry={() => void query.refetch()}
+        deadEndStatuses={READ_DEAD_ENDS}
+        loadingRows={3}
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm">
+            <caption className="sr-only">
+              This tenant&rsquo;s groups, how many people each reaches, and the controls to manage
+              them
+            </caption>
+            <thead>
+              <tr className="border-b border-border text-xs uppercase tracking-wide text-foreground-muted">
+                <th scope="col" className="px-4 py-2 font-medium">
+                  Group
+                </th>
+                <th scope="col" className="px-4 py-2 font-medium">
+                  Reaches
+                </th>
+                <th scope="col" className="px-4 py-2 font-medium">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((group) => (
+                <GroupRow
+                  key={group.id}
+                  group={group}
+                  editing={editingId === group.id}
+                  busy={busyId === group.id}
+                  selected={selectedId === group.id}
+                  onRename={(name) => handleRename(group, name)}
+                  onStartRename={() => {
+                    setToast(null);
+                    setEditingId(group.id);
+                  }}
+                  onCancelRename={() => setEditingId(null)}
+                  onDelete={() => {
+                    setToast(null);
+                    setDeleteError(null);
+                    setPendingDelete(group);
+                  }}
+                  onToggleMembers={() =>
+                    setSelectedId((current) => (current === group.id ? null : group.id))
+                  }
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </PanelBody>
+
+      {/*
+        Outside PanelBody on purpose: an admin needs the create form in exactly
+        the states PanelBody replaces — the empty list most of all.
+      */}
+      <CreateGroupForm busy={create.isPending} onCreate={handleCreate} />
+
+      {selected !== null ? <GroupMembersSection group={selected} /> : null}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete ${pendingDelete?.name ?? 'group'}?`}
+        description="This removes the group, its membership, and every share that names it. People who reached those sources only through this group will lose access."
+        confirmLabel="Delete group"
+        busyLabel="Deleting…"
+        busy={remove.isPending}
+        error={deleteError}
+        onConfirm={handleDelete}
+        onCancel={() => {
+          setPendingDelete(null);
+          setDeleteError(null);
+        }}
+      />
+    </section>
+  );
+}

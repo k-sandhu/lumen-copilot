@@ -628,6 +628,66 @@ export interface MemberList {
   next_cursor?: string | null;
 }
 
+// --- Groups (contracts/openapi.yaml §admin, #538; ADR-0022) ---
+
+/**
+ * `user` groups are created and populated by an admin. `system` is the tenant's
+ * single "All members" group, which expresses tenant-wide visibility: it cannot
+ * be renamed, deleted or populated, and its membership is DERIVED rather than
+ * stored (ADR-0022 §3).
+ */
+export type GroupKind = 'user' | 'system';
+
+/**
+ * A tenant-scoped set of users an admin manages (ADR-0022). A group confers
+ * nothing on its own — it only makes a grant to that group apply to its
+ * members; roles still decide what a user may *do*.
+ */
+export interface Group {
+  id: string;
+  name: string;
+  kind: GroupKind;
+  /**
+   * How many users are explicitly in the group, or **null** for the `system`
+   * group — whose membership is derived, so it has nothing to count and every
+   * user in the tenant belongs. `null` is NOT zero; a UI that renders it as 0
+   * states the opposite of the truth.
+   */
+  member_count: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 200 from GET /admin/groups — system group first, then by name. Not paginated. */
+export interface GroupList {
+  items: Group[];
+}
+
+/** Body for POST /admin/groups. Trimmed server-side, unique per tenant case-insensitively. */
+export interface GroupCreate {
+  name: string;
+}
+
+/** Body for PATCH /admin/groups/{groupId}. */
+export interface GroupUpdate {
+  name: string;
+}
+
+/** Body for POST /admin/groups/{groupId}/members. */
+export interface GroupMemberAdd {
+  /** A user in the caller's tenant; anyone else is 404 (INV-1). */
+  user_id: string;
+}
+
+/**
+ * 200 from GET /admin/groups/{groupId}/members — the users explicitly in a
+ * group, ordered by email. Empty for the `system` group, whose membership is
+ * derived rather than enumerated.
+ */
+export interface GroupMemberList {
+  items: Member[];
+}
+
 /** One allowed model and the governance tier it maps to. */
 export interface ModelGovernanceEntry {
   /** A model id (e.g. anthropic/claude-opus-4.8). */

@@ -17,6 +17,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type {
   AutonomyPolicy,
+  GroupList,
   MemberList,
   ModelGovernance,
   RiskTierList,
@@ -26,6 +27,7 @@ import type {
 import { AdminPage } from './AdminPage';
 
 const listMembers = vi.hoisted(() => vi.fn());
+const listGroups = vi.hoisted(() => vi.fn());
 const getModelGovernance = vi.hoisted(() => vi.fn());
 const getRiskTiers = vi.hoisted(() => vi.fn());
 const getToolPolicy = vi.hoisted(() => vi.fn());
@@ -39,6 +41,7 @@ vi.mock('@/api', async (importOriginal) => {
   return {
     ...actual,
     listMembers,
+    listGroups,
     getModelGovernance,
     getRiskTiers,
     getToolPolicy,
@@ -53,6 +56,18 @@ vi.mock('@/api', async (importOriginal) => {
 const MEMBERS: MemberList = {
   items: [{ id: 'u1', email: 'admin@acme.test', role: ['admin'], email_attested_at: null }],
   next_cursor: null,
+};
+const GROUPS: GroupList = {
+  items: [
+    {
+      id: 'g0',
+      name: 'All members',
+      kind: 'system',
+      member_count: null,
+      created_at: '2026-07-30T00:00:00Z',
+      updated_at: '2026-07-30T00:00:00Z',
+    },
+  ],
 };
 const GOVERNANCE: ModelGovernance = {
   allowed_models: [{ model_id: 'anthropic/claude-opus-4.8', tier: 'frontier' }],
@@ -110,6 +125,7 @@ function renderAdmin() {
 
 beforeEach(() => {
   listMembers.mockResolvedValue(MEMBERS);
+  listGroups.mockResolvedValue(GROUPS);
   getModelGovernance.mockResolvedValue(GOVERNANCE);
   getRiskTiers.mockResolvedValue(TIERS);
   getToolPolicy.mockResolvedValue(TOOL_POLICY);
@@ -136,6 +152,7 @@ describe('AdminPage', () => {
     const tablist = screen.getByRole('tablist', { name: /admin sections/i });
     expect(tablist).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /members & roles/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^groups$/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /model governance/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /approvals & risk/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /tool governance/i })).toBeInTheDocument();
@@ -178,7 +195,7 @@ describe('AdminPage', () => {
     // surfaces are the Tool governance + Sandbox governance + Branding tabs, not
     // mounted here.
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(9);
+    expect(tabs).toHaveLength(10);
     expect(screen.queryAllByRole('switch')).toHaveLength(0);
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });

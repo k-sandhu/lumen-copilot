@@ -22,13 +22,20 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import {
+  addGroupMember,
   attestMemberIdentity,
+  createGroup,
+  deleteGroup,
   getAutonomyPolicy,
   getModelGovernance,
   getRiskTiers,
   getSandboxPolicy,
   getToolPolicy,
+  listGroupMembers,
+  listGroups,
   listMembers,
+  removeGroupMember,
+  renameGroup,
   updateAutonomyPolicy,
   updateSandboxPolicy,
   updateToolPolicy,
@@ -49,6 +56,10 @@ import type {
   TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
+  Group,
+  GroupCreate,
+  GroupList,
+  GroupMemberList,
   Member,
   MemberList,
   ModelGovernance,
@@ -60,6 +71,16 @@ import type {
 } from '@/api';
 
 export const membersQueryKey = ['admin', 'members'] as const;
+/**
+ * Groups have a list AND a per-group sub-resource, so they get a key factory
+ * (the other admin surfaces are singleton reads and use flat consts). Never
+ * invalidate the bare `['admin']` prefix — every admin key lives under it.
+ */
+export const groupKeys = {
+  all: ['admin', 'groups'] as const,
+  list: () => [...groupKeys.all, 'list'] as const,
+  members: (groupId: string) => [...groupKeys.all, 'members', groupId] as const,
+};
 export const modelGovernanceQueryKey = ['admin', 'model-governance'] as const;
 export const riskTiersQueryKey = ['admin', 'risk-tiers'] as const;
 export const toolPolicyQueryKey = ['admin', 'tool-policy'] as const;
@@ -96,6 +117,129 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
           : prev,
       );
       void qc.invalidateQueries({ queryKey: membersQueryKey });
+    },
+  });
+}
+
+/**
+ * Every group in this tenant (admin only, ADR-0022). Not paginated — a tenant
+ * has few groups — and the derived "All members" group sorts first.
+ */
+export function useGroups(): UseQueryResult<GroupList> {
+  return useQuery<GroupList>({
+    queryKey: groupKeys.list(),
+    queryFn: ({ signal }) => listGroups(signal),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * The users explicitly in one group. Gated on a selection: with no group open
+ * the query stays disabled rather than firing a request for a sentinel id.
+ * The system group is never passed here — its membership is derived, so there
+ * is nothing to enumerate (ADR-0022 §3).
+ */
+export function useGroupMembers(groupId: string | null): UseQueryResult<GroupMemberList> {
+  return useQuery<GroupMemberList>({
+    // The `∅` sentinel only ever appears while the query is disabled, so it
+    // never becomes a real cache entry.
+    queryKey: groupKeys.members(groupId ?? '∅'),
+    queryFn: ({ signal }) => listGroupMembers(groupId as string, signal),
+    enabled: groupId !== null,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Create a user group (audited `group.created`). A duplicate name → 409
+ * `group_name_taken`, the reserved "All members" → 409 `group_name_reserved`,
+ * a blank/over-long name → 422 — all propagate as a typed `ApiError` for the
+ * panel to map; they are NOT swallowed here.
+ */
+export function useCreateGroup(): UseMutationResult<Group, unknown, GroupCreate> {
+  const qc = useQueryClient();
+  return useMutation<Group, unknown, GroupCreate>({
+    mutationFn: (body) => createGroup(body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: groupKeys.list() }),
+  });
+}
+
+/**
+ * Rename a user group (audited `group.updated`). The response is authoritative,
+ * so we patch the cached list first — the row keeps its new name instead of
+ * flashing back to the old one — and then invalidate.
+ */
+export function useRenameGroup(): UseMutationResult<
+  Group,
+  unknown,
+  { groupId: string; name: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<Group, unknown, { groupId: string; name: string }>({
+    mutationFn: ({ groupId, name }) => renameGroup(groupId, { name }),
+    onSuccess: (group) => {
+      qc.setQueryData<GroupList>(groupKeys.list(), (prev) =>
+        prev ? { ...prev, items: prev.items.map((g) => (g.id === group.id ? group : g)) } : prev,
+      );
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Delete a user group (audited `group.deleted`). The server also drops the
+ * group's memberships and every grant naming it, so anything shared with the
+ * group stops resolving — which is why the panel confirms first.
+ */
+export function useDeleteGroup(): UseMutationResult<void, unknown, string> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, string>({
+    mutationFn: (groupId) => deleteGroup(groupId),
+    onSuccess: (_data, groupId) => {
+      // Drop the dead group's member cache too, so re-creating a group with the
+      // same name can never show the deleted one's roster.
+      qc.removeQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Add a user to a group (audited `group.member_added`; idempotent). Invalidates
+ * the group's roster AND the group list, because `member_count` on the list row
+ * just changed.
+ */
+export function useAddGroupMember(): UseMutationResult<
+  void,
+  unknown,
+  { groupId: string; userId: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, { groupId: string; userId: string }>({
+    mutationFn: ({ groupId, userId }) => addGroupMember(groupId, { user_id: userId }),
+    onSuccess: (_data, { groupId }) => {
+      void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
+    },
+  });
+}
+
+/**
+ * Remove a user from a group (audited `group.member_removed`; idempotent).
+ * Takes effect on that user's next request — membership is re-read per request
+ * and never cached in their token (ADR-0022 §7).
+ */
+export function useRemoveGroupMember(): UseMutationResult<
+  void,
+  unknown,
+  { groupId: string; userId: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<void, unknown, { groupId: string; userId: string }>({
+    mutationFn: ({ groupId, userId }) => removeGroupMember(groupId, userId),
+    onSuccess: (_data, { groupId }) => {
+      void qc.invalidateQueries({ queryKey: groupKeys.members(groupId) });
+      void qc.invalidateQueries({ queryKey: groupKeys.list() });
     },
   });
 }
