@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -56,7 +56,40 @@ from app.services.transcript_recall import SessionTranscriptReader
 
 import app.db.models  # noqa: F401  isort: skip
 
-_TURNS = 12
+#: The seeded conversation, as ``(seconds-from-base, id_int)`` per turn.
+#:
+#: Explicit rather than generated, because the cursor predicates this file exists
+#: to pin have THREE branches and each needs its own shape. An evenly spaced
+#: timeline exercises exactly one of them and lets the other two rot:
+#:
+#: * **Well separated** (0-5) — the plain inequality.
+#: * **Inside the ±1s tolerance band** (6-8), with ids that DISAGREE with time
+#:   order. This is the ordinary case, not a contrived one: message ids are
+#:   UUID4, so id order and arrival order are independent. Turn 6 is 2.5s before
+#:   turn 8 and carries the LARGEST id in the file — the one shape that makes a
+#:   mis-sized tolerance window observable.
+#: * **An exact same-second burst** (9-11) — the id tiebreaker.
+#:
+#: Both of the last two were found the hard way. A fixture of minute-spaced turns
+#: let the tie branch be deleted outright with the suite green; adding a burst
+#: fixed that but still let the window grow from 1s to 5s with the suite green,
+#: because nothing sat between 1s and 5s of a cursor with a larger id. Widen the
+#: spacing here and the partition test silently stops proving anything.
+_TIMELINE: tuple[tuple[float, int], ...] = (
+    (0.0, 10),
+    (60.0, 20),
+    (120.0, 30),
+    (180.0, 40),
+    (240.0, 50),
+    (300.0, 60),
+    (360.0, 95),  # earliest of the cluster, LARGEST id — the tolerance probe
+    (360.4, 70),
+    (362.5, 80),
+    (420.0, 91),  # ─┐
+    (420.0, 92),  #  ├ one timestamp, three rows: the tie branch
+    (420.0, 93),  # ─┘
+)
+_TURNS = len(_TIMELINE)
 #: Index of the message the summary's coverage cursor points at. Turns 0..6 are
 #: compacted; 7..11 are still verbatim in the prompt.
 _CURSOR = 6
@@ -127,24 +160,28 @@ class _Ctx:
         await session.commit()
 
 
-#: Index from which every turn shares ONE timestamp — a burst of same-second
-#: messages (a fast exchange, a retry, a client that batches). This is not
-#: decoration: the cursor's tie branch and its ±1s tolerance window only engage
-#: on same-second peers, so a fixture of neatly minute-spaced turns leaves that
-#: branch DEAD and lets a broken partition test pass. Verified: with distinct
-#: stamps only, deleting the entire tie branch from
-#: ``search_for_session_before`` still passed the partition test.
-_BURST_FROM = 8
+_BASE = datetime(2021, 1, 1, tzinfo=UTC).replace(tzinfo=None)
 
 
 def _stamp(index: int) -> datetime:
-    """Ascending timestamps, with a same-second burst from ``_BURST_FROM`` on.
+    """This turn's ``created_at`` per :data:`_TIMELINE`.
 
-    SQLite's server default would land every row in one second, which makes the
-    ``(created_at, id)`` total order the cursor relies on diverge from insertion
-    order — so stamps are set explicitly rather than left to the default.
+    Set explicitly rather than left to SQLite's server default, which would land
+    every row in one second and make the ``(created_at, id)`` total order the
+    cursor relies on diverge from insertion order.
     """
-    return datetime(2021, 1, 1, 0, min(index, _BURST_FROM), tzinfo=UTC).replace(tzinfo=None)
+    return _BASE + timedelta(seconds=_TIMELINE[index][0])
+
+
+def _mid(index: int) -> uuid.UUID:
+    """This turn's message id per :data:`_TIMELINE` — DETERMINISTIC, deliberately.
+
+    Real ids are UUID4, so id order and time order are independent; a fixture
+    that leans on random ids to produce that independence reproduces the
+    interesting orderings only sometimes. Fixing them makes the disagreement in
+    the 6-8 cluster a property of the fixture rather than of the seed.
+    """
+    return uuid.UUID(int=_TIMELINE[index][1])
 
 
 @pytest_asyncio.fixture
@@ -191,8 +228,11 @@ async def ctx() -> AsyncIterator[_Ctx]:
             ids: list[uuid.UUID] = []
             for i in range(_TURNS):
                 role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
-                row = await messages.add(
-                    session_id=chat.id, role=role, content=f"turn {i}: the sky is chat_service"
+                row = await messages.add_with_id(
+                    message_id=_mid(i),
+                    session_id=chat.id,
+                    role=role,
+                    content=f"turn {i}: the sky is chat_service",
                 )
                 ids.append(row.id)
             for i, mid in enumerate(ids):
@@ -205,6 +245,45 @@ async def ctx() -> AsyncIterator[_Ctx]:
             await CitationRepository(seed, tenant.id).add(
                 message_id=ids[3], chunk_id=chunk.id, char_start=0, char_end=14, score=0.9
             )
+
+            # --- the two scopes the recall query must respect --------------------
+            # Neither is exercised by the conversation above, and BOTH are one
+            # deleted WHERE clause away from a cross-user or cross-tenant read.
+            # A single-session, single-tenant fixture cannot tell the difference,
+            # so the decoys exist to make those clauses load-bearing.
+            #
+            # (a) ANOTHER session, SAME owner + tenant — only `session_id` keeps
+            #     its turns out. Same owner deliberately: the ownership predicate
+            #     passes, so if this leaks it is the query's fault alone.
+            other_chat = await ChatSessionRepository(seed, tenant.id).create(
+                owner_id=owner.id, model="m", title="other"
+            )
+            await messages.add_with_id(
+                message_id=uuid.UUID(int=500),
+                session_id=other_chat.id,
+                role=MessageRole.USER,
+                content="turn 0: DECOY from another session of mine",
+            )
+            # (b) ANOTHER tenant, on the SAME session id. Not a shape the app can
+            #     write — but it is precisely what the `tenant_id` clause defends
+            #     against, and without it the clause is decorative: with the row
+            #     in its own session, `session_id` alone already excludes it, so
+            #     deleting `tenant_id` from the query passes every test. RLS is
+            #     not armed on the offline SQLite either, which leaves the
+            #     repository predicate as the whole of INV-1 here.
+            other_tenant = await TenantRepository(seed).create(name="Globex")
+            await MessageRepository(seed, other_tenant.id).add_with_id(
+                message_id=uuid.UUID(int=600),
+                session_id=chat.id,
+                role=MessageRole.USER,
+                content="turn 0: DECOY from another tenant",
+            )
+            for decoy in (uuid.UUID(int=500), uuid.UUID(int=600)):
+                await seed.execute(
+                    update(models.Message)
+                    .where(models.Message.id == decoy)
+                    .values(created_at=_stamp(0))
+                )
             await seed.commit()
             yield _Ctx(
                 sessionmaker=factory,
@@ -326,21 +405,38 @@ async def test_like_metacharacters_in_a_term_are_literal(ctx: _Ctx) -> None:
     """``_`` is a LIKE wildcard AND an ordinary character in real conversation.
 
     Unescaped, a search for ``chat_service`` matches ``chatXservice`` — a WRONG
-    recall, not a broad one, and the model would quote it back as if the user had
-    said it. Every seeded turn contains the literal ``chat_service``, so a test
-    for the literal alone would pass either way; the mismatching pattern is what
-    proves the escaping.
+    recall, not a broad one: the model would quote back words the user never
+    said. The test therefore needs a turn that ONLY the wildcard reading matches,
+    seeded here. An earlier version searched for ``chatXservice`` against a
+    corpus containing no such string, so it returned nothing whether or not
+    ``_`` was escaped — verified: a mutant escaping ``\\`` and ``%`` but not
+    ``_`` passed all 32 tests.
     """
     async with ctx.sessionmaker() as session:
+        # Matches "chat_service" ONLY if `_` is treated as a wildcard.
+        await MessageRepository(session, ctx.tenant_id).add_with_id(
+            message_id=uuid.UUID(int=700),
+            session_id=ctx.session_id,
+            role=MessageRole.USER,
+            content="we deployed chatXservice today",
+        )
+        await session.execute(
+            update(models.Message)
+            .where(models.Message.id == uuid.UUID(int=700))
+            .values(created_at=_stamp(0))
+        )
         await ctx.set_cursor(session, index=_CURSOR, summary="s")
         reader = ctx.reader(session, max_calls=4)
-        literal = await reader.recall(query="chat_service", limit=10)
-        wildcard = await reader.recall(query="chat%service", limit=10)
-        underscore_as_wildcard = await reader.recall(query="chatXservice", limit=10)
+        literal = await reader.recall(query="chat_service", limit=20)
+        wildcard = await reader.recall(query="chat%service", limit=20)
 
-    assert literal.turns, "the literal term should match the seeded turns"
+    matched = [t.content for t in literal.turns]
+    assert matched, "the literal term should still match the seeded turns"
+    assert not any("chatXservice" in c for c in matched), (
+        "'_' matched an arbitrary character — a search for chat_service returned a "
+        "turn that says chatXservice"
+    )
     assert wildcard.turns == (), "'%' must not match any character"
-    assert underscore_as_wildcard.turns == (), "'_' must not have matched an arbitrary character"
 
 
 async def test_terms_are_anded(ctx: _Ctx) -> None:
@@ -363,6 +459,26 @@ async def test_an_overlong_query_cannot_build_an_unbounded_predicate(ctx: _Ctx) 
         outcome = await ctx.reader(session).recall(query=query, limit=5)
     # Bounded and answered rather than expanded into a 50-clause LIKE chain.
     assert outcome.turns == ()
+
+
+async def test_recall_never_crosses_into_another_session_or_tenant(ctx: _Ctx) -> None:
+    """The two WHERE clauses a single-session fixture cannot make load-bearing.
+
+    ``search_for_session_before`` filters on tenant AND session. Neither is
+    covered by the owner predicate: the decoy session has the SAME owner, so
+    ownership passes and only ``session_id`` keeps it out; and RLS is not armed
+    on the offline SQLite, so ``tenant_id`` here is the whole of INV-1. Delete
+    either clause and this is a cross-conversation — or cross-tenant — read.
+    """
+    async with ctx.sessionmaker() as session:
+        await ctx.set_cursor(session, index=_CURSOR, summary="s")
+        # ``DECOY`` appears only in the other session and the other tenant.
+        found = await ctx.reader(session, max_calls=4).recall(query="DECOY", limit=20)
+        # And the unfiltered read must not sweep them in either.
+        everything = await ctx.reader(session, max_calls=4).recall(query=None, limit=50)
+
+    assert found.turns == ()
+    assert all("DECOY" not in t.content for t in everything.turns)
 
 
 async def test_system_turns_are_not_recallable(ctx: _Ctx) -> None:
