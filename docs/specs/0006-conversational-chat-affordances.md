@@ -237,7 +237,17 @@ question; no new INV-2 surface.
 - No mid-run blocking questions, multi-question forms, or answer-by-WS (the
   socket stays one-directional).
 - No suggestion personalization/learning; no persistence of suggestions.
-- No server-side composer history; no cross-session recall.
+- No server-side composer history; no **cross-session** recall.
+  *(Amended by [#569](https://github.com/k-sandhu/lumen-copilot/issues/569),
+  epic #533 R1.)* The standing non-goal is reaching **another conversation** —
+  that needs a permission story this spec does not have, and it stays out.
+  Reading back **the current session's own** compacted range is not covered by
+  it and now ships as the T0 `read_conversation` tool: the user already owns and
+  can read every byte of that transcript via `GET /chat/sessions/{id}/messages`;
+  only the *model* had lost it once the rolling summariser (§ADR-0016 §3.2)
+  folded a turn away. Recall is bounded to turns that have LEFT the prompt,
+  carries no citations, and re-checks every cited document against current
+  permissions before any recalled text is shown.
 - `event:narration` (#414), sub-agent progress envelopes (ADR-0018 §5), and any
   workflow *engine* (ADR-0011 §6) remain their own work.
 

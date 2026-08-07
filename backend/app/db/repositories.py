@@ -2665,6 +2665,15 @@ class SavedSearchRepository(_TenantScopedRepository):
         return True
 
 
+def _escape_like(term: str) -> str:
+    r"""Neutralise LIKE metacharacters in a literal search term (#569).
+
+    The backslash goes first — escaping it after the wildcards would re-escape
+    the backslashes this function just inserted.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class MessageRepository(_TenantScopedRepository):
     """Messages within one tenant."""
 
@@ -2777,6 +2786,69 @@ class MessageRepository(_TenantScopedRepository):
         )
         if limit is not None:
             stmt = stmt.limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_message(r) for r in rows]
+
+    async def search_for_session_before(
+        self,
+        session_id: UUID,
+        *,
+        before_created_at: datetime,
+        before_message_id: UUID,
+        terms: Sequence[str] = (),
+        roles: Sequence[MessageRole] = (MessageRole.USER, MessageRole.ASSISTANT),
+        limit: int,
+    ) -> list[Message]:
+        """The COMPACTED range of a session — turns the summary already folded (#569).
+
+        The exact set-complement of :meth:`list_for_session_after`, tolerance
+        window included, so the two partition the session: every message is in
+        the live window or in this one, never both and never neither. Written as
+        the literal negation of that predicate rather than as an independent
+        "``<=`` the cursor" — an independently-derived bound would drift the
+        moment either side is retuned, and a drift here is either a turn the
+        model can never reach (a gap) or one it reads twice (wasted budget).
+
+        ``terms`` are ANDed, case-insensitively, as substrings of the content —
+        thin on purpose: this is a navigational aid over one bounded
+        conversation, not a second retrieval engine (that is ``search_text``,
+        which is permission-filtered and ranked). Ordered NEWEST first and
+        capped at ``limit``, because "as we discussed earlier" almost always
+        means the most recent mention; the caller re-orders chronologically for
+        rendering.
+
+        ``roles`` defaults to the two conversational roles: a persisted
+        ``system`` row is prompt scaffolding, not something the user said or was
+        told, and recall must not hand the model its own scaffolding back.
+        """
+        window_start = before_created_at - timedelta(seconds=1)
+        conditions = [
+            models.Message.tenant_id == self._tenant_id,
+            models.Message.session_id == session_id,
+            models.Message.role.in_([r.value for r in roles]),
+            # NOT (created_at > cursor OR (created_at > window_start AND id > cursor_id))
+            # — de Morgan'd so the comparison stays indexable.
+            models.Message.created_at <= before_created_at,
+            or_(
+                models.Message.created_at <= window_start,
+                models.Message.id <= before_message_id,
+            ),
+        ]
+        for term in terms:
+            # ``ilike`` is native ILIKE on Postgres and lower(x) LIKE lower(y) on
+            # the offline SQLite, so both match case-insensitively.
+            # The escaping is not a nicety: ``_`` is a LIKE wildcard AND an
+            # ordinary character in real conversation (snake_case, file_names),
+            # so unescaped, a search for ``chat_service`` would quietly match
+            # ``chatXservice`` — a wrong answer, not merely a broad one. ``%``
+            # is worse: one character that matches everything.
+            conditions.append(models.Message.content.ilike(f"%{_escape_like(term)}%", escape="\\"))
+        stmt = (
+            select(models.Message)
+            .where(*conditions)
+            .order_by(models.Message.created_at.desc(), models.Message.id.desc())
+            .limit(limit)
+        )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_message(r) for r in rows]
 
@@ -2958,6 +3030,32 @@ class CitationRepository(_TenantScopedRepository):
             )
             for row in rows
         ]
+
+    async def document_ids_for_messages(self, message_ids: list[UUID]) -> dict[UUID, set[UUID]]:
+        """``{message_id: {document_id}}`` for many messages — **ids only** (#569).
+
+        Deliberately not :meth:`list_for_messages_hydrated_batch`. That one joins
+        ``chunks`` for the snippet text, and the recall seam's whole job is to
+        decide whether a turn's text may be shown *before* any of it is loaded.
+        Pulling passage prose into a process that must not emit it is how a
+        redaction becomes one forgotten field away from a leak; not selecting the
+        column at all is a property of the query, not of the code that follows it.
+        """
+        if not message_ids:
+            return {}
+        stmt = (
+            select(models.Citation.message_id, models.Chunk.document_id)
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id.in_(message_ids),
+                models.Chunk.tenant_id == self._tenant_id,
+            )
+        )
+        out: dict[UUID, set[UUID]] = {}
+        for message_id, document_id in (await self._session.execute(stmt)).all():
+            out.setdefault(message_id, set()).add(document_id)
+        return out
 
     async def list_for_message_hydrated(self, message_id: UUID) -> list[CitationView]:
         """Citations for a message, joined to source document + chunk text.

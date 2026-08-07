@@ -103,11 +103,18 @@ from app.services.provider_models import (
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
+from app.services.tools.impls.recall import READ_CONVERSATION_TOOL_NAME
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
 from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import SandboxToolRunner, ToolContext, ToolDefinition
+from app.services.tools.types import (
+    SandboxToolRunner,
+    ToolContext,
+    ToolDefinition,
+    TranscriptReader,
+)
+from app.services.transcript_recall import SessionTranscriptReader
 
 log = get_logger(__name__)
 
@@ -1170,6 +1177,12 @@ class ChatRuntime:
             snippet_budget=assembled.snippet_budget,
             session_id=session_id,
             sandbox=sandbox,
+            # The #569 own-conversation read seam, bound to THIS session so the
+            # tool has no session argument to point elsewhere. Built only when
+            # the allow-list offers ``read_conversation`` (deny-by-default).
+            transcript=self._build_transcript_seam(
+                session=session, allowed=allowed, session_id=session_id
+            ),
             # Read-only test/preview mode (F-AB-5, issue #215): a T1 file-writing tool
             # builds + validates but persists nothing, so a test run mutates no state.
             # ``run_python`` (T2) is already denied for a test run because the sandbox
@@ -1749,6 +1762,32 @@ class ChatRuntime:
                 message_id=assistant_message_id,
                 next_seq=state.next_seq,
             )
+        )
+
+    def _build_transcript_seam(
+        self,
+        *,
+        session: AsyncSession,
+        allowed: frozenset[str],
+        session_id: UUID,
+    ) -> TranscriptReader | None:
+        """Build the ``read_conversation`` seam, or ``None`` (#569).
+
+        Same deny-by-default shape as the sandbox seam: built only when this
+        run's allow-list actually offers the tool, so a session that cannot
+        recall carries no recall plumbing and a stray invocation reports a typed
+        ``ok=False`` instead of reaching the messages table.
+
+        Bound to ONE ``session_id`` here, at construction, where the value comes
+        from the runtime rather than from model output — the tool's schema has no
+        session argument, so there is nothing to smuggle one through.
+        """
+        if READ_CONVERSATION_TOOL_NAME not in allowed:
+            return None
+        return SessionTranscriptReader(
+            session=session,
+            principal=self._principal,
+            session_id=session_id,
         )
 
     async def _salvage_usage_after_failure(
@@ -2533,6 +2572,18 @@ class ChatRuntime:
                         retrieval=self._retrieval_factory(call_session),
                         artifacts=None,
                         sandbox=None,
+                        # The #569 transcript seam is a READ seam that is not
+                        # ``retrieval``, so it needs its own rebind: left as-is
+                        # it would keep the RUNTIME session and use it from a
+                        # coroutine overlapping every other fanned-out call —
+                        # the same shared-session race that keeps MCP tools out
+                        # of the fan-out. The view shares the per-answer recall
+                        # budget, so fanning out cannot buy extra calls.
+                        transcript=(
+                            None
+                            if context.transcript is None
+                            else context.transcript.for_session(call_session)
+                        ),
                     )
 
             async def _worker(i: int) -> tuple[int, ToolResult]:
