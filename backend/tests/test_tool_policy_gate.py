@@ -50,6 +50,7 @@ from app.domain.tools import (
     APPROVAL_REASON_POLICY_ABSENT,
     APPROVAL_REASON_POLICY_DISABLED,
     APPROVAL_REASON_POLICY_UNREADABLE,
+    APPROVAL_SCOPE_TENANT_PREAPPROVAL,
     ERROR_APPROVAL_DENIED,
     RiskTier,
     ToolHandlerResult,
@@ -275,3 +276,204 @@ async def test_runner_executes_gated_tool_once_admin_preapproves(
     )
     assert result.ok is True
     assert calls == ["ran"]  # the handler DID execute (the unlock)
+
+
+# --- #518: INV-7 amended — the pre-approval must actually be RECORDED ----------
+
+
+async def test_an_approval_names_the_admin_the_policy_row_and_the_call(
+    world: _World,
+) -> None:
+    """The condition on which spec 0004 §2.5 admits a tenant-wide grant (#518).
+
+    INV-7 was amended to accept a tenant-scoped, admin-recorded pre-approval as
+    "recorded approval" rather than requiring per-invocation human review. That is a
+    real weakening, and it is only defensible if the approval is genuinely recorded —
+    so an allow must be able to say WHO granted it, WHICH policy row carries the
+    grant, and WHAT call ran under it.
+
+    Before this, `ApprovalDecision.allow()` carried a bare `approved=True`: the audit
+    could report that a consequential action was approved and never say by whom.
+    """
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=False, updated_by=world.user_id
+    )
+    await world.session.commit()
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+
+    decision = await gate.request(_approval_request(world))
+
+    assert decision.approved is True
+    record = decision.approval
+    assert record is not None, "an approval with no record cannot satisfy the amended INV-7"
+    assert record.approved_by == world.user_id
+    assert record.policy_id is not None
+    assert record.scope == APPROVAL_SCOPE_TENANT_PREAPPROVAL
+    # The scope is named, not implied: when #501 lands per-invocation approval, an
+    # auditor must be able to tell the two apart in the trail.
+    assert record.scope != "per_invocation"
+
+
+async def test_a_refusal_records_no_approval(world: _World) -> None:
+    """The control: a denial authorised nothing, so it must carry no record.
+
+    A record on a refusal would be worse than none — it would put an approval in the
+    trail for a call that never ran.
+    """
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+
+    decision = await gate.request(_approval_request(world))
+
+    assert decision.approved is False
+    assert decision.approval is None
+
+
+async def test_the_recorded_hash_is_the_runner_s_own_not_a_second_one(
+    world: _World,
+) -> None:
+    """One definition of "this call's arguments", not two (#518).
+
+    The runner already computes and audits `args_hash`. Had the gate hashed the
+    arguments itself, the trail's `args_hash` and the approval's could drift apart and
+    disagree about which call was authorised — the one question the pair exists to
+    answer. The gate echoes the value it is given.
+    """
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=False, updated_by=world.user_id
+    )
+    await world.session.commit()
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+    request = ApprovalRequest(
+        call_id="call-1",
+        tool_name="run_python",
+        risk_tier=RiskTier.T2,
+        principal=_principal(world),
+        arguments={"code": "print(1)"},
+        arguments_hash="the-runners-hash",
+    )
+
+    decision = await gate.request(request)
+
+    assert decision.approval is not None
+    assert decision.approval.arguments_hash == "the-runners-hash"
+
+
+async def test_a_deprovisioned_admin_records_none_rather_than_inventing_one(
+    world: _World,
+) -> None:
+    """`updated_by` is SET NULL, so a grant outlives the admin who made it.
+
+    Recording `None` is the honest answer; substituting the caller — who is a member,
+    not the authoriser — would put a false attribution in a security trail.
+    """
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=False, updated_by=None
+    )
+    await world.session.commit()
+    gate = PolicyApprovalGate(world.session, tenant_id=world.tenant_id)
+
+    decision = await gate.request(_approval_request(world))
+
+    assert decision.approved is True
+    assert decision.approval is not None
+    assert decision.approval.approved_by is None
+    # The grant itself is still identified, so the trail is not empty.
+    assert decision.approval.policy_id is not None
+
+
+async def test_the_audit_names_who_authorised_an_executed_t2_call(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of the amendment that carries its weight (#518).
+
+    A record that never reaches the audit trail satisfies nothing: INV-7 is about what
+    is RECORDED, not about what a dataclass held for the length of one call. An
+    executed T2 invocation must let an auditor go from the call to the admin and the
+    policy row that permitted it.
+    """
+    monkeypatch.setattr("app.services.tools.runner.get_tool", lambda name: _gated_tool([]))
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=False, updated_by=world.user_id
+    )
+    await world.session.commit()
+    runner = _runner(world, PolicyApprovalGate(world.session, tenant_id=world.tenant_id))
+
+    await runner.run(
+        call=ToolCall(id="c1", name="run_python", arguments={"code": "print(1)"}),
+        context=_context(world),
+    )
+    await world.session.commit()
+
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
+    invoked = [e for e in events if e.action == "tool.invoked"]
+    assert invoked, "an executed T2 call left no tool.invoked event"
+    metadata = invoked[0].metadata
+    assert metadata["approval_scope"] == APPROVAL_SCOPE_TENANT_PREAPPROVAL
+    assert metadata["approved_by"] == str(world.user_id)
+    assert metadata["approval_policy_id"]
+    # The call is identified too, so "which approval" and "which call" cannot drift.
+    assert metadata["args_hash"]
+
+
+async def test_a_denied_call_records_no_approver(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal must not put an approval in the trail for a call that never ran."""
+    monkeypatch.setattr("app.services.tools.runner.get_tool", lambda name: _gated_tool([]))
+    runner = _runner(world, PolicyApprovalGate(world.session, tenant_id=world.tenant_id))
+
+    await runner.run(
+        call=ToolCall(id="c1", name="run_python", arguments={}), context=_context(world)
+    )
+    await world.session.commit()
+
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
+    invoked = [e for e in events if e.action == "tool.invoked"]
+    assert invoked
+    assert "approved_by" not in invoked[0].metadata
+    assert "approval_scope" not in invoked[0].metadata
+
+
+async def test_a_prompt_injected_call_in_a_preapproved_tenant_still_executes(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ACCEPTED RESIDUAL RISK of amending INV-7 (#518), pinned deliberately.
+
+    A tenant-wide pre-approval authorises a TOOL, not a payload. Nothing in this path
+    distinguishes a call the user asked for from one a retrieved document talked the
+    model into making — there is no per-invocation reviewer, which is exactly what
+    #501 would add and what spec 0004 §2.5 now says is NOT required.
+
+    This test asserts the behaviour rather than guarding against it, on purpose. The
+    risk is accepted, and an accepted risk that nothing exercises is one nobody
+    notices when it changes: if a future change makes this call refuse, that is a
+    deliberate re-tightening of the invariant and this test should fail and be
+    rewritten — not silently keep passing while the trail says something else.
+
+    What the amendment DOES buy is on the last two lines: the execution is attributable
+    to the admin who opened the tool, so an incident can name a decision-maker rather
+    than ending at "the tenant had it on".
+    """
+    calls: list[str] = []
+    monkeypatch.setattr("app.services.tools.runner.get_tool", lambda name: _gated_tool(calls))
+    await TenantToolPolicyRepository(world.session, world.tenant_id).upsert(
+        tool_name="run_python", enabled=True, requires_approval=False, updated_by=world.user_id
+    )
+    await world.session.commit()
+    runner = _runner(world, PolicyApprovalGate(world.session, tenant_id=world.tenant_id))
+
+    # Arguments a retrieved document induced, not something the user typed.
+    injected = ToolCall(
+        id="c1",
+        name="run_python",
+        arguments={"code": "import os; print(os.environ)  # injected by a document"},
+    )
+    result = await runner.run(call=injected, context=_context(world))
+    await world.session.commit()
+
+    assert result.ok is True, "accepted behaviour: a pre-approved tool runs whoever asked"
+    assert calls == ["ran"]
+    # …and it is attributable.
+    events = await AuditEventRepository(world.session, world.tenant_id).list_recent(limit=20)
+    invoked = [e for e in events if e.action == "tool.invoked"]
+    assert invoked[0].metadata["approved_by"] == str(world.user_id)

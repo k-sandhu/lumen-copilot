@@ -71,6 +71,7 @@ from app.services.tools.registry import UnknownToolError, get_tool
 from app.services.tools.types import (
     ApprovalDecision,
     ApprovalGate,
+    ApprovalRecord,
     ApprovalRequest,
     DenyAllApprovalGate,
     ToolContext,
@@ -383,6 +384,7 @@ class ToolRunner:
         # gate here; a T1 tool at ``act_with_approval`` also gates (``requires_gate``).
         # A denial refuses the call BEFORE the handler runs — no consequential action
         # executes without approval.
+        granted: ApprovalRecord | None = None
         if definition.requires_approval or requires_gate:
             approval = _as_decision(
                 await self._gate.request(
@@ -392,9 +394,23 @@ class ToolRunner:
                         risk_tier=definition.risk_tier,
                         principal=context.principal,
                         arguments=call.arguments,
+                        arguments_hash=args_hash,
                     )
                 )
             )
+            granted = approval.approval
+            if approval.approved and granted is None:
+                # A real gate always records one. An approval with nothing behind it
+                # cannot satisfy the amended INV-7, so say so loudly rather than
+                # auditing a consequential action as "approved" by nobody. Not a
+                # refusal: the inert test gates and the historical bool-returning
+                # fakes legitimately have no record, and breaking them would be a
+                # worse trade than a log line.
+                log.warning(
+                    "tool.approval_without_record",
+                    tool=call.name,
+                    risk_tier=definition.risk_tier.value,
+                )
             if not approval.approved:
                 # (iii) the structured log (issue #502): a blocked run is
                 # diagnosable from the logs alone, naming the gate that refused.
@@ -451,6 +467,9 @@ class ToolRunner:
             ordinal=ordinal,
             result=result,
             outcome=outcome,
+            # The EXECUTED path — the one an auditor cares about most. A refusal
+            # authorised nothing, so only this call carries a record.
+            approval=granted,
         )
 
     def _autonomy_decision(self, risk_tier: RiskTier) -> _AutonomyDecision:
@@ -535,6 +554,7 @@ class ToolRunner:
         result: ToolResult,
         outcome: AuditOutcome,
         denied_reason: str | None = None,
+        approval: ApprovalRecord | None = None,
     ) -> ToolResult:
         """Audit (invoked + result) and record the ``tool_invocations`` row (AC-4).
 
@@ -561,12 +581,34 @@ class ToolRunner:
         result when the handler relayed a refusal from below it (a sandbox gate).
         """
         reason = denied_reason or result.denied_reason
+        # WHAT AUTHORISED THIS (#518). Spec 0004 §2.5's INV-7 was amended to admit a
+        # tenant-scoped, admin-recorded pre-approval as "recorded approval" — and that
+        # amendment is only defensible if the approval is genuinely IN the record. So
+        # an approved T2+ invocation carries the authorising admin, the policy row that
+        # granted it, and the scope of the grant. Without these the audit could say a
+        # consequential action was approved but never who by, which is what made the
+        # original claim hollow.
+        #
+        # `args_hash` above is already the call's argument hash, and the gate echoes
+        # that same value back on the record — so "which call" and "which approval"
+        # cannot disagree.
+        approval_metadata: dict[str, object] = {}
+        if approval is not None:
+            approval_metadata = {
+                "approval_scope": approval.scope,
+                # Explicit nulls, not omissions: "no admin recorded" is a FACT about a
+                # grant whose author was deprovisioned, and an absent key would read as
+                # "this field did not exist yet".
+                "approved_by": str(approval.approved_by) if approval.approved_by else None,
+                "approval_policy_id": str(approval.policy_id) if approval.policy_id else None,
+            }
         metadata = {
             "tool": call.name,
             "call_id": call.id,
             "args_hash": args_hash,
             "ok": result.ok,
             "ordinal": ordinal,
+            **approval_metadata,
             **({"error": result.error} if result.error else {}),
             **({"denied_reason": reason} if reason else {}),
         }

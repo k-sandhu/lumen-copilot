@@ -256,6 +256,46 @@ class ApprovalRequest:
     risk_tier: RiskTier
     principal: Principal
     arguments: dict[str, Any]
+    #: The runner's canonical `hash_args(arguments)` (#518). Passed in rather than
+    #: recomputed by the gate so ONE definition of "this call's argument hash" exists:
+    #: the runner already audits this exact value, and a second implementation could
+    #: drift so that the trail's `args_hash` and the approval's disagreed about which
+    #: call was authorised — the one question the pair exists to answer.
+    arguments_hash: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRecord:
+    """What authorised a T2+ invocation — the "recorded" half of INV-7 (#518).
+
+    INV-7 requires that no consequential action executes without a *recorded*
+    approval. Spec 0004 §2.5 was amended to admit a **tenant-scoped, admin-recorded
+    pre-approval** as that record, rather than requiring per-invocation human review
+    (which is #501, unbuilt). That amendment weakens the invariant, and it is only
+    honest if the approval it admits is actually recorded — so this carries the three
+    facts the amended text demands:
+
+    * ``approved_by`` — the admin who set the policy row. ``None`` when that user has
+      since been deprovisioned: the grant outlives them (``updated_by`` is ``SET
+      NULL``), and claiming an identity we no longer have would be worse than saying
+      so.
+    * ``policy_id`` — the ``tenant_tool_policy`` row carrying the grant, so an
+      auditor can go from an invocation to the exact override that permitted it.
+    * ``arguments_hash`` — SHA-256 over the canonical JSON of the call arguments.
+      This does NOT mean the admin saw these arguments; a tenant-wide grant covers a
+      TOOL, not a payload. It is here so the trail records *what ran under* the
+      grant, which is the question an incident asks.
+
+    What this deliberately does not provide, stated so nobody reads more into it:
+    per-invocation human review. A prompt-injected `run_python` call in a tenant that
+    has pre-approved the tool still executes. That is the residual risk the amended
+    INV-7 accepts, and #501 is the path that removes it.
+    """
+
+    scope: str
+    policy_id: UUID | None = None
+    approved_by: UUID | None = None
+    arguments_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,14 +326,30 @@ class ApprovalDecision:
     approved: bool
     reason: str | None = None
     detail: str | None = None
+    #: WHO authorised this call, and on what basis (#518). Present on every approval;
+    #: ``None`` on a denial, which authorised nothing.
+    #:
+    #: INV-7 was amended (spec 0004 §2.5) to admit a tenant-scoped, admin-recorded
+    #: pre-approval as "recorded approval". That amendment is only defensible if the
+    #: approval is genuinely RECORDED, so an allow must be able to say which admin
+    #: granted it, which policy row carries the grant, and what arguments it covered.
+    #: A bare ``approved=True`` could say none of those, which is what made the
+    #: original claim hollow.
+    approval: ApprovalRecord | None = None
 
     def __bool__(self) -> bool:
         return self.approved
 
     @classmethod
-    def allow(cls) -> ApprovalDecision:
-        """The approved outcome (no reason needed — nothing refused)."""
-        return cls(approved=True)
+    def allow(cls, approval: ApprovalRecord | None = None) -> ApprovalDecision:
+        """The approved outcome (no reason needed — nothing refused).
+
+        ``approval`` is optional ONLY so the inert test gates and the historical
+        deny-all default keep constructing without it. Every real gate supplies one;
+        a production allow without a record is a bug, and the runner logs it as such
+        rather than silently auditing an approval nobody signed.
+        """
+        return cls(approved=True, approval=approval)
 
     @classmethod
     def deny(cls, reason: str, detail: str) -> ApprovalDecision:

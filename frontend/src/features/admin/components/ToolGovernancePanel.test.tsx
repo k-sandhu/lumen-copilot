@@ -83,15 +83,23 @@ describe('ToolGovernancePanel', () => {
     expect(note).toHaveTextContent(/whole tenant/i);
   });
 
-  it('does not warn about a tool that is already pre-approved', async () => {
+  it('tells the admin what clearing approval actually commits them to (#518)', async () => {
     getToolPolicy.mockResolvedValue({
       items: [{ ...POLICY.items[1], requires_approval: false }],
     } as ToolPolicy);
     renderWithQuery(<ToolGovernancePanel />);
 
     await screen.findByText('run_python');
-    // Nothing to warn about: the tool is enabled and pre-approved, so it can run.
-    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    // This used to assert "nothing to warn about". Spec 0004 §2.5 was amended (#518)
+    // so that clearing this counts as INV-7's recorded approval — which makes it a
+    // grant recorded against THIS admin that authorises the tool rather than any
+    // particular call. The person deciding should read that at the control, not find
+    // it in an audit event later.
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent(/recorded against you/i);
+    expect(note).toHaveTextContent(/not reviewed one by one/i);
+    // …and it is NOT the refuses-everything warning, which is the opposite state.
+    expect(note).not.toHaveTextContent(/refuses every call/i);
   });
 
   it('offers no approval control for a read-only (T0) tool', async () => {
