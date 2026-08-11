@@ -2,12 +2,19 @@
 
 Drives :func:`app.tasks.sync_source.sync_source_async` offline (in-memory
 SQLite, fake object store/gateway/index store) against a **fake
-capability-declaring connector** registered as ``gdrive`` — the framework
-seams under test are real: the mandatory write-mode argument, the per-page
-atomic mutation+cursor commits, identity reconcile, the cascade stale-stamp
-(Postgres NULL + index update-by-query), the ``integrity=incomplete``
-source-wide stamp, 410 → full-resync fallback, the attested-identity snapshot,
-and the wire's ``GdriveSource`` health surface (contract-validated).
+capability-declaring connector** registered as ``gdrive``. What this module
+owns is the sync *plumbing*: the per-page atomic mutation+cursor commits,
+crash-between-pages resume, identity reconcile, the object lifecycle (replaced
+revisions, rollback orphans, the stranded-ingestion sweep), 410 → full-resync
+fallback, the sync-poll beat, and the wire's ``GdriveSource`` health surface
+(contract-validated).
+
+The **ACL deny-by-default semantics** of the same path — the mandatory
+no-default write mode, the attested-identity snapshot, the §3 cascade
+stale-stamp and ``integrity=incomplete`` source-wide stamp, the sticky
+full-resync requirement, and source-side revocation — moved to
+``tests/acl_kit/`` (#454), where they run against **every** ACL-declaring
+connector rather than only this one.
 """
 
 from __future__ import annotations
@@ -340,17 +347,25 @@ async def _source_row(seeded: _Seeded) -> models.Source:
         ).scalar_one()
 
 
-# --- full sync: write-mode discipline + baseline ------------------------------
+# --- full sync: baseline cursor + the persisted scope chain -------------------
 
 
-async def test_full_sync_writes_acl_enforced_true_and_baseline_cursor(
+async def test_full_sync_persists_the_scope_chain_and_baseline_cursor(
     sqlite_engine: None, connector: FakeAclConnector
 ) -> None:
+    """The §3 mechanics of a full run: the pre-enumeration start token becomes
+    the source cursor, and each document keeps the container scope chain a later
+    cascade matches against.
+
+    The ACL *semantics* of this write — the mandatory ``acl_enforced`` mode, the
+    mirrored principal set and the unmapped-ACL count — are proven for every
+    ACL-declaring connector by ``tests/acl_kit/test_write_mode.py`` (#454).
+    """
     seeded = await _seed()
     connector.full_result = FullSyncResult(
         docs=(
             _doc("f1", principals=[f"user:{seeded.member_id}"], scopes=["drv1", "folder1"]),
-            _doc("f2", principals=[]),  # empty mirror -> unmapped, invisible
+            _doc("f2", principals=[]),
         ),
         baseline_cursor="baseline-42",
     )
@@ -359,78 +374,11 @@ async def test_full_sync_writes_acl_enforced_true_and_baseline_cursor(
 
     rows = await _rows(seeded)
     assert set(rows) == {"f1", "f2"}
-    # THE write-mode assertion (ADR-0019 §2): every managed-source document is
-    # written acl_enforced=true — a False here is a defect.
-    for row in rows.values():
-        assert row.acl_enforced is True
-        assert row.acl_synced_at is not None  # examined this run
-    assert rows["f1"].acl_principals == [f"user:{seeded.member_id}"]
     assert rows["f1"].acl_scope_ids == ["drv1", "folder1"]
-    assert rows["f2"].acl_principals == []
 
     source = await _source_row(seeded)
     assert source.sync_cursor == "baseline-42"  # start-token-before-enumeration
     assert source.acl_synced_at is not None
-    assert source.unmapped_acl_count == 1  # the empty-mirror doc, surfaced
-
-
-async def test_write_seam_refuses_defaulted_acl_mode(
-    sqlite_engine: None,
-) -> None:
-    """The ingestion seam's ACL-mode argument is mandatory/no-default."""
-    seeded = await _seed()
-    async with db_session.session_scope() as session:
-        documents = DocumentRepository(session, seeded.tenant_id)
-        with pytest.raises(TypeError):
-            await documents.create(  # type: ignore[call-arg]
-                owner_id=seeded.owner_id,
-                collection_id=seeded.collection_id,
-                filename="x.txt",
-                mime_type="text/plain",
-                size_bytes=1,
-                storage_key="t/x",
-            )
-
-
-async def test_model_insert_cannot_omit_the_acl_mode(sqlite_engine: None) -> None:
-    """Regression: the ACL mode has NO default at ANY layer (ADR-0019 §2).
-
-    The repository argument being mandatory is only half the discipline — the
-    ORM column carried ``default=False`` and migration 0040 left its backfill
-    ``server_default`` in place, so a direct model insert (or any future write
-    path that forgets the column) silently produced an owner/grant-governed
-    document out of connector content. With both defaults gone, omitting the
-    mode is a NOT NULL violation.
-    """
-    from sqlalchemy.exc import IntegrityError
-
-    seeded = await _seed()
-    with pytest.raises(IntegrityError):
-        async with db_session.session_scope() as session:
-            session.add(
-                models.Document(
-                    tenant_id=seeded.tenant_id,
-                    owner_id=seeded.owner_id,
-                    collection_id=seeded.collection_id,
-                    filename="no-mode.txt",
-                    mime_type="text/plain",
-                    size_bytes=1,
-                    storage_key="t/no-mode",
-                    status="pending",
-                )
-            )
-            await session.flush()
-
-
-async def test_acl_context_snapshot_is_attested_only(
-    sqlite_engine: None, connector: FakeAclConnector
-) -> None:
-    """The framework freezes ONLY attested emails into the run's mapping
-    context (ADR-0019 §2 — unattested maps to nothing)."""
-    seeded = await _seed(attest_owner=True)
-    await _run(seeded)
-    assert connector.seen_ctx is not None
-    assert connector.seen_ctx.email_to_user_id == {"owner@acme.test": seeded.owner_id}
 
 
 # --- incremental: per-page commits, identity reconcile, crash-resume ----------
@@ -519,76 +467,6 @@ async def test_incremental_crash_between_pages_resumes_exactly(
     assert connector.fetch_calls == ["cur-1", "cur-2"]  # resumed, not restarted
     assert set(await _rows(seeded)) == {"p1", "p2"}
     assert (await _source_row(seeded)).sync_cursor == "baseline-3"
-
-
-async def test_stale_scope_stamp_denies_descendants_in_page_transaction(
-    sqlite_engine: None, connector: FakeAclConnector
-) -> None:
-    """A replayed container change stale-stamps every known descendant (scope
-    match on persisted acl_scope_ids) in the page transaction, propagates to
-    the index by update-by-query, and an in-page re-examined doc ends fresh."""
-    seeded = await _seed()
-    connector.full_result = FullSyncResult(
-        docs=(
-            _doc("inside", principals=["tenant"], scopes=["folderX"]),
-            _doc("reexamined", principals=["tenant"], scopes=["folderX"]),
-            _doc("outside", principals=["tenant"], scopes=["folderY"]),
-        ),
-        baseline_cursor="cur-1",
-    )
-    await _run(seeded)
-    rows = await _rows(seeded)
-
-    connector.script = {
-        "cur-1": [
-            SyncPage(
-                upserts=(_doc("reexamined", principals=["tenant"], scopes=["folderX"]),),
-                deleted_external_ids=frozenset(),
-                next_cursor="baseline-4",
-                stale_scope_ids=frozenset({"folderX"}),
-            ),
-        ]
-    }
-    await _run(seeded)
-    after = await _rows(seeded)
-    assert after["inside"].acl_synced_at is None  # denied immediately
-    assert after["reexamined"].acl_synced_at is not None  # refreshed in-run
-    assert after["outside"].acl_synced_at is not None  # untouched scope
-    # The index update-by-query got the stamped ids (scope-matched set).
-    stamped = [e[1] for e in _FakeIndexStore.events if e[0] == "stamp"]
-    assert any(rows["inside"].id in ids for ids in stamped)  # type: ignore[operator]
-
-
-async def test_integrity_incomplete_stamps_source_wide(
-    sqlite_engine: None, connector: FakeAclConnector
-) -> None:
-    seeded = await _seed()
-    connector.full_result = FullSyncResult(
-        docs=(
-            _doc("a", principals=["tenant"], scopes=["s1"]),
-            _doc("b", principals=["tenant"], scopes=["s2"]),
-        ),
-        baseline_cursor="cur-1",
-    )
-    await _run(seeded)
-    rows = await _rows(seeded)
-
-    connector.script = {
-        "cur-1": [
-            SyncPage(
-                upserts=(),
-                deleted_external_ids=frozenset(),
-                next_cursor="baseline-5",
-                integrity=PageIntegrity.INCOMPLETE,
-            ),
-        ]
-    }
-    await _run(seeded)
-    after = await _rows(seeded)
-    assert after["a"].acl_synced_at is None
-    assert after["b"].acl_synced_at is None
-    stamped = [e[1] for e in _FakeIndexStore.events if e[0] == "stamp"]
-    assert any({rows["a"].id, rows["b"].id} <= set(ids) for ids in stamped)  # type: ignore[arg-type]
 
 
 # --- integrity=incomplete: never consumed behind the cursor ------------------
@@ -705,75 +583,6 @@ async def test_incomplete_replay_escalates_to_a_full_resync_and_recovers(
     assert healthy.acl_synced_at is not None  # health may report success again
     assert healthy.sync_cursor == "cur-9"
     assert (await _rows(seeded))["a"].acl_synced_at is not None
-
-
-async def test_page_complete_retry_cannot_satisfy_a_source_wide_stale_stamp(
-    sqlite_engine: None, connector: FakeAclConnector
-) -> None:
-    """Regression (re-review F3): a complete retry of the ONE failed page used
-    to publish READY + fresh source health and clear the requirement, while
-    every document that page did not report was still sitting at
-    ``acl_synced_at = NULL`` — invisible to retrieval, reported healthy.
-
-    The requirement is sticky: a page-level retry re-examines a subset, never
-    the corpus a source-wide stamp nulled, so it can never clear it. Proven by
-    driving the incremental path directly (the caller would refuse to enter it
-    at all while the requirement stands — belt AND braces).
-    """
-    seeded = await _seed()
-    connector.full_result = FullSyncResult(
-        docs=(
-            _doc("reported", principals=["tenant"]),
-            _doc("unreported", principals=["tenant"]),
-        ),
-        baseline_cursor="cur-1",
-    )
-    await _run(seeded)
-
-    connector.script = {"cur-1": [_incomplete_page()]}
-    await _run(seeded)
-    stamped = await _rows(seeded)
-    assert stamped["reported"].acl_synced_at is None
-    assert stamped["unreported"].acl_synced_at is None
-
-    # The page now replays cleanly, but it only reports ONE of the two rows.
-    connector.script = {
-        "cur-1": [
-            SyncPage(
-                upserts=(_doc("reported", principals=["tenant"]),),
-                deleted_external_ids=frozenset(),
-                next_cursor="baseline-3",
-            )
-        ]
-    }
-    async with db_session.session_scope() as session:
-        source = await SourceRepository(session, seeded.tenant_id).get(seeded.source_id)
-    assert source is not None
-    result = await sync_source_module._sync_incremental(
-        seeded.tenant_id,
-        source,
-        connector,
-        _null_run(),
-        settings=_settings(),
-        object_store=_FakeObjectStore(),  # type: ignore[arg-type]
-        gateway=_FakeGateway(),  # type: ignore[arg-type]
-        collection_id=seeded.collection_id,
-        enforce_acl=True,
-    )
-
-    after = await _rows(seeded)
-    assert after["reported"].acl_synced_at is not None  # re-examined for real
-    assert after["unreported"].acl_synced_at is None  # STILL unrecovered
-    source_row = await _source_row(seeded)
-    assert source_row.acl_resync_required is True  # requirement survives the retry
-    assert source_row.acl_synced_at is None  # ...so no fresh source-level health
-    assert source_row.status == "error"  # ...and never READY
-    assert result.status is SourceStatus.ERROR  # type: ignore[attr-defined]
-    assert result.error == "acl_mirror_incomplete"  # type: ignore[attr-defined]
-    # ...and the caller refuses the incremental path entirely while it stands:
-    calls_before = connector.sync_calls
-    await _run(seeded)
-    assert connector.sync_calls == calls_before + 1  # a FULL replay, not a page
 
 
 # --- complete replays attest unchanged mirrors -------------------------------
@@ -1102,34 +911,6 @@ async def test_cursor_expired_falls_back_to_full_resync(
     assert connector.sync_calls == 2  # 410 → cursor cleared → full resync ran
     assert set(await _rows(seeded)) == {"fresh"}  # full reconcile replaced
     assert (await _source_row(seeded)).sync_cursor == "baseline-6"
-
-
-async def test_source_side_revocation_enforced_after_next_sync(
-    sqlite_engine: None, connector: FakeAclConnector
-) -> None:
-    """A revoked source ACL vanishes from the mirror on the next replay — the
-    document stays but admits nobody (INV-2: excluded after next sync)."""
-    seeded = await _seed()
-    connector.full_result = FullSyncResult(
-        docs=(_doc("d1", principals=[f"user:{seeded.member_id}"]),), baseline_cursor="cur-1"
-    )
-    await _run(seeded)
-    assert (await _rows(seeded))["d1"].acl_principals == [f"user:{seeded.member_id}"]
-
-    connector.script = {
-        "cur-1": [
-            SyncPage(
-                upserts=(_doc("d1", principals=[]),),  # the source revoked it
-                deleted_external_ids=frozenset(),
-                next_cursor="baseline-7",
-            ),
-        ]
-    }
-    await _run(seeded)
-    after = await _rows(seeded)
-    assert after["d1"].acl_principals == []
-    source = await _source_row(seeded)
-    assert source.unmapped_acl_count == 1
 
 
 # --- wire: the GdriveSource health surface ------------------------------------
