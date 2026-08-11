@@ -25,7 +25,7 @@ backend/
     tasks/             # Celery app + tasks. The only place tasks are defined/enqueued.
     realtime/          # WebSocket handlers + Redis pub/sub backplane.
     auth/              # identity & tenant resolution. The only token validator.
-    connectors/<name>/ # one adapter per external source.
+    connectors/<name>/ # one adapter per external source (see "Connectors" below).
     core/              # config (pydantic-settings), logging, errors, observability, deps wiring.
   tests/               # mirrors app/: unit (domain/services) + integration (api/db/live)
   alembic/             # migrations
@@ -49,6 +49,13 @@ backend/
 - **Citation-grounded prompting:** the chat runtime must ground answers in retrieved passages and may answer *"I couldn't find it"* — an unsourced claim is a defect (mission filter #2). Carry passage source + char offsets through for citations (CC-11).
 - **Retrieval (`retrieval/`)** is hybrid (pgvector semantic + Postgres full-text, fused) with a cross-encoder **re-rank** before context assembly. Permission filter is applied **inside** retrieval, keyed off `auth/` — there is no unfiltered path (CC-1).
 - An **eval harness** (golden Q/A-with-source set; groundedness / citation-correctness / retrieval-recall) lives under `tests/eval/` and runs in CI. Prompts are versioned in-repo and testable.
+
+## Connectors (`connectors/<name>/`)
+- **Build one by following [docs/guides/building-a-connector.md](../docs/guides/building-a-connector.md)** — the base protocol (`name`/`validate_config`/`sync`/`health`), the optional capabilities (`oauth_spec` / `fetch_changes` / `map_acl`), the error taxonomy, registration-by-drop-in, the SSRF/egress obligations, and the per-deployment OAuth prerequisites. Decisions: [ADR-0009](../docs/architecture/0009-connector-framework-and-web-source.md) (framework + egress) and [ADR-0019](../docs/architecture/0019-connector-sdk-and-oauth.md) (SDK, OAuth, ACL mirroring).
+- **Registration is drop-in** (ADR-0008 §3): `connectors/<name>/__init__.py` exposing `CONNECTOR` is auto-discovered — never edit a shared registry.
+- **The execution context is framework-supplied** (ADR-0019 §4): connector code never reads the vault, Lumen's DB/infrastructure, or mutable module state — it receives an already-authenticated, egress-guarded client on `ConnectorRun` and a frozen `AclMappingContext`. Pinned structurally by the conformance kit, which forbids both the imports (`app.db`, `app.storage`, the secrets service) **and** the settings that identify Lumen's own datastores (`database_url`, `s3_*`, `redis_url`, the crypto keys) — banning the import alone does not stop `create_async_engine(get_settings().database_url)`. An external *source* that happens to be a SQL database is a normal vendor boundary; the prohibition is Lumen's DB, not SQL.
+- **Every connector package must pass `tests/test_connector_conformance.py`** (rules in `tests/conformance/`). Enrollment is checked on the object: each package's own `CONNECTOR` must be conformant, named for its directory, and identical to what the registry resolved — registry discovery silently **skips** a `CONNECTOR` that fails the runtime protocol, so a malformed new connector would otherwise vanish instead of failing. A new connector ships with its harness or the suite fails.
+- **ACL-declaring connectors:** the INV-2 negative-test kit (F-CB-3, #454) is **not built yet**; until it lands, extend `tests/test_acl_mode_split.py` and `tests/test_gdrive_acl_mapping.py` with the new connector's fixtures. Conformance proves the mapper's shape, not end-to-end retrieval semantics.
 
 ## Errors, config, observability
 - One error model: domain raises typed errors; an exception handler maps them to the contract's error shape (RFC-9457-style problem+JSON). Never leak stack traces or vendor errors to the client.
