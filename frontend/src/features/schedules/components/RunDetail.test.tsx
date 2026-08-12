@@ -19,6 +19,12 @@ vi.mock('@/api', async (importOriginal) => {
   return { ...actual, getRun: () => getRun() };
 });
 
+vi.mock('@/components/DocumentPreviewBody', () => ({
+  DocumentPreviewBody: ({ initialTimeMs }: { initialTimeMs?: number }) => (
+    <div data-testid="run-media-preview">{initialTimeMs}</div>
+  ),
+}));
+
 import { RunDetail } from './RunDetail';
 
 const SUCCEEDED: Run = {
@@ -120,6 +126,22 @@ describe('RunDetail', () => {
     const inspectors = await screen.findAllByRole('region', { name: /source: q3 revenue.pdf/i });
     expect(inspectors.length).toBeGreaterThanOrEqual(1);
     expect(within(inspectors[0]!).getByText(/Revenue grew 12% QoQ/)).toBeInTheDocument();
+  });
+
+  it('does not mount a media player for REST citation fields serialized as null', async () => {
+    getRun.mockResolvedValue({
+      ...SUCCEEDED,
+      citations: [
+        {
+          ...SUCCEEDED.citations![0]!,
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render();
+
+    await user.click(await screen.findByRole('button', { name: /citation 1: q3 revenue.pdf/i }));
+    expect(screen.queryByTestId('run-media-preview')).not.toBeInTheDocument();
   });
 
   it('surfaces a FAILED run’s typed error prominently — not a blank pane (AC-3)', async () => {

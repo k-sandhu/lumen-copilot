@@ -8,9 +8,10 @@
  *     actually grounded in at least one cited source — never as a bare claim.
  *   - When the answer was produced ("answered <ago>"), derived from the real
  *     message timestamp (presentation.relativeTime). This is the ANSWER time, not
- *     source freshness/indexing — the chat wire carries no source-provenance
- *     timestamp, so we label it honestly as the answer time (#120 GUARD) and
- *     never as "freshest"/"last indexed". Omitted when we have no timestamp.
+ *     source freshness/indexing — the chat wire carries no source-indexing
+ *     timestamp. A media citation offset locates playback and is not recency, so
+ *     we label message time honestly as answer time (#120 GUARD), never as
+ *     "freshest"/"last indexed". Omitted when we have no timestamp.
  *   - Helpful / Not-helpful — LOCAL-ONLY UI (toggle + aria-pressed). There is NO
  *     backend feedback endpoint, so this persists NOTHING and the component never
  *     implies it does (honest per #120). It is a one-of toggle the user can clear.

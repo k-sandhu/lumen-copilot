@@ -38,7 +38,7 @@ def test_upload_control_plane_never_accepts_file_bytes() -> None:
     assert "requestBody" not in legacy
     assert set(legacy["responses"]) == {"401", "410"}
 
-    initiate = paths["/v2/document-uploads"]["post"]
+    initiate = paths["/api/v2/document-uploads"]["post"]
     content = initiate["requestBody"]["content"]
     assert set(content) == {"application/json"}
     assert "multipart/form-data" not in json.dumps(initiate)
@@ -48,19 +48,27 @@ def test_upload_control_plane_never_accepts_file_bytes() -> None:
     assert schema["required"] == ["filename", "mime_type", "size_bytes", "collection_id"]
     assert all(prop.get("format") != "binary" for prop in schema["properties"].values())
 
+    # The retired router is not merely hidden: its former service-level byte
+    # ingress/egress seams are gone, preventing a later route from accidentally
+    # reconnecting FastAPI to whole-file payloads.
+    from app.services.document_service import DocumentService
+
+    assert "upload" not in DocumentService.__dict__
+    assert "get_content" not in DocumentService.__dict__
+
 
 def test_multipart_session_contract_is_resumable_bounded_and_typed() -> None:
     spec = _openapi()
     paths = spec["paths"]
     required = {
-        "/v2/document-uploads",
-        "/v2/document-uploads/{uploadId}",
-        "/v2/document-uploads/{uploadId}/parts",
-        "/v2/document-uploads/{uploadId}/complete",
+        "/api/v2/document-uploads",
+        "/api/v2/document-uploads/{uploadId}",
+        "/api/v2/document-uploads/{uploadId}/parts",
+        "/api/v2/document-uploads/{uploadId}/complete",
     }
     assert required <= set(paths)
-    assert "get" in paths["/v2/document-uploads/{uploadId}"]
-    assert "delete" in paths["/v2/document-uploads/{uploadId}"]
+    assert "get" in paths["/api/v2/document-uploads/{uploadId}"]
+    assert "delete" in paths["/api/v2/document-uploads/{uploadId}"]
 
     schemas = spec["components"]["schemas"]
     session = schemas["DocumentUploadSession"]
@@ -94,11 +102,11 @@ def test_multipart_session_contract_is_resumable_bounded_and_typed() -> None:
     assert signed["properties"]["url"]["format"] == "uri"
 
     for path, method in (
-        ("/v2/document-uploads", "post"),
-        ("/v2/document-uploads/{uploadId}", "get"),
-        ("/v2/document-uploads/{uploadId}", "delete"),
-        ("/v2/document-uploads/{uploadId}/parts", "post"),
-        ("/v2/document-uploads/{uploadId}/complete", "post"),
+        ("/api/v2/document-uploads", "post"),
+        ("/api/v2/document-uploads/{uploadId}", "get"),
+        ("/api/v2/document-uploads/{uploadId}", "delete"),
+        ("/api/v2/document-uploads/{uploadId}/parts", "post"),
+        ("/api/v2/document-uploads/{uploadId}/complete", "post"),
     ):
         responses = paths[path][method]["responses"]
         assert "401" in responses
@@ -115,7 +123,7 @@ def test_media_access_and_transcript_are_json_control_plane_contracts() -> None:
     assert content.get("deprecated") is True
     assert set(content["responses"]) == {"401", "410"}
 
-    access = paths["/v2/documents/{documentId}/access-url"]["post"]
+    access = paths["/api/v2/documents/{documentId}/access-url"]["post"]
     assert set(access["requestBody"]["content"]) == {"application/json"}
     response_ref = access["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
     assert response_ref.endswith("/DocumentAccessUrl")
@@ -123,7 +131,7 @@ def test_media_access_and_transcript_are_json_control_plane_contracts() -> None:
         schemas["DocumentAccessUrl"]["required"]
     )
 
-    transcript = paths["/v2/documents/{documentId}/transcript"]["get"]
+    transcript = paths["/api/v2/documents/{documentId}/transcript"]["get"]
     assert {p["name"] for p in transcript["parameters"]} >= {"cursor", "limit", "around_ms"}
     assert {"401", "404", "409"} <= set(transcript["responses"])
     page = schemas["TranscriptPage"]
@@ -170,3 +178,24 @@ def test_document_and_every_citation_surface_carry_optional_media_time() -> None
         "timeStartMs": ["timeEndMs"],
         "timeEndMs": ["timeStartMs"],
     }
+
+
+def test_media_contract_paths_match_fastapi_mounts() -> None:
+    """A canonical/generated client must call the routes FastAPI actually serves."""
+    import re
+
+    from app.main import create_app
+
+    def route_shape(path: str) -> str:
+        # Placeholder spelling is a generator concern (camelCase in the
+        # hand-authored contract, snake_case in FastAPI); the HTTP route shape
+        # and its /api/v2 mount are what must agree.
+        return re.sub(r"\{[^}]+\}", "{}", path)
+
+    canonical = {route_shape(path) for path in _openapi()["paths"] if path.startswith("/api/v2/")}
+    emitted = {
+        route_shape(path) for path in create_app().openapi()["paths"] if path.startswith("/api/v2/")
+    }
+
+    assert canonical == emitted
+    assert not any(path.startswith("/v2/") for path in _openapi()["paths"])

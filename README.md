@@ -24,9 +24,12 @@ flowchart LR
     API --> RET["retrieval/<br/>permission filter"]
     RET --> OS[("OpenSearch<br/>BM25 + kNN hybrid")]
     API --> PG[("Postgres 16 + pgvector<br/>row-level security")]
-    API --> S3[("MinIO<br/>uploads & artifacts")]
+    API -. "signed upload/playback capabilities" .-> S3[("MinIO<br/>uploads & artifacts")]
+    SPA -- "multipart PUT + Range GET<br/>(bytes bypass API)" --> S3
     API --> LLM["LiteLLM gateway<br/>→ OpenRouter"]
-    API -- "Redis broker" --> WK["Celery worker + redbeat beat"]
+    API -- "Redis broker" --> WK["Celery general + bounded media workers · redbeat"]
+    WK --> S3
+    WK --> STT["app/llm STT adapter<br/>→ OpenRouter"]
     WK --> SBX["sandbox-runner<br/>ephemeral containers"]
 ```
 
@@ -45,11 +48,11 @@ Requires Docker (with compose). Cold start to a running UI:
 ```bash
 git clone https://github.com/k-sandhu/lumen-copilot.git && cd lumen-copilot
 cp .env.example .env            # safe local-dev defaults; set OPENROUTER_API_KEY for model calls
-docker compose up --build       # Postgres+pgvector, OpenSearch, Redis, MinIO, SearXNG, API, worker, beat, SPA
+docker compose up --build       # Postgres+pgvector, OpenSearch, Redis, MinIO+reaper, SearXNG, API, general+media workers, beat, SPA
 docker compose exec backend python -m app.auth.seed   # dev user: dev@acme.test / devpass
 ```
 
-Then open the app at **http://localhost:47180** (API docs at http://localhost:47181/docs). LLM calls route through OpenRouter — export `OPENROUTER_API_KEY` in your shell or set it in `.env`; everything else runs with the shipped local-dev defaults.
+Then open the app at **http://localhost:47180** (API docs at http://localhost:47181/docs). Chat/embedding calls and media transcription route through OpenRouter — export `OPENROUTER_API_KEY` in your shell or set it in `.env`; everything else runs with the shipped local-dev defaults. Uploaded document and media bytes travel directly between the browser and MinIO as resumable multipart PUTs, and native audio/video playback uses signed Range GETs; FastAPI remains the authenticated control plane.
 
 Sandboxed code execution is off by default and gated behind a compose profile: `docker compose --profile sandbox up --build` builds and starts the in-repo `sandbox-runner`. Each chat gets one reusable, offline container; approved packages and workspace files persist until reset/close. Model code runs as root inside that container, but receives no host mounts, Docker socket, application secrets, or network route. The default stack runs fully without the runner.
 
@@ -68,10 +71,11 @@ Sandboxed code execution is off by default and gated behind a compose profile: `
 | Frontend | React 18 · Vite · TypeScript · generated OpenAPI client |
 | Contract | OpenAPI 3 + WebSocket envelope JSON Schemas (`contracts/`) |
 | Data | PostgreSQL 16 + pgvector (RLS) · OpenSearch 2.19 (BM25 + kNN) · Redis 7.4 · MinIO |
-| LLM | LiteLLM gateway → OpenRouter (provider-swappable, streaming) |
+| LLM | LiteLLM gateway → OpenRouter (chat/embeddings/tools); narrow `app/llm` OpenRouter STT adapter for diarized word timestamps (ADR-0023) |
+| Media | FFmpeg/ffprobe worker pipeline · diarized transcript segments · timestamped citations · native audio/video playback |
 | Web search | Self-hosted SearXNG (off by default) |
 | Sandbox | Dedicated runner service + ephemeral OCI containers (compose profile `sandbox`) |
-| Local run | One `docker compose up` (9 services, version-pinned images; the sandbox runner is a 10th behind the `sandbox` profile) |
+| Local run | One `docker compose up` (version-pinned services; sandbox helpers remain behind the `sandbox` profile) |
 
 ## Status
 

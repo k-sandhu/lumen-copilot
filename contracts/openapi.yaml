@@ -58,7 +58,7 @@ info:
     FastAPI is the authenticated control plane only. Audio/video metadata,
     paginated diarized transcripts, signed Range-playback capabilities, and
     optional millisecond citation spans are additive. Replacement operations
-    live under `/v2` as required by the contract versioning rule. The old binary
+    live under `/api/v2` as required by the contract versioning rule. The old binary
     `POST /documents` and byte-returning `/documents/{id}/content` operations
     are deliberately retired with authenticated `410` responses in the same
     coordinated frontend/backend migration because retaining a backend byte
@@ -286,14 +286,14 @@ paths:
       deprecated: true
       description: >
         Binary uploads through FastAPI are no longer accepted (spec 0008).
-        Initiate a metadata-only session with `POST /v2/document-uploads`, upload
+        Initiate a metadata-only session with `POST /api/v2/document-uploads`, upload
         each signed part directly to storage, then complete the session.
       tags: [documents]
       responses:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "410": { $ref: "#/components/responses/Gone" }
 
-  /v2/document-uploads:
+  /api/v2/document-uploads:
     post:
       operationId: initiateDocumentUpload
       summary: Initiate a metadata-only direct multipart upload.
@@ -321,7 +321,7 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
-  /v2/document-uploads/{uploadId}:
+  /api/v2/document-uploads/{uploadId}:
     parameters:
       - { $ref: "#/components/parameters/UploadId" }
     get:
@@ -355,7 +355,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
-  /v2/document-uploads/{uploadId}/parts:
+  /api/v2/document-uploads/{uploadId}/parts:
     parameters:
       - { $ref: "#/components/parameters/UploadId" }
     post:
@@ -383,7 +383,7 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
-  /v2/document-uploads/{uploadId}/complete:
+  /api/v2/document-uploads/{uploadId}/complete:
     parameters:
       - { $ref: "#/components/parameters/UploadId" }
     post:
@@ -447,14 +447,14 @@ paths:
       deprecated: true
       description: >
         Backend-proxied bytes and protected redirects are retired. Request a
-        JSON capability from `/v2/documents/{documentId}/access-url`; the browser
+        JSON capability from `/api/v2/documents/{documentId}/access-url`; the browser
         then loads/downloads directly from storage.
       tags: [documents]
       responses:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "410": { $ref: "#/components/responses/Gone" }
 
-  /v2/documents/{documentId}/access-url:
+  /api/v2/documents/{documentId}/access-url:
     parameters:
       - { $ref: "#/components/parameters/DocumentId" }
     post:
@@ -483,7 +483,7 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
-  /v2/documents/{documentId}/transcript:
+  /api/v2/documents/{documentId}/transcript:
     parameters:
       - { $ref: "#/components/parameters/DocumentId" }
     get:
@@ -3569,8 +3569,8 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, filename, mime_type, size_bytes, collection_id, owner_id,
-         status, chunk_count, created_at, updated_at]
+        [id, filename, mime_type, size_bytes, collection_id, owner_id, kind,
+         duration_ms, status, chunk_count, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         filename: { type: string }
@@ -3585,7 +3585,7 @@ components:
           description: Player-relative media duration; null for ordinary documents.
         status: { $ref: "#/components/schemas/DocumentStatus" }
         error:
-          type: string
+          type: [string, "null"]
           description: Failure reason when status is failed.
         chunk_count:
           type: integer
@@ -3898,12 +3898,11 @@ components:
           description: Optional retrieval/rerank score.
         redacted:
           type: boolean
-          default: false
           description: >
             True when the caller may no longer retrieve the cited document, in
-            which case `snippet` and `document_name` are empty. Optional and
-            defaulting to false so existing clients are unaffected. Timestamp,
-            transcript-segment, and speaker fields are omitted when true.
+            which case `snippet` and `document_name` are empty. Omitted means
+            false so existing clients are unaffected. Timestamp, transcript-
+            segment, and speaker fields are omitted when true.
 
     MessageToolInvocation:
       type: object

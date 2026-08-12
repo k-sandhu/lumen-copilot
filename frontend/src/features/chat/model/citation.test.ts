@@ -103,3 +103,70 @@ describe('normalization carries additive web fields', () => {
     expect(kindOfCitation(ui)).toBe('document');
   });
 });
+
+describe('media citation normalization', () => {
+  it('preserves timestamp, transcript segment and contextual speaker fields from REST and WS', () => {
+    const rest: Citation = {
+      id: 'media-rest',
+      document_id: 'doc-media',
+      document_name: 'meeting.mp4',
+      chunk_id: 'chunk-1',
+      snippet: 'Hello, my name is John.',
+      char_start: 0,
+      char_end: 23,
+      time_start_ms: 12_500,
+      time_end_ms: 18_000,
+      transcript_segment_id: 'seg-1',
+      speaker_id: 'speaker-1',
+      speaker_name: 'John',
+    };
+    const ws: ChatCitation = {
+      id: 'media-ws',
+      documentId: 'doc-media',
+      documentName: 'meeting.mp4',
+      chunkId: 'chunk-1',
+      snippet: rest.snippet,
+      charStart: 0,
+      charEnd: 23,
+      timeStartMs: 12_500,
+      timeEndMs: 18_000,
+      transcriptSegmentId: 'seg-1',
+      speakerId: 'speaker-1',
+      speakerName: 'John',
+    };
+
+    expect(fromRestCitation(rest)).toMatchObject({
+      timeStartMs: 12_500,
+      timeEndMs: 18_000,
+      transcriptSegmentId: 'seg-1',
+      speakerId: 'speaker-1',
+      speakerName: 'John',
+    });
+    expect(fromWsCitation(ws)).toMatchObject({
+      timeStartMs: 12_500,
+      timeEndMs: 18_000,
+      transcriptSegmentId: 'seg-1',
+      speakerId: 'speaker-1',
+      speakerName: 'John',
+    });
+  });
+
+  it('omits REST media fields serialized as null instead of inventing a zero seek', () => {
+    const rest: Citation = {
+      id: 'text-rest',
+      document_id: 'doc-text',
+      document_name: 'policy.pdf',
+      chunk_id: 'chunk-text',
+      snippet: 'Ordinary document passage.',
+      char_start: 0,
+      char_end: 26,
+    };
+
+    const ui = fromRestCitation(rest);
+    expect(ui.timeStartMs).toBeUndefined();
+    expect(ui.timeEndMs).toBeUndefined();
+    expect(ui.transcriptSegmentId).toBeUndefined();
+    expect(ui.speakerId).toBeUndefined();
+    expect(ui.speakerName).toBeUndefined();
+  });
+});
