@@ -23,6 +23,7 @@
 import { useId, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiError } from '@/api';
+import { SecretInput } from '@/components/SecretInput';
 import { Icon } from '@/ui';
 import { useLogin } from '../model/queries';
 
@@ -38,7 +39,7 @@ function genericError(error: unknown): string {
 
 /** Shared input styling: token-backed, icon-prefixed, with a visible focus ring. */
 const inputClass =
-  'w-full rounded-md border border-border bg-surface py-2 pl-10 pr-3 text-sm text-foreground ' +
+  'w-full rounded-md border border-border bg-surface py-2 pl-10 pr-10 text-sm text-foreground ' +
   'placeholder:text-foreground-muted/70 transition-colors ' +
   'focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50 ' +
   'aria-[invalid=true]:border-danger';
@@ -53,7 +54,12 @@ export function LoginScreen() {
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    login.mutate({ email, password });
+    login.submit(
+      { email, password },
+      {
+        onSettled: () => setPassword(''),
+      },
+    );
   }
 
   const errorMessage = login.isError ? genericError(login.error) : null;
@@ -112,6 +118,9 @@ export function LoginScreen() {
                   type="email"
                   name="email"
                   autoComplete="username"
+                  inputMode="email"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   placeholder="you@company.com"
                   required
                   value={email}
@@ -132,15 +141,15 @@ export function LoginScreen() {
                   name="lock"
                   className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground-muted"
                 />
-                <input
+                <SecretInput
                   id={passwordId}
-                  type="password"
                   name="password"
-                  autoComplete="current-password"
+                  purpose="current-password"
+                  revealLabel="password"
                   placeholder="••••••••"
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onValueChange={setPassword}
                   aria-invalid={invalid}
                   aria-describedby={errorMessage ? errorId : undefined}
                   className={inputClass}

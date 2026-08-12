@@ -7,11 +7,13 @@
  * Rendered against a mocked fetch so a contract match is an integration match.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
+import { storageSnapshot } from '@/test/storageSnapshot';
 import { setAccessToken, clearAccessToken } from '@/api';
 import type { McpServer } from '@/api';
+import { useAuthStore } from '@/features/auth';
 import { RegisterServerModal } from './RegisterServerModal';
 
 function json(body: unknown, status = 201): Response {
@@ -44,9 +46,11 @@ function makeServer(overrides: Partial<McpServer> = {}): McpServer {
   };
 }
 
-beforeEach(() => setAccessToken('jwt'));
+beforeEach(() => {
+  act(() => setAccessToken('jwt'));
+});
 afterEach(() => {
-  clearAccessToken();
+  act(() => clearAccessToken());
   vi.restoreAllMocks();
 });
 
@@ -98,9 +102,21 @@ describe('RegisterServerModal — validation', () => {
 describe('RegisterServerModal — write-only secret (AC-2 / CC-C)', () => {
   it('never renders a stored value — the secret field starts empty and is masked', () => {
     renderWithQuery(<RegisterServerModal open onClose={() => {}} />);
+    const endpoint = screen.getByLabelText(/endpoint url/i);
+    expect(endpoint).toHaveAttribute('type', 'url');
+    expect(endpoint).toHaveAttribute('name', 'mcp_server_endpoint_url');
+    expect(endpoint).toHaveAttribute('inputmode', 'url');
+    expect(endpoint).toHaveAttribute('autocomplete', 'off');
+    expect(endpoint).toHaveAttribute('autocapitalize', 'none');
+    expect(endpoint).toHaveAttribute('spellcheck', 'false');
+
     const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
     // Write-only: masked input, never pre-filled from any stored value.
     expect(secret).toHaveAttribute('type', 'password');
+    expect(secret).toHaveAttribute('name', 'mcp_server_bearer_token');
+    expect(secret).toHaveAttribute('autocomplete', 'new-password');
+    expect(secret).toHaveAttribute('autocapitalize', 'none');
+    expect(secret).toHaveAttribute('spellcheck', 'false');
     expect(secret.value).toBe('');
     // The hint tells the user it is never displayed back.
     expect(screen.getByText(/never display it back|write-only/i)).toBeInTheDocument();
@@ -118,7 +134,7 @@ describe('RegisterServerModal — write-only secret (AC-2 / CC-C)', () => {
     });
     const onClose = vi.fn();
     const user = userEvent.setup();
-    renderWithQuery(<RegisterServerModal open onClose={onClose} />);
+    const { queryClient } = renderWithQuery(<RegisterServerModal open onClose={onClose} />);
 
     await user.type(screen.getByLabelText(/^name$/i), 'Acme');
     await user.type(screen.getByLabelText(/endpoint url/i), 'https://mcp.acme.com/sse');
@@ -134,6 +150,77 @@ describe('RegisterServerModal — write-only secret (AC-2 / CC-C)', () => {
     // outside this masked input can display it.
     const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
     expect(secret.type).toBe('password');
+    expect(secret.value).toBe('');
+    expect(
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((mutation) => mutation.state),
+      ),
+    ).not.toContain('super-secret-token');
+    expect(storageSnapshot(window.localStorage)).not.toContain('super-secret-token');
+    expect(storageSnapshot(window.sessionStorage)).not.toContain('super-secret-token');
+    expect(window.location.href).not.toContain('super-secret-token');
+  });
+
+  it('reveals the secret only through an accessible non-submit control', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const user = userEvent.setup();
+    renderWithQuery(<RegisterServerModal open onClose={() => {}} />);
+
+    const secret = screen.getByLabelText(/^secret/i);
+    await user.type(secret, 'mcp-reveal-only');
+    await user.click(screen.getByRole('button', { name: /show secret/i }));
+
+    expect(secret).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: /hide secret/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('clears credential-adjacent fields on logout / identity transition', async () => {
+    const user = userEvent.setup();
+    renderWithQuery(<RegisterServerModal open onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText(/^name$/i), 'Persona A MCP');
+    await user.type(screen.getByLabelText(/endpoint url/i), 'https://persona-a.example/mcp');
+    await user.type(screen.getByLabelText(/^secret/i), 'persona-a-mcp-secret');
+
+    act(() => useAuthStore.getState().markUnauthenticated());
+
+    expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
+    expect(screen.getByLabelText(/endpoint url/i)).toHaveValue('');
+    expect(screen.getByLabelText(/^secret/i)).toHaveValue('');
+  });
+
+  it('clears the credential controls before cancel closes the dialog', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    renderWithQuery(<RegisterServerModal open onClose={onClose} />);
+    const endpoint = screen.getByLabelText(/endpoint url/i) as HTMLInputElement;
+    const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
+    await user.type(endpoint, 'https://cancelled.example/mcp');
+    await user.type(secret, 'cancelled-mcp-secret');
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(endpoint.value).toBe('');
+    expect(secret.value).toBe('');
+  });
+
+  it('clears the detached secret control on unmount', async () => {
+    const user = userEvent.setup();
+    const view = renderWithQuery(<RegisterServerModal open onClose={() => {}} />);
+    const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
+    await user.type(secret, 'unmount-mcp-secret');
+
+    view.unmount();
+
+    expect(secret.value).toBe('');
   });
 
   it('registers with NO auth when the secret is left blank', async () => {

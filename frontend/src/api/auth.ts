@@ -19,11 +19,12 @@ import { setAccessToken, clearAccessToken } from './token';
 import type { CurrentUser, LoginRequest, TokenResponse } from './types';
 
 /** Exchange email + password for an access token (AC-1). Stores the token. */
-export async function login(body: LoginRequest): Promise<TokenResponse> {
+export async function login(body: LoginRequest, signal?: AbortSignal): Promise<TokenResponse> {
   const token = await request<TokenResponse>('/auth/login', {
     method: 'POST',
     json: body,
     skipAuth: true,
+    signal,
   });
   setAccessToken(token.access_token);
   return token;

@@ -12,5 +12,10 @@ export function renderWithQuery(ui: ReactElement) {
       queries: { retry: false, gcTime: 0, staleTime: 0 },
     },
   });
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+  return Object.assign(
+    render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>),
+    {
+      queryClient,
+    },
+  );
 }

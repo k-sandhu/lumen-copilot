@@ -5,7 +5,8 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCurrentUser, hasAccessToken, login, logout } from '@/api';
-import type { CurrentUser, LoginRequest, TokenResponse } from '@/api';
+import type { CurrentUser, LoginRequest } from '@/api';
+import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import { useAuthStore } from './authStore';
 
 export const currentUserQueryKey = ['auth', 'me'] as const;
@@ -34,8 +35,10 @@ export function useLogin() {
   const queryClient = useQueryClient();
   const markAuthenticated = useAuthStore((s) => s.markAuthenticated);
 
-  return useMutation<TokenResponse, unknown, LoginRequest>({
-    mutationFn: (credentials) => login(credentials),
+  return useEphemeralMutation<void, unknown, LoginRequest>({
+    mutationFn: async (credentials, { signal }) => {
+      await login(credentials, signal);
+    },
     onSuccess: () => {
       markAuthenticated();
       void queryClient.invalidateQueries({ queryKey: currentUserQueryKey });

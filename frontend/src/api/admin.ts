@@ -131,10 +131,7 @@ export function deleteGroup(groupId: string): Promise<void> {
  * The users explicitly in a group, ordered by email. Empty for the system
  * group, whose membership is derived rather than enumerated (ADR-0022 §3).
  */
-export function listGroupMembers(
-  groupId: string,
-  signal?: AbortSignal,
-): Promise<GroupMemberList> {
+export function listGroupMembers(groupId: string, signal?: AbortSignal): Promise<GroupMemberList> {
   return request<GroupMemberList>(`/admin/groups/${groupId}/members`, { signal });
 }
 
@@ -373,8 +370,11 @@ export function listLlmProviders(signal?: AbortSignal): Promise<LlmProviderList>
  * `discovered_models` on a reachable provider, or `error` + `last_error` on a bad
  * key/url (never a 500).
  */
-export function createLlmProvider(body: LlmProviderCreate): Promise<LlmProvider> {
-  return request<LlmProvider>('/admin/llm-providers', { method: 'POST', json: body });
+export function createLlmProvider(
+  body: LlmProviderCreate,
+  signal?: AbortSignal,
+): Promise<LlmProvider> {
+  return request<LlmProvider>('/admin/llm-providers', { method: 'POST', json: body, signal });
 }
 
 /**

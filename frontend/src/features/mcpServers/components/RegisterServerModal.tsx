@@ -22,7 +22,9 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/api';
+import { SecretInput } from '@/components/SecretInput';
 import { Icon } from '@/ui';
+import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { useFocusTrap } from '@/lib/useFocusTrap';
 import { useRegisterMcpServer } from '../model/queries';
 import { registerErrorMessage, validateEndpoint } from '../model/presentation';
@@ -45,6 +47,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const secretHintId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const endpointRef = useRef<HTMLInputElement>(null);
 
   const [name, setName] = useState('');
   const [transport, setTransport] = useState<McpTransport>('streamable_http');
@@ -58,6 +61,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const [clientError, setClientError] = useState<string | null>(null);
 
   const register = useRegisterMcpServer();
+  const resetRegister = register.reset;
   const serverError =
     register.error instanceof ApiError ? registerErrorMessage(register.error) : null;
   const error = clientError ?? serverError;
@@ -70,23 +74,39 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const submittingRef = useRef(submitting);
   submittingRef.current = submitting;
 
-  // Reset the form each time the modal opens so a prior error / value never leaks
-  // into a new attempt — the secret in particular is always blank on open.
-  useEffect(() => {
-    if (!open) return;
+  const clearForm = useCallback(() => {
+    // Blank the live controls synchronously before a parent unmounts the dialog;
+    // the state updates below keep React's controlled values in sync.
+    if (nameRef.current) nameRef.current.value = '';
+    if (endpointRef.current) endpointRef.current.value = '';
     setName('');
     setTransport('streamable_http');
     setEndpoint('');
     setSecret('');
     setClientError(null);
-    register.reset();
-    // register.reset is stable; intentionally run only on the open transition.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
+
+  useCredentialClearer(() => {
+    clearForm();
+    resetRegister();
+  });
+
+  // Reset on both close and open transitions. Clearing while hidden guarantees
+  // a later render cannot briefly rehydrate a prior secret before effects run.
+  useEffect(() => {
+    clearForm();
+    resetRegister();
+  }, [clearForm, open, resetRegister]);
+
+  const closeAndClear = useCallback(() => {
+    clearForm();
+    resetRegister();
+    onClose();
+  }, [clearForm, onClose, resetRegister]);
 
   const handleTrapClose = useCallback(() => {
-    if (!submittingRef.current) onClose();
-  }, [onClose]);
+    if (!submittingRef.current) closeAndClear();
+  }, [closeAndClear]);
   useFocusTrap(open, dialogRef, handleTrapClose, { initialFocus: nameRef });
 
   if (!open) return null;
@@ -117,11 +137,12 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
       ? { type: 'bearer', value: trimmedSecret }
       : undefined;
 
-    register.mutate(
+    register.submit(
       { name: name.trim(), transport, endpoint_url: endpointResult.url, auth },
       {
-        onSuccess: () => onClose(),
+        onSuccess: closeAndClear,
         onError: () => nameRef.current?.focus(),
+        onSettled: () => setSecret(''),
       },
     );
   }
@@ -134,7 +155,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
       aria-labelledby={titleId}
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-[10vh]"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !submitting) onClose();
+        if (e.target === e.currentTarget && !submitting) closeAndClear();
       }}
     >
       <div className="w-full max-w-lg overflow-hidden rounded-xl border border-border bg-surface shadow-xl">
@@ -144,7 +165,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={closeAndClear}
             disabled={submitting}
             aria-label="Close"
             className="ml-auto rounded-md border border-border p-1.5 text-foreground-muted hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
@@ -153,7 +174,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
           </button>
         </header>
 
-        <form onSubmit={handleSubmit} noValidate>
+        <form onSubmit={handleSubmit} autoComplete="off" noValidate>
           <div className="space-y-4 px-5 py-4">
             <p className="text-sm text-foreground-muted">
               Connect a remote MCP server. We’ll register it (pending), then you can test it to
@@ -169,6 +190,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
                 ref={nameRef}
                 id={`${titleId}-name`}
                 type="text"
+                name="mcp_server_display_name"
                 autoComplete="off"
                 placeholder="Acme Ticketing"
                 value={name}
@@ -211,10 +233,13 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
                 Endpoint URL
               </label>
               <input
+                ref={endpointRef}
                 id={`${titleId}-endpoint`}
                 type="url"
+                name="mcp_server_endpoint_url"
                 inputMode="url"
                 autoComplete="off"
+                autoCapitalize="none"
                 spellCheck={false}
                 placeholder="https://mcp.example.com/sse"
                 value={endpoint}
@@ -239,20 +264,20 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
               <label htmlFor={`${titleId}-secret`} className="mb-1 block text-xs font-medium">
                 Secret <span className="font-normal text-foreground-muted">(optional)</span>
               </label>
-              <input
+              <SecretInput
                 id={`${titleId}-secret`}
-                type="password"
-                autoComplete="new-password"
-                spellCheck={false}
+                name="mcp_server_bearer_token"
+                purpose="new-secret"
+                revealLabel="secret"
                 placeholder="Bearer token — sent once, never shown again"
                 value={secret}
                 disabled={submitting}
                 aria-describedby={secretHintId}
-                onChange={(e) => {
-                  setSecret(e.target.value);
+                onValueChange={(value) => {
+                  setSecret(value);
                   clearServerError();
                 }}
-                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
+                className="w-full rounded-md border border-border bg-surface py-2 pl-3 pr-10 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60"
               />
               <p id={secretHintId} className="mt-1.5 text-xs text-foreground-muted">
                 Stored write-only and encrypted — we never display it back. Leave blank for an
@@ -261,11 +286,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
             </div>
 
             {error ? (
-              <p
-                id={errorId}
-                role="alert"
-                className="flex items-start gap-1.5 text-xs text-danger"
-              >
+              <p id={errorId} role="alert" className="flex items-start gap-1.5 text-xs text-danger">
                 <Icon name="alert-triangle" className="mt-px shrink-0" />
                 <span>{error}</span>
               </p>
@@ -275,7 +296,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
           <footer className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
             <button
               type="button"
-              onClick={onClose}
+              onClick={closeAndClear}
               disabled={submitting}
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
             >

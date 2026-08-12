@@ -50,6 +50,37 @@ paths (bad creds → generic error, expired token → refresh+retry, failed refr
 login) are covered in `authClient.test.ts`, `auth.test.ts`, `LoginScreen.test.tsx`,
 and `RouteGuard.test.tsx`.
 
+## Credential-field and draft-lifecycle contract
+
+Credential inputs use explicit browser semantics instead of treating
+`autocomplete="off"` as a security boundary:
+
+- the real login form is password-manager compatible: the email field is named
+  `email` with `autocomplete="username"`, and the password field is named
+  `password` with `autocomplete="current-password"`;
+- non-login API keys and bearer tokens use domain-specific names and the shared
+  `SecretInput` primitive with `autocomplete="new-password"`; adjacent endpoints
+  are named URL inputs so they cannot be mistaken for usernames;
+- raw drafts stay only in controlled component state and the ephemeral request
+  holder. TanStack MutationCache receives an opaque token, not the request body,
+  and local/session storage, query strings, logs, and read responses must never
+  receive a raw credential;
+- the owning form wipes its draft on cancel, settled submission, unmount,
+  principal change, and logout. Provider/server reads expose only presence or a
+  masked fingerprint, so an existing secret is never hydrated back into the DOM.
+
+At a principal boundary, queued ephemeral mutations destroy their request
+variables before they can start, while dispatched credential requests receive an
+abort signal. Abort is not a server-side rollback: if the server already accepted
+a request, it remains authorized and audited under the bearer attached at
+dispatch. It is never reissued from the queued holder under the next principal,
+and logout clears the client query cache before that principal's data is loaded.
+
+Browsers and extensions may ignore standards-correct hints or retain values in
+their own vaults. The application cannot clear that third-party storage; precise
+field semantics, short draft lifetimes, and DOM blanking are the enforceable
+boundary here.
+
 ## Wiring it up at the wire-up with the live BE (#19)
 
 This slice is contract-true today against mocks. At BE integration, confirm the

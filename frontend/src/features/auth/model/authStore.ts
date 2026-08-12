@@ -15,6 +15,7 @@
  */
 import { create } from 'zustand';
 import { subscribeToken } from '@/api';
+import { clearCredentialDrafts } from '@/lib/credentialLifecycle';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -26,8 +27,14 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>((set) => ({
   status: 'unknown',
-  markAuthenticated: () => set({ status: 'authenticated' }),
-  markUnauthenticated: () => set({ status: 'unauthenticated' }),
+  markAuthenticated: () => {
+    clearCredentialDrafts();
+    set({ status: 'authenticated' });
+  },
+  markUnauthenticated: () => {
+    clearCredentialDrafts();
+    set({ status: 'unauthenticated' });
+  },
 }));
 
 // When the access token is dropped (failed refresh / logout) flip to

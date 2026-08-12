@@ -14,11 +14,13 @@
  * - the API key value is never rendered (only the masked secret_hint).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
+import { storageSnapshot } from '@/test/storageSnapshot';
 import { ApiError } from '@/api';
 import type { LlmProvider, LlmProviderList } from '@/api';
+import { useAuthStore } from '@/features/auth';
 import { ProvidersPanel } from './ProvidersPanel';
 
 const listLlmProviders = vi.hoisted(() => vi.fn());
@@ -78,6 +80,49 @@ beforeEach(() => {
 });
 
 describe('ProvidersPanel', () => {
+  it('uses non-login field semantics for provider metadata and a new write-only key', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    renderWithQuery(<ProvidersPanel />);
+    const form = screen.getByRole('form', { name: /add llm provider/i });
+
+    const name = within(form).getByLabelText(/^name$/i);
+    expect(name).toHaveAttribute('name', 'llm_provider_display_name');
+
+    const baseUrl = within(form).getByLabelText(/base url/i);
+    expect(baseUrl).toHaveAttribute('type', 'url');
+    expect(baseUrl).toHaveAttribute('name', 'llm_provider_base_url');
+    expect(baseUrl).toHaveAttribute('inputmode', 'url');
+    expect(baseUrl).toHaveAttribute('autocomplete', 'off');
+    expect(baseUrl).toHaveAttribute('autocapitalize', 'none');
+    expect(baseUrl).toHaveAttribute('spellcheck', 'false');
+
+    const apiKey = within(form).getByLabelText(/api key/i);
+    expect(apiKey).toHaveAttribute('type', 'password');
+    expect(apiKey).toHaveAttribute('name', 'llm_provider_api_key');
+    expect(apiKey).toHaveAttribute('autocomplete', 'new-password');
+    expect(apiKey).toHaveAttribute('autocapitalize', 'none');
+    expect(apiKey).toHaveAttribute('spellcheck', 'false');
+    expect(apiKey).toHaveValue('');
+  });
+
+  it('reveals an API key only through an accessible non-submit control', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const user = userEvent.setup();
+    renderWithQuery(<ProvidersPanel />);
+
+    const apiKey = screen.getByLabelText(/api key/i);
+    await user.type(apiKey, 'sk-reveal-only');
+    await user.click(screen.getByRole('button', { name: /show api key/i }));
+
+    expect(apiKey).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: /hide api key/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('renders a provider list with status, model count, and model ids', async () => {
     listLlmProviders.mockResolvedValue(LIST_ONE);
     renderWithQuery(<ProvidersPanel />);
@@ -105,26 +150,98 @@ describe('ProvidersPanel', () => {
   it('the add-form submit calls createLlmProvider (openai_compatible)', async () => {
     listLlmProviders.mockResolvedValue({ items: [] });
     createLlmProvider.mockResolvedValue(PROVIDER_READY);
-    renderWithQuery(<ProvidersPanel />);
+    const { queryClient } = renderWithQuery(<ProvidersPanel />);
 
     // Empty state renders, and the add form is always present.
     await screen.findByText(/no llm providers registered/i);
     const form = screen.getByRole('form', { name: /add llm provider/i });
     await userEvent.type(within(form).getByLabelText(/^name$/i), 'OpenRouter');
-    await userEvent.type(
-      within(form).getByLabelText(/base url/i),
-      'https://openrouter.ai/api/v1',
-    );
+    await userEvent.type(within(form).getByLabelText(/base url/i), 'https://openrouter.ai/api/v1');
     await userEvent.type(within(form).getByLabelText(/api key/i), 'sk-secret-1234567890');
     await userEvent.click(within(form).getByRole('button', { name: /add provider/i }));
 
-    expect(createLlmProvider).toHaveBeenCalledWith({
-      name: 'OpenRouter',
-      provider_type: 'openai_compatible',
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key: 'sk-secret-1234567890',
-    });
+    expect(createLlmProvider).toHaveBeenCalledWith(
+      {
+        name: 'OpenRouter',
+        provider_type: 'openai_compatible',
+        base_url: 'https://openrouter.ai/api/v1',
+        api_key: 'sk-secret-1234567890',
+      },
+      expect.any(AbortSignal),
+    );
     expect(await screen.findByText(/added openrouter/i)).toBeInTheDocument();
+    expect(within(form).getByLabelText(/api key/i)).toHaveValue('');
+    expect(
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((mutation) => mutation.state),
+      ),
+    ).not.toContain('sk-secret-1234567890');
+    expect(storageSnapshot(window.localStorage)).not.toContain('sk-secret-1234567890');
+    expect(storageSnapshot(window.sessionStorage)).not.toContain('sk-secret-1234567890');
+    expect(window.location.href).not.toContain('sk-secret-1234567890');
+  });
+
+  it('omits an untouched provider API key from the request', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    createLlmProvider.mockResolvedValue(PROVIDER_READY);
+    const user = userEvent.setup();
+    renderWithQuery(<ProvidersPanel />);
+    const form = await screen.findByRole('form', { name: /add llm provider/i });
+
+    await user.type(within(form).getByLabelText(/^name$/i), 'No-key provider');
+    await user.type(within(form).getByLabelText(/base url/i), 'https://no-key.example/v1');
+    await user.click(within(form).getByRole('button', { name: /add provider/i }));
+
+    expect(createLlmProvider).toHaveBeenCalledWith(
+      {
+        name: 'No-key provider',
+        provider_type: 'openai_compatible',
+        base_url: 'https://no-key.example/v1',
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('clears provider credential-adjacent fields on identity transition and logout', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    useAuthStore.setState({ status: 'authenticated' });
+    const user = userEvent.setup();
+    renderWithQuery(<ProvidersPanel />);
+
+    await user.type(screen.getByLabelText(/^name$/i), 'Persona A provider');
+    await user.type(screen.getByLabelText(/base url/i), 'https://persona-a.example/v1');
+    await user.type(screen.getByLabelText(/api key/i), 'persona-a-secret');
+
+    act(() => useAuthStore.getState().markAuthenticated());
+
+    expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
+    expect(screen.getByLabelText(/base url/i)).toHaveValue('');
+    expect(screen.getByLabelText(/api key/i)).toHaveValue('');
+
+    await user.type(screen.getByLabelText(/^name$/i), 'Persona B provider');
+    await user.type(screen.getByLabelText(/base url/i), 'https://persona-b.example/v1');
+    await user.type(screen.getByLabelText(/api key/i), 'persona-b-secret');
+
+    act(() => useAuthStore.getState().markUnauthenticated());
+
+    expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
+    expect(screen.getByLabelText(/base url/i)).toHaveValue('');
+    expect(screen.getByLabelText(/api key/i)).toHaveValue('');
+  });
+
+  it('clears the detached API-key control on unmount', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    const user = userEvent.setup();
+    const view = renderWithQuery(<ProvidersPanel />);
+    const apiKey = screen.getByLabelText(/api key/i) as HTMLInputElement;
+    await user.type(apiKey, 'unmount-provider-secret');
+
+    view.unmount();
+
+    expect(apiKey.value).toBe('');
   });
 
   it('Refresh calls refreshLlmProvider and surfaces the outcome', async () => {
