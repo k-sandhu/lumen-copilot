@@ -6,6 +6,7 @@ export { ApiError, request, registerRefreshHandler } from './client';
 export type { RequestOptions } from './client';
 export { getHealth, getReadiness } from './health';
 export { login, refresh, getCurrentUser, logout, installAuthRefresh } from './auth';
+export { getAuthIntentGeneration, getPrincipalGeneration, isAuthIntentCurrent } from './token';
 export {
   listCollections,
   createCollection,

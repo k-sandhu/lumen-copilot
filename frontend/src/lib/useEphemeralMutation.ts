@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 interface EphemeralMutationContext {
   signal: AbortSignal;
@@ -52,7 +52,7 @@ export function useEphemeralMutation<TData, TError = unknown, TVariables = void>
 
   useEffect(() => () => clearVariables(), [clearVariables]);
 
-  const mutation = useMutation<TData, TError, number>({
+  const mutation = usePrincipalMutation<TData, TError, number>({
     mutationFn: async (token) => {
       const holder = pending.current.get(token);
       pending.current.delete(token);

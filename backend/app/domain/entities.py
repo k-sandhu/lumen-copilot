@@ -680,7 +680,8 @@ class RefreshToken:
     The opaque token itself is never stored — only its hash (``token_hash``), so
     a DB leak does not yield usable tokens. ``revoked_at`` set ⇒ unusable
     (logout or rotation); ``expires_at`` caps its lifetime. One row per issued
-    token; refresh rotates by revoking the presented row and issuing a new one.
+    token. Legacy refresh revokes/replaces a row; slot-aware refresh rotates the
+    hash in the same stable session-family row under a database lock.
     """
 
     id: UUID

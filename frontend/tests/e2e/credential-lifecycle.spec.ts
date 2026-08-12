@@ -33,6 +33,7 @@ function currentUser(persona: Persona) {
   return {
     id: `00000000-0000-0000-0000-00000000000${persona === 'a' ? '1' : '2'}`,
     tenant_id: `10000000-0000-0000-0000-00000000000${persona === 'a' ? '1' : '2'}`,
+    tenant_name: `Persona ${persona.toUpperCase()} tenant`,
     email: `persona-${persona}@example.test`,
     roles: ['admin'],
     created_at: '2026-08-12T00:00:00Z',
@@ -173,6 +174,120 @@ async function openProviders(page: Page) {
   await page.getByRole('tab', { name: 'LLM providers' }).click();
   return page.getByRole('form', { name: /add llm provider/i });
 }
+
+test('real HttpOnly cookie jar survives held A logout after B login and restart (R2-001/R2-003)', async ({
+  page,
+}) => {
+  test.skip(
+    Boolean(process.env.E2E_BASE_URL),
+    'The faithful cookie fixture is owned by the default Playwright web servers.',
+  );
+  const control = 'http://127.0.0.1:4174/__control__';
+  await fetch(`${control}/reset`, { method: 'POST' });
+  await page.goto('/admin');
+  await loginAs(page, 'a');
+
+  const cookieA = (await page.context().cookies()).find((cookie) =>
+    cookie.name.startsWith('lumen_refresh_token_'),
+  );
+  expect(cookieA).toBeDefined();
+  expect(cookieA?.httpOnly).toBe(true);
+  expect(cookieA?.sameSite).toBe('Strict');
+  expect(cookieA?.secure).toBe(false); // faithful local-development policy
+  expect(cookieA?.path).toBe('/api/v1/auth');
+  const slotA = cookieA?.name.replace('lumen_refresh_token_', '');
+  expect(slotA).toMatch(/^[0-9a-f-]{36}$/i);
+  if (!slotA) throw new Error('Persona A auth slot cookie was not created');
+  expect(await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'))).toBe(slotA);
+
+  await fetch(`${control}/hold-logout`, { method: 'POST' });
+  await page.getByRole('button', { name: /account menu/i }).click();
+  await page.getByRole('button', { name: /^sign out$/i }).click();
+  await expect(page.getByRole('heading', { name: /sign in to your workspace/i })).toBeVisible();
+
+  // The real A response is still held by the HTTP server. Slot isolation means
+  // B need not trust AbortController/header timing and can establish its own jar entry.
+  await loginAs(page, 'b');
+  const beforeRelease = (await page.context().cookies()).filter((cookie) =>
+    cookie.name.startsWith('lumen_refresh_token_'),
+  );
+  expect(beforeRelease).toHaveLength(2);
+  const cookieB = beforeRelease.find((cookie) => cookie.name !== cookieA?.name);
+  expect(cookieB?.httpOnly).toBe(true);
+  const slotB = cookieB?.name.replace('lumen_refresh_token_', '');
+  expect(slotB).toBeTruthy();
+  if (!slotB) throw new Error('Persona B auth slot cookie was not created');
+  expect(slotB).not.toBe(slotA);
+  expect(await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'))).toBe(slotB);
+
+  await fetch(`${control}/release-logout`, { method: 'POST' });
+  await expect
+    .poll(async () =>
+      (await page.context().cookies())
+        .filter((cookie) => cookie.name.startsWith('lumen_refresh_token_'))
+        .map((cookie) => cookie.name),
+    )
+    .toEqual([cookieB?.name]);
+
+  const state = (await (await fetch(`${control}/state`)).json()) as {
+    active: Array<{ persona: Persona; slot: string }>;
+    heldLogout: boolean;
+    requests: Array<{ path: string; slot: string | null }>;
+  };
+  expect(state.heldLogout).toBe(false);
+  expect(state.active).toEqual([{ persona: 'b', slot: slotB }]);
+  expect(state.requests.find(({ path }) => path.endsWith('/auth/logout'))?.slot).toBe(slotA);
+  expect(state.requests.filter(({ path }) => path.endsWith('/auth/login')).at(-1)?.slot).toBe(
+    slotB,
+  );
+
+  // Reload proves bootstrap selects B's HttpOnly cookie through the real app
+  // coordinator. Selecting the revoked/deleted A slot cannot resurrect A.
+  await page.reload();
+  await expect(page.getByRole('button', { name: /account menu/i })).toBeVisible();
+  await page.getByRole('button', { name: /account menu/i }).click();
+  await expect(page.getByText('persona-b@example.test', { exact: true }).first()).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.evaluate((staleSlot) => {
+    localStorage.setItem('lumen.active-auth-slot', staleSlot);
+  }, slotA);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /sign in to your workspace/i })).toBeVisible();
+
+  // Re-select B, then prove a second tab clearing/replacing the shared selector
+  // logs the old B tab out and revokes/deletes B rather than leaving a session
+  // that can resurrect after restart.
+  await page.evaluate((activeSlot) => {
+    localStorage.setItem('lumen.active-auth-slot', activeSlot);
+  }, slotB);
+  await page.reload();
+  await expect(page.getByRole('button', { name: /account menu/i })).toBeVisible();
+  const secondTab = await page.context().newPage();
+  await secondTab.goto('/admin');
+  await expect(secondTab.getByRole('button', { name: /account menu/i })).toBeVisible();
+
+  await secondTab.evaluate(() => localStorage.removeItem('lumen.active-auth-slot'));
+  await expect(page.getByRole('heading', { name: /sign in to your workspace/i })).toBeVisible();
+  await expect
+    .poll(async () => {
+      const latest = (await (await fetch(`${control}/state`)).json()) as {
+        active: Array<{ persona: Persona; slot: string }>;
+      };
+      return latest.active;
+    })
+    .toEqual([]);
+  expect(
+    (await page.context().cookies()).filter((cookie) =>
+      cookie.name.startsWith('lumen_refresh_token_'),
+    ),
+  ).toEqual([]);
+  await secondTab.reload();
+  await expect(
+    secondTab.getByRole('heading', { name: /sign in to your workspace/i }),
+  ).toBeVisible();
+  await secondTab.close();
+});
 
 test('logout intent hard-blanks manager values before delayed revocation and late completion (R1-002/R1-005)', async ({
   page,

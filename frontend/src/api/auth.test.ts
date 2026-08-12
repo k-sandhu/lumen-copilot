@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { login, refresh, getCurrentUser, logout } from './auth';
+import { login, refresh, getCurrentUser, installAuthRefresh, logout } from './auth';
 import { ApiError } from './client';
 import { getAccessToken, setAccessToken, clearAccessToken } from './token';
 
@@ -17,7 +17,10 @@ function problemResponse(status: number, body: Partial<Record<string, unknown>> 
   });
 }
 
-beforeEach(() => clearAccessToken());
+beforeEach(() => {
+  clearAccessToken();
+  installAuthRefresh();
+});
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -54,15 +57,242 @@ describe('login', () => {
   });
 
   it('surfaces a 401 as an ApiError without storing a token (AC-4 bad creds)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      problemResponse(401, { title: 'Unauthorized', detail: 'Invalid email or password.' }),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        problemResponse(401, { title: 'Unauthorized', detail: 'Invalid email or password.' }),
+      );
 
     await expect(login({ email: 'nope@acme.test', password: 'bad' })).rejects.toMatchObject({
       name: 'ApiError',
       status: 401,
     });
     expect(getAccessToken()).toBeNull();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('cleans up a slot whose Set-Cookie may have landed before a transport failure', async () => {
+    const paths: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      paths.push(path);
+      if (path.endsWith('/auth/login')) return Promise.reject(new TypeError('connection reset'));
+      if (path.endsWith('/auth/refresh')) {
+        return Promise.resolve(
+          jsonResponse({
+            access_token: 'cleanup-only-bearer',
+            token_type: 'bearer',
+            expires_in: 900,
+          }),
+        );
+      }
+      if (path.endsWith('/auth/logout')) return Promise.resolve(jsonResponse(null, 204));
+      return Promise.resolve(problemResponse(404));
+    });
+
+    await expect(
+      login({ email: 'persona-a@example.test', password: 'persona-a-password' }),
+    ).rejects.toMatchObject({ status: 0 });
+    await vi.waitFor(() =>
+      expect(paths).toEqual(['/api/v1/auth/login', '/api/v1/auth/refresh', '/api/v1/auth/logout']),
+    );
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it.each(['older-first', 'newer-first'] as const)(
+    'makes the newest concurrent login intent authoritative when %s resolves',
+    async (responseOrder) => {
+      let resolveA!: (response: Response) => void;
+      let resolveB!: (response: Response) => void;
+      const calls: Array<{ email: string; slot: string | null; signal: AbortSignal | null }> = [];
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { email: string };
+        const call = {
+          email: body.email,
+          slot: new Headers(init?.headers).get('X-Lumen-Auth-Slot'),
+          signal: init?.signal ?? null,
+        };
+        calls.push(call);
+        return new Promise<Response>((resolve) => {
+          if (body.email.startsWith('persona-a')) resolveA = resolve;
+          else resolveB = resolve;
+        });
+      });
+
+      const older = login({
+        email: 'persona-a@example.test',
+        password: 'persona-a-password',
+      });
+      const newer = login({
+        email: 'persona-b@example.test',
+        password: 'persona-b-password',
+      });
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+
+      const responseA = jsonResponse({
+        access_token: 'jwt-persona-a',
+        token_type: 'bearer',
+        expires_in: 900,
+      });
+      const responseB = jsonResponse({
+        access_token: 'jwt-persona-b',
+        token_type: 'bearer',
+        expires_in: 900,
+      });
+      if (responseOrder === 'older-first') {
+        resolveA(responseA);
+        await Promise.resolve();
+        resolveB(responseB);
+      } else {
+        resolveB(responseB);
+        await newer;
+        resolveA(responseA);
+      }
+
+      await expect(older).rejects.toThrow(/discarded|superseded|abort/i);
+      await expect(newer).resolves.toMatchObject({ access_token: 'jwt-persona-b' });
+      expect(getAccessToken()).toBe('jwt-persona-b');
+      // Supersession is logical: the old transport is allowed to settle so its
+      // unique server-side session can be revoked instead of orphaned.
+      expect(calls[0]?.signal).toBeNull();
+      expect(calls[0]?.slot).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(calls[1]?.slot).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(calls[0]?.slot).not.toBe(calls[1]?.slot);
+    },
+  );
+
+  it('does not resurrect an older successful login when the newer credentials fail', async () => {
+    let resolveOlder!: (response: Response) => void;
+    let resolveNewer!: (response: Response) => void;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { email: string };
+      return new Promise<Response>((resolve) => {
+        if (body.email.startsWith('persona-a')) resolveOlder = resolve;
+        else resolveNewer = resolve;
+      });
+    });
+
+    const older = login({
+      email: 'persona-a@example.test',
+      password: 'persona-a-password',
+    });
+    const newer = login({
+      email: 'persona-b@example.test',
+      password: 'wrong-password',
+    });
+    await vi.waitFor(() => {
+      expect(resolveOlder).toBeTypeOf('function');
+      expect(resolveNewer).toBeTypeOf('function');
+    });
+
+    resolveNewer(problemResponse(401, { detail: 'Invalid email or password.' }));
+    await expect(newer).rejects.toMatchObject({ status: 401 });
+    resolveOlder(
+      jsonResponse({ access_token: 'jwt-persona-a', token_type: 'bearer', expires_in: 900 }),
+    );
+
+    await expect(older).rejects.toThrow(/discarded|superseded|abort/i);
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('preserves an existing authenticated principal when a direct newer login fails', async () => {
+    setAccessToken('jwt-existing-persona');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      problemResponse(401, { detail: 'Invalid email or password.' }),
+    );
+
+    await expect(
+      login({ email: 'persona-b@example.test', password: 'wrong-password' }),
+    ).rejects.toMatchObject({ status: 401 });
+
+    expect(getAccessToken()).toBe('jwt-existing-persona');
+  });
+
+  it('cancels caller observation without letting an accepted late login authenticate', async () => {
+    const controller = new AbortController();
+    let resolveLogin!: (response: Response) => void;
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      requests.push(path);
+      if (path.endsWith('/auth/login')) {
+        return new Promise<Response>((resolve) => {
+          resolveLogin = resolve;
+        });
+      }
+      if (path.endsWith('/auth/logout')) return Promise.resolve(jsonResponse(null, 204));
+      return Promise.resolve(problemResponse(404));
+    });
+
+    const outcome = login(
+      { email: 'persona-a@example.test', password: 'persona-a-password' },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(resolveLogin).toBeTypeOf('function'));
+    controller.abort();
+    await expect(outcome).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Headers may already have been accepted, so the transport is allowed to
+    // finish and its distinct server session is explicitly revoked.
+    resolveLogin(
+      jsonResponse({ access_token: 'jwt-persona-a', token_type: 'bearer', expires_in: 900 }),
+    );
+    await vi.waitFor(() =>
+      expect(requests.filter((path) => path.endsWith('/auth/logout'))).toHaveLength(1),
+    );
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('does not dispatch credentials when the login signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(
+      login({ email: 'persona-a@example.test', password: 'persona-a-password' }, controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it('makes the final intent authoritative across three repeated submissions', async () => {
+    const resolvers = new Map<string, (response: Response) => void>();
+    const loginSlots = new Map<string, string | null>();
+    const retiredSlots: Array<string | null> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/logout')) {
+        retiredSlots.push(new Headers(init?.headers).get('X-Lumen-Auth-Slot'));
+        return Promise.resolve(jsonResponse(null, 204));
+      }
+      const email = (JSON.parse(String(init?.body)) as { email: string }).email;
+      loginSlots.set(email, new Headers(init?.headers).get('X-Lumen-Auth-Slot'));
+      return new Promise<Response>((resolve) => resolvers.set(email, resolve));
+    });
+    const attempts = ['a', 'b', 'c'].map((persona) =>
+      login({ email: `persona-${persona}@example.test`, password: 'password' }),
+    );
+    await vi.waitFor(() => expect(resolvers.size).toBe(3));
+    for (const persona of ['b', 'a', 'c']) {
+      resolvers.get(`persona-${persona}@example.test`)?.(
+        jsonResponse({
+          access_token: `jwt-persona-${persona}`,
+          token_type: 'bearer',
+          expires_in: 900,
+        }),
+      );
+    }
+    await expect(attempts[0]).rejects.toThrow(/discarded|superseded/i);
+    await expect(attempts[1]).rejects.toThrow(/discarded|superseded/i);
+    await expect(attempts[2]).resolves.toMatchObject({ access_token: 'jwt-persona-c' });
+    await vi.waitFor(() => expect(retiredSlots).toHaveLength(2));
+    expect(new Set(retiredSlots)).toEqual(
+      new Set([loginSlots.get('persona-a@example.test'), loginSlots.get('persona-b@example.test')]),
+    );
+    expect(getAccessToken()).toBe('jwt-persona-c');
   });
 });
 
@@ -86,6 +316,26 @@ describe('refresh', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(problemResponse(401));
     await expect(refresh()).rejects.toBeInstanceOf(ApiError);
     expect(getAccessToken()).toBeNull();
+  });
+
+  it('deduplicates concurrent direct/bootstrap refresh callers through one coordinator', async () => {
+    let resolveRefresh!: (response: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+
+    const first = refresh();
+    const second = refresh();
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+    resolveRefresh(
+      jsonResponse({ access_token: 'jwt-shared', token_type: 'bearer', expires_in: 900 }),
+    );
+
+    await expect(first).resolves.toMatchObject({ access_token: 'jwt-shared' });
+    await expect(second).resolves.toMatchObject({ access_token: 'jwt-shared' });
+    expect(getAccessToken()).toBe('jwt-shared');
   });
 });
 
@@ -129,6 +379,30 @@ describe('logout', () => {
     await logout();
 
     expect(getAccessToken()).toBeNull();
+  });
+
+  it('revokes an old tab without clearing a newer tab auth-slot selection', async () => {
+    const slotA = '11111111-1111-4111-8111-111111111111';
+    const slotB = '22222222-2222-4222-8222-222222222222';
+    setAccessToken('jwt-persona-a', 'login', slotA);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(null, 204));
+
+    localStorage.setItem('lumen.active-auth-slot', slotB);
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: 'lumen.active-auth-slot',
+        oldValue: slotA,
+        newValue: slotB,
+        storageArea: localStorage,
+      }),
+    );
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+    const headers = new Headers((fetchSpy.mock.calls[0]?.[1] as RequestInit).headers);
+    expect(headers.get('Authorization')).toBe('Bearer jwt-persona-a');
+    expect(headers.get('X-Lumen-Auth-Slot')).toBe(slotA);
+    expect(getAccessToken()).toBeNull();
+    expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slotB);
   });
 
   it('settles A logout before dispatching B login so B cookie/token wins (R1-002/R1-005)', async () => {
@@ -224,5 +498,83 @@ describe('logout', () => {
     expect(logoutSignal?.aborted).toBe(true);
     expect(loginCalls).toBe(1);
     expect(getAccessToken()).toBe('jwt-persona-b');
+  });
+
+  it('registers the whole logout transition before awaiting a held refresh (R2-002)', async () => {
+    vi.useFakeTimers();
+    setAccessToken('jwt-persona-a');
+    let markRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const order: string[] = [];
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/probe')) return Promise.resolve(problemResponse(401));
+      if (path.endsWith('/auth/refresh')) {
+        order.push('refresh-start');
+        markRefreshStarted();
+        return new Promise<Response>(() => {});
+      }
+      if (path.endsWith('/auth/logout')) {
+        order.push('logout-start');
+        return Promise.resolve(jsonResponse(null, 204));
+      }
+      if (path.endsWith('/auth/login')) {
+        order.push('login-start');
+        return Promise.resolve(
+          jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+        );
+      }
+      return Promise.resolve(problemResponse(404));
+    });
+
+    const { installAuthRefresh, request } = await import('./index');
+    installAuthRefresh();
+    void request('/probe').catch(() => undefined);
+    await refreshStarted;
+
+    const outgoing = logout();
+    const incoming = login({
+      email: 'persona-b@example.test',
+      password: 'persona-b-password',
+    });
+    await Promise.resolve();
+    expect(order).toEqual(['refresh-start']);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    await outgoing;
+    await incoming;
+
+    expect(order).toEqual(['refresh-start', 'logout-start', 'login-start']);
+    expect(getAccessToken()).toBe('jwt-persona-b');
+  });
+
+  it('supersedes a held login immediately when logout is the newest auth intent', async () => {
+    let resolveLogin!: (response: Response) => void;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/login')) {
+        return new Promise<Response>((resolve) => {
+          resolveLogin = resolve;
+        });
+      }
+      if (path.endsWith('/auth/logout')) return Promise.resolve(jsonResponse(null, 204));
+      return Promise.resolve(problemResponse(404));
+    });
+
+    const pendingLogin = login({
+      email: 'persona-a@example.test',
+      password: 'persona-a-password',
+    });
+    await Promise.resolve();
+    await logout();
+    resolveLogin(
+      jsonResponse({ access_token: 'jwt-persona-a', token_type: 'bearer', expires_in: 900 }),
+    );
+
+    await expect(pendingLogin).rejects.toThrow(/discarded|superseded|abort/i);
+    expect(getAccessToken()).toBeNull();
   });
 });

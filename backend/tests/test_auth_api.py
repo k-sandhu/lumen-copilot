@@ -21,17 +21,22 @@ import asyncio
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.deps import get_db_session, require_roles
+from app.api.deps import get_db_session, get_settings_dep, require_roles
 from app.auth import Principal, hash_password, hashing
+from app.core.config import get_settings
 from app.db.base import Base
+from app.db.models import RefreshToken
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
@@ -105,6 +110,9 @@ async def test_login_returns_token_and_sets_refresh_cookie(client: AsyncClient) 
     set_cookie = resp.headers.get("set-cookie", "")
     assert "lumen_refresh_token=" in set_cookie
     assert "httponly" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+    assert "path=/api/v1/auth" in set_cookie.lower()
+    assert "max-age=" in set_cookie.lower()
 
 
 async def test_me_returns_current_user_after_login(client: AsyncClient) -> None:
@@ -166,9 +174,318 @@ async def test_logout_revokes_refresh_token(client: AsyncClient) -> None:
     token = login.json()["access_token"]
     logout = await client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"})
     assert logout.status_code == 204
+    # Legacy fixed-cookie compatibility never emits a shared deletion header; a
+    # late response therefore cannot erase a newer slotless login's cookie.
+    assert "set-cookie" not in logout.headers
     # After logout the refresh token is revoked → refresh now 401s.
     again = await client.post("/api/v1/auth/refresh")
     assert again.status_code == 401
+
+
+async def test_auth_slots_isolate_reordered_login_refresh_and_logout_cookies(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each browser auth intent owns one cookie name; stale responses cannot overwrite it."""
+    slot_a = "11111111-1111-4111-8111-111111111111"
+    slot_b = "22222222-2222-4222-8222-222222222222"
+    header_a = {"X-Lumen-Auth-Slot": slot_a}
+    header_b = {"X-Lumen-Auth-Slot": slot_b}
+
+    login_a = await client.post(
+        "/api/v1/auth/login",
+        headers=header_a,
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    login_b = await client.post(
+        "/api/v1/auth/login",
+        headers=header_b,
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert login_a.status_code == login_b.status_code == 200
+    cookie_a = f"lumen_refresh_token_{slot_a}"
+    cookie_b = f"lumen_refresh_token_{slot_b}"
+    assert client.cookies.get(cookie_a) is not None
+    assert client.cookies.get(cookie_b) is not None
+    assert cookie_a in login_a.headers["set-cookie"]
+    assert cookie_b in login_b.headers["set-cookie"]
+    assert "httponly" in login_a.headers["set-cookie"].lower()
+    assert "samesite=strict" in login_a.headers["set-cookie"].lower()
+    async with sessionmaker() as session:
+        ids = set((await session.execute(select(RefreshToken.id))).scalars().all())
+    assert uuid.UUID(slot_a) in ids
+    assert uuid.UUID(slot_b) in ids
+
+    # Dynamic cookies are never scanned when routing metadata is absent.
+    no_selector = await client.post("/api/v1/auth/refresh")
+    assert no_selector.status_code == 401
+
+    # Logout A revokes and expires only A's unique slot cookie. Even if this
+    # response lands late, it has no cookie mutation capable of erasing B.
+    logout_a = await client.post(
+        "/api/v1/auth/logout",
+        headers={
+            "Authorization": f"Bearer {login_a.json()['access_token']}",
+            **header_a,
+        },
+    )
+    assert logout_a.status_code == 204
+    deletion = logout_a.headers["set-cookie"]
+    assert cookie_a in deletion
+    assert "Max-Age=0" in deletion
+    assert cookie_b not in deletion
+    assert client.cookies.get(cookie_a) is None
+    assert client.cookies.get(cookie_b) is not None
+
+    rejected_a = await client.post("/api/v1/auth/refresh", headers=header_a)
+    assert rejected_a.status_code == 401
+    refreshed_b = await client.post("/api/v1/auth/refresh", headers=header_b)
+    assert refreshed_b.status_code == 200
+    assert refreshed_b.json()["access_token"]
+
+
+async def test_slot_refresh_and_logout_serialize_on_one_session_family(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    """Logout revokes the family even when it captured the pre-rotation cookie."""
+    slot = "33333333-3333-4333-8333-333333333333"
+    header = {"X-Lumen-Auth-Slot": slot}
+    cookie_name = f"lumen_refresh_token_{slot}"
+    login = await client.post(
+        "/api/v1/auth/login",
+        headers=header,
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    old_cookie = login.cookies.get(cookie_name)
+    assert old_cookie is not None
+
+    rotated = await client.post("/api/v1/auth/refresh", headers=header)
+    assert rotated.status_code == 200
+    assert client.cookies.get(cookie_name) != old_cookie
+
+    # Model a held logout request whose Cookie header was captured before the
+    # refresh committed, but whose server transaction runs afterward.
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as stale:
+        logout = await stale.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {login.json()['access_token']}", **header},
+            cookies={cookie_name: old_cookie},
+        )
+    assert logout.status_code == 204
+
+    # The current rotated secret belongs to the same row/family and is revoked.
+    after = await client.post("/api/v1/auth/refresh", headers=header)
+    assert after.status_code == 401
+
+
+async def test_auth_slot_is_routing_metadata_not_refresh_authority(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    slot = "44444444-4444-4444-8444-444444444444"
+    unknown_slot = "55555555-5555-4555-8555-555555555555"
+    cookie_name = f"lumen_refresh_token_{slot}"
+    login = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": slot},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    raw_token = login.cookies.get(cookie_name)
+    assert raw_token is not None
+
+    # Copying the real secret under an unknown selector must still fail: the
+    # selector is bound to the token row, not an alternate hash-only lookup.
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as fresh:
+        response = await fresh.post(
+            "/api/v1/auth/refresh",
+            headers={"X-Lumen-Auth-Slot": unknown_slot},
+            cookies={f"lumen_refresh_token_{unknown_slot}": raw_token},
+        )
+    assert response.status_code == 401
+
+
+async def test_logout_slot_is_bound_to_bearer_tenant_and_user(
+    app: FastAPI,
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    slot_a = "abababab-abab-4bab-8bab-abababababab"
+    slot_b = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc"
+    cookie_a_name = f"lumen_refresh_token_{slot_a}"
+    login_a = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": slot_a},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    raw_a = login_a.cookies.get(cookie_a_name)
+    assert raw_a is not None
+
+    other_email = "other-tenant@example.test"
+    other_password = "other-tenant-password"
+    async with sessionmaker() as session:
+        other_tenant = await TenantRepository(session).create(name="Other tenant")
+        await UserRepository(session, other_tenant.id).create(
+            email=other_email,
+            password_hash=hash_password(other_password),
+            roles=[Role.MEMBER],
+        )
+        await session.commit()
+    login_b = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": slot_b},
+        json={"email": other_email, "password": other_password},
+    )
+
+    # B knows A's non-secret routing id and presents A's cookie, but B's bearer
+    # tenant/user cannot revoke A's family.
+    mismatch = await client.post(
+        "/api/v1/auth/logout",
+        headers={
+            "Authorization": f"Bearer {login_b.json()['access_token']}",
+            "X-Lumen-Auth-Slot": slot_a,
+        },
+        cookies={cookie_a_name: raw_a},
+    )
+    assert mismatch.status_code == 204
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as persona_a:
+        still_live = await persona_a.post(
+            "/api/v1/auth/refresh",
+            headers={"X-Lumen-Auth-Slot": slot_a},
+            cookies={cookie_a_name: raw_a},
+        )
+    assert still_live.status_code == 200
+
+
+async def test_reusing_an_active_auth_slot_fails_without_overwriting_it(
+    client: AsyncClient,
+) -> None:
+    slot = "66666666-6666-4666-8666-666666666666"
+    header = {"X-Lumen-Auth-Slot": slot}
+    first = await client.post(
+        "/api/v1/auth/login",
+        headers=header,
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    original = client.cookies.get(f"lumen_refresh_token_{slot}")
+    assert first.status_code == 200
+
+    duplicate = await client.post(
+        "/api/v1/auth/login",
+        headers=header,
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert duplicate.status_code == 409
+    assert "set-cookie" not in duplicate.headers
+    assert client.cookies.get(f"lumen_refresh_token_{slot}") == original
+
+
+async def test_malformed_auth_slot_is_rejected_without_creating_a_cookie(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": "not-a-uuid"},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert response.status_code == 422
+    assert "set-cookie" not in response.headers
+
+
+async def test_non_v4_auth_slot_is_rejected_without_creating_a_cookie(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": "77777777-7777-1777-8777-777777777777"},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert response.status_code == 422
+    assert "set-cookie" not in response.headers
+
+
+async def test_slot_cookie_is_secure_outside_local_environment(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    production = get_settings().model_copy(update={"environment": "production"})
+    app.dependency_overrides[get_settings_dep] = lambda: production
+    slot = "88888888-8888-4888-8888-888888888888"
+    headers = {"X-Lumen-Auth-Slot": slot}
+    try:
+        response = await client.post(
+            "/api/v1/auth/login",
+            headers=headers,
+            json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+        )
+        logout = await client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {response.json()['access_token']}", **headers},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings_dep, None)
+    assert response.status_code == 200
+    assert "secure" in response.headers["set-cookie"].lower()
+    deletion = logout.headers["set-cookie"].lower()
+    assert "secure" in deletion
+    assert "httponly" in deletion
+    assert "samesite=strict" in deletion
+    assert "path=/api/v1/auth" in deletion
+
+
+async def test_cross_origin_auth_slot_preflight_fails_closed(client: AsyncClient) -> None:
+    """The supported SPA transport is same-origin; backend CORS is not implicit."""
+    response = await client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "https://untrusted.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "x-lumen-auth-slot,content-type",
+        },
+    )
+    assert response.status_code == 405
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-headers" not in response.headers
+
+
+async def test_auth_flow_does_not_log_password_or_refresh_secret(
+    client: AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    password = "log-sentinel-password-never-emit"
+    response = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": "99999999-9999-4999-8999-999999999999"},
+        json={"email": _DEV_EMAIL, "password": password},
+    )
+    assert response.status_code == 401
+    assert password not in caplog.text
+
+    caplog.clear()
+    success = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    raw_refresh = success.cookies.get("lumen_refresh_token_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    assert raw_refresh is not None
+    assert raw_refresh not in caplog.text
+
+
+def test_auth_slot_contract_matches_server_protocol() -> None:
+    contract = Path(__file__).resolve().parents[2] / "contracts" / "openapi.yaml"
+    spec = yaml.safe_load(contract.read_text(encoding="utf-8"))
+    slot = spec["components"]["parameters"]["AuthSlot"]
+    assert slot["name"] == "X-Lumen-Auth-Slot"
+    assert slot["schema"]["format"] == "uuid"
+    assert slot["schema"]["pattern"].startswith("^")
+    assert "409" in spec["paths"]["/auth/login"]["post"]["responses"]
+    assert "422" in spec["paths"]["/auth/refresh"]["post"]["responses"]
+    assert "422" in spec["paths"]["/auth/logout"]["post"]["responses"]
 
 
 # --- Negative: authentication (INV-4) --------------------------------------

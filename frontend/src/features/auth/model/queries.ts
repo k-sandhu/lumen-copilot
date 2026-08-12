@@ -5,14 +5,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  clearAccessToken,
-  getAccessToken,
-  getCurrentUser,
-  hasAccessToken,
-  login,
-  logout,
-} from '@/api';
+import { getCurrentUser, hasAccessToken, login, logout } from '@/api';
 import type { CurrentUser, LoginRequest } from '@/api';
 import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import { useAuthStore } from './authStore';
@@ -75,21 +68,19 @@ export function useLogout() {
 
   const mutate = useCallback(() => {
     if (pending.current) return;
+    const hadAccessToken = hasAccessToken();
     pending.current = true;
     setIsPending(true);
 
-    const bearer = getAccessToken();
     // Synchronous with the click: blank/remask drafts, abort credential work,
     // clear every query/mutation, and leave the authenticated route before the
     // best-effort revocation is awaited.
-    clearAccessToken();
-    // An authenticated route normally has a bearer, so clearAccessToken's
-    // synchronous notification already ran the canonical teardown. Keep the
-    // null-bearer fallback idempotent for defensive/direct hook use without
-    // firing registered form clearers twice during the normal unmount path.
-    if (bearer === null) transitionPrincipal(queryClient, 'unauthenticated');
+    const revocation = logout();
+    // Defensive fallback for a direct/null-token hook call: a normal logout's
+    // token notification already ran this canonical teardown synchronously.
+    if (!hadAccessToken) transitionPrincipal(queryClient, 'unauthenticated');
 
-    void logout(bearer, false).finally(() => {
+    void revocation.finally(() => {
       pending.current = false;
       if (mounted.current) setIsPending(false);
     });

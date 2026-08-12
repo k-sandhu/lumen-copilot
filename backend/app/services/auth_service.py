@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import (
@@ -38,7 +39,7 @@ from app.auth import (
     verify_password_async,
 )
 from app.core.config import Settings
-from app.core.errors import ForbiddenError
+from app.core.errors import ConflictError, ForbiddenError
 from app.db.repositories import (
     AuditEventRepository,
     RefreshTokenRepository,
@@ -82,16 +83,45 @@ class AuthService:
 
     # --- internal helpers ---------------------------------------------------
 
-    async def _issue_tokens(self, user: User) -> IssuedTokens:
+    async def _issue_tokens(self, user: User, *, session_id: UUID | None = None) -> IssuedTokens:
         principal = Principal.from_user(user)
         access = mint_access_token(principal, self._settings)
         raw_refresh = generate_refresh_token()
         expires_at = datetime.now(UTC) + timedelta(seconds=self._settings.refresh_token_ttl_seconds)
-        await RefreshTokenRepository(self._session, user.tenant_id).create(
+        try:
+            await RefreshTokenRepository(self._session, user.tenant_id).create(
+                user_id=user.id,
+                token_hash=hash_refresh_token(raw_refresh),
+                expires_at=expires_at,
+                token_id=session_id,
+            )
+        except IntegrityError as exc:
+            # A client-generated UUID must never upsert or overwrite an existing
+            # family. Random collisions are vanishingly unlikely; deliberate
+            # reuse is an illegal transition and exposes no stored credential.
+            raise ConflictError("Authentication session could not be created.") from exc
+        return IssuedTokens(access=access, refresh_token=raw_refresh)
+
+    async def _rotate_session_tokens(
+        self,
+        user: User,
+        *,
+        session_id: UUID,
+        expected_hash: str,
+    ) -> IssuedTokens:
+        principal = Principal.from_user(user)
+        access = mint_access_token(principal, self._settings)
+        raw_refresh = generate_refresh_token()
+        expires_at = datetime.now(UTC) + timedelta(seconds=self._settings.refresh_token_ttl_seconds)
+        rotated = await RefreshTokenRepository(self._session, user.tenant_id).rotate_session(
+            session_id,
             user_id=user.id,
-            token_hash=hash_refresh_token(raw_refresh),
+            expected_hash=expected_hash,
+            new_hash=hash_refresh_token(raw_refresh),
             expires_at=expires_at,
         )
+        if not rotated:
+            raise InvalidTokenError()
         return IssuedTokens(access=access, refresh_token=raw_refresh)
 
     # --- use-cases ----------------------------------------------------------
@@ -103,6 +133,7 @@ class AuthService:
         password: str,
         request_id: str | None = None,
         source_ip: str | None = None,
+        session_id: UUID | None = None,
     ) -> IssuedTokens:
         """Verify credentials and issue an access + refresh token pair.
 
@@ -148,7 +179,7 @@ class AuthService:
         # exact tenant, so the token + audit writes below are under that tenant's
         # RLS scope, not the broad bypass (#17, defense in depth).
         await bind_tenant(self._session, user.tenant_id)
-        tokens = await self._issue_tokens(user)
+        tokens = await self._issue_tokens(user, session_id=session_id)
         await AuditEventRepository(self._session, user.tenant_id).record(
             action="auth.login",
             resource_type="session",
@@ -166,11 +197,13 @@ class AuthService:
         raw_refresh_token: str | None,
         request_id: str | None = None,
         source_ip: str | None = None,
+        session_id: UUID | None = None,
     ) -> IssuedTokens:
         """Rotate a valid refresh token into a fresh access + refresh pair.
 
-        Rotation: the presented token is revoked and a new one issued, so a
-        replayed (already-rotated) token fails. An expired, revoked, unknown, or
+        Slot-aware rotation updates one stable session-family row under a lock;
+        legacy rotation revokes the presented row and issues another. In both
+        modes, replaying the old secret fails. An expired, revoked, unknown, or
         missing token raises :class:`InvalidTokenError` → 401 (INV-4).
         """
         if not raw_refresh_token:
@@ -182,7 +215,12 @@ class AuthService:
         # (#17, a no-op off Postgres) for this lookup; the rotation + re-issue
         # below stay within the resolved token's tenant.
         await bind_bypass(self._session)
-        token = await UserLookupRepository(self._session).find_refresh_token_owner(token_hash)
+        lookup = UserLookupRepository(self._session)
+        token = (
+            await lookup.find_refresh_token_session(session_id, token_hash)
+            if session_id is not None
+            else await lookup.find_refresh_token_owner(token_hash)
+        )
         if token is None or token.revoked_at is not None:
             raise InvalidTokenError()
         if _as_utc(token.expires_at) <= datetime.now(UTC):
@@ -196,7 +234,16 @@ class AuthService:
         if user is None:
             raise InvalidTokenError()
 
-        # Rotate: revoke the presented token, then issue a new pair.
+        if session_id is not None:
+            # The UUID row id is the stable session-family routing key. Refresh
+            # and logout lock the same row, so their commit order is decisive.
+            return await self._rotate_session_tokens(
+                user,
+                session_id=session_id,
+                expected_hash=token_hash,
+            )
+
+        # Legacy fixed-cookie compatibility: exact-hash revoke + new row.
         await RefreshTokenRepository(self._session, token.tenant_id).revoke(token_hash)
         return await self._issue_tokens(user)
 
@@ -207,8 +254,9 @@ class AuthService:
         raw_refresh_token: str | None,
         request_id: str | None = None,
         source_ip: str | None = None,
+        session_id: UUID | None = None,
     ) -> None:
-        """Revoke the presented refresh token and audit the logout.
+        """Revoke the selected session family/token and audit the logout.
 
         Idempotent: an absent/already-revoked token is not an error (the client
         is logging out regardless). Revocation is tenant-scoped to the caller.
@@ -218,7 +266,14 @@ class AuthService:
         # not depend on ``current_tenant`` (it takes the principal directly), so
         # the GUC is bound here rather than by the request dependency.
         await bind_tenant(self._session, principal.tenant_id)
-        if raw_refresh_token:
+        if session_id is not None:
+            # Bearer tenant+user bind this routing id. The old Cookie header may
+            # carry a pre-rotation secret; family revocation intentionally does
+            # not depend on that stale value.
+            await RefreshTokenRepository(self._session, principal.tenant_id).revoke_session(
+                session_id, user_id=principal.user_id
+            )
+        elif raw_refresh_token:
             await RefreshTokenRepository(self._session, principal.tenant_id).revoke(
                 hash_refresh_token(raw_refresh_token)
             )

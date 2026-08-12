@@ -13,11 +13,14 @@ Transport (the `api/` boundary — the only backend caller):
 - [`api/token.ts`](../../api/token.ts) — the access token holder. **In memory
   only**, never `localStorage`/`sessionStorage` (least-exposure, spec 0004): a
   reload drops it and the app silently refreshes from the httpOnly cookie. The
-  refresh token is never visible to JS.
+  refresh token is never visible to JS. Only its non-secret UUIDv4 auth-slot
+  selector is persisted so bootstrap can address the correct cookie after a
+  reload.
 - [`api/auth.ts`](../../api/auth.ts) — typed `login` / `refresh` / `getCurrentUser`
   / `logout` and `installAuthRefresh()` (wires the silent-refresh handler into the
   client). `login`/`refresh` use `skipAuth` so they carry no stale bearer and never
-  recurse into the refresh loop.
+  recurse into the refresh loop. Every login reserves latest-intent authority
+  before its first await and uses a distinct cookie slot.
 - [`api/client.ts`](../../api/client.ts) — every request gets `credentials:
 'include'` (so the refresh cookie rides along) and, when a token is held,
   `Authorization: Bearer …`. On a **401** it performs **one** silent refresh via the
@@ -37,9 +40,11 @@ Feature (`features/auth`):
   principal can render, it cancels queries, destroys/aborts credential holders,
   clears every query and mutation, and only then changes route status. A normal
   same-principal access-token refresh is not treated as an account switch. The
-  auth request coordinator qualifies refresh completion/retry with a monotonic
-  principal generation, so an old refresh cannot write a token or retry an A
-  operation after logout or B login.
+  auth request coordinator qualifies refresh completion/retry with monotonic
+  principal and auth-intent generations, so an old refresh cannot write a token
+  or retry an A operation after logout or B login. Production mutations use the
+  principal-scoped mutation wrapper, which rejects late results and suppresses
+  old-generation callbacks (including paused/offline work).
 - `model/queries.ts` — `useCurrentUser` (`GET /auth/me`), `useLogin`, `useLogout`.
 - `model/useBootstrapSession.ts` — one boot-time silent refresh so a reload keeps
   the session; until it resolves the guard shows a loading state (no login flash).
@@ -89,19 +94,24 @@ server-side rollback: if the server already accepted a request, it remains
 authorized and audited under the bearer attached at dispatch. It is never
 reissued from the queued holder under the next principal.
 
-The single-flight refresh coordinator owns its `AbortController`. Login/logout
-invalidate the old generation, abort its refresh fetch, and await that JS promise
-before issuing the boundary request; this also orders any old refresh-cookie
-response the browser did accept before the later login/logout cookie response.
-Likewise, a later login waits for the outgoing logout's cookie-clearing response.
-Both barriers are bounded: a genuinely hung fetch is aborted after 1.5 seconds so
-sign-in cannot remain wedged indefinitely. Browser cancellation is only
-best-effort transport cleanup: if the server already rotated the refresh token or
-response headers (including `Set-Cookie`) arrived, JavaScript cannot undo them.
-When the old response settles within the barrier, the later boundary response is
-deliberately last; after a timeout, server/header ordering is residual risk. The
-generation gate still rejects stale access-token writes and original-request
-retries, and this frontend does not claim server rollback.
+The single-flight refresh coordinator owns its `AbortController`, and bootstrap,
+401 retry, login, and logout all use the same generation-checked transition path.
+Browser cancellation remains transport cleanup only: it cannot retract response
+headers the browser already accepted. Cookie safety therefore lives at the wire
+and server boundary. Each login's strict UUIDv4 slot is both its unique cookie
+suffix and the stable `refresh_tokens.id`; refresh rotates that row under a lock,
+and bearer-authenticated logout revokes the tenant/user-bound row even if it
+captured a pre-rotation cookie. A late logout expires only its own cookie name,
+never a later login's. Legacy fixed-cookie logout revokes server-side without a
+shared `Delete-Cookie` header.
+
+Superseded/cancelled successful logins revoke their own slot, a successful switch
+retires the outgoing slot, and cross-tab selector changes revoke the old tab's
+family while preserving the newer selector. If both an accepted login response
+and its slot-specific cleanup remain unreachable, the inactive unique session is
+never selected and is bounded by the configured refresh-token TTL; no client-only
+mechanism can safely revoke an unknown accepted HttpOnly credential during that
+network partition.
 
 Browsers and extensions may ignore standards-correct hints or retain values in
 their own vaults. The application cannot clear that third-party storage; precise

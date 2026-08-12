@@ -906,7 +906,30 @@ class UserLookupRepository:
         The refresh cookie carries no tenant; the hash is globally unique, so
         this finds the owning row, after which the caller scopes to its tenant.
         """
-        stmt = select(models.RefreshToken).where(models.RefreshToken.token_hash == token_hash)
+        stmt = (
+            select(models.RefreshToken)
+            .where(models.RefreshToken.token_hash == token_hash)
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_refresh_token(row) if row is not None else None
+
+    async def find_refresh_token_session(
+        self, session_id: UUID, token_hash: str
+    ) -> RefreshToken | None:
+        """Lock a slot-aware session by both routing id and secret hash.
+
+        ``session_id`` is non-secret routing metadata. Requiring the independently
+        random token hash in the same lookup is what authorizes refresh.
+        """
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.id == session_id,
+                models.RefreshToken.token_hash == token_hash,
+            )
+            .with_for_update()
+        )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
 
@@ -1089,8 +1112,9 @@ class RefreshTokenRepository(_TenantScopedRepository):
     """Rotating, revocable refresh tokens within one tenant (spec 0004 §2.3).
 
     Only the token **hash** is ever passed in/out — the opaque token is hashed
-    in ``auth/`` before it reaches here. Lookups are tenant-scoped (INV-1) so a
-    token minted in tenant A can never be resolved by a tenant-B repository.
+    in ``auth/`` before it reaches here. Slot-aware operations keep the row id as
+    a stable session-family selector and serialize rotation/revocation with a row
+    lock. Lookups are tenant-scoped (INV-1), so tenant A cannot resolve tenant B.
     """
 
     async def create(
@@ -1099,12 +1123,18 @@ class RefreshTokenRepository(_TenantScopedRepository):
         user_id: UUID,
         token_hash: str,
         expires_at: datetime,
+        token_id: UUID | None = None,
     ) -> RefreshToken:
+        values: dict[str, object] = {
+            "tenant_id": self._tenant_id,
+            "user_id": user_id,
+            "token_hash": token_hash,
+            "expires_at": expires_at,
+        }
+        if token_id is not None:
+            values["id"] = token_id
         row = models.RefreshToken(
-            tenant_id=self._tenant_id,
-            user_id=user_id,
-            token_hash=token_hash,
-            expires_at=expires_at,
+            **values,
         )
         self._session.add(row)
         await self._session.flush()
@@ -1123,6 +1153,54 @@ class RefreshTokenRepository(_TenantScopedRepository):
         stmt = select(models.RefreshToken).where(
             models.RefreshToken.tenant_id == self._tenant_id,
             models.RefreshToken.token_hash == token_hash,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.revoked_at is None:
+            row.revoked_at = datetime.now(UTC)
+            await self._session.flush()
+        return True
+
+    async def rotate_session(
+        self,
+        session_id: UUID,
+        *,
+        user_id: UUID,
+        expected_hash: str,
+        new_hash: str,
+        expires_at: datetime,
+    ) -> bool:
+        """Rotate one locked session row in place, preserving its family id."""
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.id == session_id,
+                models.RefreshToken.user_id == user_id,
+                models.RefreshToken.token_hash == expected_hash,
+                models.RefreshToken.revoked_at.is_(None),
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        row.token_hash = new_hash
+        row.expires_at = expires_at
+        await self._session.flush()
+        return True
+
+    async def revoke_session(self, session_id: UUID, *, user_id: UUID) -> bool:
+        """Revoke a session family by id, bound to the bearer principal."""
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.id == session_id,
+                models.RefreshToken.user_id == user_id,
+            )
+            .with_for_update()
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:

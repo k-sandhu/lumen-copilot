@@ -71,6 +71,7 @@ describe('principal lifecycle', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       json({ access_token: 'jwt-persona-a-refreshed', token_type: 'bearer', expires_in: 900 }),
     );
+    installAuthRefresh();
     await act(async () => {
       await refresh();
     });
@@ -215,6 +216,7 @@ describe('principal lifecycle', () => {
     expect(getAccessToken()).toBeNull();
     expect(useAuthStore.getState().status).toBe('unauthenticated');
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    await Promise.resolve();
     expect.soft(refreshSignal?.aborted).toBe(true);
     expect.soft(logoutCalls).toBe(0);
 

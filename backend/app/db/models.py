@@ -156,11 +156,12 @@ class User(TenantScopedMixin, TimestampMixin, Base):
 class RefreshToken(TenantScopedMixin, Base):
     """A rotating, revocable refresh token (spec 0004 §2.3).
 
-    No ``TimestampMixin``/``updated_at``: a token row is created, optionally
-    revoked, then expires — it is never re-described. Only the **hash** of the
-    opaque token is stored (``token_hash``, unique) so a DB read yields no usable
-    token. ``revoked_at`` set ⇒ the token can no longer be used (logout or
-    rotation); ``expires_at`` is the hard lifetime cap.
+    No ``TimestampMixin``/``updated_at``: legacy rows are revoked and replaced
+    on rotation; slot-aware rows keep ``id`` as the stable session-family key and
+    rotate ``token_hash``/``expires_at`` in place under a row lock. Only the
+    **hash** of the opaque token is stored (``token_hash``, unique), so a DB read
+    yields no usable token. ``revoked_at`` set ⇒ the whole row/family is unusable;
+    ``expires_at`` is the hard lifetime cap.
     """
 
     __tablename__ = "refresh_tokens"

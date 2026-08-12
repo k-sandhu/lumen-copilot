@@ -16,7 +16,6 @@
  */
 import {
   useInfiniteQuery,
-  useMutation,
   useQuery,
   useQueryClient,
   type InfiniteData,
@@ -24,6 +23,7 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import { ApiError } from '@/api';
 import {
   addGroupMember,
@@ -113,7 +113,7 @@ export function useMembers(): UseQueryResult<MemberList> {
  */
 export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, string> {
   const qc = useQueryClient();
-  return useMutation<Member, unknown, string>({
+  return usePrincipalMutation<Member, unknown, string>({
     mutationFn: (memberId) => attestMemberIdentity(memberId),
     onSuccess: (member) => {
       qc.setQueryData<MemberList>(membersQueryKey, (prev) =>
@@ -216,7 +216,7 @@ export function useGroupMembers(groupId: string | null): UseQueryResult<GroupMem
  */
 export function useCreateGroup(): UseMutationResult<Group, unknown, GroupCreate> {
   const qc = useQueryClient();
-  return useMutation<Group, unknown, GroupCreate>({
+  return usePrincipalMutation<Group, unknown, GroupCreate>({
     mutationFn: (body) => createGroup(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: groupKeys.list() }),
   });
@@ -233,7 +233,7 @@ export function useRenameGroup(): UseMutationResult<
   { groupId: string; name: string }
 > {
   const qc = useQueryClient();
-  return useMutation<Group, unknown, { groupId: string; name: string }>({
+  return usePrincipalMutation<Group, unknown, { groupId: string; name: string }>({
     mutationFn: ({ groupId, name }) => renameGroup(groupId, { name }),
     onError: (error) => reconcileIfVanished(qc, error),
     onSuccess: (group) => {
@@ -252,7 +252,7 @@ export function useRenameGroup(): UseMutationResult<
  */
 export function useDeleteGroup(): UseMutationResult<void, unknown, string> {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (groupId) => deleteGroup(groupId),
     onError: (error, groupId) => {
       if (error instanceof ApiError && error.status === 404) dropGroupFromList(qc, groupId);
@@ -279,7 +279,7 @@ export function useAddGroupMember(): UseMutationResult<
   { groupId: string; userId: string }
 > {
   const qc = useQueryClient();
-  return useMutation<void, unknown, { groupId: string; userId: string }>({
+  return usePrincipalMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => addGroupMember(groupId, { user_id: userId }),
     onError: (error, { groupId: id }) =>
       reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
@@ -301,7 +301,7 @@ export function useRemoveGroupMember(): UseMutationResult<
   { groupId: string; userId: string }
 > {
   const qc = useQueryClient();
-  return useMutation<void, unknown, { groupId: string; userId: string }>({
+  return usePrincipalMutation<void, unknown, { groupId: string; userId: string }>({
     mutationFn: ({ groupId, userId }) => removeGroupMember(groupId, userId),
     onError: (error, { groupId: id }) =>
       reconcileIfVanished(qc, error, groupKeys.members(id), membersQueryKey),
@@ -348,7 +348,7 @@ export function useToolPolicy(): UseQueryResult<ToolPolicy> {
  */
 export function useUpdateToolPolicy(): UseMutationResult<ToolPolicy, unknown, ToolPolicyUpdate> {
   const qc = useQueryClient();
-  return useMutation<ToolPolicy, unknown, ToolPolicyUpdate>({
+  return usePrincipalMutation<ToolPolicy, unknown, ToolPolicyUpdate>({
     mutationFn: (body) => updateToolPolicy(body),
     onSuccess: (policy) => {
       qc.setQueryData(toolPolicyQueryKey, policy);
@@ -378,7 +378,7 @@ export function useUpdateSandboxPolicy(): UseMutationResult<
   SandboxPolicyUpdate
 > {
   const qc = useQueryClient();
-  return useMutation<SandboxPolicy, unknown, SandboxPolicyUpdate>({
+  return usePrincipalMutation<SandboxPolicy, unknown, SandboxPolicyUpdate>({
     mutationFn: (body) => updateSandboxPolicy(body),
     onSuccess: (policy) => {
       qc.setQueryData(sandboxPolicyQueryKey, policy);
@@ -409,7 +409,7 @@ export function useUpdateAutonomyPolicy(): UseMutationResult<
   AutonomyPolicyUpdate
 > {
   const qc = useQueryClient();
-  return useMutation<AutonomyPolicy, unknown, AutonomyPolicyUpdate>({
+  return usePrincipalMutation<AutonomyPolicy, unknown, AutonomyPolicyUpdate>({
     mutationFn: (body) => updateAutonomyPolicy(body),
     onSuccess: (policy) => {
       qc.setQueryData(autonomyPolicyQueryKey, policy);
@@ -429,7 +429,7 @@ export function useUpdateAutonomyPolicy(): UseMutationResult<
  */
 export function useUpdateTenantBranding(): UseMutationResult<TenantBranding, unknown, File> {
   const qc = useQueryClient();
-  return useMutation<TenantBranding, unknown, File>({
+  return usePrincipalMutation<TenantBranding, unknown, File>({
     mutationFn: (file) => updateTenantBranding(file),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: currentUserQueryKey });
@@ -444,7 +444,7 @@ export function useUpdateTenantBranding(): UseMutationResult<TenantBranding, unk
  */
 export function useClearTenantBranding(): UseMutationResult<void, unknown, void> {
   const qc = useQueryClient();
-  return useMutation<void, unknown, void>({
+  return usePrincipalMutation<void, unknown, void>({
     mutationFn: () => clearTenantBranding(),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: currentUserQueryKey });
@@ -478,7 +478,7 @@ export function useUpdateLlmProvider(): UseMutationResult<
   { id: string; body: LlmProviderUpdate }
 > {
   const qc = useQueryClient();
-  return useMutation<LlmProvider, unknown, { id: string; body: LlmProviderUpdate }>({
+  return usePrincipalMutation<LlmProvider, unknown, { id: string; body: LlmProviderUpdate }>({
     mutationFn: ({ id, body }) => updateLlmProvider(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
@@ -488,7 +488,7 @@ export function useUpdateLlmProvider(): UseMutationResult<
 
 export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string> {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteLlmProvider(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
@@ -498,7 +498,7 @@ export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string>
 
 export function useRefreshLlmProvider(): UseMutationResult<LlmProvider, unknown, string> {
   const qc = useQueryClient();
-  return useMutation<LlmProvider, unknown, string>({
+  return usePrincipalMutation<LlmProvider, unknown, string>({
     mutationFn: (id) => refreshLlmProvider(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });

@@ -3,7 +3,7 @@
 Contract-first: shapes match ``contracts/openapi.yaml`` (``LoginRequest`` →
 ``TokenResponse``; ``CurrentUser``). Routers validate in → call **one** service
 → shape out (ADR-0004): all orchestration is in ``services.auth_service``; this
-layer only (de)serializes, sets/clears the refresh cookie, and threads
+layer only (de)serializes, scopes the refresh cookie, and threads
 correlation context.
 
 The refresh token rides an **httpOnly, SameSite=strict** cookie (never the JSON
@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Request, Response, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Header, Request, Response, status
+from pydantic import UUID4, BaseModel, Field
 
 from app.api.deps import (
     CurrentTenant,
@@ -40,6 +41,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # not sent on every request — only where it is consumed.
 _REFRESH_COOKIE = "lumen_refresh_token"
 _REFRESH_COOKIE_PATH = "/api/v1/auth"
+_AUTH_SLOT_HEADER = "X-Lumen-Auth-Slot"
 
 
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
@@ -94,14 +96,28 @@ class CurrentUserResponse(BaseModel):
 # --- Helpers ----------------------------------------------------------------
 
 
-def _set_refresh_cookie(response: Response, tokens: IssuedTokens, settings: Settings) -> None:
+def _refresh_cookie_name(auth_slot: UUID | None) -> str:
+    """One cookie name per browser auth intent; slot identity grants no access."""
+    return _REFRESH_COOKIE if auth_slot is None else f"{_REFRESH_COOKIE}_{auth_slot}"
+
+
+def _presented_refresh_token(request: Request, auth_slot: UUID | None) -> str | None:
+    return request.cookies.get(_refresh_cookie_name(auth_slot))
+
+
+def _set_refresh_cookie(
+    response: Response,
+    tokens: IssuedTokens,
+    settings: Settings,
+    auth_slot: UUID | None,
+) -> None:
     """Attach the rotating refresh token as an httpOnly cookie.
 
     ``secure`` is on outside ``local`` (HTTPS-only there); kept off locally so
     plain-HTTP dev still works. ``SameSite=strict`` blocks cross-site sends.
     """
     response.set_cookie(
-        key=_REFRESH_COOKIE,
+        key=_refresh_cookie_name(auth_slot),
         value=tokens.refresh_token,
         max_age=settings.refresh_token_ttl_seconds,
         httponly=True,
@@ -128,6 +144,7 @@ async def login(
     response: Response,
     session: DbSession,
     settings: SettingsDep,
+    auth_slot: Annotated[UUID4 | None, Header(alias=_AUTH_SLOT_HEADER)] = None,
 ) -> TokenResponse:
     """Exchange email + password for an access token (sets refresh cookie).
 
@@ -140,9 +157,10 @@ async def login(
         password=body.password,
         request_id=extract_request_id(request),
         source_ip=request.client.host if request.client else "unknown",
+        session_id=auth_slot,
     )
     await session.commit()
-    _set_refresh_cookie(response, tokens, settings)
+    _set_refresh_cookie(response, tokens, settings, auth_slot)
     return _token_response(tokens)
 
 
@@ -152,7 +170,7 @@ async def refresh(
     response: Response,
     session: DbSession,
     settings: SettingsDep,
-    refresh_token: Annotated[str | None, Cookie(alias=_REFRESH_COOKIE)] = None,
+    auth_slot: Annotated[UUID4 | None, Header(alias=_AUTH_SLOT_HEADER)] = None,
 ) -> TokenResponse:
     """Rotate the refresh cookie into a fresh access token + refresh cookie.
 
@@ -160,12 +178,13 @@ async def refresh(
     """
     service = AuthService(session, settings)
     tokens = await service.refresh(
-        raw_refresh_token=refresh_token,
+        raw_refresh_token=_presented_refresh_token(request, auth_slot),
         request_id=extract_request_id(request),
         source_ip=request.client.host if request.client else "unknown",
+        session_id=auth_slot,
     )
     await session.commit()
-    _set_refresh_cookie(response, tokens, settings)
+    _set_refresh_cookie(response, tokens, settings, auth_slot)
     return _token_response(tokens)
 
 
@@ -176,18 +195,31 @@ async def logout(
     principal: CurrentUser,
     session: DbSession,
     settings: SettingsDep,
-    refresh_token: Annotated[str | None, Cookie(alias=_REFRESH_COOKIE)] = None,
+    auth_slot: Annotated[UUID4 | None, Header(alias=_AUTH_SLOT_HEADER)] = None,
 ) -> Response:
-    """Revoke the refresh token and clear the cookie (requires a bearer token)."""
+    """Revoke the selected refresh-token family (requires a bearer token).
+
+    Slot-aware responses expire only their unique cookie name, so a late logout
+    cannot erase a newer login's distinct cookie. Legacy shared-cookie responses
+    intentionally omit deletion; server-side revocation still ends the session.
+    """
     service = AuthService(session, settings)
     await service.logout(
         principal,
-        raw_refresh_token=refresh_token,
+        raw_refresh_token=_presented_refresh_token(request, auth_slot),
         request_id=extract_request_id(request),
         source_ip=request.client.host if request.client else "unknown",
+        session_id=auth_slot,
     )
     await session.commit()
-    response.delete_cookie(key=_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
+    if auth_slot is not None:
+        response.delete_cookie(
+            key=_refresh_cookie_name(auth_slot),
+            httponly=True,
+            secure=settings.environment != "local",
+            samesite="strict",
+            path=_REFRESH_COOKIE_PATH,
+        )
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
