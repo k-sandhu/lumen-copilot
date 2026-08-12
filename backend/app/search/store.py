@@ -35,7 +35,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
@@ -49,9 +49,10 @@ log = get_logger(__name__)
 
 # Bulk NDJSON content type (the _bulk endpoint rejects application/json).
 _NDJSON = "application/x-ndjson"
+_PublicationRefresh = bool | Literal["wait_for"]
 
 # Chunks per _bulk request (#258). Bounds the request body no matter how large a
-# document is — 1024-dim vectors make each chunk ~20KB of NDJSON, so an
+# document is — fixed-width vectors make each chunk sizable NDJSON, so an
 # unbatched 40+-chunk document blew past the request timeout deterministically.
 _BULK_BATCH_SIZE = 32
 
@@ -81,6 +82,8 @@ class IndexedChunk:
     embedding: tuple[float, ...] | None
     char_start: int
     char_end: int
+    ingestion_attempt: int
+    embedding_fingerprint: str
     acl_enforced: bool = False
     acl_principals: tuple[str, ...] = ()
     acl_synced_at: datetime | None = None
@@ -94,6 +97,8 @@ class SearchHit:
     chunk_id: UUID
     document_id: UUID
     score: float
+    ingestion_attempt: int
+    embedding_fingerprint: str
 
 
 def _acl_mapping_properties() -> dict[str, Any]:
@@ -119,7 +124,7 @@ def _acl_mapping_properties() -> dict[str, Any]:
     }
 
 
-def _index_body(dimensions: int) -> dict[str, Any]:
+def _index_body(dimensions: int, embedding_fingerprint: str) -> dict[str, Any]:
     """The chunk-index settings + strict mapping (ADR-0010 §5).
 
     ``dynamic: strict`` makes an unmapped field an indexing error — the index is
@@ -133,6 +138,7 @@ def _index_body(dimensions: int) -> dict[str, Any]:
         "settings": {"index": {"knn": True, "number_of_replicas": 0}},
         "mappings": {
             "dynamic": "strict",
+            "_meta": {"lumen_embedding_space": embedding_fingerprint},
             "properties": {
                 "chunk_id": {"type": "keyword"},
                 "tenant_id": {"type": "keyword"},
@@ -152,6 +158,8 @@ def _index_body(dimensions: int) -> dict[str, Any]:
                 },
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
+                "ingestion_attempt": {"type": "long"},
+                "embedding_fingerprint": {"type": "keyword"},
                 # Mirrored source ACL (ADR-0019 §2) — the engine half of the
                 # mode-split predicate, shared verbatim with the additive
                 # mapping update an already-deployed index receives.
@@ -183,6 +191,7 @@ def _hybrid_body(
     *,
     query_text: str,
     embedding: Sequence[float],
+    embedding_fingerprint: str,
     allow: SearchAllowFilter,
     k: int,
     collection_ids: Sequence[UUID] | None = None,
@@ -200,13 +209,19 @@ def _hybrid_body(
     outside the allow-set contributes nothing.
     """
     filters: list[dict[str, Any]] = list(allow.to_engine_filter())
+    filters.append({"term": {"embedding_fingerprint": embedding_fingerprint}})
     if collection_ids:
         filters.append({"terms": {"collection_id": sorted(str(c) for c in collection_ids)}})
     if document_ids:
         filters.append({"terms": {"document_id": sorted(str(d) for d in document_ids)}})
     return {
         "size": k,
-        "_source": ["chunk_id", "document_id"],
+        "_source": [
+            "chunk_id",
+            "document_id",
+            "ingestion_attempt",
+            "embedding_fingerprint",
+        ],
         "query": {
             "hybrid": {
                 "queries": [
@@ -246,6 +261,7 @@ class OpenSearchStore:
         base_url: str,
         index: str,
         dimensions: int,
+        embedding_fingerprint: str,
         timeout_seconds: float = 10.0,
         username: str = "",
         password: str = "",
@@ -254,6 +270,9 @@ class OpenSearchStore:
         self._index = index
         self._pipeline = f"{index}-hybrid"
         self._dimensions = dimensions
+        if not embedding_fingerprint:
+            raise ValueError("embedding_fingerprint must be non-empty")
+        self._embedding_fingerprint = embedding_fingerprint
         # Instance-level "schema is in place" latch so hot paths can call
         # ensure_index() unconditionally without paying HEAD+PUT per call.
         self._ensured = False
@@ -271,6 +290,7 @@ class OpenSearchStore:
             base_url=settings.opensearch_url,
             index=settings.opensearch_index,
             dimensions=settings.llm_embedding_dimensions,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
             timeout_seconds=settings.opensearch_timeout_seconds,
             username=settings.opensearch_username,
             password=settings.opensearch_password,
@@ -343,7 +363,7 @@ class OpenSearchStore:
         **Mapping migration (ADR-0019 §2).** Creating the index only ever
         covers a *fresh* deployment; an index that already exists keeps the
         mapping it was created with. Because the mapping is ``dynamic:
-        strict``, a deployed ``lumen-chunks`` that predates the mirrored-ACL
+        strict``, a deployed index that predates the mirrored-ACL
         fields would reject every new bulk write outright. So the ACL
         properties are **always** applied as an additive ``PUT
         /{index}/_mapping`` — legal and idempotent for a strict mapping (new
@@ -366,12 +386,17 @@ class OpenSearchStore:
             await self._request(
                 "PUT",
                 f"/{self._index}",
-                json_body=_index_body(self._dimensions),
+                json_body=_index_body(self._dimensions, self._embedding_fingerprint),
                 # 400 = lost a concurrent-create race → the index exists; fine.
                 ok_statuses=frozenset({200, 400}),
             )
         elif head.status_code != 200:
             raise DependencyError("The search engine is unreachable.", code="search_unavailable")
+        # Validate before mutating an existing index. In particular, never
+        # stamp the configured fingerprint onto an index whose vectors may
+        # have been produced by another model: equal width does not imply an
+        # equal coordinate space (R1-005/R1-006).
+        await self.check_embedding_contract()
         # Additive, compatible mapping update — also repairs the lost-create
         # race above (that index was created by the winner, possibly older).
         await self._request(
@@ -385,6 +410,54 @@ class OpenSearchStore:
         )
         self._ensured = True
 
+    async def check_embedding_contract(self) -> tuple[int, str]:
+        """Reject an index whose width or vector-space fingerprint drifts."""
+
+        payload = await self._request("GET", f"/{self._index}/_mapping")
+        try:
+            properties = payload[self._index]["mappings"]["properties"]
+            actual = properties["embedding"]["dimension"]
+            actual_fingerprint = payload[self._index]["mappings"]["_meta"]["lumen_embedding_space"]
+        except (KeyError, TypeError):
+            actual = None
+            actual_fingerprint = None
+
+        if not isinstance(actual, int) or actual != self._dimensions:
+            log.error(
+                "embedding.opensearch_dimension_mismatch",
+                index=self._index,
+                configured_dimensions=self._dimensions,
+                opensearch_dimensions=actual,
+            )
+            raise DependencyError(
+                "The search index does not share the configured embedding dimension.",
+                code="embedding_dimension_mismatch",
+            )
+        if actual_fingerprint != self._embedding_fingerprint:
+            log.error(
+                "embedding.opensearch_space_mismatch",
+                index=self._index,
+                configured_fingerprint=self._embedding_fingerprint,
+                opensearch_fingerprint=actual_fingerprint,
+            )
+            raise DependencyError(
+                "The search index belongs to another embedding coordinate space.",
+                code="embedding_space_mismatch",
+            )
+        log.info(
+            "embedding.opensearch_dimension_ready",
+            index=self._index,
+            configured_dimensions=self._dimensions,
+            opensearch_dimensions=actual,
+        )
+        return actual, self._embedding_fingerprint
+
+    async def check_embedding_dimensions(self) -> int:
+        """Backward-compatible width view over the full embedding contract."""
+
+        dimensions, _fingerprint = await self.check_embedding_contract()
+        return dimensions
+
     async def health(self) -> bool:
         """True iff the cluster answers its health endpoint (readiness probe)."""
         try:
@@ -395,14 +468,20 @@ class OpenSearchStore:
 
     # --- writes (ingestion path; never the request path) ----------------------
 
-    async def upsert_chunks(self, chunks: Sequence[IndexedChunk], *, refresh: bool = False) -> None:
+    async def upsert_chunks(
+        self,
+        chunks: Sequence[IndexedChunk],
+        *,
+        refresh: _PublicationRefresh = False,
+    ) -> None:
         """Bulk-index chunk docs (id = chunk_id, routed by tenant — ADR-0010 §5).
 
-        ``refresh=True`` makes the writes immediately searchable — for tests and
-        the backfill command only; the ingestion path leaves the engine's
-        refresh cadence alone. A partial bulk failure fails the call (the
-        ingestion task retries as a unit; the index must never silently hold a
-        subset).
+        ``refresh=True`` forces each bulk request visible (tests/operators).
+        ``refresh="wait_for"`` is the ingestion publication contract: all
+        bounded bulks are accepted first, then one explicit index refresh is
+        acknowledged before the caller may publish PostgreSQL ``Ready``. A
+        partial bulk or refresh failure fails the call (the ingestion task
+        retries as a unit; the index must never silently hold a subset).
 
         The write is issued in bounded sub-batches of ``_BULK_BATCH_SIZE``
         chunks (#258): each chunk carries a ~20KB embedding, so one request per
@@ -411,8 +490,31 @@ class OpenSearchStore:
         sequentially in order; the first failing batch fails the whole call
         (the caller's retry re-runs the idempotent sync, converging).
         """
+        for chunk in chunks:
+            if chunk.ingestion_attempt < 0:
+                raise ValueError("ingestion_attempt must be non-negative")
+            if chunk.embedding_fingerprint != self._embedding_fingerprint:
+                raise DependencyError(
+                    "The chunk belongs to another embedding coordinate space.",
+                    code="embedding_space_mismatch",
+                )
+            if chunk.embedding is not None and len(chunk.embedding) != self._dimensions:
+                raise DependencyError(
+                    "The chunk does not share the configured embedding dimension.",
+                    code="embedding_dimension_mismatch",
+                )
+        force_each_batch = refresh is True
         for start in range(0, len(chunks), _BULK_BATCH_SIZE):
-            await self._bulk_batch(chunks[start : start + _BULK_BATCH_SIZE], refresh=refresh)
+            await self._bulk_batch(
+                chunks[start : start + _BULK_BATCH_SIZE],
+                refresh=force_each_batch,
+            )
+        if chunks and refresh == "wait_for":
+            # One explicit refresh covers every batch and every routing shard,
+            # unlike putting wait_for only on the final bulk. The response is
+            # the visibility acknowledgement ingestion needs before its Ready
+            # CAS (R2-001).
+            await self._request("POST", f"/{self._index}/_refresh")
 
     async def _bulk_batch(self, chunks: Sequence[IndexedChunk], *, refresh: bool) -> None:
         """Issue one bounded ``_bulk`` request for ``chunks`` (fail closed)."""
@@ -425,7 +527,7 @@ class OpenSearchStore:
                     {
                         "index": {
                             "_index": self._index,
-                            "_id": str(chunk.chunk_id),
+                            "_id": f"{chunk.chunk_id}:{chunk.ingestion_attempt}",
                             "routing": str(chunk.tenant_id),
                         }
                     }
@@ -441,6 +543,8 @@ class OpenSearchStore:
                 "text": chunk.text,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
+                "ingestion_attempt": chunk.ingestion_attempt,
+                "embedding_fingerprint": chunk.embedding_fingerprint,
                 # Mirrored source ACL (ADR-0019 §2): always written explicitly
                 # so an enforced document's chunks can never fall back to the
                 # non-enforced branch by omission. ``acl_synced_at`` is null
@@ -489,6 +593,68 @@ class OpenSearchStore:
                         "filter": [
                             {"term": {"tenant_id": str(tenant_id)}},
                             {"term": {"document_id": str(document_id)}},
+                        ]
+                    }
+                }
+            },
+            params=params,
+        )
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: UUID,
+        document_id: UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        """Delete exactly one failed/stale publication generation."""
+
+        await self._delete_document_by_attempt(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            attempt_clause={"term": {"ingestion_attempt": ingestion_attempt}},
+            refresh=refresh,
+        )
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: UUID,
+        document_id: UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        """Retire only generations older than a successfully published one."""
+
+        await self._delete_document_by_attempt(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            attempt_clause={"range": {"ingestion_attempt": {"lt": ingestion_attempt}}},
+            refresh=refresh,
+        )
+
+    async def _delete_document_by_attempt(
+        self,
+        *,
+        tenant_id: UUID,
+        document_id: UUID,
+        attempt_clause: dict[str, Any],
+        refresh: bool,
+    ) -> None:
+        params: dict[str, str] = {"routing": str(tenant_id)}
+        if refresh:
+            params["refresh"] = "true"
+        await self._request(
+            "POST",
+            f"/{self._index}/_delete_by_query",
+            json_body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"tenant_id": str(tenant_id)}},
+                            {"term": {"document_id": str(document_id)}},
+                            attempt_clause,
                         ]
                     }
                 }
@@ -620,6 +786,7 @@ class OpenSearchStore:
             json_body=_hybrid_body(
                 query_text=query_text,
                 embedding=embedding,
+                embedding_fingerprint=self._embedding_fingerprint,
                 allow=allow,
                 k=k,
                 collection_ids=collection_ids,
@@ -638,6 +805,8 @@ class OpenSearchStore:
                     chunk_id=UUID(source["chunk_id"]),
                     document_id=UUID(source["document_id"]),
                     score=float(raw.get("_score") or 0.0),
+                    ingestion_attempt=int(source["ingestion_attempt"]),
+                    embedding_fingerprint=str(source["embedding_fingerprint"]),
                 )
             )
         return hits

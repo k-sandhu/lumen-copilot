@@ -31,12 +31,14 @@ import json
 import math
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.core.errors import AppError, DependencyError, ValidationError
+from app.core.logging import get_logger
 from app.domain.llm import (
     ChatMessage,
     Completion,
@@ -50,6 +52,9 @@ from app.domain.llm import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+
+log = get_logger(__name__)
 
 
 class LlmProviderError(DependencyError):
@@ -263,7 +268,8 @@ def _map_vendor_error(exc: Exception) -> AppError:
 # SHA-256 digest of the text (query text is sensitive — the audit trail hashes
 # it for the same reason), never the raw string. Capacity/TTL come from
 # Settings (LLM_EMBED_CACHE_MAX_ENTRIES / LLM_EMBED_CACHE_TTL_SECONDS).
-_embed_cache: OrderedDict[tuple[str, str, str, str], tuple[float, list[float]]] = OrderedDict()
+_EmbedCacheKey = tuple[str, str, str, int, str]
+_embed_cache: OrderedDict[_EmbedCacheKey, tuple[float, list[float]]] = OrderedDict()
 
 
 def _monotonic() -> float:  # seam for TTL tests
@@ -275,7 +281,7 @@ def clear_embed_cache() -> None:
     _embed_cache.clear()
 
 
-def _embed_cache_get(key: tuple[str, str, str, str], *, ttl_seconds: float) -> list[float] | None:
+def _embed_cache_get(key: _EmbedCacheKey, *, ttl_seconds: float) -> list[float] | None:
     entry = _embed_cache.get(key)
     if entry is None:
         return None
@@ -287,13 +293,156 @@ def _embed_cache_get(key: tuple[str, str, str, str], *, ttl_seconds: float) -> l
     return vector
 
 
-def _embed_cache_put(
-    key: tuple[str, str, str, str], vector: list[float], *, max_entries: int
-) -> None:
+def _embed_cache_put(key: _EmbedCacheKey, vector: list[float], *, max_entries: int) -> None:
     _embed_cache[key] = (_monotonic(), list(vector))
     _embed_cache.move_to_end(key)
     while len(_embed_cache) > max_entries:
         _embed_cache.popitem(last=False)
+
+
+def _validate_embedding_vectors(
+    vectors: Sequence[Sequence[object]],
+    *,
+    expected_count: int,
+    expected_dimensions: int,
+    model: str,
+) -> list[list[float]]:
+    """Fail at the provider boundary before a fixed-width store sees drift.
+
+    Telemetry intentionally contains only counts, dimensions, and route id; input
+    text and vector values are sensitive and never enter the log.
+    """
+
+    if len(vectors) != expected_count:
+        log.error(
+            "embedding.provider_count_mismatch",
+            model=model,
+            expected_count=expected_count,
+            actual_count=len(vectors),
+            configured_dimensions=expected_dimensions,
+        )
+        raise DependencyError(
+            "Embedding provider returned an unexpected result count.",
+            code="embedding_count_mismatch",
+        )
+
+    normalized_vectors: list[list[float]] = []
+    for index, vector in enumerate(vectors):
+        actual_dimensions = len(vector)
+        if actual_dimensions != expected_dimensions:
+            log.error(
+                "embedding.provider_dimension_mismatch",
+                model=model,
+                vector_index=index,
+                configured_dimensions=expected_dimensions,
+                provider_dimensions=actual_dimensions,
+            )
+            raise DependencyError(
+                "Embedding provider returned an incompatible vector.",
+                code="embedding_dimension_mismatch",
+            )
+        normalized: list[float] = []
+        for coordinate in vector:
+            if isinstance(coordinate, bool) or not isinstance(coordinate, Real):
+                normalized = []
+                break
+            try:
+                # Convert exactly once. Python's JSON decoder accepts integers
+                # of arbitrary precision, and ``float(10**10000)`` raises an
+                # OverflowError; vendor scalar objects may raise TypeError or
+                # ValueError from ``__float__`` as well. No raw value or vendor
+                # exception may cross this adapter boundary (R2-005).
+                converted = float(coordinate)
+            except Exception:  # noqa: BLE001 — untrusted provider scalar boundary
+                normalized = []
+                break
+            if not math.isfinite(converted):
+                normalized = []
+                break
+            normalized.append(converted)
+        if len(normalized) != expected_dimensions:
+            log.error(
+                "embedding.provider_coordinate_invalid",
+                model=model,
+                vector_index=index,
+                configured_dimensions=expected_dimensions,
+            )
+            raise DependencyError(
+                "Embedding provider returned a malformed vector.",
+                code="embedding_response_invalid",
+            )
+        normalized_vectors.append(normalized)
+    return normalized_vectors
+
+
+def _ordered_embedding_vectors(
+    data: object,
+    *,
+    expected_count: int,
+    expected_dimensions: int,
+    model: str,
+) -> list[list[float]]:
+    """Validate vendor items and return vectors in input-index order.
+
+    OpenAI-compatible providers may return embedding items out of wire order.
+    The item ``index`` is therefore authoritative: consuming response order can
+    silently bind a valid vector to the wrong chunk. Malformed vendor shapes are
+    normalized here instead of leaking ``KeyError``/``TypeError`` upstream.
+    """
+
+    if not isinstance(data, Sequence) or isinstance(data, str | bytes | bytearray):
+        raise DependencyError(
+            "Embedding provider returned a malformed response.",
+            code="embedding_response_invalid",
+        )
+    if len(data) != expected_count:
+        log.error(
+            "embedding.provider_count_mismatch",
+            model=model,
+            expected_count=expected_count,
+            actual_count=len(data),
+            configured_dimensions=expected_dimensions,
+        )
+        raise DependencyError(
+            "Embedding provider returned an unexpected result count.",
+            code="embedding_count_mismatch",
+        )
+
+    ordered: list[list[object] | None] = [None] * expected_count
+    for item in data:
+        if isinstance(item, Mapping):
+            raw_index = item.get("index")
+            raw_vector = item.get("embedding")
+        else:
+            raw_index = getattr(item, "index", None)
+            raw_vector = getattr(item, "embedding", None)
+        if (
+            isinstance(raw_index, bool)
+            or not isinstance(raw_index, int)
+            or raw_index < 0
+            or raw_index >= expected_count
+            or ordered[raw_index] is not None
+            or not isinstance(raw_vector, Sequence)
+            or isinstance(raw_vector, str | bytes | bytearray)
+        ):
+            raise DependencyError(
+                "Embedding provider returned a malformed response.",
+                code="embedding_response_invalid",
+            )
+        ordered[raw_index] = list(raw_vector)
+
+    if any(vector is None for vector in ordered):
+        raise DependencyError(
+            "Embedding provider returned a malformed response.",
+            code="embedding_response_invalid",
+        )
+    vectors = [vector for vector in ordered if vector is not None]
+    return _validate_embedding_vectors(
+        vectors,
+        expected_count=expected_count,
+        expected_dimensions=expected_dimensions,
+        model=model,
+    )
 
 
 class LLMGateway:
@@ -642,17 +791,29 @@ class LLMGateway:
             and api_key is None
             and api_base is None
         )
-        cache_key: tuple[str, str, str, str] | None = None
+        cache_key: _EmbedCacheKey | None = None
         if cacheable:
             digest = hashlib.sha256(inputs[0].encode("utf-8")).hexdigest()
-            cache_key = (cache_namespace or "", model_id, effective_api_base or "", digest)
+            cache_key = (
+                cache_namespace or "",
+                model_id,
+                effective_api_base or "",
+                self._settings.llm_embedding_dimensions,
+                digest,
+            )
             cached = _embed_cache_get(
                 cache_key, ttl_seconds=self._settings.llm_embed_cache_ttl_seconds
             )
             if cached is not None:
+                [normalized] = _validate_embedding_vectors(
+                    [cached],
+                    expected_count=1,
+                    expected_dimensions=self._settings.llm_embedding_dimensions,
+                    model=model_id,
+                )
                 # Copy on the way out so a caller mutating its vector cannot
                 # poison the cache.
-                return [Embedding(vector=list(cached), model=model_id)]
+                return [Embedding(vector=normalized, model=model_id)]
 
         try:
             response = await litellm.aembedding(
@@ -671,9 +832,13 @@ class LLMGateway:
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
-        embeddings = [
-            Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data
-        ]
+        vectors = _ordered_embedding_vectors(
+            getattr(response, "data", None),
+            expected_count=len(inputs),
+            expected_dimensions=self._settings.llm_embedding_dimensions,
+            model=model_id,
+        )
+        embeddings = [Embedding(vector=vector, model=model_id) for vector in vectors]
         if cache_key is not None and len(embeddings) == 1:
             _embed_cache_put(
                 cache_key,

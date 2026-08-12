@@ -61,6 +61,7 @@ from app.db.repositories import (
 )
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role, Source, SourceStatus
+from app.ingestion.contract import require_embedding_work_admission
 from app.services.audit import AuditSink
 from app.storage import ObjectStore
 
@@ -171,6 +172,7 @@ class SourcesService:
         audit: AuditSink,
         request_id: str,
         source_ip: str,
+        embedding_space_fingerprint: str,
     ) -> None:
         self._session = session
         self._sources = SourceRepository(session, tenant_id)
@@ -183,6 +185,7 @@ class SourcesService:
         self._audit = audit
         self._request_id = request_id
         self._source_ip = source_ip
+        self._embedding_space_fingerprint = embedding_space_fingerprint
 
     # --- internal helpers ---------------------------------------------------
 
@@ -293,6 +296,8 @@ class SourcesService:
            syncs after its connect flow completes).
 
         Raises:
+            DependencyError: API startup already proved the embedding contract
+                unavailable; raised before any web-source persistence.
             ForbiddenError: a non-admin creating a managed source (INV-5).
             ValidationError: unknown ``source_type``, or an invalid / SSRF-blocked
                 config — all mapped to **422** (INV-8) with the connector's stable
@@ -323,6 +328,13 @@ class SourcesService:
             validated = connector.validate_config(raw_config)
         except ConnectorConfigError as exc:
             raise ValidationError(exc.detail, code=exc.code) from exc
+
+        if not managed:
+            # Startup already proved whether this API process can admit new
+            # embedding work. Reject a web source before its backing collection
+            # or Pending row exists; an unvalidated process remains consumable-
+            # worker gated for backward compatibility (R2-002).
+            require_embedding_work_admission(self._embedding_space_fingerprint)
 
         # A backing collection homes the source's ingested documents. Named after
         # the connector + its salient config so it is recognisable in the
@@ -391,7 +403,9 @@ class SourcesService:
         source was already ``syncing`` (a no-op → the contract's 200) and ``True``
         when a fresh sync was enqueued and the status moved to ``syncing`` (→ 202).
         Returns ``None`` when the source is not visible to the caller (→ 404).
-        Audits ``source.synced`` on a real enqueue (INV-6).
+        Audits ``source.synced`` on a real enqueue (INV-6). A known-failed
+        embedding contract raises ``DependencyError`` before the status update,
+        audit, or enqueue, preserving the existing aggregate.
         """
         source = await self._visible(source_id)
         if source is None:
@@ -408,6 +422,12 @@ class SourcesService:
         if source.status == SourceStatus.SYNCING:
             # Already in flight — no new sync, no new audit (idempotent no-op).
             return source, False
+
+        # Resync publishes embedding work for every connector type. Do not
+        # advance the durable source to Syncing when startup has already proved
+        # this coordinate space unavailable; the request gets a typed 503 and
+        # the existing status remains truthful (R2-002).
+        require_embedding_work_admission(self._embedding_space_fingerprint)
 
         updated = await self._sources.update_status(source_id, status=SourceStatus.SYNCING)
         assert updated is not None  # visibility already established  # noqa: S101

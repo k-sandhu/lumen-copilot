@@ -39,7 +39,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import DependencyError
 from app.db.repositories import ChunkRepository, DocumentRepository
 from app.db.session import tenant_session_scope
-from app.domain.entities import Chunk, Document
+from app.domain.entities import Chunk, Document, DocumentStatus
 from app.search import IndexedChunk, OpenSearchStore
 from app.tasks.celery_app import celery_app
 from app.tasks.runner import run_task
@@ -58,15 +58,26 @@ class IndexSyncResult:
     document_id: UUID
     indexed_count: int
     deleted: bool
+    superseded: bool = False
 
 
-def _to_indexed(document: Document, chunks: list[Chunk]) -> list[IndexedChunk]:
+def _to_indexed(
+    document: Document,
+    chunks: list[Chunk],
+    *,
+    embedding_fingerprint: str,
+) -> list[IndexedChunk]:
     """Project db rows into the engine's write shape (ids + text + vector + spans).
 
     The four ACL-mirror fields (ADR-0019 §2) ride along from the document row —
     Postgres is authoritative, so a re-sync/reindex always converges the engine
     onto the current mirrored state (incl. a stale-stamped ``acl_synced_at``).
     """
+    if any(chunk.embedding_fingerprint != embedding_fingerprint for chunk in chunks):
+        raise DependencyError(
+            "Stored chunks belong to another embedding coordinate space.",
+            code="embedding_space_mismatch",
+        )
     return [
         IndexedChunk(
             chunk_id=chunk.id,
@@ -79,6 +90,8 @@ def _to_indexed(document: Document, chunks: list[Chunk]) -> list[IndexedChunk]:
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
+            ingestion_attempt=document.ingestion_attempts,
+            embedding_fingerprint=chunk.embedding_fingerprint or "",
             acl_enforced=document.acl_enforced,
             acl_principals=document.acl_principals or (),
             acl_synced_at=document.acl_synced_at,
@@ -95,6 +108,8 @@ async def sync_document_index_async(
     settings: Settings,
     store: OpenSearchStore | None = None,
     refresh: bool = False,
+    expected_attempt: int | None = None,
+    require_search_visibility: bool = False,
 ) -> IndexSyncResult:
     """Make the search index match Postgres for one document (idempotent).
 
@@ -115,6 +130,12 @@ async def sync_document_index_async(
     """
     async with tenant_session_scope(tenant_id) as session:
         document = await DocumentRepository(session, tenant_id).get(document_id)
+        if expected_attempt is not None and (
+            document is None
+            or document.status is not DocumentStatus.PROCESSING
+            or document.ingestion_attempts != expected_attempt
+        ):
+            return IndexSyncResult(document_id, 0, deleted=False, superseded=True)
         chunks = (
             await ChunkRepository(session, tenant_id).list_for_document(document_id)
             if document is not None
@@ -125,10 +146,134 @@ async def sync_document_index_async(
     active = store or OpenSearchStore.from_settings(settings)
     try:
         await active.ensure_index()
-        await active.delete_document(tenant_id=tenant_id, document_id=document_id, refresh=refresh)
-        if document is None or not chunks:
+        if expected_attempt is None:
+            if document is None:
+                # No replacement can race a truly absent source row; deleting
+                # every derived generation is safe and repairs orphaned docs.
+                await active.delete_document(
+                    tenant_id=tenant_id, document_id=document_id, refresh=refresh
+                )
+                return IndexSyncResult(document_id, 0, deleted=True)
+
+            snapshot_attempt = document.ingestion_attempts
+            # Generic repair/reindex is allowed to publish only a completed,
+            # current-space generation. Failed/processing rows and legacy-space
+            # chunks remain absent from the derived store until ingestion makes
+            # them Ready under this fingerprint (R1-002/R1-006).
+            if (
+                document.status is not DocumentStatus.READY
+                or not chunks
+                or any(
+                    chunk.embedding_fingerprint != settings.embedding_space_fingerprint
+                    for chunk in chunks
+                )
+            ):
+                # The snapshot may already be stale. Exact + older cleanup can
+                # never delete a replacement generation that claimed after the
+                # read; a delete-all query can (R1-002).
+                await active.delete_document_generation(
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    ingestion_attempt=snapshot_attempt,
+                    refresh=refresh,
+                )
+                await active.delete_older_document_generations(
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    ingestion_attempt=snapshot_attempt,
+                    refresh=refresh,
+                )
+                return IndexSyncResult(document_id, 0, deleted=True)
+
+            # Repair orphaned ids from this exact generation without touching
+            # any concurrently published replacement generation.
+            await active.delete_document_generation(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=snapshot_attempt,
+                refresh=refresh,
+            )
+        elif not chunks:
+            await active.delete_document_generation(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=expected_attempt,
+                refresh=refresh,
+            )
+            await active.delete_older_document_generations(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=expected_attempt,
+                refresh=refresh,
+            )
             return IndexSyncResult(document_id, 0, deleted=True)
-        await active.upsert_chunks(_to_indexed(document, chunks), refresh=refresh)
+        assert document is not None
+        indexed = _to_indexed(
+            document,
+            chunks,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
+        )
+        try:
+            await active.upsert_chunks(
+                indexed,
+                refresh="wait_for" if require_search_visibility else refresh,
+            )
+        except DependencyError:
+            # A bulk request may have committed a prefix before reporting a
+            # partial failure. Delete only this attempt; never touch a newer
+            # worker's generation (R1-001/R1-002).
+            try:
+                await active.delete_document_generation(
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    ingestion_attempt=document.ingestion_attempts,
+                    refresh=refresh,
+                )
+            except DependencyError:
+                log.warning(
+                    "index_sync.generation_cleanup_deferred",
+                    tenant_id=str(tenant_id),
+                    document_id=str(document_id),
+                    attempt=document.ingestion_attempts,
+                )
+            raise
+        if expected_attempt is not None:
+            await active.delete_older_document_generations(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=expected_attempt,
+                refresh=refresh,
+            )
+        else:
+            await active.delete_older_document_generations(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=snapshot_attempt,
+                refresh=refresh,
+            )
+            # Publication used a DB snapshot taken before ensure/delete/upsert.
+            # If a live worker claimed in that window, compensate by removing
+            # only this stale snapshot. Hydration is fail-closed throughout;
+            # the cleanup prevents the stale derived rows from lingering.
+            async with tenant_session_scope(tenant_id) as session:
+                current = await DocumentRepository(session, tenant_id).get(document_id)
+            if (
+                current is None
+                or current.status is not DocumentStatus.READY
+                or current.ingestion_attempts != snapshot_attempt
+            ):
+                await active.delete_document_generation(
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    ingestion_attempt=snapshot_attempt,
+                    refresh=refresh,
+                )
+                return IndexSyncResult(
+                    document_id,
+                    0,
+                    deleted=True,
+                    superseded=True,
+                )
         return IndexSyncResult(document_id, len(chunks), deleted=False)
     finally:
         if owns_store:

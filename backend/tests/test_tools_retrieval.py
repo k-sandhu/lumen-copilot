@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.repositories import (
     ChunkInput,
@@ -39,7 +40,7 @@ from app.services.tools.types import ToolContext
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
-_EMBED_DIM = 1024
+_EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
 
 
 class _FakeGateway:

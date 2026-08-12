@@ -734,6 +734,8 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    ingestion_attempts: int = 0
+    ingestion_failure: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,6 +956,7 @@ class Chunk:
     char_start: int
     char_end: int
     created_at: datetime
+    embedding_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

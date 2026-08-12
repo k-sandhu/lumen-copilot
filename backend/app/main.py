@@ -34,6 +34,7 @@ from app.core.errors import (
 )
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
+from app.ingestion.contract import provision_embedding_contract
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
 from app.search import aclose_search_store
@@ -91,6 +92,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("startup.bucket_ready", bucket=settings.s3_bucket)
     except Exception as exc:  # noqa: BLE001 — non-fatal; readiness surfaces it
         log.warning("startup.bucket_unavailable", error=str(exc))
+
+    try:
+        fingerprint = await provision_embedding_contract(settings)
+        log.info("startup.embedding_contract_ready", fingerprint=fingerprint)
+    except Exception as exc:  # noqa: BLE001 — process stays live; readiness rejects traffic
+        log.warning("startup.embedding_contract_unavailable", error=type(exc).__name__)
 
     yield
 

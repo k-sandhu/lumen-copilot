@@ -82,6 +82,7 @@ async def seed_corpus(
     documents: Sequence[GoldenDocument],
     embed: object | None = None,
     store: OpenSearchStore | None = None,
+    embedding_fingerprint: str | None = None,
 ) -> SeededCorpus:
     """Ingest the golden documents for ``owner_id`` using the real chunker (#21).
 
@@ -97,6 +98,9 @@ async def seed_corpus(
     than the ingestion task, so it mirrors the write-path itself so the
     engine-backed :class:`RetrievalService` can find them.
     """
+    if store is not None and not embedding_fingerprint:
+        raise ValueError("embedding_fingerprint is required when seeding OpenSearch")
+
     collection = await CollectionRepository(session, tenant_id).create(
         owner_id=owner_id, name="Golden corpus"
     )
@@ -124,6 +128,7 @@ async def seed_corpus(
                     char_start=chunk.char_start,
                     char_end=chunk.char_end,
                     embedding=vector,
+                    embedding_fingerprint=embedding_fingerprint,
                 )
             )
         rows = await ChunkRepository(session, tenant_id).replace_for_document(document.id, inputs)
@@ -141,6 +146,8 @@ async def seed_corpus(
                         embedding=r.embedding,
                         char_start=r.char_start,
                         char_end=r.char_end,
+                        ingestion_attempt=document.ingestion_attempts,
+                        embedding_fingerprint=embedding_fingerprint or "",
                     )
                     for r in rows
                 ],

@@ -31,7 +31,7 @@ OpenSearch is the only OSI-licensed option with first-class **hybrid** search (B
 
 ### 2. Single retrieval store
 
-OpenSearch holds, per chunk, both the **analyzed text** (BM25) and the **embedding** (`knn_vector`). Hybrid ranking is done by OpenSearch's **hybrid query + normalization search pipeline** (score-normalized BM25 ⊕ kNN), replacing the Python `pgvector`+FTS+RRF path. Embeddings are still produced by the `llm/` gateway (bge-m3) and written into OpenSearch at index time. The `pgvector` extension, the `chunks.embedding` column, and the Postgres FTS query path are **removed** once cutover is verified.
+OpenSearch holds, per chunk, both the **analyzed text** (BM25) and the **embedding** (`knn_vector`). Hybrid ranking is done by OpenSearch's **hybrid query + normalization search pipeline** (score-normalized BM25 ⊕ kNN), replacing the Python `pgvector`+FTS+RRF path. Embeddings are produced by the `llm/` gateway under the fixed-width deployment contract (native 2,048 dimensions as of issue #346) and written into OpenSearch at index time. The `pgvector` extension, the active `chunks.embedding` column, and the Postgres FTS query path are **removed only after** the lossless cutover and rollback window are verified; migration 0044 temporarily preserves the prior 1,024-dimension vectors in `embedding_legacy_1024` rather than coercing them.
 
 ### 3. Module boundary — new `backend/app/search/`; `retrieval/` stays the chokepoint
 
@@ -52,9 +52,9 @@ Retrieved chunks are still hydrated and permission-re-checked against Postgres (
 
 ### 5. Index model, indexing, reindex
 
-- **Document = chunk** (the citation unit): `{ chunk_id, tenant_id, document_id, owner_id, collection_id, ord, text (analyzed), embedding (knn_vector), char_start, char_end }`. Offsets are stored so highlights/snippets map back to exact source spans (INV-3).
+- **Document = chunk** (the citation unit): `{ chunk_id, tenant_id, document_id, owner_id, collection_id, ord, text (analyzed), embedding (knn_vector), char_start, char_end, ingestion_attempt, embedding_fingerprint }`. Offsets are stored so highlights/snippets map back to exact source spans (INV-3). As of issue #346, the mapping `_meta` also records the credential-free vector-space fingerprint (provider/model/dimension/normalization revision). Width equality alone is not compatibility.
 - **Topology (decided):** a **single shared index** with a **mandatory `tenant_id` filter** on every query (routing by tenant). Per-tenant indices are a future option only if isolation/scale demands.
-- **Write path:** a **Celery task** ([tasks/](../../backend/app/tasks/)) upserts/deletes chunk docs (text + embedding + metadata) on ingest and document mutation — never in the request path. Document/source deletion cascades to index deletes.
+- **Write path:** a **Celery task** ([tasks/](../../backend/app/tasks/)) upserts/deletes chunk docs (text + embedding + metadata) on ingest and document mutation — never in the request path. Document/source deletion cascades to index deletes. Issue #346 makes publication attempt-scoped: OpenSearch ids include the ingestion generation, and `ready` is the final Postgres CAS only after every current-generation bulk is accepted **and one index-wide refresh acknowledgement makes those writes searchable**. Thus one immediate search after observing Ready is valid; acceptance must not poll away a Ready→unsearchable window. A bulk/refresh failure cleans up only that generation, while hydration independently admits only a Ready hit whose attempt + fingerprint match Postgres. Failed/superseded publications are therefore non-retrievable even during compensating cleanup or a late-worker race.
 - **Backfill:** an idempotent, resumable reindex command for the existing corpus.
 
 ### 6. Local stack + config (base stack)

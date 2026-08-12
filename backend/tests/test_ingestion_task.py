@@ -33,6 +33,8 @@ import pytest
 import pytest_asyncio
 from celery.exceptions import Retry
 from kombu.exceptions import OperationalError
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -40,8 +42,10 @@ import app.db.session as db_session
 import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
+from app.db import models
 from app.db.base import Base
 from app.db.repositories import (
+    ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
@@ -113,8 +117,9 @@ class _FakeObjectStore:
 class _FakeGateway:
     """Fake LLM gateway: returns a deterministic vector per input, counts batches."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, failure_code: str = "llm_unconfigured") -> None:
         self.fail = fail
+        self.failure_code = failure_code
         self.calls: list[int] = []  # batch sizes, in order
 
     async def embed(
@@ -125,7 +130,7 @@ class _FakeGateway:
         cache_namespace: str | None = None,
     ) -> list[Embedding]:
         if self.fail:
-            raise DependencyError("no key", code="llm_unconfigured")
+            raise DependencyError("provider detail", code=self.failure_code)
         self.calls.append(len(inputs))
         return [Embedding(vector=[float(len(t) % 7)] * _DIM, model="fake") for t in inputs]
 
@@ -150,6 +155,26 @@ class _FakeIndexStore:
 
     async def delete_document(
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
+    ) -> None:
+        return None
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
     ) -> None:
         return None
 
@@ -268,6 +293,63 @@ async def test_ingest_text_document_persists_chunks_and_marks_ready(
             assert text[c.char_start : c.char_end] == c.text
 
 
+@pytest.mark.parametrize(
+    ("mime_type", "payload"),
+    [
+        ("text/plain", b"plain dimension contract"),
+        ("text/markdown", b"# Markdown dimension contract"),
+        ("application/pdf", None),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", None),
+        ("application/vnd.openxmlformats-officedocument.presentationml.presentation", None),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", None),
+    ],
+)
+async def test_each_supported_format_reaches_ready_with_configured_vectors(
+    sqlite_engine: None,
+    mime_type: str,
+    payload: bytes | None,
+) -> None:
+    """#346: all six parser paths reach the same dimension-aware terminal state."""
+
+    from tests.test_ingestion_parsers import _make_docx, _make_pdf, _make_pptx, _make_xlsx
+
+    if payload is None:
+        builder = {
+            "application/pdf": _make_pdf,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": _make_docx,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": _make_pptx,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": _make_xlsx,
+        }[mime_type]
+        payload = builder("supported format dimension contract")
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    tenant_id, document_id = await _seed_document(mime_type=mime_type, key="format")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, payload)
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+    )
+    assert result.status is DocumentStatus.READY
+    assert result.chunk_count > 0
+    async with db_session.session_scope() as session:
+        chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+        assert chunks
+        assert all(
+            chunk.embedding is not None
+            and len(chunk.embedding) == settings.llm_embedding_dimensions
+            and chunk.embedding_fingerprint == settings.embedding_space_fingerprint
+            for chunk in chunks
+        )
+
+
 async def test_embeddings_are_batched(sqlite_engine: None) -> None:
     """The gateway is called once per batch, not once per chunk (batched)."""
     settings = _settings(INGESTION_EMBED_BATCH_SIZE="3")
@@ -331,6 +413,328 @@ async def test_reingest_replaces_chunks_idempotent(sqlite_engine: None) -> None:
         assert len(chunks) == second.chunk_count
         # Ordinals still contiguous after the replace.
         assert [c.ord for c in chunks] == list(range(len(chunks)))
+
+
+async def test_controlled_reembedding_preserves_legacy_vectors_and_chunk_ids(
+    sqlite_engine: None,
+) -> None:
+    """#346: native re-embedding fills beside legacy data without replacing it."""
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="legacy")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, ("stable migration text. " * 40).encode())
+
+    await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+
+    legacy = [0.25] * 1024
+    async with db_session.session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(models.Chunk)
+                    .where(models.Chunk.document_id == document_id)
+                    .order_by(models.Chunk.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        original_ids = [row.id for row in rows]
+        for row in rows:
+            row.legacy_embedding = legacy
+            row.embedding = None
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+    assert result.status is DocumentStatus.READY
+
+    async with db_session.session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(models.Chunk)
+                    .where(models.Chunk.document_id == document_id)
+                    .order_by(models.Chunk.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.id for row in rows] == original_ids
+        assert all(row.legacy_embedding == legacy for row in rows)
+        assert all(row.embedding is not None and len(row.embedding) == _DIM for row in rows)
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.ingestion_attempts == 2
+        assert doc.ingestion_failure is None
+
+
+async def test_connector_content_revision_archives_legacy_and_stale_worker_cannot_clobber(
+    sqlite_engine: None,
+) -> None:
+    """R1-009: changed content progresses without sacrificing rollback bytes."""
+
+    settings = _settings()
+    object_store = _FakeObjectStore()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="revision")
+    old_body = ("old connector revision. " * 35).encode()
+    new_body = ("new connector content with reshaped boundaries. " * 14).encode()
+    object_store.put(str(tenant_id), "revision", old_body)
+
+    await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=object_store,  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+    )
+    legacy = [0.125] * 1024
+    async with db_session.session_scope() as session:
+        old_rows = list(
+            (
+                await session.execute(
+                    select(models.Chunk)
+                    .where(models.Chunk.document_id == document_id)
+                    .order_by(models.Chunk.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in old_rows:
+            row.legacy_embedding = legacy
+            row.embedding = None
+            row.embedding_fingerprint = None
+
+    object_store.put(str(tenant_id), "revision", new_body)
+    revised = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=object_store,  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+    )
+    assert revised.status is DocumentStatus.READY
+
+    async with db_session.session_scope() as session:
+        archived = list(
+            (
+                await session.execute(
+                    select(models.LegacyEmbeddingArchive)
+                    .where(models.LegacyEmbeddingArchive.document_id == document_id)
+                    .order_by(models.LegacyEmbeddingArchive.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        current = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+        assert len(archived) == len(old_rows)
+        assert all(row.embedding == legacy for row in archived)
+        revised_text = new_body.decode()
+        assert all(
+            revised_text[chunk.char_start : chunk.char_end] == chunk.text for chunk in current
+        )
+        current_ids = [chunk.id for chunk in current]
+
+    # Attempt 3 is redelivered after attempt 4 has claimed the row. Its stale
+    # content cannot replace the newer chunks or add a second archive.
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        third = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+        assert third is not None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        fourth = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+        assert fourth is not None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        stale = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+            document_id,
+            [
+                ChunkInput(
+                    text="stale old worker",
+                    char_start=0,
+                    char_end=16,
+                    embedding=[0.0] * _DIM,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
+                )
+            ],
+            expected_attempt=third.ingestion_attempts,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
+        )
+        assert stale is None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+            document_id, expected_attempt=fourth.ingestion_attempts
+        )
+        assert ready is not None
+    async with db_session.session_scope() as session:
+        current = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+        archive_count = len(
+            list(
+                (
+                    await session.execute(
+                        select(models.LegacyEmbeddingArchive).where(
+                            models.LegacyEmbeddingArchive.document_id == document_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
+        assert [chunk.id for chunk in current] == current_ids
+        assert archive_count == len(old_rows)
+
+
+async def test_stale_attempt_cannot_overwrite_newer_terminal_state(
+    sqlite_engine: None,
+) -> None:
+    """R1-001: an attempt number is a compare-and-set generation, not telemetry."""
+
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="cas")
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        repo = DocumentRepository(session, tenant_id)
+        first = await repo.begin_ingestion(document_id)
+        assert first is not None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        repo = DocumentRepository(session, tenant_id)
+        second = await repo.begin_ingestion(document_id)
+        assert second is not None
+
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        stale_failure = await DocumentRepository(session, tenant_id).mark_ingestion_failed(
+            document_id,
+            expected_attempt=first.ingestion_attempts,
+            code="old_worker",
+            message="old worker failed",
+        )
+        assert stale_failure is None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        completed = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+            document_id,
+            expected_attempt=second.ingestion_attempts,
+        )
+        assert completed is not None
+
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None
+        assert document.status is DocumentStatus.READY
+        assert document.ingestion_attempts == second.ingestion_attempts
+        assert document.ingestion_failure is None
+
+
+async def test_document_remains_processing_until_index_publication_succeeds(
+    sqlite_engine: None,
+) -> None:
+    """R1-002: Ready is the final CAS after the current index generation publishes."""
+
+    class _InspectingIndexStore(_FakeIndexStore):
+        saw_processing = False
+
+        async def upsert_chunks(self, chunks: Sequence[object], *, refresh: bool = False) -> None:
+            chunk = chunks[0]
+            async with db_session.tenant_session_scope(chunk.tenant_id) as session:
+                document = await DocumentRepository(session, chunk.tenant_id).get(chunk.document_id)
+                assert document is not None
+                self.saw_processing = document.status is DocumentStatus.PROCESSING
+
+    settings = _settings()
+    object_store = _FakeObjectStore()
+    index_store = _InspectingIndexStore()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="publish-first")
+    object_store.put(str(tenant_id), "publish-first", b"publish before ready")
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=object_store,  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+        search_store=index_store,  # type: ignore[arg-type]
+    )
+
+    assert result.status is DocumentStatus.READY
+    assert index_store.saw_processing is True
+
+
+async def test_claim_database_fault_is_normalized_for_celery_retry(
+    sqlite_engine: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-003: a transient claim fault cannot escape the task's retry taxonomy."""
+
+    async def _claim_fails(*_args: object, **_kwargs: object) -> object:
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(DocumentRepository, "begin_ingestion", _claim_fails)
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="claim-db")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=_settings(),
+            object_store=_FakeObjectStore(),  # type: ignore[arg-type]
+            gateway=_FakeGateway(),  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.code == "ingestion_claim_database_error"
+
+
+async def test_failure_finalizer_retries_after_transient_database_fault(
+    sqlite_engine: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-003: finalizer recovery preserves the original safe failure code."""
+
+    original = DocumentRepository.mark_ingestion_failed
+    attempts = 0
+
+    async def _flaky_finalizer(self: DocumentRepository, *args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("temporary commit failure")
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DocumentRepository, "mark_ingestion_failed", _flaky_finalizer)
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="finalize-db")
+    object_store = _FakeObjectStore()
+    object_store.put(str(tenant_id), "finalize-db", b"provider fails")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=_settings(),
+            object_store=object_store,  # type: ignore[arg-type]
+            gateway=_FakeGateway(fail=True),  # type: ignore[arg-type]
+        )
+
+    assert attempts == 2
+    assert excinfo.value.code == "ingestion_embedding_error"
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None
+        assert document.status is DocumentStatus.FAILED
+        assert document.ingestion_failure is not None
+        assert document.ingestion_failure["code"] == "ingestion_embedding_error"
 
 
 # --- Negatives (AC-6) -------------------------------------------------------
@@ -451,6 +855,12 @@ async def test_storage_unavailable_raises_retryable(sqlite_engine: None) -> None
             gateway=gateway,  # type: ignore[arg-type]
         )
 
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion could not fetch the stored object."
+
 
 async def test_embed_unavailable_raises_retryable(sqlite_engine: None) -> None:
     settings = _settings()
@@ -472,6 +882,130 @@ async def test_embed_unavailable_raises_retryable(sqlite_engine: None) -> None:
             object_store=store,
             gateway=gateway,  # type: ignore[arg-type]
         )
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.ingestion_failure is not None
+        assert doc.ingestion_failure["code"] == "ingestion_embedding_error"
+
+
+async def test_bad_provider_vector_is_terminal_with_normalized_code(
+    sqlite_engine: None,
+) -> None:
+    """#346: native-width drift keeps its actionable code but no provider detail."""
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway(fail=True, failure_code="embedding_dimension_mismatch")
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="bad-vector")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, b"provider dimension drift")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=store,  # type: ignore[arg-type]
+            gateway=gateway,  # type: ignore[arg-type]
+        )
+    assert excinfo.value.code == "embedding_dimension_mismatch"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.ingestion_failure is not None
+        assert doc.ingestion_failure["code"] == "embedding_dimension_mismatch"
+        assert "provider detail" not in (doc.error or "")
+
+
+async def test_unexpected_chunk_insert_failure_is_terminal(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression #346: an asyncpg-style insert fault never strands processing.
+
+    The old orchestration caught only provider ``DependencyError`` values.  A
+    fixed-width pgvector ``DataError`` therefore escaped after the claim commit,
+    leaving the row permanently ``processing``.  A generic repository fault is
+    enough to pin the transaction/finalization boundary without requiring live
+    Postgres in this unit test.
+    """
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="db-fault")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, b"content that must be embedded")
+
+    async def _insert_fails(*_args: object, **_kwargs: object) -> object:
+        raise SQLAlchemyError("expected 1024 dimensions, not 2048")
+
+    monkeypatch.setattr(ChunkRepository, "replace_for_ingestion", _insert_fails)
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=store,  # type: ignore[arg-type]
+            gateway=gateway,  # type: ignore[arg-type]
+            correlation_id="task-safe-correlation",
+        )
+    assert excinfo.value.code == "ingestion_database_error"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion failed while saving chunks."
+        assert doc.ingestion_attempts == 1
+        assert doc.ingestion_failure == {
+            "code": "ingestion_database_error",
+            "message": "Document ingestion failed while saving chunks.",
+            "attempt": 1,
+            "correlation_id": "task-safe-correlation",
+        }
+
+
+async def test_opensearch_failure_is_terminal_and_retryable(sqlite_engine: None) -> None:
+    """#346: derived-index faults also finalize the durable document state."""
+
+    class _FailingIndexStore(_FakeIndexStore):
+        async def upsert_chunks(self, chunks: Sequence[object], *, refresh: bool = False) -> None:
+            raise DependencyError("engine detail", code="search_error")
+
+    settings = _settings()
+    object_store = _FakeObjectStore()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="search-fault")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        object_store.put(str(tenant_id), doc.storage_key, b"search indexing must be terminal")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=object_store,  # type: ignore[arg-type]
+            gateway=_FakeGateway(),  # type: ignore[arg-type]
+            search_store=_FailingIndexStore(),  # type: ignore[arg-type]
+        )
+    assert excinfo.value.code == "ingestion_index_error"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion failed while updating the search index."
 
 
 # --- The Celery sync wrapper: retry / backoff / dead-letter -----------------
@@ -529,6 +1063,11 @@ def _patch_wrapper_collaborators(monkeypatch: pytest.MonkeyPatch, *, settings: S
     monkeypatch.setattr(ingest_module, "get_settings", lambda: settings)
     monkeypatch.setattr(ingest_module, "ObjectStore", lambda _s: object())
     monkeypatch.setattr(ingest_module, "LLMGateway", lambda _s: object())
+
+    async def _contract_ready(_settings: Settings) -> str:
+        return _settings.embedding_space_fingerprint
+
+    monkeypatch.setattr(ingest_module, "ensure_embedding_contract", _contract_ready)
 
 
 def test_wrapper_transient_fault_retries_with_exponential_backoff(
@@ -630,6 +1169,39 @@ def test_wrapper_final_attempt_dead_letters_and_returns(
     tid, did, reason = fail_calls[0]
     assert (tid, did) == (tenant_id, document_id)
     assert "after 3 retries" in reason
+
+
+def test_wrapper_finalizer_database_fault_has_bounded_recovery_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-003: exhausted work retries cannot leak a raw finalizer DB error."""
+
+    settings = _settings(INGESTION_MAX_RETRIES="3", INGESTION_RETRY_BACKOFF_SECONDS="1")
+    _patch_wrapper_collaborators(monkeypatch, settings=settings)
+
+    def _work_failed(*_args: object, **_kwargs: object) -> object:
+        raise IngestionError("work failed", attempt=7)
+
+    async def _database_down(*_args: object, **_kwargs: object) -> IngestionResult:
+        raise SQLAlchemyError("terminal commit unavailable")
+
+    monkeypatch.setattr(ingest_module, "ingest_document_async", _work_failed)
+    monkeypatch.setattr(ingest_module, "_fail", _database_down)
+
+    tid, did = uuid.uuid4(), uuid.uuid4()
+    retrying = _FakeTask(retries=3)
+    with pytest.raises(Retry):
+        _ingest_wrapper(retrying, str(tid), str(did))
+    assert len(retrying.retry_calls) == 1
+    retry_error = retrying.retry_calls[0]["exc"]
+    assert isinstance(retry_error, IngestionError)
+    assert retry_error.code == "ingestion_finalize_database_error"
+
+    exhausted = _FakeTask(retries=5)
+    result = _ingest_wrapper(exhausted, str(tid), str(did))
+    assert exhausted.retry_calls == []
+    assert result["status"] == DocumentStatus.PROCESSING.value
+    assert result["error"] == "Terminal state deferred to stranded-work recovery."
 
 
 def test_wrapper_success_returns_result_dict(monkeypatch: pytest.MonkeyPatch) -> None:

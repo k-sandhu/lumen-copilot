@@ -1331,6 +1331,8 @@ paths:
         redirect hop; ADR-0009 §3). An invalid OR SSRF-blocked URL is rejected with
         **422** (INV-8) — a blocked URL is a validation failure, not a 403. The
         created `web` source returns `pending` and its first sync is enqueued.
+        If API startup has already proved the embedding contract unavailable,
+        creation is rejected with **503 before any collection/source write**.
         For a **managed** connector (`gdrive`) the body is `{type: gdrive,
         config}` — **tenant-admin only** (every managed-source mutation is
         admin-gated at action time, ADR-0019 §1; any other role is **403**,
@@ -1353,6 +1355,7 @@ paths:
               schema: { $ref: "#/components/schemas/Source" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Problem" }
         "422":
           description: >
             Malformed body or invalid configuration (INV-8). `Problem.code` is
@@ -1402,7 +1405,9 @@ paths:
         non-owner or cross-tenant source is **404** (INV-1/INV-2). **Managed
         sources are admin-gated at action time** (ADR-0019 §1): a non-admin is
         **403** (INV-5); a `pending_auth` source cannot sync — **409** (INV-8).
-        Emits an audit event.
+        If the startup embedding contract is unavailable, a fresh enqueue
+        returns **503 without changing the source's durable status**. Emits an
+        audit event only for a successful fresh enqueue.
       tags: [sources]
       responses:
         "200":
@@ -1425,6 +1430,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   # --- Managed-connector OAuth (ADR-0019 §1; F-CB-0 #451) --------------------
   /sources/{sourceId}/connect:
@@ -4569,10 +4575,12 @@ components:
         Sync lifecycle for the connector health grid (ADR-0009 §4, ADR-0019 §1).
         `pending_auth` = a managed source was created but its OAuth consent has
         not completed (run `connectSource`); `pending` = authorized (or web),
-        first sync not yet run; `syncing` = a sync is in flight; `ready` = last
-        sync succeeded and content is indexed; `error` = the last sync failed
-        (see `last_error`; a dead OAuth grant additionally sets
-        `reauthorize_required`).
+        first sync not yet run; `syncing` = a sync is in flight; `ready` = the
+        last sync completed and every returned document is Ready for its current
+        ingestion attempt; `error` = the last sync failed or any returned
+        document is Failed/non-Ready (see `last_error`; partial success may retain
+        a non-zero Ready-only `indexed_count`; a dead OAuth grant additionally
+        sets `reauthorize_required`).
       enum: [pending_auth, pending, syncing, ready, error]
 
     SourceConfig:
@@ -4700,7 +4708,7 @@ components:
         indexed_count:
           type: integer
           minimum: 0
-          description: Number of documents this source has ingested (0 until the first sync completes).
+          description: Number of this source's documents currently Ready and indexed; excludes Failed/non-Ready documents, including after partial sync failure.
         last_synced_at:
           type: [string, "null"]
           format: date-time
@@ -4730,7 +4738,7 @@ components:
         indexed_count:
           type: integer
           minimum: 0
-          description: Number of documents this source has ingested (0 until the first sync completes).
+          description: Number of this source's documents currently Ready and indexed; excludes Failed/non-Ready documents, including after partial sync failure.
         last_synced_at:
           type: [string, "null"]
           format: date-time

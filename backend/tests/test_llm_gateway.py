@@ -73,6 +73,9 @@ def _settings(**overrides: str) -> Settings:
         "LLM_MODEL": "openrouter/openai/gpt-4o-mini",
         "LLM_EMBEDDING_MODEL": "openai/baai/bge-m3",
         "LLM_EMBEDDING_API_BASE": "https://openrouter.ai/api/v1",
+        # Most adapter tests use one-element vectors for speed. Tests whose
+        # fake returns another valid width override this beside the fake.
+        "LLM_EMBEDDING_DIMENSIONS": "1",
         "LLM_TIMEOUT_SECONDS": "60",
         **overrides,
     }
@@ -154,8 +157,17 @@ class _FakeStream:
 
 
 class _EmbeddingResponse:
-    def __init__(self, vectors: list[list[float]]) -> None:
-        self.data = [{"embedding": v} for v in vectors]
+    def __init__(
+        self,
+        vectors: list[list[object]],
+        *,
+        indices: list[int] | None = None,
+    ) -> None:
+        resolved = indices if indices is not None else list(range(len(vectors)))
+        self.data = [
+            {"embedding": vector, "index": index}
+            for vector, index in zip(vectors, resolved, strict=True)
+        ]
 
 
 # --- AC-1 / AC-5: chat returns a Completion with usage; model from config --
@@ -559,7 +571,7 @@ async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyP
         return _EmbeddingResponse([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
 
     monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
-    gw = LLMGateway(_settings())
+    gw = LLMGateway(_settings(LLM_EMBEDDING_DIMENSIONS="3"))
 
     result = await gw.embed(["alpha", "beta"])
 
@@ -576,6 +588,181 @@ async def test_embed_returns_one_embedding_per_input(monkeypatch: pytest.MonkeyP
     # #32: embeddings ride OpenRouter's OpenAI-compatible endpoint via api_base.
     assert captured["api_base"] == "https://openrouter.ai/api/v1"
     assert result[0].model == "openai/baai/bge-m3"
+
+
+@pytest.mark.parametrize("actual_dimensions", [1024, 2049])
+async def test_embed_rejects_provider_dimension_drift_before_persistence(
+    monkeypatch: pytest.MonkeyPatch, actual_dimensions: int
+) -> None:
+    """Regression #346: a non-2,048 provider vector fails at the LLM boundary.
+
+    The database and OpenSearch mappings are fixed-width.  Letting a 1,024- or
+    2,049-element response escape the gateway defers the error to asyncpg/the
+    search engine after the document is already ``processing``.  The adapter is
+    the first point that knows both the configured and actual dimensions, so it
+    must reject the response there with a provider-neutral error.
+    """
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.1] * actual_dimensions])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gw = LLMGateway(_settings(LLM_EMBEDDING_DIMENSIONS="2048"))
+
+    with pytest.raises(DependencyError) as excinfo:
+        await gw.embed(["dimension drift"])
+
+    assert excinfo.value.code == "embedding_dimension_mismatch"
+
+
+async def test_embed_reorders_a_complete_provider_index_permutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-004: provider response order cannot attach a vector to the wrong text."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[20.0], [10.0]], indices=[1, 0])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    result = await LLMGateway(_settings()).embed(["first", "second"])
+
+    assert [embedding.vector for embedding in result] == [[10.0], [20.0]]
+
+
+@pytest.mark.parametrize(
+    ("items", "expected_code"),
+    [
+        (
+            [{"index": 0, "embedding": [1.0]}, {"index": 0, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        ([{"index": 0, "embedding": [1.0]}], "embedding_count_mismatch"),
+        (
+            [{"index": 0, "embedding": [1.0]}, {"index": 2, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        (
+            [{"index": -1, "embedding": [1.0]}, {"index": 1, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        ([{"embedding": [1.0]}, {"index": 1, "embedding": [2.0]}], "embedding_response_invalid"),
+        ([{"index": 0}, {"index": 1, "embedding": [2.0]}], "embedding_response_invalid"),
+    ],
+)
+async def test_embed_rejects_incomplete_or_malformed_provider_indices(
+    monkeypatch: pytest.MonkeyPatch,
+    items: list[dict[str, object]],
+    expected_code: str,
+) -> None:
+    """R1-004: indices must be a unique, complete 0..N-1 permutation."""
+
+    async def fake_aembedding(**kwargs: Any) -> object:
+        response = type("MalformedEmbeddingResponse", (), {})()
+        response.data = items
+        return response
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["first", "second"])
+
+    assert excinfo.value.code == expected_code
+
+
+@pytest.mark.parametrize("coordinate", [True, "1.0", float("nan"), float("inf"), -float("inf")])
+async def test_embed_rejects_nonfinite_or_nonreal_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinate: object,
+) -> None:
+    """R1-004: only finite real scalars (and never booleans) cross the boundary."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[coordinate]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["poison"])
+
+    assert excinfo.value.code == "embedding_response_invalid"
+
+
+@pytest.mark.parametrize("sign", [1, -1], ids=["huge-positive", "huge-negative"])
+async def test_embed_normalizes_huge_json_integers_without_value_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    sign: int,
+) -> None:
+    """R2-005: arbitrary-size JSON ints cannot escape as ``OverflowError``."""
+
+    coordinate = sign * 10**10000
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[coordinate]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["overflow poison"])
+
+    assert excinfo.value.code == "embedding_response_invalid"
+    assert excinfo.value.detail == "Embedding provider returned a malformed vector."
+
+
+@pytest.mark.parametrize("poison_kind", ["huge", "nested", "mapping"])
+async def test_embed_normalizes_malformed_poisoned_cache_scalars(
+    monkeypatch: pytest.MonkeyPatch,
+    poison_kind: str,
+) -> None:
+    """R2-005: cache corruption shares the typed, content-safe provider boundary."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.5]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gateway = LLMGateway(_settings())
+    await gateway.embed(["cached scalar"], cache_namespace="tenant")
+
+    import app.llm.gateway as gateway_module
+
+    huge = -(10**10000)
+    poison: object = {
+        "huge": huge,
+        "nested": [huge],
+        "mapping": {"coordinate": huge},
+    }[poison_kind]
+    key = next(iter(gateway_module._embed_cache))
+    stored_at, _ = gateway_module._embed_cache[key]
+    gateway_module._embed_cache[key] = (stored_at, [poison])  # type: ignore[list-item]
+
+    with pytest.raises(DependencyError) as excinfo:
+        await gateway.embed(["cached scalar"], cache_namespace="tenant")
+
+    assert excinfo.value.code == "embedding_response_invalid"
+    assert excinfo.value.detail == "Embedding provider returned a malformed vector."
+
+
+async def test_embed_revalidates_a_poisoned_query_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-004: cache corruption is normalized instead of returning NaN downstream."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.5]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gateway = LLMGateway(_settings())
+    await gateway.embed(["cached"], cache_namespace="tenant")
+
+    import app.llm.gateway as gateway_module
+
+    key = next(iter(gateway_module._embed_cache))
+    stored_at, _ = gateway_module._embed_cache[key]
+    gateway_module._embed_cache[key] = (stored_at, [float("nan")])
+
+    with pytest.raises(DependencyError) as excinfo:
+        await gateway.embed(["cached"], cache_namespace="tenant")
+
+    assert excinfo.value.code == "embedding_response_invalid"
 
 
 async def test_embed_requests_float_encoding_format(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,7 +783,7 @@ async def test_embed_requests_float_encoding_format(monkeypatch: pytest.MonkeyPa
         return _EmbeddingResponse([[0.1, 0.2]])
 
     monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
-    gw = LLMGateway(_settings())
+    gw = LLMGateway(_settings(LLM_EMBEDDING_DIMENSIONS="2"))
 
     await gw.embed(["x"])
     assert captured["encoding_format"] == "float"
@@ -654,7 +841,7 @@ async def test_embed_caches_repeated_single_text_queries(
         return _EmbeddingResponse([[0.1, 0.2]])
 
     monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
-    gw = LLMGateway(_settings())
+    gw = LLMGateway(_settings(LLM_EMBEDDING_DIMENSIONS="2"))
 
     first = await gw.embed(["connection pool"], cache_namespace="tenant-a")
     second = await gw.embed(["connection pool"], cache_namespace="tenant-a")
@@ -959,7 +1146,7 @@ async def test_no_vendor_type_crosses_boundary(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
-    gw = LLMGateway(_settings())
+    gw = LLMGateway(_settings(LLM_EMBEDDING_DIMENSIONS="2"))
 
     completion = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
     assert type(completion).__module__ == "app.domain.llm"
@@ -1048,7 +1235,7 @@ async def test_live_embed_smoke(_live_gateway: LLMGateway) -> None:
     """One tiny real embedding call (skipped unless opted in).
 
     OpenRouter serves embeddings on an OpenAI-compatible endpoint (issue #32);
-    the gateway routes ``LLM_EMBEDDING_MODEL`` (default ``openai/baai/bge-m3``)
+    the gateway routes ``LLM_EMBEDDING_MODEL`` (the native-2,048 default)
     through ``LLM_EMBEDDING_API_BASE``. The returned vector width must equal the
     configured ``LLM_EMBEDDING_DIMENSIONS`` so a model/dim mismatch fails here,
     not deep in ingestion.

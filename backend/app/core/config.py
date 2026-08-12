@@ -12,16 +12,26 @@ process refuses to boot misconfigured rather than failing deep in a request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from functools import lru_cache
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as _APP_VERSION
 from app.domain.models import ModelTier
+
+# Embedding storage is a schema contract, not a deploy-time guess (#346).  Keep
+# these literals beside Settings so the provider adapter, ORM readiness check,
+# migration, and operator documentation all name the same native vector width.
+CANONICAL_EMBEDDING_MODEL = "openai/nvidia/nemotron-3-embed-1b:free"
+CANONICAL_EMBEDDING_DIMENSIONS = 2048
+LEGACY_EMBEDDING_DIMENSIONS = 1024
+EMBEDDING_SPACE_REVISION = "lumen-native-2048-v1"
 
 
 class ChatModelSetting(BaseModel):
@@ -491,7 +501,10 @@ class Settings(BaseSettings):
     # engine. An unreachable engine fails retrieval CLOSED (503), never an
     # unfiltered fallback.
     opensearch_url: str = Field(default="http://localhost:47186", alias="OPENSEARCH_URL")
-    opensearch_index: str = Field(default="lumen-chunks", alias="OPENSEARCH_INDEX")
+    # A vector field's dimension cannot be changed in-place.  The v2 index is a
+    # lossless cut-over target; the old lumen-chunks index remains available for
+    # rollback until the controlled re-embedding run is verified.
+    opensearch_index: str = Field(default="lumen-chunks-v2", alias="OPENSEARCH_INDEX")
     # 30s default (#258): bulk writes carry ~20KB-per-chunk embedding payloads
     # and kNN graph insertion is not instant; 10s proved too tight for real
     # batches on a laptop-sized single node. Queries stay far below this.
@@ -518,9 +531,9 @@ class Settings(BaseSettings):
     # LiteLLM's OpenAI-compatible client pointed at ``llm_embedding_api_base``
     # with the OpenRouter key — chat keeps the native ``openrouter/`` route.
     # Hence the ``openai/<author>/<model>`` form: LiteLLM strips ``openai/`` and
-    # sends ``baai/bge-m3`` to the configured base.
+    # sends the provider/model suffix to the configured base.
     llm_embedding_model: str = Field(
-        default="openai/baai/bge-m3",
+        default=CANONICAL_EMBEDDING_MODEL,
         alias="LLM_EMBEDDING_MODEL",
     )
     # Base URL embeddings are sent to (OpenRouter's OpenAI-compatible endpoint).
@@ -529,9 +542,14 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         alias="LLM_EMBEDDING_API_BASE",
     )
-    # Output dimension of ``llm_embedding_model`` (bge-m3 = 1024). Pins the
-    # pgvector column width for the ingestion migration; change with the model.
-    llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
+    # Native output dimension of the canonical model.  The schema remains fixed
+    # at this width; a runtime override is allowed only so readiness can reject a
+    # mismatched deployment explicitly instead of failing on an insert later.
+    llm_embedding_dimensions: int = Field(
+        default=CANONICAL_EMBEDDING_DIMENSIONS,
+        ge=1,
+        alias="LLM_EMBEDDING_DIMENSIONS",
+    )
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     # This is the BATCH budget — ingestion, summarisation, headless runs — where a
@@ -1468,6 +1486,39 @@ class Settings(BaseSettings):
         may be left blank in ``.env``).
         """
         return bool(self.openrouter_api_key.strip())
+
+    @property
+    def embedding_space_fingerprint(self) -> str:
+        """Stable, credential-free identity of the configured coordinate space.
+
+        Width alone does not identify an embedding space.  Model, provider/base,
+        native dimension, and Lumen's normalization contract are hashed together
+        so persisted/indexed vectors and query vectors can fail closed when any
+        coordinate-defining input changes. URL credentials/query/fragment are
+        deliberately excluded from the persisted fingerprint.
+        """
+
+        raw_base = self.llm_embedding_api_base.strip()
+        parsed = urlsplit(raw_base)
+        host = (parsed.hostname or "").lower()
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        normalized_base = (
+            f"{parsed.scheme.lower()}://{host}{parsed.path.rstrip('/')}"
+            if parsed.scheme and host
+            else raw_base.rstrip("/")
+        )
+        payload = json.dumps(
+            {
+                "api_base": normalized_base,
+                "dimensions": self.llm_embedding_dimensions,
+                "model": self.llm_embedding_model.strip(),
+                "revision": EMBEDDING_SPACE_REVISION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
     # The base64 dev vault key baked into the ``secrets_encryption_key`` default —

@@ -103,6 +103,33 @@ def _test_environment() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _offline_embedding_contract(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep ordinary unit/API startup offline while preserving an explicit gate.
+
+    Contract/preflight tests override this fixture's patch locally. Production
+    still performs the real DB/index/provider startup validation.
+    """
+
+    from app.core.config import get_settings
+    from app.ingestion.contract import (
+        mark_embedding_contract_valid,
+        reset_embedding_contract_gate,
+    )
+
+    reset_embedding_contract_gate()
+    mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
+
+    async def _validated_for_test(settings: object) -> str:
+        fingerprint = settings.embedding_space_fingerprint  # type: ignore[attr-defined]
+        mark_embedding_contract_valid(fingerprint)
+        return fingerprint
+
+    monkeypatch.setattr("app.main.provision_embedding_contract", _validated_for_test)
+    yield
+    reset_embedding_contract_gate()
+
+
+@pytest.fixture(autouse=True)
 def _close_orphan_event_loops() -> Iterator[None]:
     """Close per-test/-fixture asyncio loops eagerly so no socket leaks (#94).
 

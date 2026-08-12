@@ -115,6 +115,7 @@ async def test_live_eval_meets_thresholds() -> None:
         base_url=_OS_URL,
         index=f"lumen-eval-{uuid.uuid4().hex[:8]}",
         dimensions=settings.llm_embedding_dimensions,
+        embedding_fingerprint=settings.embedding_space_fingerprint,
         timeout_seconds=30.0,
     )
     try:
@@ -156,6 +157,7 @@ async def test_live_eval_meets_thresholds() -> None:
                 documents=GOLDEN_DOCUMENTS,
                 embed=gateway.embed,
                 store=store,
+                embedding_fingerprint=settings.embedding_space_fingerprint,
             )
             await seed.commit()
 

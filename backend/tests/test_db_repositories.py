@@ -21,6 +21,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -166,10 +167,10 @@ async def test_collection_and_document_and_chunk_chain(
         text="passage one",
         char_start=0,
         char_end=11,
-        embedding=[0.1] * 1024,
+        embedding=[0.1] * CANONICAL_EMBEDDING_DIMENSIONS,
     )
     assert chunk.embedding is not None
-    assert len(chunk.embedding) == 1024
+    assert len(chunk.embedding) == CANONICAL_EMBEDDING_DIMENSIONS
 
     listed = await chunks.list_for_document(doc.id)
     assert [c.id for c in listed] == [chunk.id]
@@ -747,14 +748,27 @@ async def test_replace_for_document_assigns_contiguous_ord(
     persisted = await chunks.replace_for_document(
         doc_id,
         [
-            ChunkInput(text="one", char_start=0, char_end=3, embedding=[0.1] * 1024),
-            ChunkInput(text="two", char_start=3, char_end=6, embedding=[0.2] * 1024),
+            ChunkInput(
+                text="one",
+                char_start=0,
+                char_end=3,
+                embedding=[0.1] * CANONICAL_EMBEDDING_DIMENSIONS,
+            ),
+            ChunkInput(
+                text="two",
+                char_start=3,
+                char_end=6,
+                embedding=[0.2] * CANONICAL_EMBEDDING_DIMENSIONS,
+            ),
         ],
     )
     assert [c.ord for c in persisted] == [0, 1]
     listed = await chunks.list_for_document(doc_id)
     assert [c.text for c in listed] == ["one", "two"]
-    assert all(c.embedding is not None and len(c.embedding) == 1024 for c in listed)
+    assert all(
+        c.embedding is not None and len(c.embedding) == CANONICAL_EMBEDDING_DIMENSIONS
+        for c in listed
+    )
 
 
 async def test_replace_for_document_is_idempotent(

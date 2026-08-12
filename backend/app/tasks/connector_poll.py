@@ -14,13 +14,13 @@ rate limit** (ADR-0009 §3) applies unchanged — the poll can never make the
 worker fan out unbounded fetches. Webhooks/push notification stay out (E7-2,
 the epic scope fence).
 
-The same beat carries the **stranded-ingestion sweep**. The incremental sync
+The same beat carries the **stranded-ingestion sweep**. Any upload or connector
 commits a page's rows + cursor first and drives ingestion post-commit
 (ADR-0019 §3's atomicity requirement is about the mutation/cursor pair); a
 worker that dies in that window leaves a ``pending`` connector document with no
 chunks, which the advanced cursor will never revisit and the reindex backfill
 cannot repair — it can re-index chunks, not create them. The sweep re-drives
-the **idempotent** ingestion task for connector documents left
+the **idempotent** ingestion task for documents left
 ``pending``/``processing`` past ``CONNECTOR_INGEST_RECOVERY_MINUTES``, which
 needs no new outbox table and no new document state: converging a stuck row is
 exactly what the existing status machine plus an idempotent task are for.
@@ -67,7 +67,7 @@ async def _poll_all(settings: Settings) -> int:
 
 
 async def _sweep_stranded(settings: Settings) -> int:
-    """Re-drive ingestion for connector documents stranded pre-ingestion.
+    """Re-drive ingestion for any document stranded pre-ingestion.
 
     The recovery for the one window the per-page commit discipline cannot make
     atomic (ADR-0019 §3): the row + cursor commit, then ingestion runs
@@ -84,16 +84,20 @@ async def _sweep_stranded(settings: Settings) -> int:
     cutoff = datetime.now(UTC) - timedelta(minutes=settings.connector_ingest_recovery_minutes)
     async with session_scope() as session:
         await bind_bypass(session)
-        stranded = await SourceReconcileRepository(session).list_stranded_connector_documents(
+        stranded = await SourceReconcileRepository(session).reserve_stranded_ingestion_documents(
             older_than=cutoff, limit=settings.connector_ingest_recovery_batch
         )
 
-    for tenant_id, document_id in stranded:
+    for tenant_id, document_id, _status in stranded:
         enqueue_ingestion(tenant_id, document_id)
     if stranded:
+        pending = sum(1 for _tid, _did, state in stranded if state.value == "pending")
+        processing = len(stranded) - pending
         log.warning(
-            "connector_poll.stranded_documents_redriven",
+            "ingestion.stranded_documents_redriven",
             count=len(stranded),
+            pending_count=pending,
+            processing_count=processing,
             older_than_minutes=settings.connector_ingest_recovery_minutes,
         )
     return len(stranded)

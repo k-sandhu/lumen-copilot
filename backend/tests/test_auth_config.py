@@ -33,6 +33,33 @@ _BASE = {
 _PROD_SECRETS_KEY = generate_master_key()
 
 
+def test_default_embedding_route_and_dimension_are_one_contract() -> None:
+    """Regression #346: clean deployments default to the migrated 2,048 route."""
+    settings = Settings(_env_file=None, **_BASE)
+    assert settings.llm_embedding_model == "openai/nvidia/nemotron-3-embed-1b:free"
+    assert settings.llm_embedding_dimensions == 2048
+
+
+def test_embedding_fingerprint_changes_for_same_width_model_or_provider() -> None:
+    """R1-006: dimension equality never implies coordinate-space equality."""
+
+    canonical = Settings(_env_file=None, **_BASE)
+    other_model = Settings(
+        _env_file=None,
+        **_BASE,
+        LLM_EMBEDDING_MODEL="openai/vendor/other-2048",
+    )
+    other_provider = Settings(
+        _env_file=None,
+        **_BASE,
+        LLM_EMBEDDING_API_BASE="https://embeddings.example.test/v1/",
+    )
+
+    assert len(canonical.embedding_space_fingerprint) == 64
+    assert canonical.embedding_space_fingerprint != other_model.embedding_space_fingerprint
+    assert canonical.embedding_space_fingerprint != other_provider.embedding_space_fingerprint
+
+
 def test_access_ttl_ceiling_is_enforced() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **_BASE, ACCESS_TOKEN_TTL_SECONDS=3600)  # > 900

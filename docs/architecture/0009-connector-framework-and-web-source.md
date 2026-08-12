@@ -28,12 +28,12 @@
    - apply a per-tenant fetch **rate limit**.
    These checks live in one `connectors/web/fetch.py` chokepoint with explicit negative tests. A bypass is a blocking defect.
 
-4. **Sources data model.** A tenant/owner-scoped `sources` table: `id, tenant_id, owner_id, type, config (jsonb: url, mode), status (pending|syncing|ready|error), last_synced_at, indexed_count, last_error`. Ingested documents link back via `source_id`. Sync runs as a **Celery task** (#21 tasks), never in the request path.
+4. **Sources data model.** A tenant/owner-scoped `sources` table: `id, tenant_id, owner_id, type, config (jsonb: url, mode), status (pending|syncing|ready|error), last_synced_at, indexed_count, last_error`. Ingested documents link back via `source_id`. Sync runs as a **Celery task** (#21 tasks), never in the request path. Source health is an aggregate of document truth: `ready` is permitted only when every document returned by the completed sync is itself `ready` for its current ingestion attempt. Any Failed or otherwise non-Ready document makes the source `error`; `indexed_count` counts only Ready documents and `last_error` records a content-safe failure summary. Partial success is therefore visible as Error with a non-zero Ready count, never falsely promoted to Ready.
 
 5. **Sources surface (contract, frozen first per [ADR-0006](0006-contract-first-parallel-implementation.md)):**
    - `GET /sources` — connector grid: per-source type, sync health/status, `indexed_count`, permission/owner.
-   - `POST /sources` — add a source (`type: web`, `url`); validates + SSRF-checks the URL, enqueues the first sync. **A write → read-before-write tier** (T1, owner-gated; spec 0004).
-   - `POST /sources/{id}/sync` — re-sync. `DELETE /sources/{id}` — remove (cascades its docs).
+   - `POST /sources` — add a source (`type: web`, `url`); validates + SSRF-checks the URL, enqueues the first sync. If API startup has already proved the embedding/storage/index contract incompatible, it returns a typed **503 before creating the backing collection or source row**. **A write → read-before-write tier** (T1, owner-gated; spec 0004).
+   - `POST /sources/{id}/sync` — re-sync. The same failed-startup admission gate returns **503 without changing the existing source status**. A message accepted before a dependency failure is retried with the bounded ingestion backoff policy; exhaustion durably terminalizes the source as `error` with only a stable, content-safe dependency code, never leaves it `pending` forever. `DELETE /sources/{id}` — remove (cascades its docs).
    - Every add/sync/delete emits an **audit** event.
 
 6. **Deferred (separate decisions, not this scope):** OAuth/third-party connectors (Drive/Slack/Confluence/etc.) — each needs source-side app registration + per-source ACL mirroring and its own ADR.

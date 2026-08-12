@@ -33,6 +33,7 @@ from app.core.errors import DependencyError
 from app.search import IndexedChunk, OpenSearchStore, SearchAllowFilter
 
 _DIMS = 8
+_FINGERPRINT = "f" * 64
 
 
 def _chunk(
@@ -57,6 +58,8 @@ def _chunk(
         embedding=tuple(embedding),
         char_start=0,
         char_end=len(text),
+        ingestion_attempt=3,
+        embedding_fingerprint=_FINGERPRINT,
     )
 
 
@@ -65,6 +68,7 @@ def _store(handler: httpx.MockTransport) -> OpenSearchStore:
         base_url="http://opensearch.test:9200",
         index="lumen-test",
         dimensions=_DIMS,
+        embedding_fingerprint=_FINGERPRINT,
         client=httpx.AsyncClient(base_url="http://opensearch.test:9200", transport=handler),
     )
 
@@ -149,11 +153,13 @@ async def test_hybrid_query_carries_permission_filter_in_both_legs() -> None:
         return list(out)
 
     expected = _normalized(allow.to_engine_filter())
+    expected.append({"term": {"embedding_fingerprint": _FINGERPRINT}})
     assert _normalized(legs[0]["bool"]["filter"]) == expected  # BM25 leg
     assert (
         _normalized(legs[1]["knn"]["embedding"]["filter"]["bool"]["filter"]) == expected
     )  # kNN leg
     assert captured["body"]["size"] == 5
+    assert {"term": {"embedding_fingerprint": _FINGERPRINT}} in legs[0]["bool"]["filter"]
 
 
 async def test_unreachable_engine_fails_closed() -> None:
@@ -189,12 +195,64 @@ async def test_upsert_bulk_is_ndjson_with_tenant_routing() -> None:
     assert captured["content_type"] == "application/x-ndjson"
     assert captured["params"] == {"refresh": "true"}
     action = json.loads(captured["lines"][0])["index"]
-    assert action["_id"] == str(chunk.chunk_id)
+    assert action["_id"] == f"{chunk.chunk_id}:3"
     assert action["routing"] == str(chunk.tenant_id)
     doc = json.loads(captured["lines"][1])
     assert doc["tenant_id"] == str(chunk.tenant_id)
     assert doc["owner_id"] == str(chunk.owner_id)
     assert doc["char_start"] == 0 and doc["char_end"] == len(chunk.text)
+    assert doc["ingestion_attempt"] == 3
+    assert doc["embedding_fingerprint"] == _FINGERPRINT
+
+
+async def test_publication_refresh_acknowledges_all_bulk_batches_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-001: Ready publication waits for one index-wide visibility barrier."""
+
+    import app.search.store as store_module
+
+    monkeypatch.setattr(store_module, "_BULK_BATCH_SIZE", 2)
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.path.endswith("/_bulk"):
+            return httpx.Response(200, json={"errors": False, "items": []})
+        assert request.url.path == "/lumen-test/_refresh"
+        return httpx.Response(200, json={"_shards": {"failed": 0}})
+
+    store = _store(httpx.MockTransport(handler))
+    tenant, owner = uuid.uuid4(), uuid.uuid4()
+    chunks = [_chunk(tenant_id=tenant, owner_id=owner) for _ in range(5)]
+
+    await store.upsert_chunks(chunks, refresh="wait_for")
+
+    assert requests == [
+        ("POST", "/_bulk", {}),
+        ("POST", "/_bulk", {}),
+        ("POST", "/_bulk", {}),
+        ("POST", "/lumen-test/_refresh", {}),
+    ]
+
+
+async def test_publication_refresh_failure_is_typed_and_fail_closed() -> None:
+    """R2-001: a missing visibility acknowledgement cannot publish success."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/_bulk"):
+            return httpx.Response(200, json={"errors": False, "items": []})
+        return httpx.Response(503, json={"error": "refresh unavailable"})
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.upsert_chunks(
+            [_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())],
+            refresh="wait_for",
+        )
+
+    assert excinfo.value.code == "search_error"
+    assert "refresh unavailable" not in str(excinfo.value)
 
 
 async def test_bulk_partial_failure_raises() -> None:
@@ -247,7 +305,7 @@ async def test_upsert_batches_large_chunk_sets(monkeypatch: pytest.MonkeyPatch) 
 
     assert [len(batch) for batch in requests] == [4, 4, 2]
     flattened = [cid for batch in requests for cid in batch]
-    assert flattened == [str(c.chunk_id) for c in chunks]  # order preserved
+    assert flattened == [f"{c.chunk_id}:{c.ingestion_attempt}" for c in chunks]
 
 
 async def test_upsert_failing_later_batch_fails_the_call(
@@ -300,6 +358,20 @@ class _StrictEngine:
             "embedding",
             "char_start",
             "char_end",
+            "ingestion_attempt",
+            "embedding_fingerprint",
+        }
+        self.mapping: dict[str, Any] = {
+            "dynamic": "strict",
+            "_meta": {"lumen_embedding_space": _FINGERPRINT},
+            "properties": {
+                "embedding": {"type": "knn_vector", "dimension": _DIMS},
+                **{
+                    field: {"type": "keyword"}
+                    for field in self.known_fields
+                    if field != "embedding"
+                },
+            },
         }
         self.requests: list[tuple[str, str]] = []
 
@@ -308,6 +380,8 @@ class _StrictEngine:
         self.requests.append((request.method, path))
         if request.method == "HEAD":
             return httpx.Response(200 if self.exists else 404)
+        if request.method == "GET" and path.endswith("/_mapping"):
+            return httpx.Response(200, json={"lumen-test": {"mappings": self.mapping}})
         if request.method == "PUT" and path.endswith("/_mapping"):
             body = json.loads(request.content.decode("utf-8"))
             self.known_fields |= set(body["properties"])
@@ -316,6 +390,7 @@ class _StrictEngine:
             if path == "/lumen-test":
                 body = json.loads(request.content.decode("utf-8"))
                 self.known_fields |= set(body["mappings"]["properties"])
+                self.mapping = body["mappings"]
                 self.exists = True
             return httpx.Response(200, json={"acknowledged": True})
         if path == "/_bulk":
@@ -383,6 +458,81 @@ async def test_rejected_mapping_update_fails_closed() -> None:
     assert excinfo.value.code == "search_error"
 
 
+async def test_embedding_mapping_dimension_mismatch_fails_closed() -> None:
+    """#346: an existing 1,024 mapping cannot accept configured 2,048 vectors."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "lumen-test": {
+                    "mappings": {
+                        "properties": {"embedding": {"type": "knn_vector", "dimension": 1024}}
+                    }
+                }
+            },
+        )
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.check_embedding_dimensions()
+    assert excinfo.value.code == "embedding_dimension_mismatch"
+
+
+async def test_same_width_different_embedding_fingerprint_fails_closed() -> None:
+    """R1-006: an index from another 2,048-wide model is still incompatible."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "lumen-test": {
+                    "mappings": {
+                        "_meta": {"lumen_embedding_space": "a" * 64},
+                        "properties": {"embedding": {"type": "knn_vector", "dimension": _DIMS}},
+                    }
+                }
+            },
+        )
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.check_embedding_contract()
+    assert excinfo.value.code == "embedding_space_mismatch"
+
+
+async def test_ensure_index_never_mutates_an_incompatible_existing_index() -> None:
+    """R1-005/R1-006: readiness/preflight cannot poison foreign vectors."""
+
+    mutations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "lumen-test": {
+                        "mappings": {
+                            "_meta": {"lumen_embedding_space": "d" * 64},
+                            "properties": {"embedding": {"type": "knn_vector", "dimension": _DIMS}},
+                        }
+                    }
+                },
+            )
+        mutations.append(f"{request.method} {request.url.path}")
+        return httpx.Response(200, json={"acknowledged": True})
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.ensure_index()
+    assert excinfo.value.code == "embedding_space_mismatch"
+    assert mutations == []
+
+
 # --- Live round-trip against the base-stack engine (skips when offline) ------
 
 _OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")
@@ -421,7 +571,13 @@ async def test_live_round_trip_hybrid_is_permission_filtered() -> None:
     dropped in teardown.
     """
     index = f"lumen-test-{uuid.uuid4().hex[:8]}"
-    store = OpenSearchStore(base_url=_OS_URL, index=index, dimensions=_DIMS, timeout_seconds=15.0)
+    store = OpenSearchStore(
+        base_url=_OS_URL,
+        index=index,
+        dimensions=_DIMS,
+        embedding_fingerprint=_FINGERPRINT,
+        timeout_seconds=15.0,
+    )
     tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
     u1, u2, u3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     own = _chunk(tenant_id=tenant_a, owner_id=u1, hot=1)
