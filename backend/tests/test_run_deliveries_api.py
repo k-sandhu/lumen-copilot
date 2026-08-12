@@ -97,46 +97,68 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 roles=[Role.MEMBER],
             )
             a_assistant = await AssistantRepository(seed, ta.id).create(
-                owner_id=alice.id, name="A", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=None,
+                owner_id=alice.id,
+                name="A",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=None,
             )
             b_assistant = await AssistantRepository(seed, tb.id).create(
-                owner_id=carol.id, name="B", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=None,
+                owner_id=carol.id,
+                name="B",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=None,
             )
 
             async def _run(tenant_id: uuid.UUID, owner_id: uuid.UUID, assistant_id: uuid.UUID):
                 return await RunRepository(seed, tenant_id).create(
-                    owner_id=owner_id, assistant_id=assistant_id,
-                    assistant_version_id=None, trigger=RunTrigger.MANUAL,
+                    owner_id=owner_id,
+                    assistant_id=assistant_id,
+                    assistant_version_id=None,
+                    trigger=RunTrigger.MANUAL,
                 )
 
             deliveries_a = RunDeliveryRepository(seed, ta.id)
             # Alice: one unread inbox delivery + one already-read.
             run1 = await _run(ta.id, alice.id, a_assistant.id)
             alice_delivery = await deliveries_a.create(
-                recipient_id=alice.id, run_id=run1.id, schedule_id=None,
-                kind=RunDeliveryKind.INBOX, status=RunDeliveryStatus.DELIVERED,
+                recipient_id=alice.id,
+                run_id=run1.id,
+                schedule_id=None,
+                kind=RunDeliveryKind.INBOX,
+                status=RunDeliveryStatus.DELIVERED,
                 summary="Alice run ready.",
             )
             run2 = await _run(ta.id, alice.id, a_assistant.id)
             alice_read = await deliveries_a.create(
-                recipient_id=alice.id, run_id=run2.id, schedule_id=None,
-                kind=RunDeliveryKind.INBOX, status=RunDeliveryStatus.READ,
+                recipient_id=alice.id,
+                run_id=run2.id,
+                schedule_id=None,
+                kind=RunDeliveryKind.INBOX,
+                status=RunDeliveryStatus.READ,
                 summary="Old run.",
             )
             # Bob: a delivery in the same tenant, addressed to a different user.
             run3 = await _run(ta.id, bob.id, a_assistant.id)
             bob_delivery = await deliveries_a.create(
-                recipient_id=bob.id, run_id=run3.id, schedule_id=None,
-                kind=RunDeliveryKind.INBOX, status=RunDeliveryStatus.DELIVERED,
+                recipient_id=bob.id,
+                run_id=run3.id,
+                schedule_id=None,
+                kind=RunDeliveryKind.INBOX,
+                status=RunDeliveryStatus.DELIVERED,
                 summary="Bob run.",
             )
             # Carol: a delivery in another tenant.
             run4 = await _run(tb.id, carol.id, b_assistant.id)
             carol_delivery = await RunDeliveryRepository(seed, tb.id).create(
-                recipient_id=carol.id, run_id=run4.id, schedule_id=None,
-                kind=RunDeliveryKind.INBOX, status=RunDeliveryStatus.DELIVERED,
+                recipient_id=carol.id,
+                run_id=run4.id,
+                schedule_id=None,
+                kind=RunDeliveryKind.INBOX,
+                status=RunDeliveryStatus.DELIVERED,
                 summary="Carol run.",
             )
             await seed.commit()
@@ -274,12 +296,17 @@ async def test_other_owner_mark_read_is_404(client: AsyncClient, seeded: _Seeded
     assert resp.status_code == 404
 
 
-async def test_unknown_delivery_id_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_unknown_delivery_id_is_404(
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
+) -> None:
     token = await _login(client, seeded.alice_email)
-    resp = await client.post(
-        f"/api/v1/run-deliveries/{uuid.uuid4()}/read", headers=_auth(token)
-    )
+    resp = await client.post(f"/api/v1/run-deliveries/{uuid.uuid4()}/read", headers=_auth(token))
     assert resp.status_code == 404
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].metadata == {
+        "attempted_action": "run.delivery.read",
+        "reason": "not_visible",
+    }
 
 
 async def test_deliveries_require_a_token(client: AsyncClient, seeded: _Seeded) -> None:

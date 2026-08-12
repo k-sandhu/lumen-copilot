@@ -4267,19 +4267,18 @@ def _classify_source_ip(
     if zone_index >= 0:
         candidate = candidate[:zone_index]
 
-    # Parse to VALIDATE, but store the candidate text rather than `str(parsed)`.
-    # Python's canonical form is not Postgres's: `ipaddress` renders
-    # `::ffff:1.2.3.4` as `::ffff:102:304`, while `select '::ffff:1.2.3.4'::inet`
-    # keeps the dotted form. Normalising here would quietly rewrite the address an
-    # operator sees in the audit trail into a different spelling than the database
-    # itself would have stored. (Note `ip_address` PRESERVES a zone id, so the strip
-    # above — not the parse — is what keeps link-local addresses out of `INET`.)
+    # PostgreSQL INET canonicalises text on round-trip. Canonicalise *before* both
+    # insert and idempotent-payload comparison so an expanded IPv6 spelling or a
+    # dotted IPv4-mapped IPv6 address cannot commit successfully and then fail its
+    # own equality check (R3-001). `ip_interface` preserves host bits for the INET
+    # forms carrying a prefix (`10.1.2.3/8`); `ip_network(strict=False)` would
+    # silently rewrite that value to `10.0.0.0/8`.
     try:
-        ipaddress.ip_address(candidate)
+        canonical = str(ipaddress.ip_address(candidate))
     except ValueError:
         try:
-            # `INET` also accepts CIDR (`10.0.0.0/8`) — a network, not an address.
-            ipaddress.ip_network(candidate, strict=False)
+            # `INET` accepts an address plus a prefix, retaining host bits.
+            canonical = str(ipaddress.ip_interface(candidate))
         except ValueError:
             lowered = text.lower()
             if lowered == AuditSourceOrigin.SYSTEM.value:
@@ -4291,7 +4290,7 @@ def _classify_source_ip(
             # caller to log, because silently losing every address is how a
             # misconfigured proxy destroys audit fidelity without anyone noticing.
             return AuditSourceOrigin.UNKNOWN, None, text
-    return AuditSourceOrigin.CLIENT, candidate, None
+    return AuditSourceOrigin.CLIENT, canonical, None
 
 
 class AuditEventRepository(_TenantScopedRepository):

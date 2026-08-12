@@ -64,7 +64,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import ValidationError
+from app.core.errors import ForbiddenError, ValidationError
 from app.core.logging import get_logger
 from app.db.repositories import LlmProviderRepository
 from app.domain.audit import AuditAction, AuditActor
@@ -78,7 +78,7 @@ from app.domain.entities import (
 )
 from app.llm.provider_catalog import discover_models
 from app.net.egress import EgressBlockedError, resolve_safe_ip
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.services.secrets_service import SecretsService, build_secrets_service
 
 log = get_logger(__name__)
@@ -127,6 +127,7 @@ class LlmProviderService:
         roles: tuple[Role, ...],
         secrets: SecretsService,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
         user_agent: str,
@@ -140,6 +141,8 @@ class LlmProviderService:
         self._is_admin = Role.ADMIN in roles
         self._secrets = secrets
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._user_agent = user_agent
@@ -184,22 +187,40 @@ class LlmProviderService:
             )
         host = parts.hostname
         if not host:
-            raise ValidationError(
-                "LLM provider base URL has no host.", code="base_url_scheme"
-            )
+            raise ValidationError("LLM provider base URL has no host.", code="base_url_scheme")
         try:
             resolve_safe_ip(host)
         except EgressBlockedError as exc:
             raise ValidationError(str(exc), code="base_url_blocked") from exc
 
-    async def _visible(self, provider_id: UUID) -> LlmProvider | None:
+    async def _require_admin(self, *, attempted_action: str, resource_id: str) -> None:
+        if self._is_admin:
+            return
+        await self._denials.emit(
+            resource_type="llm_provider",
+            resource_id=resource_id,
+            attempted_action=attempted_action,
+            reason="missing_required_role",
+            required_roles=(Role.ADMIN.value,),
+        )
+        raise ForbiddenError("LLM provider management requires the admin role.")
+
+    async def _visible(self, provider_id: UUID, *, attempted_action: str) -> LlmProvider | None:
         """Fetch a provider in the caller's tenant, or ``None`` (→ 404).
 
         ``None`` for a missing id or a foreign-tenant id (the repository sees no
         row) — INV-1 collapses both to 404 at the router. Admin-gating is the
         router's; every tenant admin may manage any provider in the tenant.
         """
-        return await self._providers.get(provider_id)
+        provider = await self._providers.get(provider_id)
+        if provider is None:
+            await self._denials.emit(
+                resource_type="llm_provider",
+                resource_id=str(provider_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
+        return provider
 
     async def _store_api_key(self, provider_id: UUID, api_key: str) -> tuple[UUID, str]:
         """Store the write-only API key via CC-C; return ``(secret_id, hint)``.
@@ -241,9 +262,7 @@ class LlmProviderService:
             secret_id = UUID(api_key_secret_ref)
         except ValueError:
             return None
-        return await self._secrets.get_secret_plaintext(
-            secret_id, accessor=AuditActor.system()
-        )
+        return await self._secrets.get_secret_plaintext(secret_id, accessor=AuditActor.system())
 
     # --- discovery ----------------------------------------------------------
 
@@ -264,6 +283,7 @@ class LlmProviderService:
             user_agent=self._user_agent,
             http_client=self._discovery_client,
         )
+
     async def _run_discovery(self, provider: LlmProvider) -> LlmProvider:
         """Discover + persist a provider's models; record ready/error, never raise.
 
@@ -325,11 +345,15 @@ class LlmProviderService:
 
     async def list_providers(self) -> list[LlmProvider]:
         """Every registered provider in the caller's tenant (newest first, INV-1)."""
+        await self._require_admin(attempted_action="llm_provider.list", resource_id="collection")
         return await self._providers.list_for_tenant()
 
     async def get(self, provider_id: UUID) -> LlmProvider | None:
         """Fetch one provider in the caller's tenant, or ``None`` (→ 404)."""
-        return await self._visible(provider_id)
+        await self._require_admin(
+            attempted_action="llm_provider.read", resource_id=str(provider_id)
+        )
+        return await self._visible(provider_id, attempted_action="llm_provider.read")
 
     async def create(
         self,
@@ -357,6 +381,7 @@ class LlmProviderService:
             ValidationError: unsupported type, or an invalid / non-https / SSRF-blocked
                 base URL — all mapped to **422** (INV-8).
         """
+        await self._require_admin(attempted_action="llm_provider.create", resource_id="new")
         parsed = self._parse_provider_type(provider_type)
         self._validate_base_url(base_url)
 
@@ -415,7 +440,10 @@ class LlmProviderService:
         model snapshot). Audits ``llm_provider.updated`` (INV-6). ``None`` when not
         visible (→ 404).
         """
-        provider = await self._visible(provider_id)
+        await self._require_admin(
+            attempted_action="llm_provider.update", resource_id=str(provider_id)
+        )
+        provider = await self._visible(provider_id, attempted_action="llm_provider.update")
         if provider is None:
             return None
 
@@ -475,7 +503,10 @@ class LlmProviderService:
         snapshot preserved) — never raises (a bad provider is a recorded state).
         Audits ``llm_provider.discovered`` (INV-6). ``None`` when not visible (→ 404).
         """
-        provider = await self._visible(provider_id)
+        await self._require_admin(
+            attempted_action="llm_provider.refresh", resource_id=str(provider_id)
+        )
+        provider = await self._visible(provider_id, attempted_action="llm_provider.refresh")
         if provider is None:
             return None
         return await self._run_discovery(provider)
@@ -487,7 +518,10 @@ class LlmProviderService:
         CC-C vault secret (if any) is deleted, then the provider row. Audits
         ``llm_provider.deleted`` (INV-6). Returns ``False`` when not visible.
         """
-        provider = await self._visible(provider_id)
+        await self._require_admin(
+            attempted_action="llm_provider.delete", resource_id=str(provider_id)
+        )
+        provider = await self._visible(provider_id, attempted_action="llm_provider.delete")
         if provider is None:
             return False
 
@@ -541,6 +575,7 @@ def build_llm_provider_service(
     owner_id: UUID,
     roles: tuple[Role, ...],
     audit: AuditSink,
+    denials: PermissionDeniedContext,
     request_id: str,
     source_ip: str,
     discovery_client: httpx.AsyncClient | None = None,
@@ -573,6 +608,7 @@ def build_llm_provider_service(
         roles=roles,
         secrets=secrets,
         audit=audit,
+        denials=denials,
         request_id=request_id,
         source_ip=source_ip,
         user_agent=settings.web_user_agent,

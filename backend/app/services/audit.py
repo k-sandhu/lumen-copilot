@@ -228,11 +228,91 @@ class PermissionDeniedRecorder:
         )
 
 
+class PermissionDeniedContext:
+    """Mandatory trusted attribution bundled with the durable denial capability.
+
+    Direct-resource services receive this value as one required constructor
+    dependency instead of independently accepting an optional recorder, actor,
+    request id, and peer address.  That makes the guard boundary mechanically
+    complete: a service that can return a 403/404 cannot be built without the
+    canonical durable sink and trusted attribution (R3-002).  User-facing API
+    construction binds a token-derived user; trusted background guards may instead
+    bind the explicit system or anonymous/null actor shape.  A user service must
+    call :meth:`assert_user` or :meth:`require_user`, which prevents those explicit
+    non-user shapes (or a foreign user) from being mistaken for its principal.
+    """
+
+    def __init__(
+        self,
+        recorder: PermissionDeniedRecorder,
+        *,
+        actor: AuditActor,
+        request_id: str,
+        source_ip: str,
+    ) -> None:
+        if not request_id.strip():
+            raise ValueError("Denial context requires a request id.")
+        if not source_ip.strip():
+            raise ValueError("Denial context requires a source sentinel/address.")
+        self._recorder = recorder
+        self._actor = actor
+        self._request_id = request_id
+        self._source_ip = source_ip
+
+    @property
+    def actor(self) -> AuditActor:
+        """The trusted request/system actor bound at construction."""
+        return self._actor
+
+    @property
+    def request_id(self) -> str:
+        """The middleware-minted correlation id."""
+        return self._request_id
+
+    @property
+    def source_ip(self) -> str:
+        """The peer address or explicit system/unknown sentinel."""
+        return self._source_ip
+
+    def assert_user(self, user_id: UUID) -> None:
+        """Fail before a guard if service identity and audit actor diverge."""
+        if self.require_user() != user_id:
+            raise ValueError("Denial actor must match the service's authenticated principal.")
+
+    def require_user(self) -> UUID:
+        """Return the trusted user id, rejecting explicit system/null actor shapes."""
+        if self._actor.actor_id is None or self._actor.is_system or self._actor.is_anonymous:
+            raise ValueError("Denial context is not bound to an authenticated user.")
+        return self._actor.actor_id
+
+    async def emit(
+        self,
+        *,
+        resource_type: str,
+        resource_id: str,
+        attempted_action: str,
+        reason: str,
+        required_roles: Sequence[str] = (),
+    ) -> AuditEvent:
+        """Persist one denial with the bound trusted attribution."""
+        return await self._recorder.emit(
+            actor=self._actor,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            attempted_action=attempted_action,
+            reason=reason,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            required_roles=required_roles,
+        )
+
+
 __all__ = [
     "AuditAction",
     "AuditActor",
     "AuditOutcome",
     "AuditSink",
+    "PermissionDeniedContext",
     "PermissionDeniedRecorder",
     "emit_permission_denied",
 ]

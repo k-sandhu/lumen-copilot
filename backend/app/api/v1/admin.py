@@ -45,6 +45,7 @@ from app.api.deps import (
     DbSession,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
     require_roles,
 )
@@ -506,6 +507,7 @@ async def attest_member_identity(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> MemberResponse:
     """Attest a member's email identity for connector-ACL mapping (ADR-0019 §2).
 
@@ -516,9 +518,12 @@ async def attest_member_identity(
     service = AdminService(session, tenant_id=tenant_id, settings=settings)
     attested = await service.attest_member_identity(
         member_id,
-        actor_id=principal.user_id,
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
     )
     if attested is None:
         raise NotFoundError("Member not found.")
@@ -1187,6 +1192,12 @@ def _build_llm_provider_service(
         owner_id=principal.user_id,
         roles=principal.roles,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

@@ -32,7 +32,7 @@ from app.domain.audit import AuditActor
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.realtime.backplane import Backplane, RedisBackplane
-from app.services.audit import AuditSink, PermissionDeniedRecorder
+from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
 from app.services.auth_service import require_role
 from app.storage import ObjectStore
 
@@ -100,6 +100,22 @@ class AuditSinkFactoryValue:
             request_session=self._session,
         )
 
+    def denial_context(
+        self,
+        tenant_id: UUID,
+        *,
+        actor: AuditActor,
+        request_id: str,
+        source_ip: str,
+    ) -> PermissionDeniedContext:
+        """Bundle the canonical recorder with trusted request attribution."""
+        return PermissionDeniedContext(
+            self.denials(tenant_id),
+            actor=actor,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+
 
 def make_audit_sink_factory(
     session: DbSession,
@@ -121,6 +137,22 @@ def make_audit_sink_factory(
 
 
 AuditSinkFactory = Annotated[AuditSinkFactoryValue, Depends(make_audit_sink_factory)]
+
+
+def authenticated_denial_context(
+    make_audit_sink: AuditSinkFactoryValue,
+    *,
+    tenant_id: UUID,
+    principal: Principal,
+    request: Request,
+) -> PermissionDeniedContext:
+    """The one API seam for token-bound durable-denial attribution."""
+    return make_audit_sink.denial_context(
+        tenant_id,
+        actor=AuditActor.user(principal.user_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
 
 
 @lru_cache(maxsize=1)

@@ -38,7 +38,12 @@ from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor, AuditEnvelopeError
 from app.domain.entities import AuditOutcome
-from app.services.audit import AuditSink, PermissionDeniedRecorder, emit_permission_denied
+from app.services.audit import (
+    AuditSink,
+    PermissionDeniedContext,
+    PermissionDeniedRecorder,
+    emit_permission_denied,
+)
 from tests._audit_helpers import RecordingDurableAuditTransactions, denial_recorder
 
 # Importing models registers them on Base.metadata for create_all.
@@ -229,6 +234,39 @@ async def test_durable_denial_propagates_canonical_sink_failure(
         )
 
     assert await AuditEventRepository(session, tenant_id).list_recent() == []
+
+
+@pytest.mark.parametrize("actor", [AuditActor.system(), AuditActor.anonymous()])
+def test_explicit_non_user_denial_context_cannot_impersonate_a_user(
+    actor: AuditActor,
+) -> None:
+    """Background/null attribution is valid, but never passes a user guard."""
+    ledger = RecordingDurableAuditTransactions()
+    context = PermissionDeniedContext(
+        denial_recorder(ledger, object(), uuid.uuid4()),
+        actor=actor,
+        request_id="req-background",
+        source_ip="system" if actor.is_system else "unknown",
+    )
+    with pytest.raises(ValueError, match="not bound to an authenticated user"):
+        context.require_user()
+    assert ledger.events == []
+
+
+def test_denial_context_rejects_a_foreign_service_actor_before_the_guard() -> None:
+    """A caller cannot pair trusted user A attribution with user B service state."""
+    ledger = RecordingDurableAuditTransactions()
+    actor_id = uuid.uuid4()
+    context = PermissionDeniedContext(
+        denial_recorder(ledger, object(), uuid.uuid4()),
+        actor=AuditActor.user(actor_id),
+        request_id="req-actor-match",
+        source_ip="203.0.113.7",
+    )
+    assert context.require_user() == actor_id
+    with pytest.raises(ValueError, match="must match"):
+        context.assert_user(uuid.uuid4())
+    assert ledger.events == []
 
 
 async def test_staticpool_denial_does_not_commit_the_callers_pending_write(
@@ -511,7 +549,13 @@ async def test_transient_pre_persistence_timeout_retries_the_same_event_identity
                 source_ip="unknown",
             )
 
-        assert attempted_ids == [event.id, event.id]
+        # A fast retry invokes the operation twice.  On a loaded runner the
+        # retry can persist and then lose its COMMIT acknowledgement, in which
+        # case reconciliation invokes the same operation once more to validate
+        # the canonical payload.  Both paths are bounded and must reuse the one
+        # guard-assigned identity.
+        assert 2 <= len(attempted_ids) <= 3
+        assert set(attempted_ids) == {event.id}
         async with audit_factory() as readback:
             events = await AuditEventRepository(readback, tenant.id).list_recent()
             assert [stored.id for stored in events] == [event.id]
@@ -1142,10 +1186,12 @@ async def test_the_sentinel_does_not_clobber_existing_metadata(session: AsyncSes
         # Plain addresses, stored canonically.
         ("203.0.113.10", "203.0.113.10"),
         ("2001:db8::1", "2001:db8::1"),
-        ("::ffff:1.2.3.4", "::ffff:1.2.3.4"),
+        ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
+        ("::ffff:1.2.3.4", "::ffff:102:304"),
         ("  192.168.1.5  ", "192.168.1.5"),
         # `INET` accepts CIDR too.
         ("10.0.0.0/8", "10.0.0.0/8"),
+        ("10.1.2.3/8", "10.1.2.3/8"),
         # ZONE-SCOPED: Python parses it, Postgres does NOT — storing the raw text would
         # reproduce the very rollback this function exists to prevent, for any
         # link-local peer. The zone is dropped and the address kept.
@@ -1172,6 +1218,46 @@ async def test_real_addresses_survive_in_every_form_a_client_can_present(
     )
     assert event.source_ip == stored
     assert event.source_origin == "client"
+
+
+@pytest.mark.parametrize(
+    ("given", "canonical"),
+    [
+        ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
+        ("::ffff:192.0.2.128", "::ffff:c000:280"),
+        ("[2001:0db8:0:0:0:0:0:1]:443", "2001:db8::1"),
+        ("fe80:0:0:0:0:0:0:1%eth0", "fe80::1"),
+        ("10.1.2.3/8", "10.1.2.3/8"),
+    ],
+)
+async def test_explicit_idempotency_uses_the_same_canonical_ip_on_insert_and_retry(
+    session: AsyncSession,
+    given: str,
+    canonical: str,
+) -> None:
+    """R3-001: equivalent PostgreSQL INET spellings must reconcile as one payload."""
+    tenant_id = uuid.uuid4()
+    event_id = uuid.uuid4()
+    repository = AuditEventRepository(session, tenant_id)
+    kwargs = {
+        "event_id": event_id,
+        "action": AuditAction.PERMISSION_DENIED.value,
+        "resource_type": "document",
+        "outcome": AuditOutcome.DENIED,
+        "actor_id": uuid.uuid4(),
+        "resource_id": str(uuid.uuid4()),
+        "request_id": "req-canonical-inet",
+        "source_ip": given,
+        "metadata": {"attempted_action": "document.read", "reason": "not_visible"},
+    }
+
+    first = await repository.record(**kwargs)
+    retry_kwargs = {**kwargs, "source_ip": canonical}
+    second = await repository.record(**retry_kwargs)
+
+    assert first.id == second.id == event_id
+    assert first.source_origin == second.source_origin == "client"
+    assert first.source_ip == second.source_ip == canonical
 
 
 async def test_a_caller_metadata_key_named_source_ip_is_not_clobbered(

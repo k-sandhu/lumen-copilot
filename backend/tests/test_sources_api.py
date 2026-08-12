@@ -298,7 +298,9 @@ async def test_add_malformed_body_is_422(client: AsyncClient, seeded: _Seeded) -
 # --- INV-1/INV-2: cross-tenant + cross-owner → 404 --------------------------
 
 
-async def test_sync_other_owner_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_sync_other_owner_is_404(
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
+) -> None:
     bob_token = await _login(client, seeded.bob_email)
     resp = await _add(client, bob_token, f"http://{_PUBLIC}/bob")
     bob_source_id = resp.json()["id"]
@@ -306,6 +308,11 @@ async def test_sync_other_owner_is_404(client: AsyncClient, seeded: _Seeded) -> 
     alice_token = await _login(client, seeded.alice_email)
     resp = await client.post(f"/api/v1/sources/{bob_source_id}/sync", headers=_auth(alice_token))
     assert resp.status_code == 404  # never 403 (existence non-disclosure)
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].metadata == {
+        "attempted_action": "source.sync",
+        "reason": "not_visible",
+    }
 
 
 async def test_delete_cross_tenant_is_404(client: AsyncClient, seeded: _Seeded) -> None:

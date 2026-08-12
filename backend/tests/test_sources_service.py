@@ -33,6 +33,7 @@ from app.domain.entities import DocumentStatus, Role, SourceStatus
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
 from app.storage.keys import assert_key_owned_by
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -126,6 +127,7 @@ def _service(
         owner_id=owner_id,
         object_store=store or _FakeObjectStore(),  # type: ignore[arg-type]
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=denial_context(RecordingDurableAuditTransactions(), session, tenant_id, owner_id),
         request_id="req-1",
         source_ip="203.0.113.5",
     )

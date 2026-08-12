@@ -813,6 +813,7 @@ async def test_get_other_owner_same_tenant_is_404(
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
     store: FakeObjectStore,
+    durable_audit_ledger,
 ) -> None:
     coll = await _seed_collection(
         sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email
@@ -827,6 +828,12 @@ async def test_get_other_owner_same_tenant_is_404(
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
     assert resp.status_code == 404
+    assert len(durable_audit_ledger.events) == 1
+    denial = durable_audit_ledger.events[0]
+    assert denial.tenant_id == seeded.tenant_a
+    assert denial.resource_type == "document"
+    assert denial.resource_id == str(doc_id)
+    assert denial.metadata == {"attempted_action": "document.read", "reason": "not_visible"}
 
 
 async def test_get_cross_tenant_is_404(

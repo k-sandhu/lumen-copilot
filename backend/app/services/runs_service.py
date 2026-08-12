@@ -616,6 +616,7 @@ def _build_run_mcp_tools_factory(
             owner_id=principal.user_id,
             roles=principal.roles,
             audit=audit,
+            denials=None,  # run-tool resolution is list-only, with no direct-id guard
             request_id=request_id,
             source_ip=source_ip,
         )

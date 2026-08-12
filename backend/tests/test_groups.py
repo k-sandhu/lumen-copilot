@@ -50,6 +50,7 @@ from app.search import SearchAllowFilter
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
 from app.services.groups_service import GroupsService
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 # Importing models registers them on Base.metadata.
 import app.db.models  # noqa: F401  isort: skip
@@ -175,9 +176,9 @@ async def test_ensure_system_group_is_idempotent(
     groups = GroupRepository(session, tenant_a)
     first, first_created = await groups.ensure_system_group()
     second, second_created = await groups.ensure_system_group()
-    assert first_created is True and second_created is False, (
-        "only the inserting call reports creation, so only it audits"
-    )
+    assert (
+        first_created is True and second_created is False
+    ), "only the inserting call reports creation, so only it audits"
     assert first.id == second.id
     assert len([g for g in await groups.list_all() if g.is_system]) == 1
 
@@ -491,6 +492,7 @@ def _groups_service(
         actor_id=actor_id,
         roles=roles,
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=denial_context(RecordingDurableAuditTransactions(), session, tenant_id, actor_id),
         request_id="req-test",
         source_ip="203.0.113.1",
     )

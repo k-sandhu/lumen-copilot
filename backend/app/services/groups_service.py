@@ -39,7 +39,7 @@ from app.core.errors import ConflictError, ForbiddenError, NotFoundError, Valida
 from app.db.repositories import SYSTEM_GROUP_NAME, GroupRepository, UserRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Group, Role, User
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 
 # A group name is a human label an admin types; keep it bounded and non-blank so
 # the unique index has something meaningful to key on.
@@ -62,6 +62,7 @@ class GroupsService:
         actor_id: UUID,
         roles: tuple[Role, ...],
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -72,18 +73,32 @@ class GroupsService:
         self._actor_id = actor_id
         self._is_admin = Role.ADMIN in roles
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(actor_id)
         self._request_id = request_id
         self._source_ip = source_ip
 
     # --- internal guards ----------------------------------------------------
 
-    def _require_admin(self) -> None:
+    async def _require_admin(
+        self,
+        *,
+        attempted_action: str,
+        resource_id: str = "collection",
+    ) -> None:
         """Group management is admin-only (INV-5 → 403).
 
         Asserted here as well as at the router so the service — the seam the
         negative tests drive — is safe on its own, not only behind a route.
         """
         if not self._is_admin:
+            await self._denials.emit(
+                resource_type="group",
+                resource_id=resource_id,
+                attempted_action=attempted_action,
+                reason="missing_required_role",
+                required_roles=(Role.ADMIN.value,),
+            )
             raise ForbiddenError("Group management requires the admin role.")
 
     @staticmethod
@@ -114,10 +129,16 @@ class GroupsService:
                 code="group_name_reserved",
             )
 
-    async def _get_or_404(self, group_id: UUID) -> Group:
+    async def _get_or_404(self, group_id: UUID, *, attempted_action: str) -> Group:
         """Load a group in this tenant, or 404 (never 403 — INV-1)."""
         group = await self._groups.get(group_id)
         if group is None:
+            await self._denials.emit(
+                resource_type="group",
+                resource_id=str(group_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             raise NotFoundError("Group not found.")
         return group
 
@@ -147,7 +168,7 @@ class GroupsService:
 
     async def list_groups(self) -> list[Group]:
         """Every group in the tenant (system group first, then by name)."""
-        self._require_admin()
+        await self._require_admin(attempted_action="group.list")
         return await self._groups.list_all()
 
     async def list_groups_with_counts(self) -> list[tuple[Group, int | None]]:
@@ -157,7 +178,7 @@ class GroupsService:
         user group with no members is ``0``. Pairing the count here keeps the
         listing route free of per-group round trips.
         """
-        self._require_admin()
+        await self._require_admin(attempted_action="group.list")
         # Materialize the tenant's "All members" group on first admin view.
         # ADR-0022 §3 chose lazy creation over provisioning-time creation so
         # existing tenants need no back-fill; without a caller the group would
@@ -174,12 +195,12 @@ class GroupsService:
         return [(g, None if g.is_system else counts.get(g.id, 0)) for g in groups]
 
     async def get_group(self, group_id: UUID) -> Group:
-        self._require_admin()
-        return await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.read", resource_id=str(group_id))
+        return await self._get_or_404(group_id, attempted_action="group.read")
 
     async def create_group(self, *, name: str) -> Group:
         """Create a user group. Duplicate name (case-insensitive) → 409."""
-        self._require_admin()
+        await self._require_admin(attempted_action="group.create", resource_id="new")
         cleaned = self._clean_name(name)
         self._reject_reserved_name(cleaned)
         if await self._groups.get_by_name(cleaned) is not None:
@@ -196,8 +217,8 @@ class GroupsService:
         return group
 
     async def rename_group(self, group_id: UUID, *, name: str) -> Group:
-        self._require_admin()
-        group = await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.update", resource_id=str(group_id))
+        group = await self._get_or_404(group_id, attempted_action="group.update")
         self._reject_if_system(group)
         cleaned = self._clean_name(name)
         self._reject_reserved_name(cleaned)
@@ -227,8 +248,8 @@ class GroupsService:
         remove a grant to a group that no longer exists. The repository does both
         in one place.
         """
-        self._require_admin()
-        group = await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.delete", resource_id=str(group_id))
+        group = await self._get_or_404(group_id, attempted_action="group.delete")
         self._reject_if_system(group)
         await self._groups.delete(group_id)
         await self._emit(AuditAction.GROUP_DELETED, group_id, name=group.name)
@@ -242,8 +263,8 @@ class GroupsService:
         (ADR-0022 §3), so there is nothing to enumerate; the caller renders that
         as "everyone in the tenant" rather than as an empty group.
         """
-        self._require_admin()
-        await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.members.read", resource_id=str(group_id))
+        await self._get_or_404(group_id, attempted_action="group.members.read")
         return await self._groups.list_member_ids(group_id)
 
     async def list_members(self, group_id: UUID) -> list[User]:
@@ -254,8 +275,8 @@ class GroupsService:
         joined, email-ordered query — one read regardless of group size, and a
         membership row whose user no longer exists simply does not join.
         """
-        self._require_admin()
-        await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.members.read", resource_id=str(group_id))
+        await self._get_or_404(group_id, attempted_action="group.members.read")
         return await self._groups.list_members(group_id)
 
     async def member_count(self, group_id: UUID) -> int | None:
@@ -266,20 +287,26 @@ class GroupsService:
         The distinction is carried into the API so the console can render
         "everyone" rather than an empty group.
         """
-        self._require_admin()
-        group = await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.members.read", resource_id=str(group_id))
+        group = await self._get_or_404(group_id, attempted_action="group.members.read")
         if group.is_system:
             return None
         return len(await self._groups.list_member_ids(group_id))
 
     async def add_member(self, group_id: UUID, *, user_id: UUID) -> None:
         """Add a user to a group. Idempotent; a foreign-tenant user is 404."""
-        self._require_admin()
-        group = await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.member.add", resource_id=str(group_id))
+        group = await self._get_or_404(group_id, attempted_action="group.member.add")
         self._reject_if_system(group)
         # Tenant-scoped, so a tenant-B user is indistinguishable from a missing
         # one — 404, never 403, exactly as the grant path treats a grantee.
         if await self._users.get(user_id) is None:
+            await self._denials.emit(
+                resource_type="user",
+                resource_id=str(user_id),
+                attempted_action="group.member.add",
+                reason="not_visible",
+            )
             raise NotFoundError("User not found.")
         added = await self._groups.add_member(
             group_id=group_id, user_id=user_id, added_by=self._actor_id
@@ -294,8 +321,8 @@ class GroupsService:
         per request and never cached on the principal or in the token
         (ADR-0022 §7), so access is never carried by a still-valid token.
         """
-        self._require_admin()
-        group = await self._get_or_404(group_id)
+        await self._require_admin(attempted_action="group.member.remove", resource_id=str(group_id))
+        group = await self._get_or_404(group_id, attempted_action="group.member.remove")
         self._reject_if_system(group)
         removed = await self._groups.remove_member(group_id=group_id, user_id=user_id)
         if removed:

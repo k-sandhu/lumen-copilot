@@ -840,6 +840,7 @@ class SandboxService:
             owner_id=self._owner_id,
             object_store=self._store,
             audit=AuditSink(AuditEventRepository(session, self._tenant_id)),
+            denials=None,  # output capture is create-only; no direct-resource guard
             request_id=self._request_id,
             source_ip=self._source_ip,
             artifact_allowed_content_types=self._settings.artifact_allowed_content_types,

@@ -14,8 +14,10 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.repositories import _classify_source_ip
+from app.domain.audit import AuditActor
 from app.domain.entities import AuditEvent, AuditOutcome
-from app.services.audit import PermissionDeniedRecorder
+from app.services.audit import PermissionDeniedContext, PermissionDeniedRecorder
 
 
 class _RecordingRepository:
@@ -36,12 +38,8 @@ class _RecordingRepository:
         source_ip: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> AuditEvent:
-        if source_ip == "system":
-            origin, stored_ip = "system", None
-        elif source_ip in (None, "", "unknown"):
-            origin, stored_ip = "unknown", None
-        else:
-            origin, stored_ip = "client", source_ip.strip()
+        classified_origin, stored_ip, _unrecognised = _classify_source_ip(source_ip)
+        origin = classified_origin.value
         identity = event_id or uuid4()
         event = AuditEvent(
             id=identity,
@@ -148,8 +146,27 @@ def denial_recorder_from_session(
     return denial_recorder(ledger, request_session, tenant_id)
 
 
+def denial_context(
+    ledger: RecordingDurableAuditTransactions,
+    request_session: object,
+    tenant_id: UUID,
+    actor_id: UUID,
+    *,
+    request_id: str = "req-test-denial",
+    source_ip: str = "203.0.113.7",
+) -> PermissionDeniedContext:
+    """Build the mandatory production context over the explicit test ledger."""
+    return PermissionDeniedContext(
+        denial_recorder(ledger, request_session, tenant_id),
+        actor=AuditActor.user(actor_id),
+        request_id=request_id,
+        source_ip=source_ip,
+    )
+
+
 __all__ = [
     "RecordingDurableAuditTransactions",
+    "denial_context",
     "denial_recorder",
     "denial_recorder_from_session",
 ]

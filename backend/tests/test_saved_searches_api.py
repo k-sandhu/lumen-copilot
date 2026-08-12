@@ -196,7 +196,7 @@ async def test_delete_then_404(client: AsyncClient, seeded: _Seeded) -> None:
 
 @pytest.mark.parametrize("other_email", ["bob@acme.test", "carol@globex.test"])
 async def test_other_user_cannot_access(
-    client: AsyncClient, seeded: _Seeded, other_email: str
+    client: AsyncClient, seeded: _Seeded, other_email: str, durable_audit_ledger
 ) -> None:
     alice = await _login(client, seeded.alice_email)
     created = await client.post(_BASE, headers=_auth(alice), json={"name": "n", "query": "q"})
@@ -208,6 +208,11 @@ async def test_other_user_cannot_access(
         await client.patch(f"{_BASE}/{sid}", headers=_auth(other), json={"name": "x"})
     ).status_code == 404
     assert (await client.delete(f"{_BASE}/{sid}", headers=_auth(other))).status_code == 404
+    assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+        "saved_search.read",
+        "saved_search.update",
+        "saved_search.delete",
+    ]
     # The other user's own list is empty — they never see Alice's saved search.
     listing = await client.get(_BASE, headers=_auth(other))
     assert listing.json()["items"] == []

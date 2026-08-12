@@ -45,6 +45,7 @@ from app.domain.entities import ArtifactProducedBy, AuditEvent, Role
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
 from app.services.audit import AuditSink
 from app.storage.keys import assert_artifact_key_owned_by, build_artifact_key
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -158,6 +159,7 @@ def _service(
         owner_id=owner_id,
         object_store=store,  # type: ignore[arg-type]  # structural fake
         audit=audit,
+        denials=denial_context(RecordingDurableAuditTransactions(), session, tenant_id, owner_id),
         request_id="req-test",
         source_ip="203.0.113.1",
         artifact_allowed_content_types=_ALLOWED,
