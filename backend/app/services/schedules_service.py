@@ -184,7 +184,7 @@ class SchedulesService:
         schedule = await self._schedules.get(schedule_id)
         if schedule is None or not self._may_manage(schedule):
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="schedule",
                 resource_id=str(schedule_id),
                 attempted_action=attempted_action,
@@ -210,7 +210,7 @@ class SchedulesService:
         assistant = await self._assistants.get(assistant_id)
         if assistant is None or (not self._is_admin and assistant.owner_id != self._owner_id):
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="assistant",
                 resource_id=str(assistant_id),
                 attempted_action=attempted_action,
@@ -504,6 +504,7 @@ class SchedulesService:
             owner_id=schedule.owner_id,
             assistant_id=schedule.assistant_id,
             denials=self._denials,
+            denial_actor=AuditActor.user(self._owner_id),
             request_id=self._request_id,
             source_ip=self._source_ip,
             inputs=schedule.input_params,

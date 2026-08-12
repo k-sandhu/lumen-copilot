@@ -301,7 +301,7 @@ class AssistantGovernanceService:
         assistant = await self._assistants.get(assistant_id)
         if assistant is None:
             await self._denials.emit(
-                actor_id=self._actor_id,
+                actor=AuditActor.user(self._actor_id),
                 resource_type="assistant",
                 resource_id=str(assistant_id),
                 attempted_action=attempted_action,

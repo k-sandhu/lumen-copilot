@@ -332,7 +332,7 @@ class CollectionsService:
     async def _record_not_visible(self, collection_id: UUID, *, attempted_action: str) -> None:
         """Emit exactly one safe INV-1/INV-2 collection denial."""
         await self._denials.emit(
-            actor_id=self._owner_id,
+            actor=AuditActor.user(self._owner_id),
             resource_type="collection",
             resource_id=str(collection_id),
             attempted_action=attempted_action,

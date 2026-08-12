@@ -28,6 +28,7 @@ from app.db.audit_transactions import DurableAuditTransactions
 from app.db.repositories import AuditEventRepository
 from app.db.session import get_durable_audit_transactions, get_sessionmaker
 from app.db.tenant_context import bind_tenant
+from app.domain.audit import AuditActor
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.realtime.backplane import Backplane, RedisBackplane
@@ -314,7 +315,7 @@ def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
         route_path = str(getattr(route, "path", request.url.path))
         denials = make_audit_sink.denials(tenant_id)
         await denials.emit(
-            actor_id=principal.user_id,
+            actor=AuditActor.user(principal.user_id),
             resource_type="api_route",
             resource_id=route_path,
             attempted_action=f"{request.method.upper()} {route_path}",

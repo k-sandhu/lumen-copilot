@@ -1,18 +1,17 @@
 """Owned transaction boundary for durable denied-access audit rows.
 
-Successful audit rows share the action transaction.  An authenticated denial is
-different: its typed 403/404 ends the request without a success commit, so its
-evidence needs an independently owned transaction.  The provider in this module
-is injected into the service-layer recorder; it never derives a Session from the
-caller's bind (R1-001), and construction/lifecycle stay inside ``app.db`` per
-ADR-0004.
+Successful audit rows share the action transaction. A trusted request/background
+denial is different: its typed 403/404 or pre-execution refusal has no success
+commit, so its evidence needs an independently owned transaction. The provider
+in this module is injected into the service-layer recorder; it never derives a
+Session from the caller's bind (R1-001), and construction/lifecycle stay inside
+``app.db`` per ADR-0004.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
@@ -24,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.db.repositories import AuditEventRepository
 from app.db.tenant_context import bind_tenant
+from app.domain.entities import AuditEvent
 
 
 class UnsafeAuditTransactionTopology(RuntimeError):
@@ -85,23 +85,99 @@ class DurableAuditTransactions:
                 "Durable audit transactions require a pool independent from the caller."
             )
 
-    @asynccontextmanager
-    async def repository(self, tenant_id: UUID) -> AsyncIterator[AuditEventRepository]:
-        """Yield a canonical repository and commit only its bounded transaction.
-
-        Acquisition, RLS binding, sink flush, and commit are all inside one
-        explicit timeout.  Any failure rolls this transaction back and propagates
-        (INV-6); caller state is unreachable from this provider.
-        """
+    async def _invalidate(self, audit_session: AsyncSession) -> None:
+        """Discard a connection whose transaction outcome may be ambiguous."""
+        # A timed-out COMMIT must never return its physical connection to the
+        # pool as healthy.  ``invalidate`` closes/discards it; the following
+        # reconciliation therefore runs through a fresh pool acquisition.
         async with asyncio.timeout(self._operation_timeout_seconds):
-            async with self._factory() as audit_session:
-                try:
+            await audit_session.invalidate()
+
+    async def _attempt(
+        self,
+        tenant_id: UUID,
+        event_id: UUID,
+        operation: Callable[[AuditEventRepository], Awaitable[AuditEvent]],
+    ) -> AuditEvent:
+        """Run one bounded write+commit attempt without a detached commit task."""
+        async with self._factory() as audit_session:
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
                     await bind_tenant(audit_session, tenant_id)
-                    yield AuditEventRepository(audit_session, tenant_id)
+                    event = await operation(AuditEventRepository(audit_session, tenant_id))
+                    if event.id != event_id:
+                        raise RuntimeError(
+                            "Durable audit operation returned a different idempotency key."
+                        )
+                    # Await COMMIT in this task.  asyncio.timeout cancels and
+                    # waits for this coroutine to unwind before TimeoutError is
+                    # raised, so no background commit survives the guard call.
                     await audit_session.commit()
-                except BaseException:
+                    return event
+            except TimeoutError:
+                await self._invalidate(audit_session)
+                raise
+            except BaseException:
+                await audit_session.rollback()
+                raise
+
+    async def _reconcile(
+        self,
+        tenant_id: UUID,
+        event_id: UUID,
+        operation: Callable[[AuditEventRepository], Awaitable[AuditEvent]],
+    ) -> AuditEvent | None:
+        """Read and validate an ambiguous attempt through a fresh transaction."""
+        async with self._factory() as audit_session:
+            try:
+                async with asyncio.timeout(self._operation_timeout_seconds):
+                    await bind_tenant(audit_session, tenant_id)
+                    repository = AuditEventRepository(audit_session, tenant_id)
+                    if await repository.get(event_id) is None:
+                        await audit_session.rollback()
+                        return None
+                    # The exact same operation performs the repository's full
+                    # canonical-payload equality check against the existing row.
+                    # The no-op conflict insert is rolled back because this is a
+                    # read/reconciliation transaction, never a second append.
+                    event = await operation(repository)
+                    if event.id != event_id:
+                        raise RuntimeError(
+                            "Durable audit reconciliation returned a different " "idempotency key."
+                        )
                     await audit_session.rollback()
+                    return event
+            except TimeoutError:
+                await self._invalidate(audit_session)
+                raise
+            except BaseException:
+                await audit_session.rollback()
+                raise
+
+    async def execute_idempotent(
+        self,
+        tenant_id: UUID,
+        event_id: UUID,
+        operation: Callable[[AuditEventRepository], Awaitable[AuditEvent]],
+    ) -> AuditEvent:
+        """Persist one semantic denial despite an ambiguous COMMIT outcome.
+
+        ``event_id`` is allocated once by the trusted guard recorder and reused
+        for at most one retry.  After every timeout, a new tenant-bound session
+        reads the key and validates the complete canonical payload.  A committed
+        row is success, an absent first attempt is retried once, and an absent
+        second attempt fails closed.  Non-timeout errors are never retried.
+        """
+        for attempt in range(2):
+            try:
+                return await self._attempt(tenant_id, event_id, operation)
+            except TimeoutError:
+                reconciled = await self._reconcile(tenant_id, event_id, operation)
+                if reconciled is not None:
+                    return reconciled
+                if attempt == 1:
                     raise
+        raise AssertionError("Durable audit retry loop exhausted unexpectedly.")
 
     async def dispose(self) -> None:
         """Release the owned pool; idempotent under SQLAlchemy engine disposal."""

@@ -21,7 +21,7 @@ The two never share a path.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +46,7 @@ class AuditSink:
     async def emit(
         self,
         *,
+        event_id: UUID | None = None,
         action: AuditAction | str,
         actor: AuditActor,
         resource_type: str,
@@ -64,11 +65,16 @@ class AuditSink:
         ``request_id``, and ``source_ip`` are **required** (no silent ``None``
         default) — the spec outranks code (AGENTS.md §4). The repository assigns
         ``event_id`` (uuid) and ``ts`` (UTC ``now()``); the tenant is fixed by
-        the repository's scope. The caller owns the transaction boundary (the
-        row is flushed, not committed) so the audit write commits atomically
-        with the action it records.
+        the repository's scope. Ordinary events leave ``event_id`` unset and
+        retain fresh append semantics. The durable-denial boundary supplies a
+        trusted server-generated identity so an ambiguous COMMIT can be retried
+        idempotently; it is never accepted from request input. The caller owns
+        the transaction boundary (the row is flushed, not committed) so the
+        audit write commits atomically with the action it records.
 
         Args:
+            event_id: Optional trusted server identity for an idempotent durable
+                denial. Ordinary callers omit it; request data must never supply it.
             action: A taxonomy action (enum or string in the taxonomy).
             actor: Who performed it — user / system / anonymous.
             resource_type: The kind of resource acted on (e.g. ``"document"``).
@@ -97,6 +103,7 @@ class AuditSink:
             source_ip=source_ip,
         )
         return await self._repository.record(
+            event_id=event_id,
             action=validated_action.value,
             resource_type=resource_type,
             outcome=outcome,
@@ -111,7 +118,8 @@ class AuditSink:
 async def emit_permission_denied(
     audit: AuditSink,
     *,
-    actor_id: UUID,
+    event_id: UUID,
+    actor: AuditActor,
     resource_type: str,
     resource_id: str,
     attempted_action: str,
@@ -120,9 +128,10 @@ async def emit_permission_denied(
     source_ip: str,
     required_roles: Sequence[str] = (),
 ) -> AuditEvent:
-    """Emit one safe, authenticated denial through the canonical sink.
+    """Emit one safe, trusted-principal denial through the canonical sink.
 
-    This is the shared INV-6 boundary for authenticated 403/404 decisions. Its
+    This is the shared INV-6 boundary for authenticated 403/404 decisions and
+    trusted background guards. Its
     metadata surface is intentionally closed: callers can record only the
     server-chosen attempted action, a stable reason code, and (for RBAC gates)
     the required role names. Request bodies, content, secrets, and raw provider
@@ -140,8 +149,9 @@ async def emit_permission_denied(
     if required_roles:
         metadata["required_roles"] = list(required_roles)
     return await audit.emit(
+        event_id=event_id,
         action=AuditAction.PERMISSION_DENIED,
-        actor=AuditActor.user(actor_id),
+        actor=actor,
         resource_type=resource_type,
         resource_id=resource_id,
         outcome=AuditOutcome.DENIED,
@@ -152,7 +162,7 @@ async def emit_permission_denied(
 
 
 class PermissionDeniedRecorder:
-    """Persist authenticated denials in an isolated tenant-bound transaction.
+    """Persist trusted-principal denials in an isolated tenant-bound transaction.
 
     Successful action events deliberately share the action transaction so they
     commit or roll back atomically. A denied action has no successful transaction
@@ -182,7 +192,7 @@ class PermissionDeniedRecorder:
     async def emit(
         self,
         *,
-        actor_id: UUID,
+        actor: AuditActor,
         resource_type: str,
         resource_id: str,
         attempted_action: str,
@@ -192,10 +202,16 @@ class PermissionDeniedRecorder:
         required_roles: Sequence[str] = (),
     ) -> AuditEvent:
         """Append and commit exactly one safe denial, or propagate the failure."""
-        async with self._transactions.repository(self._tenant_id) as repository:
+        # Allocated once per semantic guard invocation, inside this trusted
+        # server boundary.  The UUID is reused only by the provider's bounded
+        # retry/reconciliation protocol and is never client-controlled.
+        event_id = uuid4()
+
+        async def _emit(repository: AuditEventRepository) -> AuditEvent:
             return await emit_permission_denied(
                 AuditSink(repository),
-                actor_id=actor_id,
+                event_id=event_id,
+                actor=actor,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 attempted_action=attempted_action,
@@ -204,6 +220,12 @@ class PermissionDeniedRecorder:
                 source_ip=source_ip,
                 required_roles=required_roles,
             )
+
+        return await self._transactions.execute_idempotent(
+            self._tenant_id,
+            event_id,
+            _emit,
+        )
 
 
 __all__ = [

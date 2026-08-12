@@ -184,6 +184,7 @@ async def enqueue_manual_run(
     owner_id: UUID,
     assistant_id: UUID,
     denials: PermissionDeniedRecorder,
+    denial_actor: AuditActor,
     request_id: str,
     source_ip: str,
     inputs: dict[str, object] | None = None,
@@ -202,6 +203,10 @@ async def enqueue_manual_run(
     ``manual`` run-now from a ``schedule`` fire; ``schedule_id`` links a fired run to
     its schedule. The Celery enqueue is **after-commit** by the caller so the
     request returns immediately and a broker outage never rolls back the queued run.
+    ``denial_actor`` is the principal that initiated this enqueue attempt: an API
+    request supplies its user, while a scheduler fire supplies ``system``. It is
+    intentionally independent from ``owner_id``, which remains the execution
+    principal if a run is successfully created.
 
     Returns the created run; the caller enqueues ``run_assistant(run.id)`` once the
     row is durable (mirroring ``enqueue_ingestion``).
@@ -210,7 +215,7 @@ async def enqueue_manual_run(
     if assistant is None or assistant.owner_id != owner_id:
         # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
         await denials.emit(
-            actor_id=owner_id,
+            actor=denial_actor,
             resource_type="assistant",
             resource_id=str(assistant_id),
             attempted_action="run.enqueue",
@@ -782,7 +787,7 @@ class RunsReadService:
         run = await self._runs.get(run_id)
         if run is None or run.owner_id != self._owner_id:
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="run",
                 resource_id=str(run_id),
                 attempted_action="run.read",
@@ -965,7 +970,7 @@ class RunsControlService:
         if target is None:
             # A cross-tenant / unknown target is non-existent to this tenant (INV-1).
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="user",
                 resource_id=str(to_owner_id),
                 attempted_action="run.reroute",
@@ -990,7 +995,7 @@ class RunsControlService:
         if run is None or run.owner_id != self._owner_id:
             # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="run",
                 resource_id=str(run_id),
                 attempted_action=attempted_action,

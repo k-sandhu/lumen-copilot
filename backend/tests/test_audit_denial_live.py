@@ -1,10 +1,11 @@
-"""Disposable-Postgres proof for durable denial isolation (#579, R1-001/R1-003).
+"""Disposable-Postgres proof for durable denial isolation (#579, R1/R2).
 
 Opt in with ``AUDIT_DENIAL_LIVE_DATABASE_URL``.  The test creates and migrates a
 random database, exercises both a size-one request pool and a fully occupied
 concurrent request pool against separately owned audit capacity, proves caller
-rollback/exactly-once persistence, and checks cross-tenant run attribution under
-the real tenant GUC/RLS backstop.
+rollback/exactly-once persistence, reconciles a lost COMMIT acknowledgement,
+and checks cross-tenant attribution/idempotency under the real tenant GUC/RLS
+backstop and a least-privilege application role.
 """
 
 from __future__ import annotations
@@ -18,7 +19,12 @@ from urllib.parse import urlparse, urlunparse
 import pytest
 from alembic.config import Config
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.core.errors import NotFoundError
 from app.db import models
@@ -33,6 +39,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.db.tenant_context import bind_bypass, bind_tenant
+from app.domain.audit import AuditActor
 from app.domain.entities import (
     AssistantStatus,
     AutonomyLevel,
@@ -56,8 +63,10 @@ def _swap_db(url: str, dbname: str) -> str:
     _BASE_URL is None,
     reason="Set AUDIT_DENIAL_LIVE_DATABASE_URL for the targeted disposable-Postgres proof.",
 )
-async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_live() -> None:
-    """All R1-001/R1-003 live invariants hold on migrated PostgreSQL."""
+async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1 isolation and R2 idempotency hold on migrated least-privilege PostgreSQL."""
     assert _BASE_URL is not None
     from alembic import command
 
@@ -89,7 +98,7 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
     os.environ["DATABASE_URL"] = database_url
     get_settings.cache_clear()
     engines: list[AsyncEngine] = []
-    transactions: DurableAuditTransactions | None = None
+    providers: list[DurableAuditTransactions] = []
     try:
         config = Config(str(_BACKEND_ROOT / "alembic.ini"))
         config.set_main_option("script_location", str(_BACKEND_ROOT / "alembic"))
@@ -167,6 +176,7 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
         )
         engines.append(audit_engine)
         transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=5)
+        providers.append(transactions)
 
         # Required regression (1): the request owns the sole request-pool slot and
         # has flushed unrelated work.  Durable audit still completes through its
@@ -197,7 +207,7 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
                 request_session=caller,
             )
             await recorder.emit(
-                actor_id=actor_a.id,
+                actor=AuditActor.user(actor_a.id),
                 resource_type="assistant",
                 resource_id=str(uuid.uuid4()),
                 attempted_action="assistant.read",
@@ -240,7 +250,7 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
                     request_session=caller,
                 )
                 await recorder.emit(
-                    actor_id=actor_a.id,
+                    actor=AuditActor.user(actor_a.id),
                     resource_type="assistant",
                     resource_id=str(uuid.uuid4()),
                     attempted_action="assistant.read",
@@ -298,6 +308,150 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
                 await service.get(run.id)
             await tenant_b_caller.rollback()
 
+        # R2-003: a real PostgreSQL COMMIT succeeds, but its acknowledgement is
+        # withheld until the provider deadline cancels the await. Reconciliation
+        # uses a fresh tenant-bound session, returns the already-durable row, and
+        # an immediate second denial proves the owned pool was not poisoned.
+        ambiguous_engine = create_async_engine(
+            app_url,
+            pool_size=2,
+            max_overflow=0,
+            pool_timeout=2,
+        )
+        engines.append(ambiguous_engine)
+        ambiguous_transactions = DurableAuditTransactions(
+            ambiguous_engine,
+            operation_timeout_seconds=0.15,
+        )
+        providers.append(ambiguous_transactions)
+        real_commit = AsyncSession.commit
+        committed_before_lost_ack = asyncio.Event()
+        cancelled_after_commit = asyncio.Event()
+        delayed_once = False
+
+        async def _commit_then_lose_ack(audit_session: AsyncSession) -> None:
+            nonlocal delayed_once
+            await real_commit(audit_session)
+            if audit_session.bind is ambiguous_engine and not delayed_once:
+                delayed_once = True
+                committed_before_lost_ack.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled_after_commit.set()
+
+        monkeypatch.setattr(AsyncSession, "commit", _commit_then_lose_ack)
+        ambiguous_request_id = f"req-commit-lost-ack-{uuid.uuid4()}"
+        async with concurrent_factory() as caller:
+            await bind_tenant(caller, tenant_a.id)
+            pending_ambiguous = await CollectionRepository(caller, tenant_a.id).create(
+                owner_id=actor_a.id,
+                name="ambiguous caller must roll back",
+            )
+            await caller.flush()
+            ambiguous_event = await PermissionDeniedRecorder(
+                ambiguous_transactions,
+                tenant_id=tenant_a.id,
+                request_session=caller,
+            ).emit(
+                actor=AuditActor.system(),
+                resource_type="assistant",
+                resource_id=str(assistant.id),
+                attempted_action="run.enqueue",
+                reason="not_visible",
+                request_id=ambiguous_request_id,
+                source_ip="system",
+            )
+            await caller.rollback()
+
+        assert committed_before_lost_ack.is_set()
+        assert cancelled_after_commit.is_set()
+        recovery_request_id = f"req-after-commit-lost-ack-{uuid.uuid4()}"
+        async with concurrent_factory() as caller:
+            await bind_tenant(caller, tenant_a.id)
+            recovered_capacity_event = await PermissionDeniedRecorder(
+                ambiguous_transactions,
+                tenant_id=tenant_a.id,
+                request_session=caller,
+            ).emit(
+                actor=AuditActor.user(actor_a.id),
+                resource_type="assistant",
+                resource_id=str(uuid.uuid4()),
+                attempted_action="assistant.read",
+                reason="not_visible",
+                request_id=recovery_request_id,
+                source_ip="203.0.113.81",
+            )
+            await caller.rollback()
+
+        # The explicit repository storage boundary is safe under actual
+        # concurrent same-key attempts: both callers receive the semantic id,
+        # while PostgreSQL stores one canonical row.
+        concurrent_event_id = uuid.uuid4()
+        concurrent_idempotency_request = f"req-idempotent-concurrent-{uuid.uuid4()}"
+        ambiguous_factory = async_sessionmaker(
+            ambiguous_engine,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+
+        async def _write_same_event() -> uuid.UUID:
+            async with ambiguous_factory() as writer:
+                await bind_tenant(writer, tenant_a.id)
+                event = await AuditEventRepository(writer, tenant_a.id).record(
+                    event_id=concurrent_event_id,
+                    action="permission.denied",
+                    resource_type="assistant",
+                    outcome=ambiguous_event.outcome,
+                    actor_id=actor_a.id,
+                    resource_id=str(assistant.id),
+                    request_id=concurrent_idempotency_request,
+                    source_ip="203.0.113.82",
+                    metadata={"attempted_action": "assistant.read", "reason": "not_visible"},
+                )
+                await writer.commit()
+                return event.id
+
+        assert await asyncio.gather(_write_same_event(), _write_same_event()) == [
+            concurrent_event_id,
+            concurrent_event_id,
+        ]
+
+        # A UUID collision in another tenant remains invisible through both RLS
+        # and the repository predicate and can never satisfy reconciliation.
+        foreign_collision_id = uuid.uuid4()
+        async with ambiguous_factory() as tenant_a_writer:
+            await bind_tenant(tenant_a_writer, tenant_a.id)
+            await AuditEventRepository(tenant_a_writer, tenant_a.id).record(
+                event_id=foreign_collision_id,
+                action="permission.denied",
+                resource_type="assistant",
+                outcome=ambiguous_event.outcome,
+                actor_id=None,
+                resource_id=str(assistant.id),
+                request_id="req-foreign-idempotency-collision",
+                source_ip="system",
+                metadata={"attempted_action": "run.enqueue", "reason": "not_visible"},
+            )
+            await tenant_a_writer.commit()
+        async with ambiguous_factory() as tenant_b_writer:
+            await bind_tenant(tenant_b_writer, tenant_b.id)
+            tenant_b_repository = AuditEventRepository(tenant_b_writer, tenant_b.id)
+            assert await tenant_b_repository.get(foreign_collision_id) is None
+            with pytest.raises(RuntimeError, match="idempotency.*tenant"):
+                await tenant_b_repository.record(
+                    event_id=foreign_collision_id,
+                    action="permission.denied",
+                    resource_type="assistant",
+                    outcome=ambiguous_event.outcome,
+                    actor_id=None,
+                    resource_id=str(assistant.id),
+                    request_id="req-foreign-idempotency-collision",
+                    source_ip="system",
+                    metadata={"attempted_action": "run.enqueue", "reason": "not_visible"},
+                )
+            await tenant_b_writer.rollback()
+
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False, autoflush=False)
         expected_request_ids = {
             size_one_request_id,
@@ -333,6 +487,34 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
             )
             assert raw_cross_tenant_a.scalar_one_or_none() is None
 
+        async with ambiguous_factory() as idempotency_readback:
+            await bind_tenant(idempotency_readback, tenant_a.id)
+            assert (
+                await CollectionRepository(idempotency_readback, tenant_a.id).get(
+                    pending_ambiguous.id
+                )
+                is None
+            )
+            idempotency_events = await AuditEventRepository(
+                idempotency_readback,
+                tenant_a.id,
+            ).list_recent(limit=50)
+            assert sum(event.id == ambiguous_event.id for event in idempotency_events) == 1
+            assert sum(event.id == recovered_capacity_event.id for event in idempotency_events) == 1
+            assert sum(event.id == concurrent_event_id for event in idempotency_events) == 1
+            stored_ambiguous = next(
+                event for event in idempotency_events if event.id == ambiguous_event.id
+            )
+            assert stored_ambiguous.actor_id is None
+            assert stored_ambiguous.source_origin == "system"
+            assert stored_ambiguous.source_ip is None
+            assert stored_ambiguous.request_id == ambiguous_request_id
+            assert stored_ambiguous.metadata == {
+                "attempted_action": "run.enqueue",
+                "reason": "not_visible",
+            }
+        assert ambiguous_engine.sync_engine.pool.checkedout() == 0
+
         async with audit_factory() as tenant_b_readback:
             await bind_tenant(tenant_b_readback, tenant_b.id)
             raw_cross_tenant_b = await tenant_b_readback.execute(
@@ -359,11 +541,10 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
                 )
             ).one() == (False, False)
     finally:
-        if transactions is not None:
-            await transactions.dispose()
+        for provider in reversed(providers):
+            await provider.dispose()
         for engine in reversed(engines):
-            if transactions is None or engine is not transactions.engine:
-                await engine.dispose()
+            await engine.dispose()
         if prior_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:

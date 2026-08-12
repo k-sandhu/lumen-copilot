@@ -214,7 +214,7 @@ class AssistantsService:
         assistant = await self._assistants.get(assistant_id)
         if assistant is None or not self._may_manage(assistant):
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="assistant",
                 resource_id=str(assistant_id),
                 attempted_action=attempted_action,

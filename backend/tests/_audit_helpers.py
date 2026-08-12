@@ -8,8 +8,7 @@ disposable-Postgres suite.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -27,6 +26,7 @@ class _RecordingRepository:
     async def record(
         self,
         *,
+        event_id: UUID | None = None,
         action: str,
         resource_type: str,
         outcome: AuditOutcome,
@@ -42,8 +42,9 @@ class _RecordingRepository:
             origin, stored_ip = "unknown", None
         else:
             origin, stored_ip = "client", source_ip.strip()
+        identity = event_id or uuid4()
         event = AuditEvent(
-            id=uuid4(),
+            id=identity,
             tenant_id=self.tenant_id,
             actor_id=actor_id,
             action=action,
@@ -56,8 +57,47 @@ class _RecordingRepository:
             metadata=metadata or {},
             ts=datetime.now(UTC),
         )
+        existing = next((row for row in self._ledger.events if row.id == identity), None)
+        if existing is not None:
+            if (
+                existing.tenant_id,
+                existing.actor_id,
+                existing.action,
+                existing.resource_type,
+                existing.resource_id,
+                existing.outcome,
+                existing.request_id,
+                existing.source_origin,
+                existing.source_ip,
+                existing.metadata,
+            ) != (
+                event.tenant_id,
+                event.actor_id,
+                event.action,
+                event.resource_type,
+                event.resource_id,
+                event.outcome,
+                event.request_id,
+                event.source_origin,
+                event.source_ip,
+                event.metadata,
+            ):
+                raise RuntimeError(
+                    "Audit idempotency key resolved to a different canonical payload."
+                )
+            return existing
         self._ledger.events.append(event)
         return event
+
+    async def get(self, event_id: UUID) -> AuditEvent | None:
+        return next(
+            (
+                event
+                for event in self._ledger.events
+                if event.tenant_id == self.tenant_id and event.id == event_id
+            ),
+            None,
+        )
 
 
 class RecordingDurableAuditTransactions:
@@ -70,11 +110,18 @@ class RecordingDurableAuditTransactions:
     def assert_independent_from(self, request_session: object) -> None:
         del request_session
 
-    @asynccontextmanager
-    async def repository(self, tenant_id: UUID) -> AsyncIterator[_RecordingRepository]:
+    async def execute_idempotent(
+        self,
+        tenant_id: UUID,
+        event_id: UUID,
+        operation: Callable[[_RecordingRepository], Awaitable[AuditEvent]],
+    ) -> AuditEvent:
         if self.fail_with is not None:
             raise self.fail_with
-        yield _RecordingRepository(self, tenant_id)
+        event = await operation(_RecordingRepository(self, tenant_id))
+        if event.id != event_id:
+            raise RuntimeError("Durable audit operation returned a different idempotency key.")
+        return event
 
 
 def denial_recorder(

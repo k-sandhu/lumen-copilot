@@ -59,6 +59,7 @@ from app.realtime.backplane import InMemoryBackplane, StreamOwner
 from app.services.audit import AuditSink
 from app.services.provider_models import make_provider_model_id
 from app.services.secrets_service import build_secrets_service
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -395,6 +396,102 @@ async def test_get_other_owner_session_is_404(client: AsyncClient, seeded: _Seed
     alice = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/chat/sessions/{sid}", headers=_auth(alice))
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload", "attempted_action"),
+    [
+        ("GET", "", None, "chat.session.read"),
+        ("GET", "/usage", None, "chat.session.usage"),
+        ("PATCH", "", {"title": "must not change"}, "chat.session.update"),
+        ("DELETE", "", None, "chat.session.delete"),
+        ("GET", "/messages", None, "chat.messages.read"),
+        ("POST", "/messages", {"content": "must not persist"}, "chat.message.send"),
+    ],
+)
+@pytest.mark.parametrize("target_owner", ["same_tenant", "cross_tenant"])
+async def test_every_authenticated_chat_404_route_records_one_safe_denial(
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    method: str,
+    suffix: str,
+    payload: dict[str, str] | None,
+    attempted_action: str,
+    target_owner: str,
+) -> None:
+    """R2-001: route wiring cannot omit request context or duplicate service auditing."""
+    owner_email = seeded.bob_email if target_owner == "same_tenant" else seeded.carol_email
+    owner = await _login(client, owner_email)
+    created = await client.post(
+        "/api/v1/chat/sessions",
+        headers=_auth(owner),
+        json={"title": f"hidden-{target_owner}"},
+    )
+    assert created.status_code == 201, created.text
+    target_id = str(created.json()["id"])
+    alice = await _login(client, seeded.alice_email)
+    durable_audit_ledger.events.clear()
+
+    kwargs: dict[str, object] = {"headers": _auth(alice)}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = await client.request(
+        method,
+        f"/api/v1/chat/sessions/{target_id}{suffix}",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert len(durable_audit_ledger.events) == 1
+    event = durable_audit_ledger.events[0]
+    assert event.tenant_id == seeded.tenant_a
+    assert event.actor_id == seeded.alice_id
+    assert event.action == "permission.denied"
+    assert event.resource_type == "chat_session"
+    assert event.resource_id == target_id
+    assert event.request_id not in (None, "", "unknown")
+    assert event.source_origin == "client"
+    assert event.source_ip is not None
+    # The same closed metadata is emitted whether the target exists in this
+    # tenant or only in another tenant; no existence/detail bit can leak.
+    assert event.metadata == {
+        "attempted_action": attempted_action,
+        "reason": "not_visible",
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload"),
+    [
+        ("GET", "", None),
+        ("GET", "/usage", None),
+        ("PATCH", "", {"title": "x"}),
+        ("DELETE", "", None),
+        ("GET", "/messages", None),
+        ("POST", "/messages", {"content": "x"}),
+    ],
+)
+async def test_unauthenticated_chat_direct_resource_routes_emit_no_tenant_denial(
+    client: AsyncClient,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    method: str,
+    suffix: str,
+    payload: dict[str, str] | None,
+) -> None:
+    """R2-001/INV-4: a 401 has no trusted tenant/actor to put in the product ledger."""
+    kwargs: dict[str, object] = {}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = await client.request(
+        method,
+        f"/api/v1/chat/sessions/{uuid.uuid4()}{suffix}",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 401
+    assert durable_audit_ledger.events == []
 
 
 async def test_list_sessions_without_token_is_401(client: AsyncClient) -> None:

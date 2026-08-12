@@ -292,11 +292,11 @@ async def test_fire_on_missing_schedule_is_noop(ctx: _Ctx) -> None:
     assert outcome == "no_schedule"
 
 
-async def test_fire_non_owner_assistant_records_owner_on_behalf_of_system_denial(
+async def test_fire_non_owner_assistant_records_system_denial_without_fabricated_user(
     ctx: _Ctx,
     durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
-    """R1-002: scheduler denials retain the owner actor and honest system origin."""
+    """R2-002: the scheduler is the actor; the configured owner did not initiate this fire."""
     schedule_id = await _make_schedule(ctx)
     async with ctx.sessionmaker() as session:
         await AssistantRepository(session, ctx.tenant_a).update(
@@ -318,7 +318,8 @@ async def test_fire_non_owner_assistant_records_owner_on_behalf_of_system_denial
     ]
     assert len(denied) == 1
     assert denied[0].tenant_id == ctx.tenant_a
-    assert denied[0].actor_id == ctx.alice_id
+    assert denied[0].actor_id is None
+    assert denied[0].resource_type == "assistant"
     assert denied[0].request_id == f"schedule-fire:{schedule_id}"
     assert denied[0].source_origin == "system"
     assert denied[0].source_ip is None

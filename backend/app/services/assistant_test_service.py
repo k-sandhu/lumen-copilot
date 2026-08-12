@@ -166,7 +166,7 @@ class AssistantTestService:
         if assistant is None or not self._may_manage(assistant):
             # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
             await self._denials.emit(
-                actor_id=self._owner_id,
+                actor=AuditActor.user(self._owner_id),
                 resource_type="assistant",
                 resource_id=str(assistant_id),
                 attempted_action="assistant.test",

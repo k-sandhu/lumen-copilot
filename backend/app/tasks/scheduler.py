@@ -42,6 +42,7 @@ from app.db.repositories import (
 )
 from app.db.session import session_scope, tenant_session_scope
 from app.db.tenant_context import bind_bypass
+from app.domain.audit import AuditActor
 from app.domain.entities import OverlapPolicy, RunStatus, Schedule
 from app.domain.scheduling import compute_next_run
 from app.tasks.celery_app import celery_app
@@ -253,6 +254,10 @@ async def _dispatch_fire(
                 owner_id=schedule.owner_id,
                 assistant_id=schedule.assistant_id,
                 denials=denials,
+                # The scheduler dispatch attempted this guard. The owner is
+                # still the execution principal if a run is created, but must
+                # not be fabricated as the actor of a pre-run denial.
+                denial_actor=AuditActor.system(),
                 request_id=f"schedule-fire:{schedule.id}",
                 source_ip="system",
                 inputs=schedule.input_params,

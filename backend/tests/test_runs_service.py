@@ -41,6 +41,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
+from app.domain.audit import AuditActor
 from app.domain.entities import (
     AssistantStatus,
     AutonomyLevel,
@@ -615,6 +616,7 @@ async def test_enqueue_manual_run_creates_queued_pinned_run(ctx: _Ctx) -> None:
             owner_id=ctx.alice_id,
             assistant_id=ctx.assistant_id,
             denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+            denial_actor=AuditActor.user(ctx.alice_id),
             request_id="enqueue-success",
             source_ip="203.0.113.8",
             inputs={"prompt": "go"},
@@ -639,6 +641,7 @@ async def test_enqueue_manual_run_unknown_assistant_is_404(ctx: _Ctx) -> None:
                 owner_id=ctx.alice_id,
                 assistant_id=unknown_id,
                 denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
                 request_id="enqueue-unknown",
                 source_ip="203.0.113.8",
             )
@@ -663,6 +666,7 @@ async def test_enqueue_manual_run_non_owner_is_404(ctx: _Ctx) -> None:
                 owner_id=ctx.bob_id,  # bob does not own alice's assistant
                 assistant_id=ctx.assistant_id,
                 denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.bob_id),
                 request_id="enqueue-non-owner",
                 source_ip="203.0.113.8",
             )
@@ -690,6 +694,7 @@ async def test_enqueue_manual_run_cross_tenant_actor_is_404_and_audited(ctx: _Ct
                 owner_id=ctx.carol_id,
                 assistant_id=ctx.assistant_id,
                 denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_b),
+                denial_actor=AuditActor.user(ctx.carol_id),
                 request_id="enqueue-cross-tenant",
                 source_ip="203.0.113.8",
             )
@@ -713,6 +718,7 @@ async def test_enqueue_manual_run_propagates_audit_failure(ctx: _Ctx) -> None:
                 owner_id=ctx.alice_id,
                 assistant_id=uuid.uuid4(),
                 denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
                 request_id="enqueue-audit-failure",
                 source_ip="203.0.113.8",
             )
@@ -742,6 +748,7 @@ async def test_enqueue_manual_run_unpublished_assistant_is_422(ctx: _Ctx) -> Non
                 owner_id=ctx.alice_id,
                 assistant_id=draft_id,
                 denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
                 request_id="enqueue-draft",
                 source_ip="203.0.113.8",
             )
