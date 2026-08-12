@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Lumen Copilot API
-  version: 0.7.0
+  version: 0.8.0
   description: >
     Source-of-truth contract for the Lumen Copilot REST surface. The backend
     implements to match this; the frontend client is generated from it.
@@ -50,6 +50,19 @@ info:
     tenant-scoped **T1** action (spec 0004 §2.5): `admin`-only (**403** otherwise,
     INV-5), audited, with an out-of-range value rejected as **422** (INV-8). No
     shape from 0.1.0–0.4.0 changed; REST request/response only.
+
+
+    This revision (0.8.0) freezes **direct multipart uploads and timestamped
+    media citations** (spec 0008 / ADR-0023 / issue #571). Browser file bytes
+    flow directly to object storage through bounded, resumable signed parts;
+    FastAPI is the authenticated control plane only. Audio/video metadata,
+    paginated diarized transcripts, signed Range-playback capabilities, and
+    optional millisecond citation spans are additive. Replacement operations
+    live under `/v2` as required by the contract versioning rule. The old binary
+    `POST /documents` and byte-returning `/documents/{id}/content` operations
+    are deliberately retired with authenticated `410` responses in the same
+    coordinated frontend/backend migration because retaining a backend byte
+    path would violate the security/performance invariant.
 
 
     **Tenancy & permission (spec 0004).** Every resource below is implicitly
@@ -268,39 +281,138 @@ paths:
               schema: { $ref: "#/components/schemas/DocumentList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
-      operationId: uploadDocument
-      summary: Upload a document into a collection (multi-format).
+      operationId: uploadDocumentLegacy
+      summary: Retired binary upload endpoint.
+      deprecated: true
       description: >
-        Stores the file (MinIO sandbox, CC-12) and creates a `Document` with
-        status `pending`; ingestion (parse → chunk → embed) runs async (#21).
-        Allowed content-types and the size cap are enforced server-side
-        (`UPLOAD_ALLOWED_CONTENT_TYPES`, `MAX_UPLOAD_BYTES`).
+        Binary uploads through FastAPI are no longer accepted (spec 0008).
+        Initiate a metadata-only session with `POST /v2/document-uploads`, upload
+        each signed part directly to storage, then complete the session.
       tags: [documents]
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "410": { $ref: "#/components/responses/Gone" }
+
+  /v2/document-uploads:
+    post:
+      operationId: initiateDocumentUpload
+      summary: Initiate a metadata-only direct multipart upload.
+      description: >
+        Authenticates the caller, verifies collection ownership and declared
+        metadata, then creates a tenant/owner-scoped upload session. No file
+        bytes are accepted. `document_id` is reserved now; the Document becomes
+        visible only after verified completion. Audited (`document.upload_started`).
+      tags: [document-uploads]
       requestBody:
         required: true
         content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [file, collection_id]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                collection_id:
-                  type: string
-                  format: uuid
+          application/json:
+            schema: { $ref: "#/components/schemas/DocumentUploadCreate" }
       responses:
         "201":
-          description: Accepted for ingestion.
+          description: Multipart session created.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Document" }
+              schema: { $ref: "#/components/schemas/DocumentUploadSession" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "422": { $ref: "#/components/responses/ValidationError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v2/document-uploads/{uploadId}:
+    parameters:
+      - { $ref: "#/components/parameters/UploadId" }
+    get:
+      operationId: getDocumentUpload
+      summary: Resume an upload from its authoritative completed-part state.
+      description: >
+        Returns only the caller's tenant/owner-scoped session and the provider-
+        verified completed parts. A foreign/unknown session is 404.
+      tags: [document-uploads]
+      responses:
+        "200":
+          description: Current upload state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentUploadSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    delete:
+      operationId: abortDocumentUpload
+      summary: Abort an incomplete direct upload (idempotent).
+      description: >
+        Aborts the provider multipart upload and marks the session aborted.
+        Repeating an abort succeeds; a completed session is an illegal
+        transition (409). Audited (`document.upload_aborted`).
+      tags: [document-uploads]
+      responses:
+        "204": { description: Aborted, or already aborted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v2/document-uploads/{uploadId}/parts:
+    parameters:
+      - { $ref: "#/components/parameters/UploadId" }
+    post:
+      operationId: signDocumentUploadParts
+      summary: Sign a bounded batch of expected multipart part numbers.
+      description: >
+        Returns short-lived least-privilege PUT URLs. The storage request uses
+        only `required_headers`; it must not carry Lumen credentials or cookies.
+        Expired URLs can be re-requested without restarting the upload.
+      tags: [document-uploads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UploadPartNumberList" }
+      responses:
+        "200":
+          description: Signed parts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignedUploadPartList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v2/document-uploads/{uploadId}/complete:
+    parameters:
+      - { $ref: "#/components/parameters/UploadId" }
+    post:
+      operationId: completeDocumentUpload
+      summary: Verify and finalize a direct multipart upload (idempotent).
+      description: >
+        Completes storage, verifies the actual byte size/metadata, creates one
+        pending Document, emits `document.uploaded` exactly once, and enqueues
+        ingestion after commit. Repeating the same completion returns the same
+        Document. A mismatched part list or stored size is rejected.
+      tags: [document-uploads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompleteDocumentUpload" }
+      responses:
+        "200":
+          description: Completed (newly or idempotently).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /documents/{documentId}:
     parameters:
@@ -330,27 +442,84 @@ paths:
     parameters:
       - { $ref: "#/components/parameters/DocumentId" }
     get:
-      operationId: getDocumentContent
-      summary: Download / view the original file bytes.
+      operationId: getDocumentContentLegacy
+      summary: Retired backend byte/redirect endpoint.
+      deprecated: true
       description: >
-        Returns the stored bytes for viewing in the UI. The server may instead
-        respond 302 to a short-TTL presigned URL (CC-12); clients must follow it.
+        Backend-proxied bytes and protected redirects are retired. Request a
+        JSON capability from `/v2/documents/{documentId}/access-url`; the browser
+        then loads/downloads directly from storage.
       tags: [documents]
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "410": { $ref: "#/components/responses/Gone" }
+
+  /v2/documents/{documentId}/access-url:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    post:
+      operationId: createDocumentAccessUrl
+      summary: Mint a short-lived direct preview/download capability.
+      description: >
+        Rechecks document visibility before returning a signed storage URL.
+        Native media uses it for Range requests. The URL is never logged or
+        persisted. `preview` is audited as `document.viewed`; `download` is
+        audited as `document.downloaded`.
+      tags: [documents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DocumentAccessRequest" }
+      responses:
         "200":
-          description: The raw document bytes.
+          description: Short-lived object access capability.
           content:
-            application/octet-stream:
-              schema: { type: string, format: binary }
-        "302":
-          description: Redirect to a short-TTL presigned URL.
-          headers:
-            Location:
-              required: true
-              description: Short-TTL presigned URL for the object.
-              schema: { type: string, format: uri }
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentAccessUrl" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v2/documents/{documentId}/transcript:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocumentTranscript
+      summary: Read a paginated diarized media transcript.
+      description: >
+        Returns ordered player-relative transcript segments and contextual
+        speaker display names after the normal visibility check. `around_ms`
+        starts a page near a citation without walking from segment zero. A
+        non-media or not-ready document is 409. Audited as `document.viewed`.
+      tags: [documents]
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque ordinal cursor from `next_cursor`.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+        - name: around_ms
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Return the page containing or immediately following this time.
+      responses:
+        "200":
+          description: Transcript page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TranscriptPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /documents/{documentId}/text:
     parameters:
@@ -3038,6 +3207,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Opaque Lumen upload-session id (never the provider multipart id).
     ArtifactId:
       name: artifactId
       in: path
@@ -3236,17 +3411,166 @@ components:
           type: [string, "null"]
           description: Cursor for the next page, or null when exhausted.
 
+    # --- Direct document uploads (spec 0008 / #571) -------------------------
+    DocumentUploadCreate:
+      type: object
+      additionalProperties: false
+      required: [filename, mime_type, size_bytes, collection_id]
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Display filename only; never a storage key.
+        mime_type:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Browser-declared type; ingestion still validates actual content.
+        size_bytes:
+          type: integer
+          minimum: 1
+          description: Declared exact size, verified with storage HEAD at completion.
+        collection_id: { type: string, format: uuid }
+        last_modified_at:
+          type: [string, "null"]
+          format: date-time
+          description: Optional client file timestamp for presentation/audit context.
+
+    DocumentUploadState:
+      type: string
+      enum: [initiated, completing, completed, aborted, expired, failed]
+
+    UploadedPart:
+      type: object
+      additionalProperties: false
+      required: [part_number, etag, size_bytes]
+      properties:
+        part_number: { type: integer, minimum: 1, maximum: 10000 }
+        etag:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\u0000-\u001F\u007F]{1,512}$'
+          description: Opaque storage ETag; clients return it unchanged.
+        size_bytes: { type: integer, minimum: 1 }
+
+    DocumentUploadSession:
+      type: object
+      additionalProperties: false
+      required:
+        [id, document_id, state, filename, mime_type, size_bytes, collection_id,
+         part_size_bytes, part_count, completed_parts, expires_at, document,
+         created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id:
+          type: string
+          format: uuid
+          description: Reserved stable id; the Document is created only after completion.
+        state: { $ref: "#/components/schemas/DocumentUploadState" }
+        filename: { type: string }
+        mime_type: { type: string }
+        size_bytes: { type: integer, minimum: 1 }
+        collection_id: { type: string, format: uuid }
+        part_size_bytes: { type: integer, minimum: 5242880 }
+        part_count: { type: integer, minimum: 1, maximum: 10000 }
+        completed_parts:
+          type: array
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/UploadedPart" }
+        expires_at: { type: string, format: date-time }
+        error:
+          type: [string, "null"]
+          description: Stable safe failure detail for failed/expired sessions.
+        document:
+          oneOf:
+            - { $ref: "#/components/schemas/Document" }
+            - { type: "null" }
+          description: The completed Document, otherwise exactly null.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    UploadPartNumberList:
+      type: object
+      additionalProperties: false
+      required: [part_numbers]
+      properties:
+        part_numbers:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { type: integer, minimum: 1, maximum: 10000 }
+
+    SignedUploadPart:
+      type: object
+      additionalProperties: false
+      required: [part_number, url, expires_at, required_headers]
+      properties:
+        part_number: { type: integer, minimum: 1, maximum: 10000 }
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+        required_headers:
+          type: object
+          additionalProperties: { type: string }
+          description: Exact storage headers; never includes Lumen auth or cookies.
+
+    SignedUploadPartList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/SignedUploadPart" }
+
+    CompleteUploadPart:
+      type: object
+      additionalProperties: false
+      required: [part_number, etag]
+      properties:
+        part_number: { type: integer, minimum: 1, maximum: 10000 }
+        etag:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\u0000-\u001F\u007F]{1,512}$'
+
+    CompleteDocumentUpload:
+      type: object
+      additionalProperties: false
+      required: [parts]
+      description: >
+        `parts` is strictly ascending and contiguous from 1 through the
+        session's expected part_count, with each part_number appearing once.
+        The service enforces this cross-item invariant before storage completion.
+      properties:
+        parts:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/CompleteUploadPart" }
+
     # --- Documents ----------------------------------------------------------
     DocumentStatus:
       type: string
       description: Ingestion lifecycle.
       enum: [pending, processing, ready, failed]
 
+    DocumentKind:
+      type: string
+      description: Processing/viewer family derived from the validated MIME type.
+      enum: [document, audio, video]
+
     Document:
       type: object
       additionalProperties: false
       required:
-        [id, filename, mime_type, size_bytes, collection_id, owner_id, status, chunk_count, created_at, updated_at]
+        [id, filename, mime_type, size_bytes, collection_id, owner_id,
+         status, chunk_count, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         filename: { type: string }
@@ -3254,6 +3578,11 @@ components:
         size_bytes: { type: integer, minimum: 0 }
         collection_id: { type: string, format: uuid }
         owner_id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/DocumentKind" }
+        duration_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: Player-relative media duration; null for ordinary documents.
         status: { $ref: "#/components/schemas/DocumentStatus" }
         error:
           type: string
@@ -3294,6 +3623,107 @@ components:
             True when the text was capped at the server limit
             (DOCUMENT_TEXT_MAX_BYTES); the UI should say so and offer the
             original-bytes download instead of implying completeness.
+
+    DocumentAccessPurpose:
+      type: string
+      enum: [preview, download]
+
+    DocumentAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [purpose]
+      properties:
+        purpose: { $ref: "#/components/schemas/DocumentAccessPurpose" }
+
+    DocumentAccessUrl:
+      type: object
+      additionalProperties: false
+      required:
+        [url, filename, mime_type, size_bytes, expires_at, purpose, supports_byte_ranges]
+      properties:
+        url: { type: string, format: uri }
+        filename: { type: string }
+        mime_type: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+        expires_at: { type: string, format: date-time }
+        purpose: { $ref: "#/components/schemas/DocumentAccessPurpose" }
+        supports_byte_ranges:
+          type: boolean
+          description: True for storage URLs intended for native media seeking.
+
+    SpeakerNameStatus:
+      type: string
+      enum: [unknown, inferred]
+
+    SpeakerNameMethod:
+      type: string
+      enum: [self_introduction, contextual_dialogue]
+
+    TranscriptSpeaker:
+      type: object
+      additionalProperties: false
+      required:
+        [speaker_id, display_name, name_status, name_confidence, name_method,
+         evidence_segment_ids]
+      properties:
+        speaker_id:
+          type: string
+          pattern: "^speaker-[1-9][0-9]*$"
+          description: Stable file-local diarizer identity; never a biometric id.
+        display_name:
+          type: [string, "null"]
+          description: Contextually inferred name, or null when evidence is insufficient.
+        name_status: { $ref: "#/components/schemas/SpeakerNameStatus" }
+        name_confidence:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+        name_method:
+          oneOf:
+            - { $ref: "#/components/schemas/SpeakerNameMethod" }
+            - { type: "null" }
+        evidence_segment_ids:
+          type: array
+          uniqueItems: true
+          items: { type: string, format: uuid }
+
+    TranscriptSegment:
+      type: object
+      additionalProperties: false
+      required:
+        [id, ordinal, speaker_id, start_ms, end_ms, char_start, char_end, text]
+      properties:
+        id: { type: string, format: uuid }
+        ordinal: { type: integer, minimum: 0 }
+        speaker_id: { type: string, pattern: "^speaker-[1-9][0-9]*$" }
+        start_ms: { type: integer, minimum: 0 }
+        end_ms: { type: integer, minimum: 1 }
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 1 }
+        text: { type: string, minLength: 1 }
+        confidence:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+
+    TranscriptPage:
+      type: object
+      additionalProperties: false
+      required:
+        [document_id, duration_ms, language, transcription_model, speakers,
+         items, next_cursor]
+      properties:
+        document_id: { type: string, format: uuid }
+        duration_ms: { type: integer, minimum: 0 }
+        language: { type: [string, "null"] }
+        transcription_model: { type: string }
+        speakers:
+          type: array
+          items: { $ref: "#/components/schemas/TranscriptSpeaker" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/TranscriptSegment" }
+        next_cursor: { type: [string, "null"] }
 
     ArtifactProducedBy:
       type: string
@@ -3419,6 +3849,22 @@ components:
         a claim's provenance is still visible as "source no longer available"
         rather than the citation silently vanishing.
       required: [id, document_id, document_name, chunk_id, snippet, char_start, char_end]
+      dependentRequired:
+        time_start_ms: [time_end_ms]
+        time_end_ms: [time_start_ms]
+      allOf:
+        - if:
+            required: [redacted]
+            properties:
+              redacted: { const: true }
+          then:
+            not:
+              anyOf:
+                - { required: [time_start_ms] }
+                - { required: [time_end_ms] }
+                - { required: [transcript_segment_id] }
+                - { required: [speaker_id] }
+                - { required: [speaker_name] }
       properties:
         id: { type: string, format: uuid }
         document_id: { type: string, format: uuid }
@@ -3427,6 +3873,26 @@ components:
         snippet: { type: string, description: The cited passage text. }
         char_start: { type: integer, minimum: 0 }
         char_end: { type: integer, minimum: 0 }
+        time_start_ms:
+          type: integer
+          minimum: 0
+          description: >
+            Player-relative start for media. Omitted with time_end_ms for text;
+            media citations require the valid pair (spec 0008 §5).
+        time_end_ms:
+          type: integer
+          minimum: 1
+          description: Exclusive player-relative end for a media citation.
+        transcript_segment_id:
+          type: string
+          format: uuid
+          description: First transcript segment covered by this media citation.
+        speaker_id:
+          type: string
+          description: Optional file-local diarizer id for a single-speaker citation.
+        speaker_name:
+          type: string
+          description: Optional contextually inferred display name (never biometric).
         score:
           type: number
           description: Optional retrieval/rerank score.
@@ -3436,7 +3902,8 @@ components:
           description: >
             True when the caller may no longer retrieve the cited document, in
             which case `snippet` and `document_name` are empty. Optional and
-            defaulting to false so existing clients are unaffected.
+            defaulting to false so existing clients are unaffected. Timestamp,
+            transcript-segment, and speaker fields are omitted when true.
 
     MessageToolInvocation:
       type: object
@@ -3750,6 +4217,12 @@ components:
           type: string
           format: uuid
           description: Source document id when the result resolves to a document (for click-through).
+        document_kind: { $ref: "#/components/schemas/DocumentKind" }
+        time_start_ms: { type: integer, minimum: 0 }
+        time_end_ms: { type: integer, minimum: 1 }
+        transcript_segment_id: { type: string, format: uuid }
+        speaker_id: { type: string }
+        speaker_name: { type: string }
         score:
           type: number
           description: Optional retrieval/rerank score.
@@ -3762,6 +4235,9 @@ components:
         in this response's `results` (by `result_id`) so the answer can never cite
         a passage the caller could not retrieve (spec 0004 INV-3).
       required: [result_id]
+      dependentRequired:
+        time_start_ms: [time_end_ms]
+        time_end_ms: [time_start_ms]
       properties:
         result_id:
           type: string
@@ -3772,6 +4248,11 @@ components:
           description: The specific cited passage text (a substring of the result snippet).
         char_start: { type: integer, minimum: 0 }
         char_end: { type: integer, minimum: 0 }
+        time_start_ms: { type: integer, minimum: 0 }
+        time_end_ms: { type: integer, minimum: 1 }
+        transcript_segment_id: { type: string, format: uuid }
+        speaker_id: { type: string }
+        speaker_name: { type: string }
 
     DirectAnswer:
       type: object
@@ -3855,6 +4336,10 @@ components:
         - collection.created
         - document.deleted
         - document.downloaded
+        - document.transcribed
+        - document.upload_aborted
+        - document.upload_expired
+        - document.upload_started
         - document.uploaded
         - document.viewed
         - group.created
@@ -6453,6 +6938,13 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
+    Gone:
+      description: >
+        This operation was deliberately retired. The problem `code` names the
+        replacement path; the server does not parse or proxy a legacy file body.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
     ValidationError:
       description: Malformed or invalid request body (INV-8).
       content:
@@ -6465,6 +6957,11 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     UnsupportedMediaType:
       description: Content-type not in the upload allowlist.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    ServiceUnavailable:
+      description: A required storage/model dependency is temporarily unavailable.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -6486,7 +6983,9 @@ tags:
   - name: collections
     description: Folders that group uploaded documents.
   - name: documents
-    description: Upload, list, view, and delete documents (multi-format).
+    description: List, view, transcribe, and delete documents/media.
+  - name: document-uploads
+    description: Metadata-only control plane for direct multipart storage uploads.
   - name: chat
     description: Chat sessions, history, and message send (answer streams over WS).
   - name: models
