@@ -14,7 +14,13 @@
  * the login screen (AC-3).
  */
 import { useEffect } from 'react';
-import { refresh } from '@/api';
+import {
+  getAccessToken,
+  getAuthIntentGeneration,
+  isAuthIntentCurrent,
+  refresh,
+  registerRefreshHandler,
+} from '@/api';
 import { useAuthStore } from './authStore';
 
 let bootstrapPromise: Promise<void> | null = null;
@@ -23,11 +29,20 @@ let bootstrapPromise: Promise<void> | null = null;
 export function bootstrapSession(): Promise<void> {
   if (!bootstrapPromise) {
     bootstrapPromise = (async () => {
+      const authIntentGeneration = getAuthIntentGeneration();
       try {
         await refresh();
-        useAuthStore.getState().markAuthenticated();
+        if (getAccessToken() !== null) {
+          useAuthStore.getState().markAuthenticated();
+        }
       } catch {
-        useAuthStore.getState().markUnauthenticated();
+        if (getAccessToken() !== null) {
+          // A newer login won while bootstrap was in flight. Its live token is
+          // authoritative regardless of how the discarded bootstrap settled.
+          useAuthStore.getState().markAuthenticated();
+        } else if (isAuthIntentCurrent(authIntentGeneration)) {
+          useAuthStore.getState().markUnauthenticated();
+        }
       }
     })();
   }
@@ -37,6 +52,7 @@ export function bootstrapSession(): Promise<void> {
 /** Test-only: reset the one-time guard so each test bootstraps fresh. */
 export function resetBootstrapForTests(): void {
   bootstrapPromise = null;
+  registerRefreshHandler(null);
 }
 
 export function useBootstrapSession(): void {

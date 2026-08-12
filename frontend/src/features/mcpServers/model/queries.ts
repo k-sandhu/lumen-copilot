@@ -13,12 +13,7 @@
  * `ApiError`s the components branch on (a 422 → inline form error, INV-8; a 404 →
  * existence non-disclosure, INV-1/INV-2; a 401 → re-auth, INV-4).
  */
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type UseQueryResult,
-} from '@tanstack/react-query';
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   deleteMcpServer,
   getMcpServer,
@@ -28,6 +23,7 @@ import {
   testMcpServer,
   updateMcpServer,
 } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import type {
   McpServer,
   McpServerCreate,
@@ -35,6 +31,7 @@ import type {
   McpServerUpdate,
   McpToolList,
 } from '@/api';
+import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 
 /** Stable query keys for the slice. */
 export const mcpKeys = {
@@ -81,8 +78,8 @@ export function useMcpServerTools(id: string | null): UseQueryResult<McpToolList
  */
 export function useRegisterMcpServer() {
   const qc = useQueryClient();
-  return useMutation<McpServer, unknown, McpServerCreate>({
-    mutationFn: (body) => registerMcpServer(body),
+  return useEphemeralMutation<McpServer, unknown, McpServerCreate>({
+    mutationFn: (body, { signal }) => registerMcpServer(body, signal),
     onSuccess: () => void qc.invalidateQueries({ queryKey: mcpKeys.list() }),
   });
 }
@@ -94,7 +91,7 @@ export function useRegisterMcpServer() {
  */
 export function useUpdateMcpServer(id: string) {
   const qc = useQueryClient();
-  return useMutation<McpServer, unknown, McpServerUpdate>({
+  return usePrincipalMutation<McpServer, unknown, McpServerUpdate>({
     mutationFn: (body) => updateMcpServer(id, body),
     onSuccess: (updated) => {
       qc.setQueryData(mcpKeys.detail(id), updated);
@@ -111,7 +108,7 @@ export function useUpdateMcpServer(id: string) {
  */
 export function useTestMcpServer(id: string) {
   const qc = useQueryClient();
-  return useMutation<McpServer, unknown, void>({
+  return usePrincipalMutation<McpServer, unknown, void>({
     mutationFn: () => testMcpServer(id),
     onSuccess: (updated) => {
       qc.setQueryData(mcpKeys.detail(id), updated);
@@ -124,7 +121,7 @@ export function useTestMcpServer(id: string) {
 /** Remove a server + its stored credential + discovered tools (204). Refreshes all. */
 export function useDeleteMcpServer() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteMcpServer(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: mcpKeys.all }),
   });

@@ -10,9 +10,10 @@
  * INV-1/INV-2); a malformed id → 422 (INV-8); a missing/expired token → 401
  * (INV-4).
  */
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { cancelCodeRun, getCodeRun } from '@/api';
 import type { CodeRun } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import { isTerminalCodeRun } from './presentation';
 
 /** Stable query keys for the slice. */
@@ -48,7 +49,7 @@ export function useCodeRun(
 /** Explicit cancellation destroys the active container and returns the killed row. */
 export function useCancelCodeRun(id: string) {
   const client = useQueryClient();
-  return useMutation({
+  return usePrincipalMutation({
     mutationFn: () => cancelCodeRun(id),
     onSuccess: (value) => {
       client.setQueryData(codeRunKeys.detail(id), value);

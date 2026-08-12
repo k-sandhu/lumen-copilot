@@ -8,15 +8,16 @@
  * writes reuse the preferences slice's `useUpdatePreferences` (spec 0005), so they are
  * not re-declared here.
  */
-import { useMutation, useQueryClient, type UseMutationResult } from '@tanstack/react-query';
+import { useQueryClient, type UseMutationResult } from '@tanstack/react-query';
 import { clearAvatar, updateAvatar } from '@/api';
 import type { UserAvatar } from '@/api';
 import { currentUserQueryKey } from '@/features/auth';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 /** Upload the caller's profile avatar; invalidates `/auth/me` so the shell re-reads. */
 export function useUpdateAvatar(): UseMutationResult<UserAvatar, unknown, File> {
   const qc = useQueryClient();
-  return useMutation<UserAvatar, unknown, File>({
+  return usePrincipalMutation<UserAvatar, unknown, File>({
     mutationFn: (file) => updateAvatar(file),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: currentUserQueryKey });
@@ -27,7 +28,7 @@ export function useUpdateAvatar(): UseMutationResult<UserAvatar, unknown, File> 
 /** Clear the caller's profile avatar; invalidates `/auth/me` so the shell re-reads. */
 export function useClearAvatar(): UseMutationResult<void, unknown, void> {
   const qc = useQueryClient();
-  return useMutation<void, unknown, void>({
+  return usePrincipalMutation<void, unknown, void>({
     mutationFn: () => clearAvatar(),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: currentUserQueryKey });

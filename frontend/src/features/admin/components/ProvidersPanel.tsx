@@ -21,7 +21,9 @@
  * wired into the chat model picker and no chat/embedding request is routed through a
  * registered provider — that is a separate follow-up PR.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
+import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { Icon, StatusDot, type StatusTone } from '@/ui';
 import { ApiError } from '@/api';
 import type { LlmProvider, LlmProviderStatus } from '@/api';
@@ -239,7 +241,31 @@ function AddProviderForm({
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const baseUrlRef = useRef<HTMLInputElement | null>(null);
+  const apiKeyRef = useRef<SecretInputHandle | null>(null);
+  const apiKeyId = useId();
   const canSubmit = name.trim().length > 0 && baseUrl.trim().length > 0 && !submitting;
+
+  const rememberName = useCallback((node: HTMLInputElement | null) => {
+    if (node) nameRef.current = node;
+  }, []);
+  const rememberBaseUrl = useCallback((node: HTMLInputElement | null) => {
+    if (node) baseUrlRef.current = node;
+  }, []);
+  const hardBlankDom = useCallback(() => {
+    if (nameRef.current) nameRef.current.value = '';
+    if (baseUrlRef.current) baseUrlRef.current.value = '';
+    apiKeyRef.current?.reset();
+  }, []);
+  const clearForm = useCallback(() => {
+    hardBlankDom();
+    setName('');
+    setBaseUrl('');
+    setApiKey('');
+  }, [hardBlankDom]);
+  useCredentialClearer(clearForm);
+  useEffect(() => () => hardBlankDom(), [hardBlankDom]);
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -250,21 +276,23 @@ function AddProviderForm({
     };
     if (apiKey.trim().length > 0) body.api_key = apiKey.trim();
     onSubmit(body);
-    setName('');
-    setBaseUrl('');
-    setApiKey('');
+    clearForm();
   };
 
   return (
     <form
       onSubmit={handleSubmit}
+      autoComplete="off"
       aria-label="Add LLM provider"
       className="grid gap-3 border-t border-border bg-surface-muted/40 px-4 py-4 sm:grid-cols-2"
     >
       <label className="flex flex-col gap-1 text-xs font-medium text-foreground-muted">
         Name
         <input
+          ref={rememberName}
           type="text"
+          name="llm_provider_display_name"
+          autoComplete="off"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="OpenRouter"
@@ -288,24 +316,35 @@ function AddProviderForm({
       <label className="flex flex-col gap-1 text-xs font-medium text-foreground-muted sm:col-span-2">
         Base URL
         <input
+          ref={rememberBaseUrl}
           type="url"
+          name="llm_provider_base_url"
+          inputMode="url"
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
           value={baseUrl}
           onChange={(e) => setBaseUrl(e.target.value)}
           placeholder="https://openrouter.ai/api/v1"
           className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         />
       </label>
-      <label className="flex flex-col gap-1 text-xs font-medium text-foreground-muted sm:col-span-2">
-        API key (write-only)
-        <input
-          type="password"
+      <div className="sm:col-span-2">
+        <label htmlFor={apiKeyId} className="mb-1 block text-xs font-medium text-foreground-muted">
+          API key (write-only)
+        </label>
+        <SecretInput
+          ref={apiKeyRef}
+          id={apiKeyId}
+          name="llm_provider_api_key"
+          purpose="new-secret"
+          revealLabel="API key"
           value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
+          onValueChange={setApiKey}
           placeholder="sk-…"
-          autoComplete="off"
-          className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="w-full rounded-md border border-border bg-surface py-1.5 pl-2 pr-10 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         />
-      </label>
+      </div>
       <div className="sm:col-span-2">
         <button
           type="submit"
@@ -330,12 +369,18 @@ export function ProvidersPanel() {
   const providers = query.data?.items ?? [];
 
   const onOk = (message: string) => setToast({ kind: 'ok', message });
-  const onError = (error: unknown) => setToast({ kind: 'error', message: describeWriteError(error) });
+  const onError = (error: unknown) =>
+    setToast({ kind: 'error', message: describeWriteError(error) });
 
   const handleCreate = (body: { name: string; base_url: string; api_key?: string }) => {
     setToast(null);
-    createMutation.mutate(
-      { name: body.name, provider_type: 'openai_compatible', base_url: body.base_url, api_key: body.api_key },
+    createMutation.submit(
+      {
+        name: body.name,
+        provider_type: 'openai_compatible',
+        base_url: body.base_url,
+        ...(body.api_key === undefined ? {} : { api_key: body.api_key }),
+      },
       {
         onSuccess: (p) => onOk(`Added ${p.name} (${p.status}).`),
         onError,

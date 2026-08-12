@@ -257,6 +257,11 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = Field(
         default=14 * 24 * 3600, alias="REFRESH_TOKEN_TTL_SECONDS"
     )
+    # Bound per-user refresh families so slot-scoped HttpOnly cookies remain
+    # comfortably below browser/per-request header limits. Two is the minimum:
+    # an account switch must preserve the selected session until the new one is
+    # established. Sixteen still keeps the namespace below ~2 KiB.
+    auth_session_max_active: int = Field(default=8, ge=2, le=16, alias="AUTH_SESSION_MAX_ACTIVE")
 
     # --- Secrets vault master key (CC / issue #209, spec 0004 "deny by default") ---
     # Base64 of a 32-byte (AES-256) master key for the per-tenant secrets vault's

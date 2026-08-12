@@ -9,12 +9,12 @@
  *   authenticated    — a valid access token is held
  *   unauthenticated  — no session; the guard routes to /login
  *
- * The store SUBSCRIBES to the api token holder so that a token cleared anywhere
- * (a failed silent refresh, logout) deterministically routes back to login
- * (AC-4) without each call site having to remember to update status.
+ * `PrincipalLifecycle` subscribes to the api token holder and updates this
+ * store only after it has cancelled requests and cleared the QueryClient. The
+ * store deliberately remains a small status holder; it does not own server
+ * state or a second QueryClient.
  */
 import { create } from 'zustand';
-import { subscribeToken } from '@/api';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -29,16 +29,3 @@ export const useAuthStore = create<AuthState>((set) => ({
   markAuthenticated: () => set({ status: 'authenticated' }),
   markUnauthenticated: () => set({ status: 'unauthenticated' }),
 }));
-
-// When the access token is dropped (failed refresh / logout) flip to
-// unauthenticated; when one appears, mark authenticated. Subscribed once at
-// module load — the api/ holder is the single source of truth for "do we have a
-// token", and the guard reacts to the derived status.
-subscribeToken((token) => {
-  const { status, markAuthenticated, markUnauthenticated } = useAuthStore.getState();
-  if (token === null) {
-    if (status !== 'unauthenticated') markUnauthenticated();
-  } else if (status !== 'authenticated') {
-    markAuthenticated();
-  }
-});

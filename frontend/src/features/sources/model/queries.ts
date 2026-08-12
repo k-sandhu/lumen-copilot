@@ -14,14 +14,10 @@
  * refetches on an interval so the pending → syncing → ready/error transitions
  * surface; it goes quiet once every source is settled.
  */
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type UseQueryResult,
-} from '@tanstack/react-query';
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { connectSource, createSource, deleteSource, listSources, syncSource } from '@/api';
 import type { Source, SourceConnectResponse, SourceCreate, SourceList } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 /** Stable query key for the sources list. */
 export const sourcesKey = ['sources'] as const;
@@ -57,7 +53,7 @@ export function useSources(): UseQueryResult<SourceList> {
  */
 export function useCreateSource() {
   const qc = useQueryClient();
-  return useMutation<Source, unknown, SourceCreate>({
+  return usePrincipalMutation<Source, unknown, SourceCreate>({
     mutationFn: (body) => createSource(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: sourcesKey }),
   });
@@ -73,7 +69,7 @@ export function useCreateSource() {
  * source, INV-8) propagates as an `ApiError` the UI surfaces — never swallowed.
  */
 export function useConnectSource() {
-  return useMutation<SourceConnectResponse, unknown, string>({
+  return usePrincipalMutation<SourceConnectResponse, unknown, string>({
     mutationFn: (id) => connectSource(id),
   });
 }
@@ -81,7 +77,7 @@ export function useConnectSource() {
 /** Re-sync a source (AC-1). Refreshes the list so its status flips to syncing. */
 export function useSyncSource() {
   const qc = useQueryClient();
-  return useMutation<Source, unknown, string>({
+  return usePrincipalMutation<Source, unknown, string>({
     mutationFn: (id) => syncSource(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: sourcesKey }),
   });
@@ -90,7 +86,7 @@ export function useSyncSource() {
 /** Remove a source and cascade its documents (AC-1). Refreshes the grid. */
 export function useDeleteSource() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteSource(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: sourcesKey }),
   });

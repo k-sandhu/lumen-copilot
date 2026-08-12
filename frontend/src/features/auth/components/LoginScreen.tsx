@@ -20,9 +20,11 @@
  * whether the email exists. A 422 (malformed) and a transport error get their
  * own generic copy so the user is never stranded (quality bar: every state).
  */
-import { useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiError } from '@/api';
+import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
+import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { Icon } from '@/ui';
 import { useLogin } from '../model/queries';
 
@@ -38,7 +40,7 @@ function genericError(error: unknown): string {
 
 /** Shared input styling: token-backed, icon-prefixed, with a visible focus ring. */
 const inputClass =
-  'w-full rounded-md border border-border bg-surface py-2 pl-10 pr-3 text-sm text-foreground ' +
+  'w-full rounded-md border border-border bg-surface py-2 pl-10 pr-10 text-sm text-foreground ' +
   'placeholder:text-foreground-muted/70 transition-colors ' +
   'focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50 ' +
   'aria-[invalid=true]:border-danger';
@@ -47,13 +49,36 @@ export function LoginScreen() {
   const login = useLogin();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const emailRef = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<SecretInputHandle | null>(null);
   const emailId = useId();
   const passwordId = useId();
   const errorId = useId();
 
+  const rememberEmail = useCallback((node: HTMLInputElement | null) => {
+    if (node) emailRef.current = node;
+  }, []);
+  const hardBlankDom = useCallback(() => {
+    if (emailRef.current) emailRef.current.value = '';
+    passwordRef.current?.reset();
+  }, []);
+  const clearForm = useCallback(() => {
+    hardBlankDom();
+    setEmail('');
+    setPassword('');
+  }, [hardBlankDom]);
+
+  useCredentialClearer(clearForm);
+  useEffect(() => () => hardBlankDom(), [hardBlankDom]);
+
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    login.mutate({ email, password });
+    login.submit(
+      { email, password },
+      {
+        onSettled: () => passwordRef.current?.reset(),
+      },
+    );
   }
 
   const errorMessage = login.isError ? genericError(login.error) : null;
@@ -108,10 +133,14 @@ export function LoginScreen() {
                   className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground-muted"
                 />
                 <input
+                  ref={rememberEmail}
                   id={emailId}
                   type="email"
                   name="email"
                   autoComplete="username"
+                  inputMode="email"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   placeholder="you@company.com"
                   required
                   value={email}
@@ -132,15 +161,16 @@ export function LoginScreen() {
                   name="lock"
                   className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground-muted"
                 />
-                <input
+                <SecretInput
+                  ref={passwordRef}
                   id={passwordId}
-                  type="password"
                   name="password"
-                  autoComplete="current-password"
+                  purpose="current-password"
+                  revealLabel="password"
                   placeholder="••••••••"
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onValueChange={setPassword}
                   aria-invalid={invalid}
                   aria-describedby={errorMessage ? errorId : undefined}
                   className={inputClass}

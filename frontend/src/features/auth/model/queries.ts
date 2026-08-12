@@ -3,10 +3,13 @@
  * is server data fetched from GET /auth/me; mutations (login/logout) invalidate
  * it. The coarse session status lives in the Zustand authStore.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCurrentUser, hasAccessToken, login, logout } from '@/api';
-import type { CurrentUser, LoginRequest, TokenResponse } from '@/api';
+import type { CurrentUser, LoginRequest } from '@/api';
+import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import { useAuthStore } from './authStore';
+import { transitionPrincipal } from './principalTransition';
 
 export const currentUserQueryKey = ['auth', 'me'] as const;
 
@@ -34,8 +37,10 @@ export function useLogin() {
   const queryClient = useQueryClient();
   const markAuthenticated = useAuthStore((s) => s.markAuthenticated);
 
-  return useMutation<TokenResponse, unknown, LoginRequest>({
-    mutationFn: (credentials) => login(credentials),
+  return useEphemeralMutation<void, unknown, LoginRequest>({
+    mutationFn: async (credentials, { signal }) => {
+      await login(credentials, signal);
+    },
     onSuccess: () => {
       markAuthenticated();
       void queryClient.invalidateQueries({ queryKey: currentUserQueryKey });
@@ -44,19 +49,42 @@ export function useLogin() {
 }
 
 /**
- * Logout mutation (AC-2). Revokes server-side, clears the token (which the
- * authStore observes → unauthenticated), and drops cached server state so no
- * other user's data lingers in the cache.
+ * Logout action (AC-2). The canonical principal lifecycle first drops every
+ * client-side tenant/query holder; server revocation then runs best-effort with
+ * the outgoing bearer and is deliberately not awaited by the UI.
  */
 export function useLogout() {
   const queryClient = useQueryClient();
-  const markUnauthenticated = useAuthStore((s) => s.markUnauthenticated);
+  const mounted = useRef(true);
+  const pending = useRef(false);
+  const [isPending, setIsPending] = useState(false);
 
-  return useMutation<void, unknown, void>({
-    mutationFn: () => logout(),
-    onSettled: () => {
-      markUnauthenticated();
-      queryClient.clear();
+  useEffect(
+    () => () => {
+      mounted.current = false;
     },
-  });
+    [],
+  );
+
+  const mutate = useCallback(() => {
+    if (pending.current) return;
+    const hadAccessToken = hasAccessToken();
+    pending.current = true;
+    setIsPending(true);
+
+    // Synchronous with the click: blank/remask drafts, abort credential work,
+    // clear every query/mutation, and leave the authenticated route before the
+    // best-effort revocation is awaited.
+    const revocation = logout();
+    // Defensive fallback for a direct/null-token hook call: a normal logout's
+    // token notification already ran this canonical teardown synchronously.
+    if (!hadAccessToken) transitionPrincipal(queryClient, 'unauthenticated');
+
+    void revocation.finally(() => {
+      pending.current = false;
+      if (mounted.current) setIsPending(false);
+    });
+  }, [queryClient]);
+
+  return { mutate, isPending };
 }

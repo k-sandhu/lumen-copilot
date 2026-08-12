@@ -107,10 +107,16 @@ paths:
       summary: Exchange email + password for an access token.
       description: >
         App-managed identity (spec 0004): returns a short-lived access token and
-        sets a rotating, httpOnly refresh cookie. Invalid credentials → 401 with
-        a generic message (no account-existence disclosure).
+        sets a rotating, HttpOnly refresh cookie. A slot-aware login creates one
+        refresh-token family whose id is the supplied X-Lumen-Auth-Slot UUID and
+        whose cookie name is unique to that slot. Invalid credentials → 401 with
+        a generic message (no account-existence disclosure). Reusing an existing
+        slot never overwrites it and returns 409.
       tags: [auth]
       security: []
+      parameters:
+        - { $ref: "#/components/parameters/AuthSlot" }
+        - { $ref: "#/components/parameters/PreviousAuthSlot" }
       requestBody:
         required: true
         content:
@@ -123,14 +129,22 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TokenResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
   /auth/refresh:
     post:
       operationId: refresh
       summary: Mint a new access token from the refresh cookie.
+      description: >
+        For a slot-aware session, requires both the selected slot id and that
+        slot's independently random HttpOnly token. Rotation updates the same
+        family row under a database lock; the slot alone grants no authority.
+        Slotless clients retain the legacy fixed-cookie rotation path.
       tags: [auth]
       security: []
+      parameters:
+        - { $ref: "#/components/parameters/AuthSlot" }
       responses:
         "200":
           description: Refreshed.
@@ -138,15 +152,26 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TokenResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /auth/logout:
     post:
       operationId: logout
       summary: Revoke the refresh token / clear the session.
+      description: >
+        With X-Lumen-Auth-Slot, the authenticated bearer principal revokes that
+        tenant/user-bound session family under the same row lock used by refresh,
+        even when the request carried a pre-rotation cookie. The response expires
+        only that slot's unique cookie, so a late logout cannot erase a newer
+        login's distinct cookie. Slotless clients retain the legacy exact-token
+        path and receive no shared-cookie deletion; its revoked cookie is unusable.
       tags: [auth]
+      parameters:
+        - { $ref: "#/components/parameters/AuthSlot" }
       responses:
         "204": { description: Logged out. }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /auth/me:
     get:
@@ -3016,6 +3041,36 @@ paths:
 
 components:
   parameters:
+    AuthSlot:
+      name: X-Lumen-Auth-Slot
+      in: header
+      required: false
+      description: >
+        Opaque RFC-4122 version-4 UUID identifying the browser auth intent's
+        refresh-cookie slot and stable server-side session-family row. It is a
+        selector, not a credential: refresh still requires the independently
+        random HttpOnly token, and logout still requires a bearer bound to the
+        same tenant/user. Omit only for legacy fixed-cookie clients.
+      schema:
+        type: string
+        format: uuid
+        title: X-Lumen-Auth-Slot
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    PreviousAuthSlot:
+      name: X-Lumen-Previous-Auth-Slot
+      in: header
+      required: false
+      description: >
+        Canonical lowercase UUIDv4 of the browser profile's currently selected
+        slot during a slot-aware login. It grants no authority; after valid
+        credentials resolve the same tenant/user, admission preserves this row
+        while establishing the new slot and deterministically evicts older
+        excess sessions. Omit when no slot is selected or for legacy clients.
+      schema:
+        type: string
+        format: uuid
+        title: X-Lumen-Previous-Auth-Slot
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     Cursor:
       name: cursor
       in: query
