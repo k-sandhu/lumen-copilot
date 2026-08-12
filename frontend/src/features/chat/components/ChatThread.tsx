@@ -111,9 +111,10 @@ function labelForModel(
 }
 
 /**
- * Per-source freshness for a turn. We have no per-citation timestamp on the
- * wire, so the answer's evidence recency is the message time — surfaced so an
- * answer's evidence age is never hidden (mission "freshness").
+ * Per-source indexing freshness for a turn. Media citations may carry a precise
+ * player-relative passage timestamp, but the wire has no per-citation indexing
+ * timestamp. The answer-age label therefore remains based on message time and
+ * must never reinterpret the media offset as source recency.
  */
 function sourceMetaFor(
   citations: UiCitation[],

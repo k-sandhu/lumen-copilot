@@ -1,15 +1,15 @@
-"""Document upload & lifecycle use-cases — the ``/documents`` surface (#28).
+"""Document metadata and lifecycle use-cases — the v1 ``/documents`` surface.
 
-The orchestration layer for document upload, listing, metadata, content
-retrieval, and deletion (ADR-0004: ``services/`` compose adapters; routers call
-exactly one service). It pairs three adapters behind one use-case object:
+The orchestration layer for listing, metadata, extracted-text preview, and
+deletion (ADR-0004: ``services/`` compose adapters; routers call exactly one
+service). Direct upload and signed access live in
+``services.document_upload_service`` (spec 0008); this class deliberately has
+no whole-file byte ingress or egress method.
 
-* the tenant-scoped ``db/`` ``DocumentRepository`` + ``CollectionRepository``
-  (the only SQL) — for the ``Document`` rows and the target-collection check;
+* the tenant-scoped ``db/`` repositories (the only SQL);
 * the ``storage/`` ``ObjectStore`` (#22, CC-12) — the **only** object-store
-  caller (put / get / delete / presign_get over tenant-prefixed,
-  content-addressed keys, with the allowlist + size-cap validation);
-* the one ``AuditSink`` (spec 0004 §2.4) — ``document.uploaded`` / ``viewed`` /
+  caller for deletion and signed legacy helpers;
+* the one ``AuditSink`` (spec 0004 §2.4) — ``document.viewed`` /
   ``downloaded`` / ``deleted``.
 
 It turns the repository's storage-faithful :class:`~app.domain.entities.Document`
@@ -18,24 +18,10 @@ into the wire projection the contract requires (``chunk_count`` is computed here
 
 **Tenancy + ownership (spec 0004 §2.1/§2.2, INV-1/INV-2 — deny by default).**
 Every operation is scoped to the caller's tenant (the repositories) *and* the
-caller's ownership (this service). A document — or the target collection on
-upload — in another tenant, or owned by another user in the same tenant, is
+caller's ownership/permission (this service). A document in another tenant, or
+one the caller may not read/manage in the same tenant, is
 treated as **non-existent**: the read/op returns ``None``/``False`` and the
-router maps that to **404** (existence non-disclosure; never 403). The
-``owner_id``/``tenant_id`` of a created document come from the resolved
-principal, never from request input.
-
-**Upload validation (contract 413/415, reuses #22).** The declared content-type
-and byte size are checked against the config allowlist/cap via the storage
-``validate_upload`` (the single owner of those rules); a rejection is re-mapped
-here to the precise HTTP status the contract pins — ``upload_too_large`` → 413,
-``content_type_not_allowed`` → 415, ``empty_upload`` → 422 — before any bytes are
-stored or any row is written.
-
-**Ingestion seam (#21, OUT of scope here).** A successful upload leaves the
-document ``status=pending`` and marks a clear TODO to enqueue the async
-parse → chunk → embed task; that Celery task is issue #21 and is *not*
-implemented in this change.
+router maps that to **404** (existence non-disclosure; never 403).
 
 Cursor pagination mirrors ``collections_service``: a keyset over
 ``(created_at, id)`` descending, the opaque cursor carrying only the boundary id
@@ -54,16 +40,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import (
-    ConflictError,
-    PayloadTooLargeError,
-    UnsupportedMediaTypeError,
-    ValidationError,
-)
+from app.core.errors import ConflictError, ValidationError
 from app.db.repositories import (
     ChunkRepository,
-    CollectionRepository,
     DocumentRepository,
+    DocumentUploadRepository,
     GroupRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
@@ -72,7 +53,6 @@ from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document, permitted_document_ids
 from app.services.audit import AuditSink
 from app.storage import ObjectStore
-from app.storage.validation import validate_upload
 
 # Pagination bounds mirror the contract's Limit parameter (min 1, max 100).
 _MIN_LIMIT = 1
@@ -102,19 +82,6 @@ class DocumentPage:
 
     items: list[DocumentView]
     next_cursor: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentContent:
-    """The bytes of a document plus the metadata needed to serve them.
-
-    Returned by the inline-content path; the router streams ``data`` as
-    ``application/octet-stream``.
-    """
-
-    filename: str
-    mime_type: str
-    data: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,24 +173,8 @@ def _clamp_limit(limit: int | None) -> int:
     return max(_MIN_LIMIT, min(_MAX_LIMIT, limit))
 
 
-def _map_upload_validation_error(exc: ValidationError) -> Exception:
-    """Re-map a storage upload-validation error to the contract's HTTP status.
-
-    The storage ``validate_upload`` (#22) is the single owner of the allowlist +
-    size-cap rules and raises a generic ``ValidationError`` (422) with a stable
-    ``code``. The contract pins distinct statuses for the upload negatives, so
-    map by code here: ``upload_too_large`` → 413, ``content_type_not_allowed`` →
-    415; an empty/other rejection stays 422 (INV-8).
-    """
-    if exc.code == "upload_too_large":
-        return PayloadTooLargeError(exc.detail, code=exc.code)
-    if exc.code == "content_type_not_allowed":
-        return UnsupportedMediaTypeError(exc.detail, code=exc.code)
-    return exc
-
-
 class DocumentService:
-    """Upload / list / get / content / delete documents for one principal.
+    """List / get / preview-text / delete documents for one principal.
 
     Constructed per-request with the session, the resolved ``tenant_id`` and
     ``owner_id`` (both from the token — never request input), the object-store
@@ -242,12 +193,10 @@ class DocumentService:
         audit: AuditSink,
         request_id: str,
         source_ip: str,
-        upload_allowed_content_types: frozenset[str],
-        max_upload_bytes: int,
     ) -> None:
         self._session = session
         self._documents = DocumentRepository(session, tenant_id)
-        self._collections = CollectionRepository(session, tenant_id)
+        self._uploads = DocumentUploadRepository(session, tenant_id)
         self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
@@ -262,8 +211,6 @@ class DocumentService:
         self._audit = audit
         self._request_id = request_id
         self._source_ip = source_ip
-        self._allowed_content_types = upload_allowed_content_types
-        self._max_upload_bytes = max_upload_bytes
 
     # --- internal helpers ---------------------------------------------------
 
@@ -329,133 +276,11 @@ class DocumentService:
 
     # --- use-cases ----------------------------------------------------------
 
-    async def upload(
-        self,
-        *,
-        collection_id: UUID,
-        filename: str,
-        content_type: str,
-        data: bytes,
-    ) -> DocumentView | None:
-        """Validate, store, and register an uploaded document.
-
-        Order matters for fail-closed correctness:
-
-        1. **Visibility** of the target collection first — a collection in
-           another tenant or owned by another user is reported as ``None`` → 404
-           (INV-1/INV-2) *before* any bytes touch storage.
-        2. **Validation** of the declared content-type + size against the config
-           allowlist/cap (the #22 storage rules), re-mapped to 415/413/422.
-        3. **Store** the bytes via the #22 ``ObjectStore`` (tenant-prefixed,
-           content-addressed) — the only object-store caller.
-        4. **Register** a ``Document`` row ``status=pending`` owned by the caller.
-        5. **Audit** ``document.uploaded`` through the one sink (INV-6).
-
-        Returns ``None`` when the target collection is not the caller's (→ 404);
-        the ``owner_id``/``tenant_id`` come from the principal, never the request.
-
-        Ingestion (#21) is **not** triggered here — see the TODO below.
-        """
-        # 1. Target collection must be the caller's (deny by default; INV-1/INV-2).
-        collection = await self._collections.get(collection_id)
-        if collection is None or collection.owner_id != self._owner_id:
-            return None
-
-        # 2. Allowlist + size cap (reuse #22's single rule owner), mapped to the
-        #    contract's distinct statuses (415/413/422).
-        try:
-            validate_upload(
-                size_bytes=len(data),
-                content_type=content_type,
-                allowed_content_types=self._allowed_content_types,
-                max_bytes=self._max_upload_bytes,
-            )
-        except ValidationError as exc:
-            raise _map_upload_validation_error(exc) from exc
-
-        # 3. Store the bytes via the #22 adapter (the only object-store caller).
-        stored = await self._store.put(
-            tenant_id=str(self._tenant_id),
-            data=data,
-            content_type=content_type,
-            filename=filename,
-        )
-
-        # 4. Register the row, owned by the caller, pending ingestion. An
-        # upload is owner-or-grant governed — never a mirrored source ACL
-        # (ADR-0019 §2: the mode is explicit at every write, no default).
-        document = await self._documents.create(
-            owner_id=self._owner_id,
-            collection_id=collection_id,
-            filename=filename,
-            mime_type=content_type,
-            size_bytes=stored.size_bytes,
-            storage_key=stored.key,
-            acl_enforced=False,
-            status=DocumentStatus.PENDING,
-        )
-
-        # 5. Audit the upload (INV-6) — flushes within this request's transaction.
-        await self._audit.emit(
-            action=AuditAction.DOCUMENT_UPLOADED,
-            actor=AuditActor.user(self._owner_id),
-            resource_type="document",
-            resource_id=str(document.id),
-            outcome=AuditOutcome.ALLOWED,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={
-                "collection_id": str(collection_id),
-                "filename": document.filename,
-                "mime_type": document.mime_type,
-                "size_bytes": document.size_bytes,
-            },
-        )
-
-        # Enqueue ingestion (#21, CC-5): the worker drives the pending row through
-        # parse → chunk → embed → persist to ``ready`` (or ``failed`` with a
-        # reason). Enqueue is the single seam in ``tasks/`` (ADR-0004: only
-        # ``tasks/`` enqueues). Fire it **after** this request's transaction
-        # commits — otherwise the worker could pick up the message and not yet see
-        # the row (it would no-op and the document would stick at ``pending``). An
-        # after-commit session hook makes the enqueue exactly-once on success and
-        # never on rollback; the task is idempotent/defensive as a backstop.
-        self._enqueue_ingestion_after_commit(document.id)
-
-        # A freshly uploaded document holds no chunks yet.
-        return DocumentView(document=document, chunk_count=0)
-
-    def _enqueue_ingestion_after_commit(self, document_id: UUID) -> None:
-        """Schedule the ingestion enqueue to fire after the request commits.
-
-        Registers a one-shot SQLAlchemy ``after_commit`` listener on this
-        request's session so the Celery message is sent only once the ``pending``
-        document row is durably committed (and never if the transaction rolls
-        back). Enqueueing goes through ``tasks.enqueue_ingestion`` — the single
-        enqueue point (ADR-0004). ``once=True`` lets SQLAlchemy remove the
-        listener safely after it fires (removing it from inside the callback
-        would mutate the listener collection mid-dispatch); ``import app.tasks``
-        is resolved at call time so a test can monkeypatch the enqueue.
-        """
-        # Imported lazily so the service module does not pull in Celery at import
-        # time (keeps unit tests that exercise the pure helpers dependency-light).
-        from sqlalchemy import event
-
-        import app.tasks as tasks
-
-        tenant_id = self._tenant_id
-
-        def _on_commit(_session: object) -> None:
-            tasks.enqueue_ingestion(tenant_id, document_id)
-
-        event.listen(self._session.sync_session, "after_commit", _on_commit, once=True)
-
     def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
         """Schedule a search-index sync to fire after the request commits.
 
-        The deletion twin of :meth:`_enqueue_ingestion_after_commit` (same
-        one-shot ``after_commit`` listener, same single enqueue seam in
-        ``tasks/``): the ``lumen.sync_document_index`` worker reads the
+        A one-shot ``after_commit`` listener uses the single enqueue seam in
+        ``tasks/``: the ``lumen.sync_document_index`` worker reads the
         committed (deleted) state and removes the document's chunk docs from
         the engine (ADR-0010 §5) — and never fires on rollback.
         """
@@ -520,9 +345,7 @@ class DocumentService:
         # no chunks is absent from the mapping and defaults to 0, exactly as the
         # single-id count returns for a document ingestion has not populated yet.
         chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
-        items = [
-            DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible
-        ]
+        items = [DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible]
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:
@@ -531,34 +354,6 @@ class DocumentService:
         if document is None:
             return None
         return await self._view(document)
-
-    async def get_content(self, document_id: UUID) -> DocumentContent | None:
-        """Read the stored bytes for one of the caller's documents (→ 404 if not).
-
-        Establishes visibility first (INV-1/INV-2), then reads the bytes back via
-        the #22 ``ObjectStore`` (tenant-prefix checked inside the adapter). Audits
-        ``document.downloaded`` (INV-6). Returns ``None`` when the document is not
-        the caller's.
-        """
-        document = await self._visible(document_id)
-        if document is None:
-            return None
-        data = await self._store.get(str(self._tenant_id), document.storage_key)
-        await self._audit.emit(
-            action=AuditAction.DOCUMENT_DOWNLOADED,
-            actor=AuditActor.user(self._owner_id),
-            resource_type="document",
-            resource_id=str(document.id),
-            outcome=AuditOutcome.ALLOWED,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={"filename": document.filename},
-        )
-        return DocumentContent(
-            filename=document.filename,
-            mime_type=document.mime_type,
-            data=data,
-        )
 
     async def get_text(self, document_id: UUID, *, max_bytes: int) -> DocumentText | None:
         """Serve the extracted plain text of a ready document (#244).
@@ -641,10 +436,9 @@ class DocumentService:
         document is not the caller's.
 
         Order: delete the row first, ``flush`` it, then remove the object **only
-        if no other document (this tenant) still references the content-addressed
-        key** (#269). Objects are keyed by ``{tenant}/{sha256}/{filename}``, so two
-        identical uploads share one object — deleting it unconditionally would
-        break the survivor's ``/content``. The flush is required because the app
+        if no other document (this tenant) still references the same storage
+        key** (#269). Connector/legacy content-addressed objects can be shared;
+        direct multipart keys are unique. The flush is required because the app
         sessionmaker runs ``autoflush=False`` (``db/session.py``); without it the
         ``count_by_storage_key`` read would still see the just-deleted row. All of
         this commits within this request's transaction at the router.
@@ -655,6 +449,7 @@ class DocumentService:
         deleted = await self._documents.delete(document_id)
         if not deleted:  # pragma: no cover — visibility already established
             return False
+        await self._uploads.delete_for_document(document.id)
         await self._session.flush()
         if await self._documents.count_by_storage_key(document.storage_key) == 0:
             await self._store.delete(str(self._tenant_id), document.storage_key)

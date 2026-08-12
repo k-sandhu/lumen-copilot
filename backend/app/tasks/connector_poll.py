@@ -14,16 +14,14 @@ rate limit** (ADR-0009 §3) applies unchanged — the poll can never make the
 worker fan out unbounded fetches. Webhooks/push notification stay out (E7-2,
 the epic scope fence).
 
-The same beat carries the **stranded-ingestion sweep**. The incremental sync
-commits a page's rows + cursor first and drives ingestion post-commit
-(ADR-0019 §3's atomicity requirement is about the mutation/cursor pair); a
-worker that dies in that window leaves a ``pending`` connector document with no
-chunks, which the advanced cursor will never revisit and the reindex backfill
-cannot repair — it can re-index chunks, not create them. The sweep re-drives
-the **idempotent** ingestion task for connector documents left
-``pending``/``processing`` past ``CONNECTOR_INGEST_RECOVERY_MINUTES``, which
-needs no new outbox table and no new document state: converging a stuck row is
-exactly what the existing status machine plus an idempotent task are for.
+The same beat carries the **stranded-ingestion sweep**. Both incremental sync
+and direct-upload completion commit durable rows before their after-commit task
+publication. A crash or broker fault in that window leaves a ``pending`` row
+with no live task; the reindex backfill cannot repair it because it can re-index
+chunks, not create them. The sweep re-drives the **idempotent** ingestion task
+for uploaded or connector documents left ``pending``/``processing`` past
+``CONNECTOR_INGEST_RECOVERY_MINUTES``. Media kinds are routed to their bounded
+queue, so recovery cannot bypass the FFmpeg/provider concurrency control.
 """
 
 from __future__ import annotations
@@ -36,6 +34,7 @@ from app.core.config import Settings, get_settings
 from app.db.repositories import SourceReconcileRepository
 from app.db.session import session_scope
 from app.db.tenant_context import bind_bypass
+from app.domain.entities import DocumentKind
 from app.tasks.celery_app import celery_app
 from app.tasks.ingest import enqueue_ingestion
 from app.tasks.runner import run_task
@@ -67,13 +66,11 @@ async def _poll_all(settings: Settings) -> int:
 
 
 async def _sweep_stranded(settings: Settings) -> int:
-    """Re-drive ingestion for connector documents stranded pre-ingestion.
+    """Re-drive uploaded or connector documents stranded pre-ingestion.
 
-    The recovery for the one window the per-page commit discipline cannot make
-    atomic (ADR-0019 §3): the row + cursor commit, then ingestion runs
-    post-commit. A crash in between leaves a ``pending`` document with no
-    chunks — retrievable by nobody, and never revisited because the cursor
-    already moved past its change.
+    The recovery for the post-commit publish window: the document is durable,
+    then ingestion is enqueued. A crash/broker fault in between leaves a
+    ``pending`` document with no chunks — retrievable by nobody.
 
     Finds those rows cross-tenant (bypass-scoped, bounded, and only past the
     ``CONNECTOR_INGEST_RECOVERY_MINUTES`` age threshold so a genuinely in-flight
@@ -84,12 +81,16 @@ async def _sweep_stranded(settings: Settings) -> int:
     cutoff = datetime.now(UTC) - timedelta(minutes=settings.connector_ingest_recovery_minutes)
     async with session_scope() as session:
         await bind_bypass(session)
-        stranded = await SourceReconcileRepository(session).list_stranded_connector_documents(
+        stranded = await SourceReconcileRepository(session).list_stranded_documents(
             older_than=cutoff, limit=settings.connector_ingest_recovery_batch
         )
 
-    for tenant_id, document_id in stranded:
-        enqueue_ingestion(tenant_id, document_id)
+    for tenant_id, document_id, kind in stranded:
+        enqueue_ingestion(
+            tenant_id,
+            document_id,
+            media=kind in {DocumentKind.AUDIO, DocumentKind.VIDEO},
+        )
     if stranded:
         log.warning(
             "connector_poll.stranded_documents_redriven",

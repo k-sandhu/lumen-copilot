@@ -84,6 +84,11 @@ class CitationResponse(BaseModel):
     snippet: str
     char_start: int
     char_end: int
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
     score: float | None = None
     #: True when the caller may no longer retrieve the cited document (#558), in
     #: which case `snippet` and `document_name` are empty. The row is kept so a
@@ -146,6 +151,7 @@ def _step_to_response(step: RunStep) -> RunStepResponse:
 
 
 def _citation_to_response(view: CitationView) -> CitationResponse:
+    disclose_media = not view.redacted
     return CitationResponse(
         id=view.id,
         document_id=view.document_id,
@@ -154,6 +160,11 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         snippet=view.snippet,
         char_start=view.char_start,
         char_end=view.char_end,
+        time_start_ms=view.time_start_ms if disclose_media else None,
+        time_end_ms=view.time_end_ms if disclose_media else None,
+        transcript_segment_id=view.transcript_segment_id if disclose_media else None,
+        speaker_id=view.speaker_id if disclose_media else None,
+        speaker_name=view.speaker_name if disclose_media else None,
         score=view.score,
         redacted=view.redacted,
     )

@@ -1,13 +1,16 @@
 /**
- * Multi-file upload (#49 AC-2/AC-4) — drag-drop zone + file picker. Files upload
- * concurrently into the selected collection via `POST /documents` (multipart);
- * each tile shows live progress and, on completion, success or a clear inline
- * error (413 too large / 415 unsupported / etc. — AC-4). Disabled with guidance
- * until a collection is selected.
+ * Direct multipart document/media upload (#571): the API controls sessions while
+ * bounded File.slice() bodies flow browser → object storage. Tiles expose queue,
+ * transfer, finalization, cancel, resume/start-again, and typed failure states.
  */
 import { useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
-import { useUploadStore } from '../model/uploadStore';
+import {
+  isActiveUpload,
+  isCancellableUpload,
+  useUploadStore,
+  type UploadState,
+} from '../model/uploadStore';
 import { useUploadDocuments } from '../model/useUploadDocuments';
 
 interface DocumentUploadProps {
@@ -17,7 +20,7 @@ interface DocumentUploadProps {
 export function DocumentUpload({ collectionId }: DocumentUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const startUploads = useUploadDocuments(collectionId);
+  const uploadActions = useUploadDocuments(collectionId);
   const uploads = useUploadStore((s) => s.uploads);
   const clearFinished = useUploadStore((s) => s.clearFinished);
   const remove = useUploadStore((s) => s.remove);
@@ -26,11 +29,11 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
   const entries = collectionId
     ? Object.values(uploads).filter((u) => u.collectionId === collectionId)
     : [];
-  const hasFinished = entries.some((u) => u.state !== 'uploading');
+  const hasFinished = entries.some((u) => !isActiveUpload(u.state));
 
   function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
-    startUploads(Array.from(fileList));
+    uploadActions.start(Array.from(fileList));
   }
 
   return (
@@ -60,7 +63,7 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
         <p className="text-sm">
           {disabled
             ? 'Select a collection to upload documents into.'
-            : 'Drag files here, or'}
+            : 'Drag documents, audio, or video here, or'}
         </p>
         {!disabled && (
           <button
@@ -75,6 +78,7 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
           ref={inputRef}
           type="file"
           multiple
+          accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.wav,.mp3,.m4a,.aac,.flac,.ogg,.webm,.mp4,audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,audio/webm,video/mp4,video/webm"
           className="sr-only"
           aria-label="Choose files to upload"
           disabled={disabled}
@@ -110,7 +114,16 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate">{u.filename}</span>
                   <UploadStateTag state={u.state} progress={u.progress} />
-                  {u.state !== 'uploading' && (
+                  {isCancellableUpload(u.state) ? (
+                    <button
+                      type="button"
+                      onClick={() => uploadActions.cancel(u.id)}
+                      aria-label={`Cancel ${u.filename}`}
+                      className="shrink-0 rounded border border-border px-1.5 py-0.5 text-xs text-foreground-muted hover:bg-surface-muted"
+                    >
+                      Cancel
+                    </button>
+                  ) : !isActiveUpload(u.state) ? (
                     <button
                       type="button"
                       onClick={() => remove(u.id)}
@@ -119,9 +132,9 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
                     >
                       ✕
                     </button>
-                  )}
+                  ) : null}
                 </div>
-                {u.state === 'uploading' && (
+                {isActiveUpload(u.state) && (
                   <div
                     className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-surface-muted"
                     role="progressbar"
@@ -137,9 +150,32 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
                   </div>
                 )}
                 {u.state === 'error' && (
-                  <p role="alert" className="mt-1 text-xs text-danger">
-                    {u.error}
-                  </p>
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <p role="alert" className="text-xs text-danger">
+                      {u.error}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => uploadActions.retry(u.id)}
+                      className="shrink-0 rounded border border-border px-2 py-0.5 text-xs hover:bg-surface-muted"
+                    >
+                      {u.uploadId ? 'Resume upload' : 'Try again'}
+                    </button>
+                  </div>
+                )}
+                {u.state === 'cancelled' && (
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <p role="status" className="text-xs text-foreground-muted">
+                      Upload cancelled.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => uploadActions.retry(u.id)}
+                      className="shrink-0 rounded border border-border px-2 py-0.5 text-xs hover:bg-surface-muted"
+                    >
+                      Start again
+                    </button>
+                  </div>
                 )}
               </li>
             ))}
@@ -150,9 +186,14 @@ export function DocumentUpload({ collectionId }: DocumentUploadProps) {
   );
 }
 
-function UploadStateTag({ state, progress }: { state: string; progress: number }) {
+function UploadStateTag({ state, progress }: { state: UploadState; progress: number }) {
   if (state === 'done') return <span className="shrink-0 text-xs text-ok">Uploaded</span>;
   if (state === 'error') return <span className="shrink-0 text-xs text-danger">Failed</span>;
+  if (state === 'cancelled') return <span className="shrink-0 text-xs">Cancelled</span>;
+  if (state === 'queued') return <span className="shrink-0 text-xs">Queued</span>;
+  if (state === 'initiating') return <span className="shrink-0 text-xs">Preparing…</span>;
+  if (state === 'resuming') return <span className="shrink-0 text-xs">Resuming…</span>;
+  if (state === 'completing') return <span className="shrink-0 text-xs">Finalizing…</span>;
   return (
     <span className="shrink-0 text-xs text-foreground-muted" aria-live="polite">
       {Math.round(progress * 100)}%

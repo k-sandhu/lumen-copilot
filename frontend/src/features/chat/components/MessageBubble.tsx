@@ -30,6 +30,7 @@ import { AskUserOptions } from './AskUserOptions';
 import { StepTimeline } from './StepTimeline';
 import { CodeRunPanel } from '@/features/codeRuns';
 import { artifactHref } from '@/features/artifacts';
+import { formatMediaTimestamp } from '@/lib/mediaTime';
 import type { ToolActivity as ToolActivityItem, CodeRunActivity } from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
@@ -274,11 +275,20 @@ function MessageBubbleComponent({
                               aria-label={
                                 group.redacted
                                   ? `Citation ${p.number}: source no longer available`
-                                  : `Citation ${p.number}: ${group.documentName}`
+                                  : `Citation ${p.number}: ${group.documentName}${
+                                      p.citation.timeStartMs !== undefined
+                                        ? ` at ${formatMediaTimestamp(p.citation.timeStartMs)}`
+                                        : ''
+                                    }`
                               }
                               onClick={() => onOpenCitation(p.citation, meta)}
                             >
                               {p.number}
+                              {p.citation.timeStartMs !== undefined ? (
+                                <span className="ml-1 font-mono text-[0.65rem]">
+                                  · {formatMediaTimestamp(p.citation.timeStartMs)}
+                                </span>
+                              ) : null}
                             </button>
                           ))}
                         </span>

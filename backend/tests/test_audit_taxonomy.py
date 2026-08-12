@@ -43,7 +43,13 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "auth.login_failed",
         "auth.logout",
         "collection.created",
+        # Direct multipart upload + media transcription (spec 0008 / ADR-0023)
+        # — completion keeps the existing document.uploaded action.
+        "document.upload_started",
+        "document.upload_aborted",
+        "document.upload_expired",
         "document.uploaded",
+        "document.transcribed",
         "document.viewed",
         "document.downloaded",
         "document.deleted",

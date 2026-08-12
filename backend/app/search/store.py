@@ -85,6 +85,11 @@ class IndexedChunk:
     acl_principals: tuple[str, ...] = ()
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] = ()
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,17 @@ def _acl_mapping_properties() -> dict[str, Any]:
         "acl_principals": {"type": "keyword"},
         "acl_synced_at": {"type": "date"},
         "acl_scope_ids": {"type": "keyword"},
+    }
+
+
+def _media_mapping_properties() -> dict[str, Any]:
+    """Nullable media citation provenance added by spec 0008 / #571."""
+    return {
+        "time_start_ms": {"type": "long"},
+        "time_end_ms": {"type": "long"},
+        "transcript_segment_id": {"type": "keyword"},
+        "speaker_id": {"type": "keyword"},
+        "speaker_name": {"type": "keyword"},
     }
 
 
@@ -152,6 +168,7 @@ def _index_body(dimensions: int) -> dict[str, Any]:
                 },
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
+                **_media_mapping_properties(),
                 # Mirrored source ACL (ADR-0019 §2) — the engine half of the
                 # mode-split predicate, shared verbatim with the additive
                 # mapping update an already-deployed index receives.
@@ -377,7 +394,12 @@ class OpenSearchStore:
         await self._request(
             "PUT",
             f"/{self._index}/_mapping",
-            json_body={"properties": _acl_mapping_properties()},
+            json_body={
+                "properties": {
+                    **_acl_mapping_properties(),
+                    **_media_mapping_properties(),
+                }
+            },
         )
         # PUT of a search pipeline is a full upsert — idempotent by nature.
         await self._request(
@@ -453,6 +475,19 @@ class OpenSearchStore:
                 ),
                 "acl_scope_ids": sorted(chunk.acl_scope_ids),
             }
+            # Keep absent values absent: ordinary document chunks predate this
+            # additive mapping and should not acquire misleading null media
+            # provenance in the strict index.
+            if chunk.time_start_ms is not None:
+                doc["time_start_ms"] = chunk.time_start_ms
+            if chunk.time_end_ms is not None:
+                doc["time_end_ms"] = chunk.time_end_ms
+            if chunk.transcript_segment_id is not None:
+                doc["transcript_segment_id"] = str(chunk.transcript_segment_id)
+            if chunk.speaker_id is not None:
+                doc["speaker_id"] = chunk.speaker_id
+            if chunk.speaker_name is not None:
+                doc["speaker_name"] = chunk.speaker_name
             # A pending-embedding chunk indexes without the knn_vector field —
             # BM25-searchable now, kNN-matchable once re-synced with a vector.
             if chunk.embedding is not None:

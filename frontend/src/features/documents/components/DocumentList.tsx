@@ -263,7 +263,7 @@ function StatusCell({ doc }: { doc: Document }) {
     );
   }
   return (
-    <StatusBadge tone={statusTone(doc.status)} detail={doc.error}>
+    <StatusBadge tone={statusTone(doc.status)} detail={doc.error ?? undefined}>
       {statusLabel(doc.status)}
     </StatusBadge>
   );
@@ -336,9 +336,7 @@ function DocumentRow({
             </div>
           </div>
         </td>
-        <td className="px-3 py-2.5 align-middle text-foreground-muted">
-          {collectionName ?? '—'}
-        </td>
+        <td className="px-3 py-2.5 align-middle text-foreground-muted">{collectionName ?? '—'}</td>
         <td className="px-3 py-2.5 align-middle">
           <PermissionPill level={vis.level} label={vis.label} title={vis.title} />
         </td>

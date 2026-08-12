@@ -348,6 +348,10 @@ def configure_beat(settings: Settings | None = None) -> None:
                 "task": "lumen.poll_connector_syncs",
                 "schedule": float(settings.connector_sync_interval_minutes) * 60.0,
             },
+            "expired-upload-sweep": {
+                "task": "lumen.sweep_expired_uploads",
+                "schedule": float(settings.upload_janitor_interval_seconds),
+            },
         },
     )
 

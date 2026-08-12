@@ -21,6 +21,8 @@ const doc: Document = {
   size_bytes: 2048,
   collection_id: 'col-1',
   owner_id: 'u-1',
+  kind: 'document',
+  duration_ms: null,
   status: 'ready',
   chunk_count: 5,
   created_at: '2026-06-18T00:00:00Z',
@@ -29,20 +31,30 @@ const doc: Document = {
 
 afterEach(() => vi.restoreAllMocks());
 
+function accessResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      url: 'https://storage.example/msa?signed',
+      filename: 'msa.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 2048,
+      expires_at: '2030-01-01T00:00:00Z',
+      purpose: 'preview',
+      supports_byte_ranges: true,
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
 describe('DocumentViewer', () => {
-  it('mounts the shared preview body for a ready document (blob iframe)', async () => {
-    // The body fetches the bytes through the api/ boundary; a 200 blob → iframe.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(new Blob([new Uint8Array([1, 2, 3])], { type: 'application/pdf' }), {
-        status: 200,
-      }),
-    );
+  it('mounts the shared preview body with a signed PDF capability', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     renderWithQuery(<DocumentViewer doc={doc} onClose={() => {}} />);
 
     const frame = await screen.findByTitle(/preview of msa.pdf/i);
     // PDF frames are intentionally unsandboxed — sandbox="" blocks Chrome's PDF viewer.
     expect(frame).not.toHaveAttribute('sandbox');
-    expect(frame.getAttribute('src')).toMatch(/^blob:/);
+    expect(frame.getAttribute('src')).toBe('https://storage.example/msa?signed');
   });
 
   it('shows a clear message and no retry when the document is not permitted (404 — INV-2)', async () => {
@@ -60,7 +72,7 @@ describe('DocumentViewer', () => {
   });
 
   it('closes on the Close button and on Escape', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     const onClose = vi.fn();
     const user = userEvent.setup();
     renderWithQuery(<DocumentViewer doc={doc} onClose={onClose} />);
@@ -73,7 +85,7 @@ describe('DocumentViewer', () => {
   });
 
   it('traps Tab within the drawer — focus never escapes the open dialog (#163)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     const user = userEvent.setup();
     renderWithQuery(<DocumentViewer doc={doc} onClose={() => {}} />);
     const dialog = screen.getByRole('dialog');
@@ -85,7 +97,7 @@ describe('DocumentViewer', () => {
   });
 
   it('renders the parse → chunk → embed → ready ingestion trace (#89)', () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     renderWithQuery(<DocumentViewer doc={{ ...doc, chunk_count: 142 }} onClose={() => {}} />);
 
     const ingestion = screen.getByRole('region', { name: /ingestion/i });
@@ -96,7 +108,7 @@ describe('DocumentViewer', () => {
   });
 
   it('surfaces a cited passage when one is supplied (#89 viewer drawer)', () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     renderWithQuery(
       <DocumentViewer
         doc={doc}

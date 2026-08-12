@@ -84,6 +84,21 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
    * endpoints themselves (login/refresh) so refresh never recurses.
    */
   skipAuth?: boolean;
+  /** Internal: `path` is already rooted at a derived API-version base. */
+  absoluteApiPath?: boolean;
+}
+
+/**
+ * Call the coordinated v2 surface while leaving every existing v1 caller alone.
+ * `VITE_API_BASE_URL=/api/v1` becomes `/api/v2`; absolute deployment URLs keep
+ * their origin/prefix and replace only the terminal version segment.
+ */
+export function requestV2<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const v2Base = API_BASE_URL.replace(/\/v1\/?$/, '/v2');
+  if (v2Base === API_BASE_URL) {
+    throw new Error('VITE_API_BASE_URL must end in /v1 to derive the v2 API base');
+  }
+  return request<T>(joinUrl(v2Base, path), { ...options, absoluteApiPath: true });
 }
 
 /**
@@ -126,13 +141,20 @@ export async function withRefreshRetry<T>(
  *              path (used for liveness/readiness which live outside /api).
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { json, okStatuses = [], headers, skipAuth = false, ...init } = options;
+  const {
+    json,
+    okStatuses = [],
+    headers,
+    skipAuth = false,
+    absoluteApiPath = false,
+    ...init
+  } = options;
 
   // Health/readiness live outside the versioned API base (they're proxied at
   // "/health"); every other path is relative to API_BASE_URL (the "/api/v1"
   // mount), whether or not it has a leading slash. Without this, leading-slash
   // feature paths like "/auth/login" would hit the SPA origin and 404.
-  const url = path.startsWith('/health') ? path : joinUrl(API_BASE_URL, path);
+  const url = absoluteApiPath || path.startsWith('/health') ? path : joinUrl(API_BASE_URL, path);
 
   return withRefreshRetry<T>(
     async () => {

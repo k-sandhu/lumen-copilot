@@ -112,6 +112,50 @@ from app.services.tools.types import SandboxToolRunner, ToolContext, ToolDefinit
 log = get_logger(__name__)
 
 
+def _citation_event_data(citation: GroundedCitation) -> dict[str, object]:
+    """Project one persisted citation to the strict WebSocket payload.
+
+    Media provenance is all-or-nothing: a malformed half-pair is blocked rather
+    than becoming a citation that cannot seek reliably (spec 0008 §5 / INV-3).
+    """
+    start, end = citation.time_start_ms, citation.time_end_ms
+    if (start is None) != (end is None):
+        raise ValueError("media citation timestamps must be provided as a pair")
+    if start is not None and end is not None and (start < 0 or end <= start):
+        raise ValueError("media citation timestamps must be ordered and non-negative")
+    if start is None and any(
+        value is not None
+        for value in (
+            citation.transcript_segment_id,
+            citation.speaker_id,
+            citation.speaker_name,
+        )
+    ):
+        raise ValueError("media citation metadata requires timestamps")
+
+    payload: dict[str, object] = {
+        "id": str(citation.id),
+        "documentId": str(citation.document_id),
+        "documentName": citation.document_name,
+        "chunkId": str(citation.chunk_id),
+        "snippet": citation.snippet,
+        "charStart": citation.char_start,
+        "charEnd": citation.char_end,
+    }
+    if citation.score is not None:
+        payload["score"] = citation.score
+    if start is not None and end is not None:
+        payload["timeStartMs"] = start
+        payload["timeEndMs"] = end
+    if citation.transcript_segment_id is not None:
+        payload["transcriptSegmentId"] = str(citation.transcript_segment_id)
+    if citation.speaker_id is not None:
+        payload["speakerId"] = citation.speaker_id
+    if citation.speaker_name is not None:
+        payload["speakerName"] = citation.speaker_name
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class SandboxContext:
     """The per-answer inputs the sandbox seam factory needs (issue #231).
@@ -2659,6 +2703,11 @@ class ChatRuntime:
                 char_start=citation.char_start,
                 char_end=citation.char_end,
                 score=citation.score,
+                time_start_ms=citation.time_start_ms,
+                time_end_ms=citation.time_end_ms,
+                transcript_segment_id=citation.transcript_segment_id,
+                speaker_id=citation.speaker_id,
+                speaker_name=citation.speaker_name,
             )
             stored.append(
                 GroundedCitation(
@@ -2670,6 +2719,11 @@ class ChatRuntime:
                     char_start=citation.char_start,
                     char_end=citation.char_end,
                     score=citation.score,
+                    time_start_ms=citation.time_start_ms,
+                    time_end_ms=citation.time_end_ms,
+                    transcript_segment_id=citation.transcript_segment_id,
+                    speaker_id=citation.speaker_id,
+                    speaker_name=citation.speaker_name,
                 )
             )
         return stored
@@ -2835,16 +2889,7 @@ class ChatRuntime:
                 state.stream_id,
                 await self._next_seq(state),
                 name="citation",
-                data={
-                    "id": str(citation.id),
-                    "documentId": str(citation.document_id),
-                    "documentName": citation.document_name,
-                    "chunkId": str(citation.chunk_id),
-                    "snippet": citation.snippet,
-                    "charStart": citation.char_start,
-                    "charEnd": citation.char_end,
-                    **({"score": citation.score} if citation.score is not None else {}),
-                },
+                data=_citation_event_data(citation),
             ),
         )
 

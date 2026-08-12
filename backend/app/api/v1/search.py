@@ -114,6 +114,12 @@ class SearchResult(BaseModel):
     last_indexed: datetime
     owner: UUID | None = None
     document_id: UUID | None = None
+    document_kind: str | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
     score: float | None = None
 
 
@@ -126,6 +132,11 @@ class SearchCitation(BaseModel):
     snippet: str | None = None
     char_start: int | None = None
     char_end: int | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 class DirectAnswer(BaseModel):
@@ -165,6 +176,12 @@ def _to_result(result: SearchResultData) -> SearchResult:
         last_indexed=result.last_indexed,
         owner=result.owner,
         document_id=result.document_id,
+        document_kind=result.document_kind,
+        time_start_ms=result.time_start_ms,
+        time_end_ms=result.time_end_ms,
+        transcript_segment_id=result.transcript_segment_id,
+        speaker_id=result.speaker_id,
+        speaker_name=result.speaker_name,
         score=result.score,
     )
 
@@ -175,6 +192,11 @@ def _to_citation(citation: SearchCitationData) -> SearchCitation:
         snippet=citation.snippet,
         char_start=citation.char_start,
         char_end=citation.char_end,
+        time_start_ms=citation.time_start_ms,
+        time_end_ms=citation.time_end_ms,
+        transcript_segment_id=citation.transcript_segment_id,
+        speaker_id=citation.speaker_id,
+        speaker_name=citation.speaker_name,
     )
 
 

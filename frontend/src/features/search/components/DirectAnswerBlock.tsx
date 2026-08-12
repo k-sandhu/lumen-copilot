@@ -24,6 +24,7 @@ import { Fragment, useMemo, useState } from 'react';
 import type { DirectAnswer, SearchResult } from '@/api';
 import { CitationChip, FreshnessPill, Icon, PermissionPill, SourceInspector } from '@/ui';
 import { MarkdownView } from '@/lib/markdown';
+import { validMediaTimeSpan } from '@/lib/mediaTime';
 import {
   freshnessLabel,
   hasInlineCitations,
@@ -37,15 +38,17 @@ interface DirectAnswerBlockProps {
   answer: DirectAnswer;
   /** The page's results, indexed by id, so each citation resolves to its source. */
   resultsById: Map<string, SearchResult>;
+  onOpenDocument?: (documentId: string, title: string, initialTimeMs?: number) => void;
 }
 
 interface ResolvedCitation {
   citation: DirectAnswer['citations'][number];
   result: SearchResult;
   ordinal: number;
+  timeStartMs?: number;
 }
 
-export function DirectAnswerBlock({ answer, resultsById }: DirectAnswerBlockProps) {
+export function DirectAnswerBlock({ answer, resultsById, onOpenDocument }: DirectAnswerBlockProps) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
 
   // Only citations that resolve to a present result are renderable — a citation
@@ -55,18 +58,31 @@ export function DirectAnswerBlock({ answer, resultsById }: DirectAnswerBlockProp
   const resolved = useMemo<ResolvedCitation[]>(
     () =>
       answer.citations
-        .map((citation, i) => ({ citation, result: resultsById.get(citation.result_id), ordinal: i + 1 }))
+        .map((citation, i) => {
+          const span = validMediaTimeSpan(citation.time_start_ms, citation.time_end_ms);
+          return {
+            citation,
+            result: resultsById.get(citation.result_id),
+            ordinal: i + 1,
+            ...(span ? { timeStartMs: span.startMs } : {}),
+          };
+        })
         .filter((entry): entry is ResolvedCitation => Boolean(entry.result)),
     [answer.citations, resultsById],
   );
 
-  const resolvedByOrdinal = useMemo(
-    () => new Map(resolved.map((r) => [r.ordinal, r])),
-    [resolved],
-  );
+  const resolvedByOrdinal = useMemo(() => new Map(resolved.map((r) => [r.ordinal, r])), [resolved]);
 
-  const toggle = (ordinal: number) =>
-    setOpenIndex((cur) => (cur === ordinal ? null : ordinal));
+  const toggle = (ordinal: number) => setOpenIndex((cur) => (cur === ordinal ? null : ordinal));
+
+  const activate = (ordinal: number) => {
+    toggle(ordinal);
+    const resolvedCitation = resolvedByOrdinal.get(ordinal);
+    const documentId = resolvedCitation?.result.document_id;
+    if (resolvedCitation && documentId && resolvedCitation.timeStartMs !== undefined) {
+      onOpenDocument?.(documentId, resolvedCitation.result.title, resolvedCitation.timeStartMs);
+    }
+  };
 
   const open = openIndex === null ? null : (resolvedByOrdinal.get(openIndex) ?? null);
 
@@ -105,7 +121,7 @@ export function DirectAnswerBlock({ answer, resultsById }: DirectAnswerBlockProp
             citationCount={answer.citations.length}
             resolvedByOrdinal={resolvedByOrdinal}
             openIndex={openIndex}
-            onToggle={toggle}
+            onToggle={activate}
           />
         ) : (
           // No inline markers — render the markdown, then a trailing marker row so
@@ -117,13 +133,14 @@ export function DirectAnswerBlock({ answer, resultsById }: DirectAnswerBlockProp
       {!inline && resolved.length > 0 ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-foreground-muted">Sources</span>
-          {resolved.map(({ result, ordinal }) => (
+          {resolved.map(({ result, ordinal, timeStartMs }) => (
             <CitationChip
               key={ordinal}
               index={ordinal}
               active={openIndex === ordinal}
               sourceTitle={result.title}
-              onClick={() => toggle(ordinal)}
+              {...(timeStartMs !== undefined ? { timeStartMs } : {})}
+              onClick={() => activate(ordinal)}
             />
           ))}
         </div>
@@ -222,6 +239,9 @@ function InlineAnswer({
             index={seg.cite}
             active={openIndex === seg.cite}
             sourceTitle={resolvedCite.result.title}
+            {...(resolvedCite.timeStartMs !== undefined
+              ? { timeStartMs: resolvedCite.timeStartMs }
+              : {})}
             onClick={() => onToggle(seg.cite!)}
           />
         );

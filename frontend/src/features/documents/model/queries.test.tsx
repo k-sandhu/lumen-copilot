@@ -37,6 +37,8 @@ function doc(id: string, filename: string): Document {
     size_bytes: 1,
     collection_id: 'col-1',
     owner_id: 'u-1',
+    kind: 'document',
+    duration_ms: null,
     status: 'ready',
     chunk_count: 1,
     created_at: '2026-06-18T00:00:00Z',

@@ -1,12 +1,8 @@
 /**
  * DocumentViewer (AC-2 click-through, INV-4): the cited document is loaded by an
- * AUTHENTICATED request — the api/ boundary attaches the bearer access token and
- * the viewer renders the bytes as a blob: URL. It must NOT point a bare
- * <iframe src>/<a href> at the bearer-authed `GET /documents/{id}/content`
- * endpoint (a browser iframe/anchor GET cannot send Authorization, so it would
- * 401). Covers: authenticated load → ready, loading + error (404) states, the
- * blob: object URL is revoked on unmount, and the rendered <iframe>/<a> never
- * target the raw content endpoint.
+ * AUTHENTICATED JSON capability request — the API boundary attaches the bearer,
+ * then the viewer points at the short-lived storage URL. FastAPI never carries
+ * the document bytes.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -24,13 +20,24 @@ const CITATION: UiCitation = {
   charEnd: 140,
 };
 
-const CONTENT_PATH = '/documents/doc-9/content';
+const ACCESS_PATH = '/api/v2/documents/doc-9/access-url';
 
-function bytesResponse(): Response {
-  return new Response(new Blob([new Uint8Array([1, 2, 3])]), {
-    status: 200,
-    headers: { 'Content-Type': 'application/octet-stream' },
-  });
+function accessResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      url: 'https://storage.example/doc-9?signed',
+      filename: 'Q4 strategy.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 3,
+      expires_at: '2030-01-01T00:00:00Z',
+      purpose: 'preview',
+      supports_byte_ranges: true,
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    },
+  );
 }
 
 function problemResponse(status: number, title: string): Response {
@@ -50,9 +57,7 @@ afterEach(() => {
 
 describe('DocumentViewer (authenticated content load — INV-4)', () => {
   it('loads the cited document through an authenticated request (bearer attached)', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(bytesResponse());
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
 
     render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
 
@@ -65,27 +70,24 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
       expect(iframe).toBeInTheDocument();
     });
 
-    // The content request carried the bearer — NOT a bare unauthenticated GET.
+    // The capability request carried the bearer; storage receives no bearer.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const call = fetchSpy.mock.calls[0];
     if (!call) throw new Error('fetch was not called');
     const [url, init] = call;
-    expect(String(url)).toContain(CONTENT_PATH);
+    expect(String(url)).toContain(ACCESS_PATH);
     const headers = new Headers(init?.headers);
     expect(headers.get('Authorization')).toBe('Bearer jwt-abc');
 
-    // The iframe renders the blob: URL, never the bearer-authed endpoint, and a
-    // download affordance is offered (bytes are always reachable).
+    // The iframe renders the signed storage URL, never the API endpoint.
     const iframe = screen.getByTitle('Preview of Q4 strategy.pdf') as HTMLIFrameElement;
-    expect(iframe.getAttribute('src')).toMatch(/^blob:/);
-    expect(iframe.getAttribute('src')).not.toContain(CONTENT_PATH);
+    expect(iframe.getAttribute('src')).toBe('https://storage.example/doc-9?signed');
+    expect(iframe.getAttribute('src')).not.toContain(ACCESS_PATH);
     expect(screen.getByRole('button', { name: /download original/i })).toBeInTheDocument();
   });
 
   it('renders "no longer available" with no retry on 404 (not-permitted / cross-tenant, INV-2)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      problemResponse(404, 'Not Found'),
-    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problemResponse(404, 'Not Found'));
 
     render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
 
@@ -97,20 +99,16 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
   });
 
-  it('revokes the blob: object URL on unmount (no leak)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(bytesResponse());
-    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
-
-    const { unmount } = render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
+  it('does not fetch document bytes after receiving the access capability', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
+    render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
     await screen.findByTitle('Preview of Q4 strategy.pdf');
-
-    unmount();
-    expect(revokeSpy).toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   describe('source metadata grid (#120)', () => {
     beforeEach(() => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValue(bytesResponse());
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
     });
 
     it('renders owner / last-modified / last-indexed rows', () => {
@@ -136,8 +134,12 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
       render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
       const grid = screen.getByRole('group', { name: /source metadata/i });
       // The "Last indexed" label maps to a "Not available" value, not a recency.
-      const labels = within(grid).getAllByRole('term').map((el) => el.textContent);
-      const values = within(grid).getAllByRole('definition').map((el) => el.textContent);
+      const labels = within(grid)
+        .getAllByRole('term')
+        .map((el) => el.textContent);
+      const values = within(grid)
+        .getAllByRole('definition')
+        .map((el) => el.textContent);
       const indexedIdx = labels.indexOf('Last indexed');
       expect(indexedIdx).toBeGreaterThanOrEqual(0);
       expect(values[indexedIdx]).toMatch(/not available/i);

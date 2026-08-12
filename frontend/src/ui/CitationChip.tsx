@@ -5,6 +5,7 @@
  * reflects the open/selected state via `aria-pressed`, which the kit CSS styles.
  */
 import { cn } from '@/lib/cn';
+import { formatMediaTimestamp } from '@/lib/mediaTime';
 
 interface CitationChipProps {
   /** 1-based citation number rendered inside the chip. */
@@ -14,6 +15,8 @@ interface CitationChipProps {
   onClick?: () => void;
   /** Source title for the accessible name (e.g. "Q3 Revenue.pdf"). */
   sourceTitle?: string;
+  /** Player-relative media seek target displayed beside the ordinal. */
+  timeStartMs?: number;
   className?: string;
 }
 
@@ -22,9 +25,13 @@ export function CitationChip({
   active = false,
   onClick,
   sourceTitle,
+  timeStartMs,
   className,
 }: CitationChipProps) {
-  const label = sourceTitle ? `Citation ${index}: ${sourceTitle}` : `Citation ${index}`;
+  const timestamp = timeStartMs !== undefined ? formatMediaTimestamp(timeStartMs) : null;
+  const label = `${sourceTitle ? `Citation ${index}: ${sourceTitle}` : `Citation ${index}`}${
+    timestamp ? ` at ${timestamp}` : ''
+  }`;
   return (
     <button
       type="button"
@@ -34,6 +41,7 @@ export function CitationChip({
       onClick={onClick}
     >
       {index}
+      {timestamp ? <span className="ml-1 font-mono text-[0.65rem]">· {timestamp}</span> : null}
     </button>
   );
 }

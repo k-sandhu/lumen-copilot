@@ -1,7 +1,7 @@
 """Object-key construction — pure, I/O-free helpers (ADR-0004 boundary).
 
-The storage adapter addresses every object by a **tenant-prefixed,
-content-addressed** key:
+The storage adapter addresses every object by a **tenant-prefixed** key. Small
+server-held payloads use a content address:
 
     {tenant_id}/{sha256(bytes)}/{safe_filename}
 
@@ -10,8 +10,11 @@ content-addressed** key:
   caller's tenant prefix, so cross-tenant reads are impossible from day one —
   before the full ACL lands in CC-1. Real tenant *resolution* is CC-2/CC-3; here
   the caller supplies ``tenant_id``.
-* The ``sha256`` middle segment makes the key **content-addressed**: identical
-  bytes map to the same key, so re-uploading a file dedupes for free.
+* The ``sha256`` middle segment makes that key **content-addressed**: identical
+  bytes map to the same key, so re-uploading a small payload dedupes for free.
+* Direct multipart uploads cannot hash bytes the API never receives, so
+  :func:`build_quarantine_key` instead reserves a random document-scoped key
+  under the same tenant prefix (ADR-0023).
 
 These functions are deliberately pure (no S3, no settings) so the key invariants
 are unit-testable with zero mocks; the adapter in :mod:`app.storage.object_store`
@@ -82,6 +85,19 @@ def build_key(tenant_id: str, data: bytes, filename: str) -> str:
     Shape: ``{tenant_id}/{sha256(data)}/{safe_filename}`` (AC-2).
     """
     return f"{validate_tenant_id(tenant_id)}/{sha256_hex(data)}/{safe_filename(filename)}"
+
+
+def build_quarantine_key(tenant_id: str, document_id: str, filename: str) -> str:
+    """Build a random-document-scoped key before direct-upload bytes exist.
+
+    Shape: ``{tenant}/quarantine/{document_id}/{safe_filename}``. The reserved
+    document id is random/server-generated; a browser declaration never chooses
+    an existing content-addressed key (ADR-0023 §1).
+    """
+    return (
+        f"{validate_tenant_id(tenant_id)}/quarantine/"
+        f"{validate_tenant_id(document_id)}/{safe_filename(filename)}"
+    )
 
 
 # Namespace prefix for agent/run-produced artifacts (issue #208), kept distinct

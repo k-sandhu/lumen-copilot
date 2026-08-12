@@ -10,10 +10,10 @@ import type { KnowledgeMode } from '@/api';
 /**
  * What the citation viewer is currently showing (AC-2 click-through). It carries
  * only what the chat/citation wire actually provides about the source (its id,
- * name, and the cited span). It deliberately holds NO freshness/last-indexed
- * label: the only timestamp a chat turn has is the answer/message time, which is
- * the answer's age — not when the source was indexed — so the viewer never
- * presents it as source provenance (#120 GUARD against fabricated provenance).
+ * name, cited span, and optional player-relative media time/speaker). It
+ * deliberately holds no freshness/last-indexed label: neither a media offset nor
+ * the answer/message time says when the source was indexed, so the viewer never
+ * presents either as indexing provenance (#120 GUARD).
  */
 export interface ViewerTarget {
   documentId: string;
@@ -21,6 +21,11 @@ export interface ViewerTarget {
   charStart: number;
   charEnd: number;
   snippet: string;
+  timeStartMs?: number;
+  timeEndMs?: number;
+  transcriptSegmentId?: string;
+  speakerId?: string;
+  speakerName?: string;
   /**
    * Present when the citation is a web page (#221): its URL. Absent ⇒ a corpus
    * document. Drives the web variant of the inspector/viewer (globe + host +

@@ -2,9 +2,9 @@
 
 Pin the three artifact settings: the size cap + content-type allowlist defaults
 and their env overrides, and the retention-days validator (positive when set,
-``None`` = keep forever). The allowlist must be **broader** than the upload one
-(agent output is more varied) and the cap must fail fast on a nonsense retention
-window rather than silently deleting artifacts.
+``None`` = keep forever). The artifact allowlist must retain its agent-output
+formats independently of the document/media upload set, and the cap must fail
+fast on a nonsense retention window rather than silently deleting artifacts.
 """
 
 from __future__ import annotations
@@ -49,13 +49,14 @@ def test_artifact_defaults() -> None:
         assert ct in s.artifact_allowed_content_types
 
 
-def test_artifact_allowlist_is_broader_than_uploads() -> None:
+def test_artifact_allowlist_retains_formats_outside_media_uploads() -> None:
     s = _settings()
-    # Every upload type is not necessarily an artifact type, but the artifact set
-    # is strictly larger and covers formats uploads don't (csv/json/png/svg/html).
-    assert len(s.artifact_allowed_content_types) > len(s.upload_allowed_content_types)
-    assert "text/csv" in s.artifact_allowed_content_types
-    assert "text/csv" not in s.upload_allowed_content_types
+    # Media upload support can make the document set numerically larger; the
+    # security boundary is that artifact-only output formats do not become
+    # ingestible documents merely because both features use object storage.
+    artifact_only = {"text/csv", "application/json", "image/png", "image/svg+xml", "text/html"}
+    assert artifact_only <= s.artifact_allowed_content_types
+    assert artifact_only.isdisjoint(s.upload_allowed_content_types)
 
 
 def test_artifact_allowlist_env_override_is_comma_split() -> None:

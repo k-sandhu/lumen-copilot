@@ -21,6 +21,7 @@
  * drop `WebCitationExtras` from the hand-parse in `streamReducer`/here.
  */
 import type { ChatCitation, Citation } from '@/api';
+import { validMediaTimeSpan } from '@/lib/mediaTime';
 
 /** Whether a citation resolves to a corpus document or a public web page. */
 export type CitationKind = 'document' | 'web';
@@ -34,6 +35,11 @@ export interface UiCitation {
   snippet: string;
   charStart: number;
   charEnd: number;
+  timeStartMs?: number;
+  timeEndMs?: number;
+  transcriptSegmentId?: string;
+  speakerId?: string;
+  speakerName?: string;
   score?: number;
   /**
    * Present only for a web citation (#221): the cited page URL. Not on the
@@ -113,6 +119,7 @@ function webExtras(extras: WebCitationExtras): Pick<UiCitation, 'url' | 'webTitl
 }
 
 export function fromRestCitation(c: Citation & WebCitationExtras): UiCitation {
+  const media = restMediaExtras(c);
   return {
     id: c.id,
     documentId: c.document_id,
@@ -121,9 +128,30 @@ export function fromRestCitation(c: Citation & WebCitationExtras): UiCitation {
     snippet: c.snippet,
     charStart: c.char_start,
     charEnd: c.char_end,
+    ...media,
     ...(c.score !== undefined ? { score: c.score } : {}),
     ...(c.redacted ? { redacted: true } : {}),
     ...webExtras(c),
+  };
+}
+
+/** REST serializers emit absent nullable media fields as null; normalize safely. */
+function restMediaExtras(
+  c: Citation,
+): Pick<
+  UiCitation,
+  'timeStartMs' | 'timeEndMs' | 'transcriptSegmentId' | 'speakerId' | 'speakerName'
+> {
+  const span = validMediaTimeSpan(c.time_start_ms, c.time_end_ms);
+  if (!span) return {};
+  return {
+    timeStartMs: span.startMs,
+    timeEndMs: span.endMs,
+    ...(typeof c.transcript_segment_id === 'string'
+      ? { transcriptSegmentId: c.transcript_segment_id }
+      : {}),
+    ...(typeof c.speaker_id === 'string' ? { speakerId: c.speaker_id } : {}),
+    ...(typeof c.speaker_name === 'string' ? { speakerName: c.speaker_name } : {}),
   };
 }
 
@@ -136,6 +164,11 @@ export function fromWsCitation(c: ChatCitation & WebCitationExtras): UiCitation 
     snippet: c.snippet,
     charStart: c.charStart,
     charEnd: c.charEnd,
+    ...(c.timeStartMs !== undefined ? { timeStartMs: c.timeStartMs } : {}),
+    ...(c.timeEndMs !== undefined ? { timeEndMs: c.timeEndMs } : {}),
+    ...(c.transcriptSegmentId !== undefined ? { transcriptSegmentId: c.transcriptSegmentId } : {}),
+    ...(c.speakerId !== undefined ? { speakerId: c.speakerId } : {}),
+    ...(c.speakerName !== undefined ? { speakerName: c.speakerName } : {}),
     ...(c.score !== undefined ? { score: c.score } : {}),
     ...webExtras(c),
   };
