@@ -59,7 +59,7 @@ class Embedding(TypeDecorator[list[float]]):
     """A fixed-dimension embedding vector, portable across dialects.
 
     PostgreSQL → pgvector ``Vector(dim)``; everything else → ``TEXT`` holding a
-    JSON array. ``dim`` pins the width (``LLM_EMBEDDING_DIMENSIONS`` = 1024).
+    JSON array. ``dim`` pins the schema width (canonical value = 2048, #346).
     """
 
     impl = types.Text

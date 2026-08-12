@@ -1035,12 +1035,10 @@ async def test_crash_between_page_commit_and_ingestion_is_recovered_by_the_sweep
     assert enqueued == [(seeded.tenant_id, stranded_id)]
 
 
-async def test_sweep_ignores_non_connector_and_ready_documents(
+async def test_sweep_recovers_uploads_but_ignores_ready_documents(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep is connector-scoped and status-scoped: a plain upload pending
-    ingestion (its own task owns it) and a ready connector document are both
-    left alone."""
+    """#346: broker-lost uploads are recovered; terminal rows stay untouched."""
     from sqlalchemy import update as sa_update
 
     seeded = await _seed()
@@ -1079,8 +1077,8 @@ async def test_sweep_ignores_non_connector_and_ready_documents(
     monkeypatch.setattr(
         poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
     )
-    assert await poll_module._sweep_stranded(_settings()) == 0
-    assert enqueued == []
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, upload.id)]
 
 
 async def test_cursor_expired_falls_back_to_full_resync(

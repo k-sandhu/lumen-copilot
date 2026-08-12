@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.core.errors import NotFoundError, ValidationError
 from app.db.base import Base
 from app.db.repositories import (
@@ -69,7 +70,7 @@ from app.services.grants_service import GrantsService
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
 
-_EMBED_DIM = 1024
+_EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
 
 
 class _FakeGateway:

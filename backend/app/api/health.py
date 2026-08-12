@@ -3,8 +3,8 @@
 Implements ``GET /health`` and ``GET /health/ready`` exactly per
 ``contracts/openapi.yaml`` (``HealthStatus`` / ``ReadinessStatus`` /
 ``DependencyStatus``). Liveness is a pure process check. Readiness actually
-reaches each critical dependency — Postgres ``SELECT 1``, Redis ``PING``, and
-object-store reachability — and returns 200 ``ready`` only if all pass, else
+reaches each critical dependency — including the fixed-width embedding schema,
+provider response, and OpenSearch mapping — and returns 200 ``ready`` only if all pass, else
 503 ``degraded`` with a per-dependency breakdown. Each check runs through that
 system's owning adapter (DB session, object store) so the boundary table holds;
 the Redis ping is a thin readiness-only client.
@@ -18,9 +18,14 @@ from fastapi import APIRouter, Response, status
 from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import SettingsDep, get_object_store
+from app.core.config import Settings
+from app.core.errors import DependencyError
 from app.core.logging import get_logger
 from app.db import session as db_session
+from app.db.embedding_contract import check_embedding_schema
+from app.llm.gateway import LLMGateway
 from app.realtime import backplane
+from app.search import OpenSearchStore
 
 router = APIRouter(tags=["health"])
 log = get_logger(__name__)
@@ -97,6 +102,66 @@ async def _check_object_store() -> DependencyStatus:
         return DependencyStatus(name="minio", ok=False, detail=str(exc))
 
 
+async def _check_embedding_schema(settings: Settings) -> DependencyStatus:
+    """Config/ORM/pgvector width agreement, inspected inside ``app.db``."""
+    try:
+        state = await check_embedding_schema(settings)
+        return DependencyStatus(
+            name="embedding_schema",
+            ok=True,
+            detail=f"native={state.postgres_dimensions}; legacy={state.legacy_dimensions}",
+        )
+    except DependencyError as exc:
+        return DependencyStatus(name="embedding_schema", ok=False, detail=exc.detail)
+    except Exception:  # noqa: BLE001 — never expose catalog/vendor detail
+        return DependencyStatus(
+            name="embedding_schema", ok=False, detail="Embedding schema inspection failed."
+        )
+
+
+async def _check_opensearch_embedding(settings: Settings) -> DependencyStatus:
+    """Create/validate the versioned index through the search adapter."""
+    store = OpenSearchStore.from_settings(settings)
+    try:
+        await store.ensure_index()
+        dimensions = await store.check_embedding_dimensions()
+        return DependencyStatus(name="opensearch_embedding", ok=True, detail=f"native={dimensions}")
+    except DependencyError as exc:
+        return DependencyStatus(name="opensearch_embedding", ok=False, detail=exc.detail)
+    except Exception:  # noqa: BLE001
+        return DependencyStatus(
+            name="opensearch_embedding",
+            ok=False,
+            detail="Search index embedding inspection failed.",
+        )
+    finally:
+        await store.aclose()
+
+
+async def _check_embedding_provider(settings: Settings) -> DependencyStatus:
+    """Probe the configured route; the LLM adapter validates the native width."""
+    if not settings.llm_enabled:
+        # LLM-less local boot is an explicit existing contract. A configured
+        # provider, however, must prove its vector width before readiness passes.
+        return DependencyStatus(name="embedding_provider", ok=True, detail="not configured")
+    try:
+        vectors = await LLMGateway(settings).embed(
+            ["lumen embedding readiness probe"],
+            cache_namespace="readiness",
+        )
+        return DependencyStatus(
+            name="embedding_provider",
+            ok=True,
+            detail=f"native={len(vectors[0].vector)}",
+        )
+    except DependencyError as exc:
+        return DependencyStatus(name="embedding_provider", ok=False, detail=exc.detail)
+    except Exception:  # noqa: BLE001
+        return DependencyStatus(
+            name="embedding_provider", ok=False, detail="Embedding provider inspection failed."
+        )
+
+
 @router.get(
     "/health/ready",
     response_model=ReadinessStatus,
@@ -114,6 +179,9 @@ async def get_readiness(settings: SettingsDep, response: Response) -> ReadinessS
         _check_postgres(),
         _check_redis(settings.redis_url),
         _check_object_store(),
+        _check_embedding_schema(settings),
+        _check_opensearch_embedding(settings),
+        _check_embedding_provider(settings),
     )
     all_ok = all(dep.ok for dep in dependencies)
     if not all_ok:

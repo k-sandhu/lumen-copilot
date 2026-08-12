@@ -51,7 +51,7 @@ log = get_logger(__name__)
 _NDJSON = "application/x-ndjson"
 
 # Chunks per _bulk request (#258). Bounds the request body no matter how large a
-# document is — 1024-dim vectors make each chunk ~20KB of NDJSON, so an
+# document is — fixed-width vectors make each chunk sizable NDJSON, so an
 # unbatched 40+-chunk document blew past the request timeout deterministically.
 _BULK_BATCH_SIZE = 32
 
@@ -343,7 +343,7 @@ class OpenSearchStore:
         **Mapping migration (ADR-0019 §2).** Creating the index only ever
         covers a *fresh* deployment; an index that already exists keeps the
         mapping it was created with. Because the mapping is ``dynamic:
-        strict``, a deployed ``lumen-chunks`` that predates the mirrored-ACL
+        strict``, a deployed index that predates the mirrored-ACL
         fields would reject every new bulk write outright. So the ACL
         properties are **always** applied as an additive ``PUT
         /{index}/_mapping`` — legal and idempotent for a strict mapping (new
@@ -384,6 +384,35 @@ class OpenSearchStore:
             "PUT", f"/_search/pipeline/{self._pipeline}", json_body=_pipeline_body()
         )
         self._ensured = True
+
+    async def check_embedding_dimensions(self) -> int:
+        """Reject an existing index whose kNN width disagrees with config (#346)."""
+
+        payload = await self._request("GET", f"/{self._index}/_mapping")
+        try:
+            properties = payload[self._index]["mappings"]["properties"]
+            actual = properties["embedding"]["dimension"]
+        except (KeyError, TypeError):
+            actual = None
+
+        if not isinstance(actual, int) or actual != self._dimensions:
+            log.error(
+                "embedding.opensearch_dimension_mismatch",
+                index=self._index,
+                configured_dimensions=self._dimensions,
+                opensearch_dimensions=actual,
+            )
+            raise DependencyError(
+                "The search index does not share the configured embedding dimension.",
+                code="embedding_dimension_mismatch",
+            )
+        log.info(
+            "embedding.opensearch_dimension_ready",
+            index=self._index,
+            configured_dimensions=self._dimensions,
+            opensearch_dimensions=actual,
+        )
+        return actual
 
     async def health(self) -> bool:
         """True iff the cluster answers its health endpoint (readiness probe)."""

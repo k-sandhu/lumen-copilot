@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.core.errors import AppError, DependencyError, ValidationError
+from app.core.logging import get_logger
 from app.domain.llm import (
     ChatMessage,
     Completion,
@@ -50,6 +51,9 @@ from app.domain.llm import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+
+log = get_logger(__name__)
 
 
 class LlmProviderError(DependencyError):
@@ -263,7 +267,8 @@ def _map_vendor_error(exc: Exception) -> AppError:
 # SHA-256 digest of the text (query text is sensitive — the audit trail hashes
 # it for the same reason), never the raw string. Capacity/TTL come from
 # Settings (LLM_EMBED_CACHE_MAX_ENTRIES / LLM_EMBED_CACHE_TTL_SECONDS).
-_embed_cache: OrderedDict[tuple[str, str, str, str], tuple[float, list[float]]] = OrderedDict()
+_EmbedCacheKey = tuple[str, str, str, int, str]
+_embed_cache: OrderedDict[_EmbedCacheKey, tuple[float, list[float]]] = OrderedDict()
 
 
 def _monotonic() -> float:  # seam for TTL tests
@@ -275,7 +280,7 @@ def clear_embed_cache() -> None:
     _embed_cache.clear()
 
 
-def _embed_cache_get(key: tuple[str, str, str, str], *, ttl_seconds: float) -> list[float] | None:
+def _embed_cache_get(key: _EmbedCacheKey, *, ttl_seconds: float) -> list[float] | None:
     entry = _embed_cache.get(key)
     if entry is None:
         return None
@@ -287,13 +292,53 @@ def _embed_cache_get(key: tuple[str, str, str, str], *, ttl_seconds: float) -> l
     return vector
 
 
-def _embed_cache_put(
-    key: tuple[str, str, str, str], vector: list[float], *, max_entries: int
-) -> None:
+def _embed_cache_put(key: _EmbedCacheKey, vector: list[float], *, max_entries: int) -> None:
     _embed_cache[key] = (_monotonic(), list(vector))
     _embed_cache.move_to_end(key)
     while len(_embed_cache) > max_entries:
         _embed_cache.popitem(last=False)
+
+
+def _validate_embedding_vectors(
+    vectors: Sequence[Sequence[float]],
+    *,
+    expected_count: int,
+    expected_dimensions: int,
+    model: str,
+) -> None:
+    """Fail at the provider boundary before a fixed-width store sees drift.
+
+    Telemetry intentionally contains only counts, dimensions, and route id; input
+    text and vector values are sensitive and never enter the log.
+    """
+
+    if len(vectors) != expected_count:
+        log.error(
+            "embedding.provider_count_mismatch",
+            model=model,
+            expected_count=expected_count,
+            actual_count=len(vectors),
+            configured_dimensions=expected_dimensions,
+        )
+        raise DependencyError(
+            "Embedding provider returned an unexpected result count.",
+            code="embedding_count_mismatch",
+        )
+
+    for index, vector in enumerate(vectors):
+        actual_dimensions = len(vector)
+        if actual_dimensions != expected_dimensions:
+            log.error(
+                "embedding.provider_dimension_mismatch",
+                model=model,
+                vector_index=index,
+                configured_dimensions=expected_dimensions,
+                provider_dimensions=actual_dimensions,
+            )
+            raise DependencyError(
+                "Embedding provider returned an incompatible vector.",
+                code="embedding_dimension_mismatch",
+            )
 
 
 class LLMGateway:
@@ -642,14 +687,26 @@ class LLMGateway:
             and api_key is None
             and api_base is None
         )
-        cache_key: tuple[str, str, str, str] | None = None
+        cache_key: _EmbedCacheKey | None = None
         if cacheable:
             digest = hashlib.sha256(inputs[0].encode("utf-8")).hexdigest()
-            cache_key = (cache_namespace or "", model_id, effective_api_base or "", digest)
+            cache_key = (
+                cache_namespace or "",
+                model_id,
+                effective_api_base or "",
+                self._settings.llm_embedding_dimensions,
+                digest,
+            )
             cached = _embed_cache_get(
                 cache_key, ttl_seconds=self._settings.llm_embed_cache_ttl_seconds
             )
             if cached is not None:
+                _validate_embedding_vectors(
+                    [cached],
+                    expected_count=1,
+                    expected_dimensions=self._settings.llm_embedding_dimensions,
+                    model=model_id,
+                )
                 # Copy on the way out so a caller mutating its vector cannot
                 # poison the cache.
                 return [Embedding(vector=list(cached), model=model_id)]
@@ -671,9 +728,14 @@ class LLMGateway:
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
-        embeddings = [
-            Embedding(vector=list(item["embedding"]), model=model_id) for item in response.data
-        ]
+        vectors = [list(item["embedding"]) for item in response.data]
+        _validate_embedding_vectors(
+            vectors,
+            expected_count=len(inputs),
+            expected_dimensions=self._settings.llm_embedding_dimensions,
+            model=model_id,
+        )
+        embeddings = [Embedding(vector=vector, model=model_id) for vector in vectors]
         if cache_key is not None and len(embeddings) == 1:
             _embed_cache_put(
                 cache_key,

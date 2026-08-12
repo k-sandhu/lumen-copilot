@@ -734,6 +734,8 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    ingestion_attempts: int = 0
+    ingestion_failure: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

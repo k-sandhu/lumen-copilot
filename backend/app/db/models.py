@@ -18,8 +18,8 @@ Tenancy & ownership invariants baked into the schema (spec 0004 §2.1/§2.2):
 * ``audit_events`` is append-only (the app DB role gets no UPDATE/DELETE on it —
   enforced in the migration, §2.4); the model is write-then-read only.
 
-The pgvector column width comes from settings (``LLM_EMBEDDING_DIMENSIONS``); the
-migration pins the same literal so the table and the model agree.
+The active pgvector column width is a schema constant shared with the config
+default; startup readiness rejects a runtime override that disagrees.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
-from app.core.config import get_settings
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS, LEGACY_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.types import Embedding, StringArray
 
@@ -318,6 +318,11 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Durable, content-safe ingestion diagnostics (#346).  The attempt count is
+    # incremented when a worker claims the row; the structured failure contains
+    # only a normalized code, safe operator copy, attempt, and correlation id.
+    ingestion_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ingestion_failure: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
@@ -358,7 +363,7 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
 
     The ``embedding`` column sits beside ``tenant_id`` + ``document_id`` so a
     permission-aware retrieval query is one ``WHERE`` clause. Width =
-    ``LLM_EMBEDDING_DIMENSIONS`` (1024). Nullable so a row can exist before the
+    the canonical schema contract (2048). Nullable so a row can exist before the
     embedding is computed (two-phase ingestion, #21).
     """
 
@@ -379,7 +384,15 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     ord: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(
-        Embedding(get_settings().llm_embedding_dimensions), nullable=True
+        Embedding(CANONICAL_EMBEDDING_DIMENSIONS), nullable=True
+    )
+    # Migration 0044 keeps every pre-existing 1,024-float vector intact beside
+    # the native 2,048 target. It is read only by DB migration/recovery tooling;
+    # retrieval never mixes vector spaces.
+    legacy_embedding: Mapped[list[float] | None] = mapped_column(
+        "embedding_legacy_1024",
+        Embedding(LEGACY_EMBEDDING_DIMENSIONS),
+        nullable=True,
     )
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

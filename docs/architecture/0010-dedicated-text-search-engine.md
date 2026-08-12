@@ -31,7 +31,7 @@ OpenSearch is the only OSI-licensed option with first-class **hybrid** search (B
 
 ### 2. Single retrieval store
 
-OpenSearch holds, per chunk, both the **analyzed text** (BM25) and the **embedding** (`knn_vector`). Hybrid ranking is done by OpenSearch's **hybrid query + normalization search pipeline** (score-normalized BM25 ⊕ kNN), replacing the Python `pgvector`+FTS+RRF path. Embeddings are still produced by the `llm/` gateway (bge-m3) and written into OpenSearch at index time. The `pgvector` extension, the `chunks.embedding` column, and the Postgres FTS query path are **removed** once cutover is verified.
+OpenSearch holds, per chunk, both the **analyzed text** (BM25) and the **embedding** (`knn_vector`). Hybrid ranking is done by OpenSearch's **hybrid query + normalization search pipeline** (score-normalized BM25 ⊕ kNN), replacing the Python `pgvector`+FTS+RRF path. Embeddings are produced by the `llm/` gateway under the fixed-width deployment contract (native 2,048 dimensions as of issue #346) and written into OpenSearch at index time. The `pgvector` extension, the active `chunks.embedding` column, and the Postgres FTS query path are **removed only after** the lossless cutover and rollback window are verified; migration 0044 temporarily preserves the prior 1,024-dimension vectors in `embedding_legacy_1024` rather than coercing them.
 
 ### 3. Module boundary — new `backend/app/search/`; `retrieval/` stays the chokepoint
 

@@ -33,6 +33,13 @@ _BASE = {
 _PROD_SECRETS_KEY = generate_master_key()
 
 
+def test_default_embedding_route_and_dimension_are_one_contract() -> None:
+    """Regression #346: clean deployments default to the migrated 2,048 route."""
+    settings = Settings(_env_file=None, **_BASE)
+    assert settings.llm_embedding_model == "openai/nvidia/nemotron-3-embed-1b:free"
+    assert settings.llm_embedding_dimensions == 2048
+
+
 def test_access_ttl_ceiling_is_enforced() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **_BASE, ACCESS_TOKEN_TTL_SECONDS=3600)  # > 900

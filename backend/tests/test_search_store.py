@@ -383,6 +383,28 @@ async def test_rejected_mapping_update_fails_closed() -> None:
     assert excinfo.value.code == "search_error"
 
 
+async def test_embedding_mapping_dimension_mismatch_fails_closed() -> None:
+    """#346: an existing 1,024 mapping cannot accept configured 2,048 vectors."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "lumen-test": {
+                    "mappings": {
+                        "properties": {"embedding": {"type": "knn_vector", "dimension": 1024}}
+                    }
+                }
+            },
+        )
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.check_embedding_dimensions()
+    assert excinfo.value.code == "embedding_dimension_mismatch"
+
+
 # --- Live round-trip against the base-stack engine (skips when offline) ------
 
 _OS_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:47186")

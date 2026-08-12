@@ -33,6 +33,8 @@ import pytest
 import pytest_asyncio
 from celery.exceptions import Retry
 from kombu.exceptions import OperationalError
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -40,6 +42,7 @@ import app.db.session as db_session
 import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
+from app.db import models
 from app.db.base import Base
 from app.db.repositories import (
     ChunkRepository,
@@ -113,8 +116,9 @@ class _FakeObjectStore:
 class _FakeGateway:
     """Fake LLM gateway: returns a deterministic vector per input, counts batches."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, failure_code: str = "llm_unconfigured") -> None:
         self.fail = fail
+        self.failure_code = failure_code
         self.calls: list[int] = []  # batch sizes, in order
 
     async def embed(
@@ -125,7 +129,7 @@ class _FakeGateway:
         cache_namespace: str | None = None,
     ) -> list[Embedding]:
         if self.fail:
-            raise DependencyError("no key", code="llm_unconfigured")
+            raise DependencyError("provider detail", code=self.failure_code)
         self.calls.append(len(inputs))
         return [Embedding(vector=[float(len(t) % 7)] * _DIM, model="fake") for t in inputs]
 
@@ -268,6 +272,62 @@ async def test_ingest_text_document_persists_chunks_and_marks_ready(
             assert text[c.char_start : c.char_end] == c.text
 
 
+@pytest.mark.parametrize(
+    ("mime_type", "payload"),
+    [
+        ("text/plain", b"plain dimension contract"),
+        ("text/markdown", b"# Markdown dimension contract"),
+        ("application/pdf", None),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", None),
+        ("application/vnd.openxmlformats-officedocument.presentationml.presentation", None),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", None),
+    ],
+)
+async def test_each_supported_format_reaches_ready_with_configured_vectors(
+    sqlite_engine: None,
+    mime_type: str,
+    payload: bytes | None,
+) -> None:
+    """#346: all six parser paths reach the same dimension-aware terminal state."""
+
+    from tests.test_ingestion_parsers import _make_docx, _make_pdf, _make_pptx, _make_xlsx
+
+    if payload is None:
+        builder = {
+            "application/pdf": _make_pdf,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": _make_docx,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": _make_pptx,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": _make_xlsx,
+        }[mime_type]
+        payload = builder("supported format dimension contract")
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    tenant_id, document_id = await _seed_document(mime_type=mime_type, key="format")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, payload)
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=_FakeGateway(),  # type: ignore[arg-type]
+    )
+    assert result.status is DocumentStatus.READY
+    assert result.chunk_count > 0
+    async with db_session.session_scope() as session:
+        chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+        assert chunks
+        assert all(
+            chunk.embedding is not None
+            and len(chunk.embedding) == settings.llm_embedding_dimensions
+            for chunk in chunks
+        )
+
+
 async def test_embeddings_are_batched(sqlite_engine: None) -> None:
     """The gateway is called once per batch, not once per chunk (batched)."""
     settings = _settings(INGESTION_EMBED_BATCH_SIZE="3")
@@ -331,6 +391,76 @@ async def test_reingest_replaces_chunks_idempotent(sqlite_engine: None) -> None:
         assert len(chunks) == second.chunk_count
         # Ordinals still contiguous after the replace.
         assert [c.ord for c in chunks] == list(range(len(chunks)))
+
+
+async def test_controlled_reembedding_preserves_legacy_vectors_and_chunk_ids(
+    sqlite_engine: None,
+) -> None:
+    """#346: native re-embedding fills beside legacy data without replacing it."""
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="legacy")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, ("stable migration text. " * 40).encode())
+
+    await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+
+    legacy = [0.25] * 1024
+    async with db_session.session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(models.Chunk)
+                    .where(models.Chunk.document_id == document_id)
+                    .order_by(models.Chunk.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        original_ids = [row.id for row in rows]
+        for row in rows:
+            row.legacy_embedding = legacy
+            row.embedding = None
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        object_store=store,  # type: ignore[arg-type]
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+    assert result.status is DocumentStatus.READY
+
+    async with db_session.session_scope() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(models.Chunk)
+                    .where(models.Chunk.document_id == document_id)
+                    .order_by(models.Chunk.ord)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.id for row in rows] == original_ids
+        assert all(row.legacy_embedding == legacy for row in rows)
+        assert all(row.embedding is not None and len(row.embedding) == _DIM for row in rows)
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.ingestion_attempts == 2
+        assert doc.ingestion_failure is None
 
 
 # --- Negatives (AC-6) -------------------------------------------------------
@@ -451,6 +581,12 @@ async def test_storage_unavailable_raises_retryable(sqlite_engine: None) -> None
             gateway=gateway,  # type: ignore[arg-type]
         )
 
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion could not fetch the stored object."
+
 
 async def test_embed_unavailable_raises_retryable(sqlite_engine: None) -> None:
     settings = _settings()
@@ -472,6 +608,130 @@ async def test_embed_unavailable_raises_retryable(sqlite_engine: None) -> None:
             object_store=store,
             gateway=gateway,  # type: ignore[arg-type]
         )
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.ingestion_failure is not None
+        assert doc.ingestion_failure["code"] == "ingestion_embedding_error"
+
+
+async def test_bad_provider_vector_is_terminal_with_normalized_code(
+    sqlite_engine: None,
+) -> None:
+    """#346: native-width drift keeps its actionable code but no provider detail."""
+
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway(fail=True, failure_code="embedding_dimension_mismatch")
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="bad-vector")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, b"provider dimension drift")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=store,  # type: ignore[arg-type]
+            gateway=gateway,  # type: ignore[arg-type]
+        )
+    assert excinfo.value.code == "embedding_dimension_mismatch"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.ingestion_failure is not None
+        assert doc.ingestion_failure["code"] == "embedding_dimension_mismatch"
+        assert "provider detail" not in (doc.error or "")
+
+
+async def test_unexpected_chunk_insert_failure_is_terminal(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression #346: an asyncpg-style insert fault never strands processing.
+
+    The old orchestration caught only provider ``DependencyError`` values.  A
+    fixed-width pgvector ``DataError`` therefore escaped after the claim commit,
+    leaving the row permanently ``processing``.  A generic repository fault is
+    enough to pin the transaction/finalization boundary without requiring live
+    Postgres in this unit test.
+    """
+    settings = _settings()
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="db-fault")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        store.put(str(tenant_id), doc.storage_key, b"content that must be embedded")
+
+    async def _insert_fails(*_args: object, **_kwargs: object) -> object:
+        raise SQLAlchemyError("expected 1024 dimensions, not 2048")
+
+    monkeypatch.setattr(ChunkRepository, "replace_for_document", _insert_fails)
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=store,  # type: ignore[arg-type]
+            gateway=gateway,  # type: ignore[arg-type]
+            correlation_id="task-safe-correlation",
+        )
+    assert excinfo.value.code == "ingestion_database_error"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion failed while saving chunks."
+        assert doc.ingestion_attempts == 1
+        assert doc.ingestion_failure == {
+            "code": "ingestion_database_error",
+            "message": "Document ingestion failed while saving chunks.",
+            "attempt": 1,
+            "correlation_id": "task-safe-correlation",
+        }
+
+
+async def test_opensearch_failure_is_terminal_and_retryable(sqlite_engine: None) -> None:
+    """#346: derived-index faults also finalize the durable document state."""
+
+    class _FailingIndexStore(_FakeIndexStore):
+        async def upsert_chunks(self, chunks: Sequence[object], *, refresh: bool = False) -> None:
+            raise DependencyError("engine detail", code="search_error")
+
+    settings = _settings()
+    object_store = _FakeObjectStore()
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="search-fault")
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        object_store.put(str(tenant_id), doc.storage_key, b"search indexing must be terminal")
+
+    with pytest.raises(IngestionError) as excinfo:
+        await ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            object_store=object_store,  # type: ignore[arg-type]
+            gateway=_FakeGateway(),  # type: ignore[arg-type]
+            search_store=_FailingIndexStore(),  # type: ignore[arg-type]
+        )
+    assert excinfo.value.code == "ingestion_index_error"
+
+    async with db_session.session_scope() as session:
+        doc = await DocumentRepository(session, tenant_id).get(document_id)
+        assert doc is not None
+        assert doc.status is DocumentStatus.FAILED
+        assert doc.error == "Document ingestion failed while updating the search index."
 
 
 # --- The Celery sync wrapper: retry / backoff / dead-letter -----------------

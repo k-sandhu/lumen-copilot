@@ -234,6 +234,10 @@ def to_document(row: models.Document) -> Document:
         acl_synced_at=row.acl_synced_at,
         acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
         external_id=row.external_id,
+        ingestion_attempts=row.ingestion_attempts,
+        ingestion_failure=dict(row.ingestion_failure)
+        if row.ingestion_failure is not None
+        else None,
     )
 
 
@@ -2064,9 +2068,64 @@ class DocumentRepository(_TenantScopedRepository):
             return None
         row.status = status.value
         row.error = error
+        if status is not DocumentStatus.FAILED:
+            row.ingestion_failure = None
         await self._session.flush()
         # The ``onupdate`` server default refreshed ``updated_at`` server-side;
         # reload so the mapper reads the new value without a lazy emit.
+        await self._session.refresh(row)
+        return to_document(row)
+
+    async def begin_ingestion(self, document_id: UUID) -> Document | None:
+        """Atomically claim one attempt and clear the prior terminal failure."""
+
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = DocumentStatus.PROCESSING.value
+        row.error = None
+        row.ingestion_failure = None
+        row.ingestion_attempts += 1
+        await self._session.flush()
+        await self._session.refresh(row)
+        return to_document(row)
+
+    async def mark_ingestion_failed(
+        self,
+        document_id: UUID,
+        *,
+        code: str,
+        message: str,
+        correlation_id: str | None = None,
+    ) -> Document | None:
+        """Persist a content-safe terminal failure in a fresh transaction."""
+
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        failure: dict[str, object] = {
+            "code": code,
+            "message": message,
+            "attempt": row.ingestion_attempts,
+        }
+        if correlation_id:
+            failure["correlation_id"] = correlation_id
+        row.status = DocumentStatus.FAILED.value
+        row.error = message
+        row.ingestion_failure = failure
+        await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
 
@@ -2295,7 +2354,40 @@ class ChunkRepository(_TenantScopedRepository):
         boundary, so the delete + inserts commit atomically — a re-run is never
         observed half-applied.
         """
-        await self.delete_for_document(document_id)
+        existing_stmt = (
+            select(models.Chunk)
+            .where(
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Chunk.document_id == document_id,
+            )
+            .order_by(models.Chunk.ord.asc())
+        )
+        existing = list((await self._session.execute(existing_stmt)).scalars().all())
+
+        # During the #346 cut-over, update deterministic chunks in place so the
+        # old 1,024 vectors and stable chunk ids survive re-embedding.  If the
+        # current chunker would reshape a legacy document, fail/rollback instead
+        # of silently destroying the only rollback vector set.
+        if any(row.legacy_embedding is not None for row in existing):
+            same_shape = len(existing) == len(chunks) and all(
+                row.ord == ordinal
+                and row.text == chunk.text
+                and row.char_start == chunk.char_start
+                and row.char_end == chunk.char_end
+                for ordinal, (row, chunk) in enumerate(zip(existing, chunks, strict=True))
+            )
+            if not same_shape:
+                raise ValueError(
+                    "Legacy embedding preservation requires unchanged chunk text and spans."
+                )
+            for row, chunk in zip(existing, chunks, strict=True):
+                row.embedding = list(chunk.embedding) if chunk.embedding is not None else None
+            await self._session.flush()
+            return [_to_chunk(row) for row in existing]
+
+        for row in existing:
+            await self._session.delete(row)
+        await self._session.flush()
         rows = [
             models.Chunk(
                 tenant_id=self._tenant_id,
@@ -5622,10 +5714,10 @@ class SourceReconcileRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
 
-    async def list_stranded_connector_documents(
+    async def list_stranded_ingestion_documents(
         self, *, older_than: datetime, limit: int
-    ) -> list[tuple[UUID, UUID]]:
-        """``(tenant_id, document_id)`` for connector docs stuck pre-ingestion.
+    ) -> list[tuple[UUID, UUID, DocumentStatus]]:
+        """``(tenant, document, status)`` for uploads/connectors stuck ingesting.
 
         The recovery half of the incremental sync's commit discipline
         (ADR-0019 §3): a page's row + cursor commit **first**, then ingestion is
@@ -5634,17 +5726,14 @@ class SourceReconcileRepository:
         invisible to retrieval forever, and not repairable by the reindex
         backfill (which cannot create chunks that were never parsed).
 
-        This finds those rows — a **connector-owned** document (``source_id``
-        set) still ``pending``/``processing`` and untouched since
-        ``older_than`` — so the poll beat can re-drive the idempotent ingestion
-        task for each. The age threshold is what keeps a legitimately in-flight
-        ingestion out of the result. Cross-tenant (bypass-scoped, system-only)
-        and bounded by ``limit`` so one sweep can never fan out unbounded.
+        The same crash window exists after a direct upload commits and before its
+        broker delivery.  Therefore this intentionally covers every document
+        still ``pending``/``processing`` and untouched since ``older_than``.
+        Cross-tenant use is bypass-scoped/system-only and bounded by ``limit``.
         """
         stmt = (
-            select(models.Document.tenant_id, models.Document.id)
+            select(models.Document.tenant_id, models.Document.id, models.Document.status)
             .where(
-                models.Document.source_id.is_not(None),
                 models.Document.status.in_(
                     (DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value)
                 ),
@@ -5653,6 +5742,48 @@ class SourceReconcileRepository:
             .order_by(models.Document.updated_at.asc(), models.Document.id.asc())
             .limit(limit)
         )
+        rows = (await self._session.execute(stmt)).all()
+        return [(row[0], row[1], DocumentStatus(row[2])) for row in rows]
+
+
+class EmbeddingReconcileRepository:
+    """System-only discovery for the lossless #346 re-embedding cut-over.
+
+    Construct only under ``bind_bypass`` from the operator command. It returns
+    opaque tenant/document ids—never text, vector values, names, or owner data.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_requiring_reembedding(
+        self,
+        *,
+        limit: int,
+        tenant_id: UUID | None = None,
+    ) -> list[tuple[UUID, UUID]]:
+        """Documents with preserved legacy vectors but no native vector yet."""
+
+        stmt = (
+            select(models.Document.tenant_id, models.Document.id)
+            .join(
+                models.Chunk,
+                and_(
+                    models.Chunk.tenant_id == models.Document.tenant_id,
+                    models.Chunk.document_id == models.Document.id,
+                ),
+            )
+            .where(
+                models.Chunk.legacy_embedding.is_not(None),
+                models.Chunk.embedding.is_(None),
+                models.Document.status != DocumentStatus.PROCESSING.value,
+            )
+            .distinct()
+            .order_by(models.Document.tenant_id.asc(), models.Document.id.asc())
+            .limit(limit)
+        )
+        if tenant_id is not None:
+            stmt = stmt.where(models.Document.tenant_id == tenant_id)
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
 

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -56,7 +57,7 @@ from app.services.search_service import SearchService
 
 import app.db.models  # noqa: F401  isort: skip
 
-_EMBED_DIM = 1024
+_EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
 
 
 # --- Fakes ------------------------------------------------------------------
