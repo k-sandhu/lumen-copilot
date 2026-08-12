@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { login, refresh, getCurrentUser, logout } from './auth';
 import { ApiError } from './client';
-import { getAccessToken, clearAccessToken } from './token';
+import { getAccessToken, setAccessToken, clearAccessToken } from './token';
 
 function jsonResponse(body: unknown, status = 200, contentType = 'application/json'): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -18,7 +18,10 @@ function problemResponse(status: number, body: Partial<Record<string, unknown>> 
 }
 
 beforeEach(() => clearAccessToken());
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('login', () => {
   it('exchanges credentials for a token and stores it (AC-1)', async () => {
@@ -126,5 +129,100 @@ describe('logout', () => {
     await logout();
 
     expect(getAccessToken()).toBeNull();
+  });
+
+  it('settles A logout before dispatching B login so B cookie/token wins (R1-002/R1-005)', async () => {
+    setAccessToken('jwt-persona-a');
+    let resolveLogout!: (response: Response) => void;
+    let markLogoutStarted!: () => void;
+    const logoutStarted = new Promise<void>((resolve) => {
+      markLogoutStarted = resolve;
+    });
+    const order: string[] = [];
+    let loginCalls = 0;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/logout')) {
+        order.push('logout-start');
+        markLogoutStarted();
+        return new Promise<Response>((resolve) => {
+          resolveLogout = (response) => {
+            order.push('logout-settled');
+            resolve(response);
+          };
+        });
+      }
+      if (path.endsWith('/auth/login')) {
+        loginCalls += 1;
+        order.push('login-start');
+        return Promise.resolve(
+          jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+        );
+      }
+      return Promise.resolve(problemResponse(404));
+    });
+
+    const personaALogout = logout();
+    await logoutStarted;
+    const personaBLogin = login({
+      email: 'persona-b@example.test',
+      password: 'persona-b-password',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loginCalls).toBe(0);
+    resolveLogout(jsonResponse(null, 204));
+    await personaALogout;
+    await personaBLogin;
+
+    expect(order).toEqual(['logout-start', 'logout-settled', 'login-start']);
+    expect(getAccessToken()).toBe('jwt-persona-b');
+  });
+
+  it('aborts a hung A logout after the bounded barrier and allows B login (R1-002)', async () => {
+    vi.useFakeTimers();
+    setAccessToken('jwt-persona-a');
+    let logoutSignal: AbortSignal | undefined;
+    let markLogoutStarted!: () => void;
+    const logoutStarted = new Promise<void>((resolve) => {
+      markLogoutStarted = resolve;
+    });
+    let loginCalls = 0;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/logout')) {
+        logoutSignal = init?.signal ?? undefined;
+        markLogoutStarted();
+        // Ignore abort to prove the coordinator itself does not await an
+        // uncooperative transport forever.
+        return new Promise<Response>(() => {});
+      }
+      if (path.endsWith('/auth/login')) {
+        loginCalls += 1;
+        return Promise.resolve(
+          jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+        );
+      }
+      return Promise.resolve(problemResponse(404));
+    });
+
+    void logout();
+    await logoutStarted;
+    const personaBLogin = login({
+      email: 'persona-b@example.test',
+      password: 'persona-b-password',
+    });
+    await Promise.resolve();
+    expect(loginCalls).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    await personaBLogin;
+
+    expect(logoutSignal?.aborted).toBe(true);
+    expect(loginCalls).toBe(1);
+    expect(getAccessToken()).toBe('jwt-persona-b');
   });
 });

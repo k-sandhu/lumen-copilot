@@ -13,7 +13,6 @@ import { renderWithQuery } from '@/test/renderWithQuery';
 import { storageSnapshot } from '@/test/storageSnapshot';
 import { setAccessToken, clearAccessToken } from '@/api';
 import type { McpServer } from '@/api';
-import { useAuthStore } from '@/features/auth';
 import { RegisterServerModal } from './RegisterServerModal';
 
 function json(body: unknown, status = 201): Response {
@@ -189,7 +188,7 @@ describe('RegisterServerModal — write-only secret (AC-2 / CC-C)', () => {
     await user.type(screen.getByLabelText(/endpoint url/i), 'https://persona-a.example/mcp');
     await user.type(screen.getByLabelText(/^secret/i), 'persona-a-mcp-secret');
 
-    act(() => useAuthStore.getState().markUnauthenticated());
+    act(() => clearAccessToken());
 
     expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
     expect(screen.getByLabelText(/endpoint url/i)).toHaveValue('');
@@ -210,6 +209,58 @@ describe('RegisterServerModal — write-only secret (AC-2 / CC-C)', () => {
     expect(onClose).toHaveBeenCalledOnce();
     expect(endpoint.value).toBe('');
     expect(secret.value).toBe('');
+  });
+
+  it('hard-resets a revealed manager-owned secret after a failed submit (R1-003)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      problem(422, 'Endpoint blocked', 'endpoint_blocked'),
+    );
+    const user = userEvent.setup();
+    renderWithQuery(<RegisterServerModal open onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText(/^name$/i), 'Persona A MCP');
+    await user.type(screen.getByLabelText(/endpoint url/i), 'https://persona-a.example/mcp');
+    const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: /show secret/i }));
+    secret.value = 'manager-owned-mcp-secret';
+
+    await user.click(screen.getByRole('button', { name: /register server/i }));
+    await screen.findByRole('alert');
+
+    expect(secret.value).toBe('');
+    expect(secret.type).toBe('password');
+    expect(screen.getByRole('button', { name: /show secret/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('hard-blanks manager-owned MCP controls on cancel and retained unmount', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const view = renderWithQuery(<RegisterServerModal open onClose={onClose} />);
+    const name = screen.getByLabelText(/^name$/i) as HTMLInputElement;
+    const endpoint = screen.getByLabelText(/endpoint url/i) as HTMLInputElement;
+    const secret = screen.getByLabelText(/^secret/i) as HTMLInputElement;
+
+    name.value = 'manager-owned-mcp-name';
+    endpoint.value = 'https://manager-owned-mcp.example';
+    secret.value = 'manager-owned-mcp-secret';
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+
+    expect(name.value).toBe('');
+    expect(endpoint.value).toBe('');
+    expect(secret.value).toBe('');
+
+    name.value = 'retained-mcp-name';
+    endpoint.value = 'https://retained-mcp.example';
+    secret.value = 'retained-mcp-secret';
+    view.unmount();
+
+    expect(name.value).toBe('');
+    expect(endpoint.value).toBe('');
+    expect(secret.value).toBe('');
+    expect(secret.type).toBe('password');
   });
 
   it('clears the detached secret control on unmount', async () => {

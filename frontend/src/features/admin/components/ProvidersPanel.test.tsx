@@ -18,7 +18,7 @@ import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { storageSnapshot } from '@/test/storageSnapshot';
-import { ApiError } from '@/api';
+import { ApiError, clearAccessToken, setAccessToken } from '@/api';
 import type { LlmProvider, LlmProviderList } from '@/api';
 import { useAuthStore } from '@/features/auth';
 import { ProvidersPanel } from './ProvidersPanel';
@@ -72,6 +72,8 @@ const PROVIDER_ERROR: LlmProvider = {
 const LIST_ONE: LlmProviderList = { items: [PROVIDER_READY] };
 
 beforeEach(() => {
+  clearAccessToken();
+  useAuthStore.setState({ status: 'unknown' });
   listLlmProviders.mockReset();
   createLlmProvider.mockReset();
   updateLlmProvider.mockReset();
@@ -207,6 +209,7 @@ describe('ProvidersPanel', () => {
 
   it('clears provider credential-adjacent fields on identity transition and logout', async () => {
     listLlmProviders.mockResolvedValue({ items: [] });
+    setAccessToken('jwt-persona-a');
     useAuthStore.setState({ status: 'authenticated' });
     const user = userEvent.setup();
     renderWithQuery(<ProvidersPanel />);
@@ -215,7 +218,7 @@ describe('ProvidersPanel', () => {
     await user.type(screen.getByLabelText(/base url/i), 'https://persona-a.example/v1');
     await user.type(screen.getByLabelText(/api key/i), 'persona-a-secret');
 
-    act(() => useAuthStore.getState().markAuthenticated());
+    act(() => setAccessToken('jwt-persona-b', 'login'));
 
     expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
     expect(screen.getByLabelText(/base url/i)).toHaveValue('');
@@ -225,11 +228,58 @@ describe('ProvidersPanel', () => {
     await user.type(screen.getByLabelText(/base url/i), 'https://persona-b.example/v1');
     await user.type(screen.getByLabelText(/api key/i), 'persona-b-secret');
 
-    act(() => useAuthStore.getState().markUnauthenticated());
+    act(() => clearAccessToken());
 
     expect(screen.getByLabelText(/^name$/i)).toHaveValue('');
     expect(screen.getByLabelText(/base url/i)).toHaveValue('');
     expect(screen.getByLabelText(/api key/i)).toHaveValue('');
+  });
+
+  it('hard-resets a revealed manager-owned API key after a failed submit (R1-003)', async () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    createLlmProvider.mockRejectedValue(new ApiError('network', 0));
+    const user = userEvent.setup();
+    renderWithQuery(<ProvidersPanel />);
+    const form = await screen.findByRole('form', { name: /add llm provider/i });
+
+    await user.type(within(form).getByLabelText(/^name$/i), 'Persona A provider');
+    await user.type(within(form).getByLabelText(/base url/i), 'https://persona-a.example/v1');
+    const apiKey = within(form).getByLabelText(/api key/i) as HTMLInputElement;
+    await user.click(within(form).getByRole('button', { name: /show api key/i }));
+    apiKey.value = 'manager-owned-provider-secret';
+
+    await user.click(within(form).getByRole('button', { name: /add provider/i }));
+    await screen.findByRole('alert');
+
+    expect(apiKey.value).toBe('');
+    expect(apiKey.type).toBe('password');
+    expect(within(form).getByRole('button', { name: /show api key/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('hard-blanks manager-owned provider name/base URL on identity loss and unmount (R1-004)', () => {
+    listLlmProviders.mockResolvedValue({ items: [] });
+    setAccessToken('jwt-persona-a');
+    useAuthStore.setState({ status: 'authenticated' });
+    const view = renderWithQuery(<ProvidersPanel />);
+    const name = screen.getByLabelText(/^name$/i) as HTMLInputElement;
+    const baseUrl = screen.getByLabelText(/base url/i) as HTMLInputElement;
+
+    name.value = 'manager-owned-persona-a-name';
+    baseUrl.value = 'https://manager-owned-persona-a.example/v1';
+    act(() => clearAccessToken());
+
+    expect(name.value).toBe('');
+    expect(baseUrl.value).toBe('');
+
+    name.value = 'retained-manager-name';
+    baseUrl.value = 'https://retained-manager.example/v1';
+    view.unmount();
+
+    expect(name.value).toBe('');
+    expect(baseUrl.value).toBe('');
   });
 
   it('clears the detached API-key control on unmount', async () => {

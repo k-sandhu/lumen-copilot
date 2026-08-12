@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { InputHTMLAttributes } from 'react';
 import { Icon } from '@/ui';
 import { cn } from '@/lib/cn';
@@ -28,23 +28,32 @@ export interface SecretInputProps
   revealClassName?: string;
 }
 
+export interface SecretInputHandle {
+  /** Synchronously blank the live node and restore its masked presentation. */
+  reset: () => void;
+}
+
 /**
  * Shared credential input with exact autocomplete semantics and an explicit,
  * keyboard-accessible reveal action. It never receives a stored server value.
  */
-export function SecretInput({
-  purpose,
-  name,
-  value,
-  onValueChange,
-  revealLabel,
-  wrapperClassName,
-  revealClassName,
-  className,
-  disabled,
-  ...inputProps
-}: SecretInputProps) {
+export const SecretInput = forwardRef<SecretInputHandle, SecretInputProps>(function SecretInput(
+  {
+    purpose,
+    name,
+    value,
+    onValueChange,
+    revealLabel,
+    wrapperClassName,
+    revealClassName,
+    className,
+    disabled,
+    ...inputProps
+  },
+  forwardedRef,
+) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const mounted = useRef(true);
   const [revealed, setRevealed] = useState(false);
   // React assigns null to ordinary refs before passive unmount cleanup. Keep the
   // last node long enough to blank a detached control, then let the component
@@ -53,20 +62,32 @@ export function SecretInput({
     if (node) inputRef.current = node;
   }, []);
 
-  useCredentialClearer(() => {
-    if (inputRef.current) inputRef.current.value = '';
+  const hardReset = useCallback(() => {
+    if (inputRef.current) {
+      inputRef.current.value = '';
+      inputRef.current.type = 'password';
+    }
+    if (!mounted.current) return;
     onValueChange('');
     setRevealed(false);
-  });
+  }, [onValueChange]);
 
-  // Clear the detached DOM node too. This matters for browser extensions that
-  // keep references to removed controls beyond React's component lifetime.
-  useEffect(
-    () => () => {
-      if (inputRef.current) inputRef.current.value = '';
-    },
-    [],
-  );
+  useImperativeHandle(forwardedRef, () => ({ reset: hardReset }), [hardReset]);
+  useCredentialClearer(hardReset);
+
+  // Clear and remask the detached DOM node too. This matters for browser
+  // extensions that keep references to removed controls beyond React's
+  // component lifetime. The cleanup never schedules a state update.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (inputRef.current) {
+        inputRef.current.value = '';
+        inputRef.current.type = 'password';
+      }
+    };
+  }, []);
 
   const action = revealed ? 'Hide' : 'Show';
 
@@ -104,4 +125,4 @@ export function SecretInput({
       </button>
     </div>
   );
-}
+});

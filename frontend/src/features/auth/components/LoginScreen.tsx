@@ -20,10 +20,11 @@
  * whether the email exists. A 422 (malformed) and a transport error get their
  * own generic copy so the user is never stranded (quality bar: every state).
  */
-import { useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiError } from '@/api';
-import { SecretInput } from '@/components/SecretInput';
+import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
+import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { Icon } from '@/ui';
 import { useLogin } from '../model/queries';
 
@@ -48,16 +49,34 @@ export function LoginScreen() {
   const login = useLogin();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const emailRef = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<SecretInputHandle | null>(null);
   const emailId = useId();
   const passwordId = useId();
   const errorId = useId();
+
+  const rememberEmail = useCallback((node: HTMLInputElement | null) => {
+    if (node) emailRef.current = node;
+  }, []);
+  const hardBlankDom = useCallback(() => {
+    if (emailRef.current) emailRef.current.value = '';
+    passwordRef.current?.reset();
+  }, []);
+  const clearForm = useCallback(() => {
+    hardBlankDom();
+    setEmail('');
+    setPassword('');
+  }, [hardBlankDom]);
+
+  useCredentialClearer(clearForm);
+  useEffect(() => () => hardBlankDom(), [hardBlankDom]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     login.submit(
       { email, password },
       {
-        onSettled: () => setPassword(''),
+        onSettled: () => passwordRef.current?.reset(),
       },
     );
   }
@@ -114,6 +133,7 @@ export function LoginScreen() {
                   className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground-muted"
                 />
                 <input
+                  ref={rememberEmail}
                   id={emailId}
                   type="email"
                   name="email"
@@ -142,6 +162,7 @@ export function LoginScreen() {
                   className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground-muted"
                 />
                 <SecretInput
+                  ref={passwordRef}
                   id={passwordId}
                   name="password"
                   purpose="current-password"

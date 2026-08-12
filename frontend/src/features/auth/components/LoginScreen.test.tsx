@@ -134,6 +134,27 @@ describe('LoginScreen', () => {
     expect(screen.getByLabelText(/password/i)).toHaveValue('');
   });
 
+  it('hard-resets a revealed manager-owned password after a failed login (R1-003)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(unauthorized());
+    const user = userEvent.setup();
+    renderWithQuery(<LoginScreen />);
+
+    await user.type(screen.getByLabelText(/email/i), 'persona-a@example.test');
+    const password = screen.getByLabelText(/password/i) as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: /show password/i }));
+    password.value = 'manager-owned-login-secret';
+
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    await screen.findByRole('alert');
+
+    expect(password.value).toBe('');
+    expect(password.type).toBe('password');
+    expect(screen.getByRole('button', { name: /show password/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
   it('clears the detached password control on unmount', async () => {
     const user = userEvent.setup();
     const view = renderWithQuery(<LoginScreen />);
@@ -143,6 +164,20 @@ describe('LoginScreen', () => {
     view.unmount();
 
     expect(password.value).toBe('');
+  });
+
+  it('hard-blanks manager-owned login fields on unmount without React events', () => {
+    const view = renderWithQuery(<LoginScreen />);
+    const email = screen.getByLabelText(/email/i) as HTMLInputElement;
+    const password = screen.getByLabelText(/password/i) as HTMLInputElement;
+    email.value = 'manager-owned@example.test';
+    password.value = 'manager-owned-login-secret';
+
+    view.unmount();
+
+    expect(email.value).toBe('');
+    expect(password.value).toBe('');
+    expect(password.type).toBe('password');
   });
 
   it('disables submit and shows a busy state while the request is in flight', async () => {

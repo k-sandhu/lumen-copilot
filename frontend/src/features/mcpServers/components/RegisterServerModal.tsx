@@ -22,7 +22,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import { SecretInput } from '@/components/SecretInput';
+import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
 import { Icon } from '@/ui';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { useFocusTrap } from '@/lib/useFocusTrap';
@@ -46,8 +46,11 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const endpointHintId = useId();
   const secretHintId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
-  const endpointRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const endpointRef = useRef<HTMLInputElement | null>(null);
+  const retainedNameRef = useRef<HTMLInputElement | null>(null);
+  const retainedEndpointRef = useRef<HTMLInputElement | null>(null);
+  const secretRef = useRef<SecretInputHandle | null>(null);
 
   const [name, setName] = useState('');
   const [transport, setTransport] = useState<McpTransport>('streamable_http');
@@ -74,17 +77,30 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const submittingRef = useRef(submitting);
   submittingRef.current = submitting;
 
-  const clearForm = useCallback(() => {
+  const rememberName = useCallback((node: HTMLInputElement | null) => {
+    nameRef.current = node;
+    if (node) retainedNameRef.current = node;
+  }, []);
+  const rememberEndpoint = useCallback((node: HTMLInputElement | null) => {
+    endpointRef.current = node;
+    if (node) retainedEndpointRef.current = node;
+  }, []);
+  const hardBlankDom = useCallback(() => {
     // Blank the live controls synchronously before a parent unmounts the dialog;
-    // the state updates below keep React's controlled values in sync.
-    if (nameRef.current) nameRef.current.value = '';
-    if (endpointRef.current) endpointRef.current.value = '';
+    // retained refs also cover extension-held controls after React detaches them.
+    if (retainedNameRef.current) retainedNameRef.current.value = '';
+    if (retainedEndpointRef.current) retainedEndpointRef.current.value = '';
+    secretRef.current?.reset();
+  }, []);
+
+  const clearForm = useCallback(() => {
+    hardBlankDom();
     setName('');
     setTransport('streamable_http');
     setEndpoint('');
     setSecret('');
     setClientError(null);
-  }, []);
+  }, [hardBlankDom]);
 
   useCredentialClearer(() => {
     clearForm();
@@ -97,6 +113,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
     clearForm();
     resetRegister();
   }, [clearForm, open, resetRegister]);
+  useEffect(() => () => hardBlankDom(), [hardBlankDom]);
 
   const closeAndClear = useCallback(() => {
     clearForm();
@@ -142,7 +159,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
       {
         onSuccess: closeAndClear,
         onError: () => nameRef.current?.focus(),
-        onSettled: () => setSecret(''),
+        onSettled: () => secretRef.current?.reset(),
       },
     );
   }
@@ -187,7 +204,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
                 Name
               </label>
               <input
-                ref={nameRef}
+                ref={rememberName}
                 id={`${titleId}-name`}
                 type="text"
                 name="mcp_server_display_name"
@@ -233,7 +250,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
                 Endpoint URL
               </label>
               <input
-                ref={endpointRef}
+                ref={rememberEndpoint}
                 id={`${titleId}-endpoint`}
                 type="url"
                 name="mcp_server_endpoint_url"
@@ -265,6 +282,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
                 Secret <span className="font-normal text-foreground-muted">(optional)</span>
               </label>
               <SecretInput
+                ref={secretRef}
                 id={`${titleId}-secret`}
                 name="mcp_server_bearer_token"
                 purpose="new-secret"

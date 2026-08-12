@@ -21,8 +21,8 @@
  * wired into the chat model picker and no chat/embedding request is routed through a
  * registered provider — that is a separate follow-up PR.
  */
-import { useId, useState } from 'react';
-import { SecretInput } from '@/components/SecretInput';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
 import { Icon, StatusDot, type StatusTone } from '@/ui';
 import { ApiError } from '@/api';
@@ -241,15 +241,31 @@ function AddProviderForm({
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const baseUrlRef = useRef<HTMLInputElement | null>(null);
+  const apiKeyRef = useRef<SecretInputHandle | null>(null);
   const apiKeyId = useId();
   const canSubmit = name.trim().length > 0 && baseUrl.trim().length > 0 && !submitting;
 
-  const clearForm = () => {
+  const rememberName = useCallback((node: HTMLInputElement | null) => {
+    if (node) nameRef.current = node;
+  }, []);
+  const rememberBaseUrl = useCallback((node: HTMLInputElement | null) => {
+    if (node) baseUrlRef.current = node;
+  }, []);
+  const hardBlankDom = useCallback(() => {
+    if (nameRef.current) nameRef.current.value = '';
+    if (baseUrlRef.current) baseUrlRef.current.value = '';
+    apiKeyRef.current?.reset();
+  }, []);
+  const clearForm = useCallback(() => {
+    hardBlankDom();
     setName('');
     setBaseUrl('');
     setApiKey('');
-  };
+  }, [hardBlankDom]);
   useCredentialClearer(clearForm);
+  useEffect(() => () => hardBlankDom(), [hardBlankDom]);
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -273,6 +289,7 @@ function AddProviderForm({
       <label className="flex flex-col gap-1 text-xs font-medium text-foreground-muted">
         Name
         <input
+          ref={rememberName}
           type="text"
           name="llm_provider_display_name"
           autoComplete="off"
@@ -299,6 +316,7 @@ function AddProviderForm({
       <label className="flex flex-col gap-1 text-xs font-medium text-foreground-muted sm:col-span-2">
         Base URL
         <input
+          ref={rememberBaseUrl}
           type="url"
           name="llm_provider_base_url"
           inputMode="url"
@@ -316,6 +334,7 @@ function AddProviderForm({
           API key (write-only)
         </label>
         <SecretInput
+          ref={apiKeyRef}
           id={apiKeyId}
           name="llm_provider_api_key"
           purpose="new-secret"

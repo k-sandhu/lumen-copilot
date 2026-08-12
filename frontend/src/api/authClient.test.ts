@@ -5,7 +5,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { request, registerRefreshHandler } from './client';
-import { setAccessToken, clearAccessToken, getAccessToken } from './token';
+import {
+  setAccessToken,
+  setRefreshedAccessToken,
+  clearAccessToken,
+  getAccessToken,
+  getPrincipalGeneration,
+} from './token';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -72,7 +78,7 @@ describe('silent refresh-then-retry on 401 (AC-2, AC-4)', () => {
 
     // The refresh handler installs a fresh token, mimicking auth.refresh().
     const handler = vi.fn(async () => {
-      setAccessToken('fresh');
+      setRefreshedAccessToken('fresh', getPrincipalGeneration());
     });
     registerRefreshHandler(handler);
 
@@ -115,7 +121,7 @@ describe('silent refresh-then-retry on 401 (AC-2, AC-4)', () => {
     setAccessToken('expired');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem(401));
     const handler = vi.fn(async () => {
-      setAccessToken('still-bad');
+      setRefreshedAccessToken('still-bad', getPrincipalGeneration());
     });
     registerRefreshHandler(handler);
 
@@ -123,5 +129,26 @@ describe('silent refresh-then-retry on 401 (AC-2, AC-4)', () => {
     // Original + one retry = exactly two fetches; refresh attempted once.
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not return an old principal success that resolves after an account switch', async () => {
+    setAccessToken('persona-a');
+    let resolveRequest!: (response: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveRequest = resolve;
+      }),
+    );
+
+    const oldOutcome = request('/collections').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    setAccessToken('persona-b', 'login');
+    resolveRequest(jsonResponse({ sentinel: 'persona-a-late-success' }));
+
+    await expect(oldOutcome).resolves.toMatchObject({ status: 401 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(getAccessToken()).toBe('persona-b');
   });
 });

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
 import type { ReactElement } from 'react';
+import { PrincipalLifecycle } from '@/features/auth';
 
 /**
  * Render a component inside a fresh QueryClient with retries OFF, so error
@@ -13,7 +14,11 @@ export function renderWithQuery(ui: ReactElement) {
     },
   });
   return Object.assign(
-    render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>),
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PrincipalLifecycle>{ui}</PrincipalLifecycle>
+      </QueryClientProvider>,
+    ),
     {
       queryClient,
     },

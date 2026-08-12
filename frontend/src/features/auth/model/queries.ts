@@ -3,11 +3,20 @@
  * is server data fetched from GET /auth/me; mutations (login/logout) invalidate
  * it. The coarse session status lives in the Zustand authStore.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getCurrentUser, hasAccessToken, login, logout } from '@/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  clearAccessToken,
+  getAccessToken,
+  getCurrentUser,
+  hasAccessToken,
+  login,
+  logout,
+} from '@/api';
 import type { CurrentUser, LoginRequest } from '@/api';
 import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import { useAuthStore } from './authStore';
+import { transitionPrincipal } from './principalTransition';
 
 export const currentUserQueryKey = ['auth', 'me'] as const;
 
@@ -47,19 +56,44 @@ export function useLogin() {
 }
 
 /**
- * Logout mutation (AC-2). Revokes server-side, clears the token (which the
- * authStore observes → unauthenticated), and drops cached server state so no
- * other user's data lingers in the cache.
+ * Logout action (AC-2). The canonical principal lifecycle first drops every
+ * client-side tenant/query holder; server revocation then runs best-effort with
+ * the outgoing bearer and is deliberately not awaited by the UI.
  */
 export function useLogout() {
   const queryClient = useQueryClient();
-  const markUnauthenticated = useAuthStore((s) => s.markUnauthenticated);
+  const mounted = useRef(true);
+  const pending = useRef(false);
+  const [isPending, setIsPending] = useState(false);
 
-  return useMutation<void, unknown, void>({
-    mutationFn: () => logout(),
-    onSettled: () => {
-      markUnauthenticated();
-      queryClient.clear();
+  useEffect(
+    () => () => {
+      mounted.current = false;
     },
-  });
+    [],
+  );
+
+  const mutate = useCallback(() => {
+    if (pending.current) return;
+    pending.current = true;
+    setIsPending(true);
+
+    const bearer = getAccessToken();
+    // Synchronous with the click: blank/remask drafts, abort credential work,
+    // clear every query/mutation, and leave the authenticated route before the
+    // best-effort revocation is awaited.
+    clearAccessToken();
+    // An authenticated route normally has a bearer, so clearAccessToken's
+    // synchronous notification already ran the canonical teardown. Keep the
+    // null-bearer fallback idempotent for defensive/direct hook use without
+    // firing registered form clearers twice during the normal unmount path.
+    if (bearer === null) transitionPrincipal(queryClient, 'unauthenticated');
+
+    void logout(bearer, false).finally(() => {
+      pending.current = false;
+      if (mounted.current) setIsPending(false);
+    });
+  }, [queryClient]);
+
+  return { mutate, isPending };
 }

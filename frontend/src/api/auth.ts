@@ -14,29 +14,57 @@
  * request. The refresh handler is registered with the client so a 401 anywhere
  * triggers exactly one silent refresh + retry (AC-2/AC-4).
  */
-import { request, registerRefreshHandler } from './client';
-import { setAccessToken, clearAccessToken } from './token';
+import {
+  awaitLogoutTransition,
+  cancelInFlightRefresh,
+  request,
+  registerRefreshHandler,
+  runLogoutTransition,
+} from './client';
+import {
+  clearAccessToken,
+  clearAccessTokenIfPrincipalUnchanged,
+  getAccessToken,
+  getPrincipalGeneration,
+  setLoginAccessToken,
+  setRefreshedAccessToken,
+} from './token';
 import type { CurrentUser, LoginRequest, TokenResponse } from './types';
 
 /** Exchange email + password for an access token (AC-1). Stores the token. */
 export async function login(body: LoginRequest, signal?: AbortSignal): Promise<TokenResponse> {
+  // Invalidate the old identity before waiting for its coordinated refresh to
+  // settle. This prevents that refresh from committing/retrying, and orders any
+  // best-effort Set-Cookie it may already have produced before B's login response.
+  clearAccessToken();
+  await cancelInFlightRefresh();
+  await awaitLogoutTransition();
+  const principalGeneration = getPrincipalGeneration();
   const token = await request<TokenResponse>('/auth/login', {
     method: 'POST',
     json: body,
     skipAuth: true,
     signal,
   });
-  setAccessToken(token.access_token);
+  if (!setLoginAccessToken(token.access_token, principalGeneration)) {
+    throw new Error('Login result discarded after a principal transition');
+  }
   return token;
 }
 
 /** Mint a new access token from the refresh cookie (AC-2). Stores the token. */
-export async function refresh(): Promise<TokenResponse> {
+export async function refresh(
+  signal?: AbortSignal,
+  principalGeneration = getPrincipalGeneration(),
+): Promise<TokenResponse> {
   const token = await request<TokenResponse>('/auth/refresh', {
     method: 'POST',
     skipAuth: true,
+    signal,
   });
-  setAccessToken(token.access_token);
+  if (!setRefreshedAccessToken(token.access_token, principalGeneration)) {
+    throw new Error('Refresh result discarded after a principal transition');
+  }
   return token;
 }
 
@@ -46,18 +74,32 @@ export function getCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
 }
 
 /**
- * Revoke the session server-side and clear local state (AC-2). The in-memory
- * token is cleared even if the network call fails, so the client always ends up
- * logged out locally — never wedged in a half-authenticated state.
+ * Clear the in-memory token at intent and then attempt server-side revocation
+ * (AC-2) with the captured outgoing bearer. The request is best-effort: a late
+ * success/failure cannot clear or restore a later principal's token.
  */
-export async function logout(): Promise<void> {
-  try {
-    await request<void>('/auth/logout', { method: 'POST' });
-  } catch {
-    // Best-effort revocation; local logout proceeds regardless.
-  } finally {
-    clearAccessToken();
-  }
+export function logout(
+  bearer: string | null = getAccessToken(),
+  /** The UI may already have performed the synchronous canonical teardown. */
+  clearLocalToken = true,
+): Promise<void> {
+  // Local logout happens at intent, before this best-effort request. Capture the
+  // outgoing principal first so clearing the live holder cannot accidentally
+  // send a later principal's bearer if revocation is delayed.
+  if (clearLocalToken) clearAccessToken();
+  return (async () => {
+    await cancelInFlightRefresh();
+    await runLogoutTransition((signal) =>
+      request<void>('/auth/logout', {
+        method: 'POST',
+        skipAuth: true,
+        headers: bearer ? { Authorization: `Bearer ${bearer}` } : undefined,
+        signal,
+      }).catch(() => {
+        // Best-effort revocation; local logout proceeds regardless.
+      }),
+    );
+  })();
 }
 
 /**
@@ -67,11 +109,11 @@ export async function logout(): Promise<void> {
  * login.
  */
 export function installAuthRefresh(): void {
-  registerRefreshHandler(async () => {
+  registerRefreshHandler(async ({ signal, principalGeneration }) => {
     try {
-      await refresh();
+      await refresh(signal, principalGeneration);
     } catch (error) {
-      clearAccessToken();
+      clearAccessTokenIfPrincipalUnchanged(principalGeneration);
       throw error;
     }
   });
