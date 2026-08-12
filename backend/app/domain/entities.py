@@ -956,6 +956,7 @@ class Chunk:
     char_start: int
     char_end: int
     created_at: datetime
+    embedding_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

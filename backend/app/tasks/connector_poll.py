@@ -84,7 +84,7 @@ async def _sweep_stranded(settings: Settings) -> int:
     cutoff = datetime.now(UTC) - timedelta(minutes=settings.connector_ingest_recovery_minutes)
     async with session_scope() as session:
         await bind_bypass(session)
-        stranded = await SourceReconcileRepository(session).list_stranded_ingestion_documents(
+        stranded = await SourceReconcileRepository(session).reserve_stranded_ingestion_documents(
             older_than=cutoff, limit=settings.connector_ingest_recovery_batch
         )
 

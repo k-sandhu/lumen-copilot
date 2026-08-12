@@ -4569,10 +4569,12 @@ components:
         Sync lifecycle for the connector health grid (ADR-0009 §4, ADR-0019 §1).
         `pending_auth` = a managed source was created but its OAuth consent has
         not completed (run `connectSource`); `pending` = authorized (or web),
-        first sync not yet run; `syncing` = a sync is in flight; `ready` = last
-        sync succeeded and content is indexed; `error` = the last sync failed
-        (see `last_error`; a dead OAuth grant additionally sets
-        `reauthorize_required`).
+        first sync not yet run; `syncing` = a sync is in flight; `ready` = the
+        last sync completed and every returned document is Ready for its current
+        ingestion attempt; `error` = the last sync failed or any returned
+        document is Failed/non-Ready (see `last_error`; partial success may retain
+        a non-zero Ready-only `indexed_count`; a dead OAuth grant additionally
+        sets `reauthorize_required`).
       enum: [pending_auth, pending, syncing, ready, error]
 
     SourceConfig:
@@ -4700,7 +4702,7 @@ components:
         indexed_count:
           type: integer
           minimum: 0
-          description: Number of documents this source has ingested (0 until the first sync completes).
+          description: Number of this source's documents currently Ready and indexed; excludes Failed/non-Ready documents, including after partial sync failure.
         last_synced_at:
           type: [string, "null"]
           format: date-time
@@ -4730,7 +4732,7 @@ components:
         indexed_count:
           type: integer
           minimum: 0
-          description: Number of documents this source has ingested (0 until the first sync completes).
+          description: Number of this source's documents currently Ready and indexed; excludes Failed/non-Ready documents, including after partial sync failure.
         last_synced_at:
           type: [string, "null"]
           format: date-time

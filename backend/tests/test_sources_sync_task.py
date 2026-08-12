@@ -47,6 +47,7 @@ from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
+from app.tasks.ingest import IngestionResult
 from app.tasks.sync_source import SyncResult, sync_source_async
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -140,6 +141,26 @@ class _FakeIndexStore:
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
     ) -> None:
         type(self).events.append(("delete", document_id))
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_generation", document_id))
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_older", document_id))
 
     async def aclose(self) -> None:
         return None
@@ -457,6 +478,75 @@ async def test_sync_all_docs_failing_marks_source_error(
 
         docs = await DocumentRepository(session, tenant_id).list_for_source(source_id)
         assert docs == []
+
+
+async def test_sync_returned_partial_failure_never_marks_source_ready(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-010: returned Failed is a failure even when no exception escapes."""
+
+    tenant_id, source_id = await _seed_source()
+    body = "connector terminal outcome must be propagated. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Ready", text=body, url="http://93.184.216.34/ready"),
+            FetchedDoc(title="Failed", text=body, url="http://93.184.216.34/failed"),
+        ],
+    )
+    outcomes = iter((DocumentStatus.READY, DocumentStatus.FAILED))
+
+    async def _returned_outcome(*_args: object, **_kwargs: object) -> IngestionResult:
+        status = next(outcomes)
+        return IngestionResult(
+            document_id=uuid.uuid4(),
+            status=status,
+            chunk_count=1 if status is DocumentStatus.READY else 0,
+            error=None if status is DocumentStatus.READY else "provider rejected vector",
+        )
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _returned_outcome)
+
+    result = await _run(tenant_id, source_id)
+
+    assert result.status is SourceStatus.ERROR
+    assert result.indexed_count == 1
+    assert result.error == "1 of 2 fetched document(s) failed to ingest"
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.ERROR
+        assert source.indexed_count == 1
+        assert source.last_synced_at is None
+
+
+async def test_sync_error_retries_to_ready_only_after_every_document_is_ready(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-010: a later full retry deterministically repairs the source terminal."""
+
+    tenant_id, source_id = await _seed_source()
+    docs = [
+        FetchedDoc(title="One", text="one " * 20, url="http://93.184.216.34/one"),
+        FetchedDoc(title="Two", text="two " * 20, url="http://93.184.216.34/two"),
+    ]
+    _patch_sync(monkeypatch, docs)
+
+    async def _failed(*_args: object, **_kwargs: object) -> IngestionResult:
+        return IngestionResult(uuid.uuid4(), DocumentStatus.FAILED, 0, "failed")
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _failed)
+    first = await _run(tenant_id, source_id)
+    assert first.status is SourceStatus.ERROR
+    assert first.indexed_count == 0
+
+    async def _ready(*_args: object, **_kwargs: object) -> IngestionResult:
+        return IngestionResult(uuid.uuid4(), DocumentStatus.READY, 1)
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _ready)
+    second = await _run(tenant_id, source_id)
+    assert second.status is SourceStatus.READY
+    assert second.indexed_count == 2
 
 
 async def test_resync_all_docs_failing_zeroes_stale_indexed_count(

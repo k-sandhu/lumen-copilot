@@ -52,9 +52,9 @@ Retrieved chunks are still hydrated and permission-re-checked against Postgres (
 
 ### 5. Index model, indexing, reindex
 
-- **Document = chunk** (the citation unit): `{ chunk_id, tenant_id, document_id, owner_id, collection_id, ord, text (analyzed), embedding (knn_vector), char_start, char_end }`. Offsets are stored so highlights/snippets map back to exact source spans (INV-3).
+- **Document = chunk** (the citation unit): `{ chunk_id, tenant_id, document_id, owner_id, collection_id, ord, text (analyzed), embedding (knn_vector), char_start, char_end, ingestion_attempt, embedding_fingerprint }`. Offsets are stored so highlights/snippets map back to exact source spans (INV-3). As of issue #346, the mapping `_meta` also records the credential-free vector-space fingerprint (provider/model/dimension/normalization revision). Width equality alone is not compatibility.
 - **Topology (decided):** a **single shared index** with a **mandatory `tenant_id` filter** on every query (routing by tenant). Per-tenant indices are a future option only if isolation/scale demands.
-- **Write path:** a **Celery task** ([tasks/](../../backend/app/tasks/)) upserts/deletes chunk docs (text + embedding + metadata) on ingest and document mutation — never in the request path. Document/source deletion cascades to index deletes.
+- **Write path:** a **Celery task** ([tasks/](../../backend/app/tasks/)) upserts/deletes chunk docs (text + embedding + metadata) on ingest and document mutation — never in the request path. Document/source deletion cascades to index deletes. Issue #346 makes publication attempt-scoped: OpenSearch ids include the ingestion generation, `ready` is the final Postgres CAS only after current-generation publication succeeds, and hydration admits only a Ready hit whose attempt + fingerprint match Postgres. Failed/superseded publications are therefore non-retrievable even during compensating cleanup or a late-worker race.
 - **Backfill:** an idempotent, resumable reindex command for the existing corpus.
 
 ### 6. Local stack + config (base stack)

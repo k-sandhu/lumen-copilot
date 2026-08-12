@@ -37,3 +37,19 @@ def test_schema_or_index_dimension_drift_refuses_readiness(
     with pytest.raises(DependencyError) as excinfo:
         validate_embedding_schema(state)
     assert excinfo.value.code == "embedding_dimension_mismatch"
+
+
+def test_parked_native_column_refuses_readiness_even_at_the_right_width() -> None:
+    """R1-007: active+parked is an ambiguous state that cannot safely roll back."""
+
+    state = EmbeddingSchemaState(
+        configured_dimensions=2048,
+        orm_dimensions=2048,
+        postgres_dimensions=2048,
+        legacy_dimensions=1024,
+        pgvector_hnsw_present=False,
+        parked_dimensions=2048,
+    )
+    with pytest.raises(DependencyError) as excinfo:
+        validate_embedding_schema(state)
+    assert excinfo.value.code == "embedding_dimension_mismatch"

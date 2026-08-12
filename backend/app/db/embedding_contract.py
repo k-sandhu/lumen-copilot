@@ -33,6 +33,7 @@ class EmbeddingSchemaState:
     postgres_dimensions: int | None
     legacy_dimensions: int | None
     pgvector_hnsw_present: bool
+    parked_dimensions: int | None = None
 
 
 def validate_embedding_schema(state: EmbeddingSchemaState) -> None:
@@ -44,6 +45,7 @@ def validate_embedding_schema(state: EmbeddingSchemaState) -> None:
         and state.postgres_dimensions == CANONICAL_EMBEDDING_DIMENSIONS
         and state.legacy_dimensions == LEGACY_EMBEDDING_DIMENSIONS
         and not state.pgvector_hnsw_present
+        and state.parked_dimensions is None
     )
     if valid:
         log.info(
@@ -62,6 +64,7 @@ def validate_embedding_schema(state: EmbeddingSchemaState) -> None:
         postgres_dimensions=state.postgres_dimensions,
         legacy_dimensions=state.legacy_dimensions,
         pgvector_hnsw_present=state.pgvector_hnsw_present,
+        parked_dimensions=state.parked_dimensions,
     )
     raise DependencyError(
         "Embedding config and storage schema do not share the canonical 2,048-dimension contract.",
@@ -105,6 +108,11 @@ SELECT
       WHERE a.attrelid = 'chunks'::regclass
         AND a.attname = 'embedding_legacy_1024'
         AND NOT a.attisdropped) AS legacy_type,
+    (SELECT format_type(a.atttypid, a.atttypmod)
+       FROM pg_attribute a
+      WHERE a.attrelid = 'chunks'::regclass
+        AND a.attname = 'embedding_2048'
+        AND NOT a.attisdropped) AS parked_type,
     to_regclass('ix_chunks_embedding_hnsw') IS NOT NULL AS old_hnsw_present
 """
             )
@@ -117,6 +125,7 @@ SELECT
         postgres_dimensions=_dimension(row.active_type),
         legacy_dimensions=_dimension(row.legacy_type),
         pgvector_hnsw_present=bool(row.old_hnsw_present),
+        parked_dimensions=_dimension(row.parked_type),
     )
     validate_embedding_schema(state)
     return state

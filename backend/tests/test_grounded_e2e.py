@@ -108,6 +108,26 @@ class _FakeIndexStore:
     ) -> None:
         return None
 
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: object,
+        document_id: object,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: object,
+        document_id: object,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
     async def aclose(self) -> None:
         return None
 

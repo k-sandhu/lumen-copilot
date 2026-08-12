@@ -18,57 +18,76 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from uuid import UUID
+
+import structlog
 
 from app.core.config import get_settings
 from app.core.errors import DependencyError
-from app.db.embedding_contract import check_embedding_schema
 from app.db.repositories import EmbeddingReconcileRepository
 from app.db.session import dispose_engine, session_scope
 from app.db.tenant_context import bind_bypass
-from app.llm import LLMGateway
-from app.search import OpenSearchStore
+from app.ingestion.contract import provision_embedding_contract
 from app.tasks.ingest import enqueue_ingestion
+
+log = structlog.get_logger(__name__)
 
 
 async def _preflight() -> None:
     """Prove every fixed-width boundary before publishing any work."""
 
     settings = get_settings()
-    await check_embedding_schema(settings)
-
-    store = OpenSearchStore.from_settings(settings)
-    try:
-        await store.ensure_index()
-        await store.check_embedding_dimensions()
-    finally:
-        await store.aclose()
-
     if not settings.llm_enabled:
         raise DependencyError(
             "OPENROUTER_API_KEY is required for controlled re-embedding.",
             code="llm_unconfigured",
         )
-    await LLMGateway(settings).embed(
-        ["lumen embedding migration preflight"],
-        cache_namespace="embedding-migration-preflight",
-    )
+    await provision_embedding_contract(settings)
 
 
 async def _candidates(*, limit: int, tenant_id: UUID | None) -> list[tuple[UUID, UUID]]:
+    settings = get_settings()
     async with session_scope() as session:
         await bind_bypass(session)
         return await EmbeddingReconcileRepository(session).list_requiring_reembedding(
             limit=limit,
+            target_fingerprint=settings.embedding_space_fingerprint,
             tenant_id=tenant_id,
+        )
+
+
+async def _reserve(*, limit: int, tenant_id: UUID | None) -> list[tuple[UUID, UUID]]:
+    """Commit one SKIP-LOCKED reservation page before any broker I/O."""
+
+    settings = get_settings()
+    async with session_scope() as session:
+        await bind_bypass(session)
+        return await EmbeddingReconcileRepository(session).reserve_reembedding(
+            limit=limit,
+            target_fingerprint=settings.embedding_space_fingerprint,
+            tenant_id=tenant_id,
+        )
+
+
+async def _release(*, tenant_id: UUID, document_id: UUID) -> bool:
+    """Make a definitely-unpublished reservation visible to the next rerun."""
+
+    settings = get_settings()
+    async with session_scope() as session:
+        await bind_bypass(session)
+        return await EmbeddingReconcileRepository(session).release_reembedding(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            target_fingerprint=settings.embedding_space_fingerprint,
         )
 
 
 async def _main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     try:
-        candidates = await _candidates(limit=args.limit, tenant_id=args.tenant)
         if not args.execute:
+            candidates = await _candidates(limit=args.limit, tenant_id=args.tenant)
             print(  # noqa: T201 — operator CLI feedback is the purpose
                 f"preview: {len(candidates)} document(s) require native re-embedding; "
                 "no jobs published"
@@ -76,11 +95,39 @@ async def _main(argv: list[str] | None = None) -> None:
             return
 
         await _preflight()
+        candidates = await _reserve(limit=args.limit, tenant_id=args.tenant)
+        published = 0
+        deferred = 0
         for tenant_id, document_id in candidates:
-            enqueue_ingestion(tenant_id, document_id)
+            accepted = enqueue_ingestion(tenant_id, document_id)
+            outcome = "published" if accepted else "broker_failed_released"
+            released = False
+            if accepted:
+                published += 1
+            else:
+                deferred += 1
+                released = await _release(tenant_id=tenant_id, document_id=document_id)
+            event = {
+                "event": "embedding_reembed.publish",
+                "tenant_id": str(tenant_id),
+                "document_id": str(document_id),
+                "outcome": outcome,
+                "reservation_released": released,
+            }
+            log.info(
+                "embedding_reembed.publish",
+                tenant_id=str(tenant_id),
+                document_id=str(document_id),
+                outcome=outcome,
+                reservation_released=released,
+            )
+            print(json.dumps(event, sort_keys=True))  # noqa: T201
         print(  # noqa: T201
-            f"requested: {len(candidates)} document(s); rerun preview after workers drain"
+            f"reserved: {len(candidates)}; published: {published}; deferred: {deferred}; "
+            "rerun preview after workers drain"
         )
+        if deferred:
+            raise SystemExit(1)
     finally:
         await dispose_engine()
 

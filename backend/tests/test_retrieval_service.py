@@ -62,6 +62,7 @@ from app.search import IndexedChunk, OpenSearchStore, SearchAllowFilter, SearchH
 import app.db.models  # noqa: F401  isort: skip
 
 _EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
+_TEST_FP = "b" * 64
 
 
 class _FakeGateway:
@@ -138,7 +139,14 @@ async def _seed_user_with_document(
     offset = 0
     inputs: list[ChunkInput] = []
     for text in chunk_texts:
-        inputs.append(ChunkInput(text=text, char_start=offset, char_end=offset + len(text)))
+        inputs.append(
+            ChunkInput(
+                text=text,
+                char_start=offset,
+                char_end=offset + len(text),
+                embedding_fingerprint=_TEST_FP,
+            )
+        )
         offset += len(text)
     await ChunkRepository(session, tenant_id).replace_for_document(doc.id, inputs)
     return user.id, doc.id
@@ -457,16 +465,44 @@ async def test_search_hydrates_in_engine_order_and_drops_unknown_hits(
     chunks = await ChunkRepository(session, tenant_a).replace_for_document(
         doc.id,
         [
-            ChunkInput(text="first chunk", char_start=0, char_end=11),
-            ChunkInput(text="second chunk", char_start=11, char_end=23),
+            ChunkInput(
+                text="first chunk",
+                char_start=0,
+                char_end=11,
+                embedding_fingerprint=_TEST_FP,
+            ),
+            ChunkInput(
+                text="second chunk",
+                char_start=11,
+                char_end=23,
+                embedding_fingerprint=_TEST_FP,
+            ),
         ],
     )
     # Engine ranks chunk 2 first, then a ghost id (deleted after indexing), then chunk 1.
     store = _FakeSearchStore(
         hits=[
-            SearchHit(chunk_id=chunks[1].id, document_id=doc.id, score=0.9),
-            SearchHit(chunk_id=uuid.uuid4(), document_id=uuid.uuid4(), score=0.5),
-            SearchHit(chunk_id=chunks[0].id, document_id=doc.id, score=0.4),
+            SearchHit(
+                chunk_id=chunks[1].id,
+                document_id=doc.id,
+                score=0.9,
+                ingestion_attempt=0,
+                embedding_fingerprint=_TEST_FP,
+            ),
+            SearchHit(
+                chunk_id=uuid.uuid4(),
+                document_id=uuid.uuid4(),
+                score=0.5,
+                ingestion_attempt=0,
+                embedding_fingerprint=_TEST_FP,
+            ),
+            SearchHit(
+                chunk_id=chunks[0].id,
+                document_id=doc.id,
+                score=0.4,
+                ingestion_attempt=0,
+                embedding_fingerprint=_TEST_FP,
+            ),
         ]
     )
     svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
@@ -477,6 +513,73 @@ async def test_search_hydrates_in_engine_order_and_drops_unknown_hits(
     assert [p.text for p in passages] == ["second chunk", "first chunk"]
     assert [p.score for p in passages] == [0.9, 0.4]
     assert passages[0].document_name == "f.txt"
+
+
+async def test_search_drops_failed_or_generation_mismatched_engine_hits(
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """R1-002/R1-006: derived rows cannot outlive Postgres truth."""
+
+    tenant_a, _ = two_tenants
+    user_id, document_id = await _seed_user_with_document(
+        session,
+        tenant_id=tenant_a,
+        email="generation@x.test",
+        filename="generation.txt",
+        chunk_texts=["generation guarded passage"],
+    )
+    [chunk] = await ChunkRepository(session, tenant_a).list_for_document(document_id)
+
+    for stale_hit in (
+        SearchHit(
+            chunk_id=chunk.id,
+            document_id=document_id,
+            score=1.0,
+            ingestion_attempt=1,
+            embedding_fingerprint=_TEST_FP,
+        ),
+        SearchHit(
+            chunk_id=chunk.id,
+            document_id=document_id,
+            score=1.0,
+            ingestion_attempt=0,
+            embedding_fingerprint="c" * 64,
+        ),
+    ):
+        service = RetrievalService(
+            session,
+            gateway=_FakeGateway(),
+            store=_FakeSearchStore(hits=[stale_hit]),  # type: ignore[arg-type]
+        )
+        assert (
+            await service.search(principal=_principal(user_id, tenant_a), query="generation", k=3)
+            == []
+        )
+
+    await DocumentRepository(session, tenant_a).set_status(
+        document_id, DocumentStatus.FAILED, error="index publication failed"
+    )
+    failed_service = RetrievalService(
+        session,
+        gateway=_FakeGateway(),
+        store=_FakeSearchStore(
+            hits=[
+                SearchHit(
+                    chunk_id=chunk.id,
+                    document_id=document_id,
+                    score=1.0,
+                    ingestion_attempt=0,
+                    embedding_fingerprint=_TEST_FP,
+                )
+            ]
+        ),  # type: ignore[arg-type]
+    )
+    assert (
+        await failed_service.search(
+            principal=_principal(user_id, tenant_a), query="generation", k=3
+        )
+        == []
+    )
 
 
 async def test_search_hydration_recheck_blocks_foreign_engine_hit(
@@ -494,7 +597,15 @@ async def test_search_hydration_recheck_blocks_foreign_engine_hit(
     )
     b_chunks = await ChunkRepository(session, tenant_a).list_for_document(doc_b)
     store = _FakeSearchStore(
-        hits=[SearchHit(chunk_id=b_chunks[0].id, document_id=doc_b, score=0.99)]
+        hits=[
+            SearchHit(
+                chunk_id=b_chunks[0].id,
+                document_id=doc_b,
+                score=0.99,
+                ingestion_attempt=0,
+                embedding_fingerprint=_TEST_FP,
+            )
+        ]
     )
     svc = RetrievalService(session, gateway=_FakeGateway(), store=store)  # type: ignore[arg-type]
 
@@ -570,6 +681,8 @@ def _to_indexed(
             embedding=c.embedding,
             char_start=c.char_start,
             char_end=c.char_end,
+            ingestion_attempt=0,
+            embedding_fingerprint=_TEST_FP,
         )
         for c in chunks
     ]
@@ -593,6 +706,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
         base_url=_OS_URL,
         index=f"lumen-test-{uuid.uuid4().hex[:8]}",
         dimensions=_EMBED_DIM,
+        embedding_fingerprint=_TEST_FP,
         timeout_seconds=30.0,
     )
     try:
@@ -637,6 +751,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                         char_start=0,
                         char_end=43,
                         embedding=_unit_vector(_EMBED_DIM, hot),
+                        embedding_fingerprint=_TEST_FP,
                     )
                 ],
             )
@@ -664,6 +779,7 @@ async def test_live_hybrid_search_is_permission_filtered() -> None:
                         char_start=0,
                         char_end=43,
                         embedding=_unit_vector(_EMBED_DIM, hot),
+                        embedding_fingerprint=_TEST_FP,
                     )
                 ],
             )

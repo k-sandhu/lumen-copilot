@@ -84,6 +84,8 @@ class _FakeIndexStore:
         self.ensured = 0
         self.upserts: list[list[IndexedChunk]] = []
         self.deletes: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.deleted_generations: list[tuple[uuid.UUID, uuid.UUID, int]] = []
+        self.deleted_older_generations: list[tuple[uuid.UUID, uuid.UUID, int]] = []
         self.closed = False
         self.fail_upsert: Exception | None = None
         type(self).instances.append(self)
@@ -104,6 +106,26 @@ class _FakeIndexStore:
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
     ) -> None:
         self.deletes.append((tenant_id, document_id))
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        self.deleted_generations.append((tenant_id, document_id, ingestion_attempt))
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        self.deleted_older_generations.append((tenant_id, document_id, ingestion_attempt))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -170,6 +192,8 @@ async def _seed(
     *,
     chunk_texts: list[str],
     with_embedding: bool = True,
+    status: DocumentStatus = DocumentStatus.READY,
+    embedding_fingerprint: str | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
     """Tenant + user + collection + doc (+chunks); returns their ids."""
     async with db_session.session_scope() as session:
@@ -186,7 +210,7 @@ async def _seed(
             size_bytes=1,
             storage_key="k",
             acl_enforced=False,
-            status=DocumentStatus.READY,
+            status=status,
         )
         offset = 0
         inputs: list[ChunkInput] = []
@@ -197,6 +221,9 @@ async def _seed(
                     char_start=offset,
                     char_end=offset + len(text),
                     embedding=[0.5] * _DIM if with_embedding else None,
+                    embedding_fingerprint=(
+                        embedding_fingerprint or _settings().embedding_space_fingerprint
+                    ),
                 )
             )
             offset += len(text)
@@ -216,7 +243,8 @@ async def test_sync_replaces_live_document_chunks(sqlite_engine: None) -> None:
 
     assert result.indexed_count == 2 and result.deleted is False
     assert store.ensured == 1
-    assert store.deletes == [(tenant_id, doc_id)]  # stale ids cleared first
+    assert store.deletes == []
+    assert store.deleted_generations == [(tenant_id, doc_id, 0)]
     [batch] = store.upserts
     assert [c.text for c in batch] == ["alpha", "beta"]
     first = batch[0]
@@ -248,8 +276,156 @@ async def test_sync_chunkless_document_deletes_only(sqlite_engine: None) -> None
     result = await sync_document_index_async(tenant_id, doc_id, settings=_settings(), store=store)
 
     assert result.deleted is True
-    assert store.deletes == [(tenant_id, doc_id)]
+    assert store.deletes == []
+    assert store.deleted_generations == [(tenant_id, doc_id, 0)]
     assert store.upserts == []
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.PROCESSING, DocumentStatus.FAILED])
+async def test_generic_reindex_removes_non_ready_document_generations(
+    sqlite_engine: None, status: DocumentStatus
+) -> None:
+    """R1-002: repair cannot make a Processing/Failed document retrievable."""
+
+    tenant_id, _, _, document_id = await _seed(chunk_texts=["hidden"], status=status)
+    store = _FakeIndexStore()
+
+    result = await sync_document_index_async(
+        tenant_id, document_id, settings=_settings(), store=store
+    )
+
+    assert result.deleted is True
+    assert store.deletes == []
+    assert store.deleted_generations == [(tenant_id, document_id, 0)]
+    assert store.upserts == []
+
+
+async def test_generic_reindex_removes_foreign_embedding_space(
+    sqlite_engine: None,
+) -> None:
+    """R1-006: equal-width chunks from another model remain absent until re-embedded."""
+
+    tenant_id, _, _, document_id = await _seed(
+        chunk_texts=["foreign coordinate space"], embedding_fingerprint="f" * 64
+    )
+    store = _FakeIndexStore()
+
+    result = await sync_document_index_async(
+        tenant_id, document_id, settings=_settings(), store=store
+    )
+
+    assert result.deleted is True
+    assert store.deletes == []
+    assert store.deleted_generations == [(tenant_id, document_id, 0)]
+    assert store.upserts == []
+
+
+async def test_generic_reindex_cannot_delete_a_concurrent_ready_generation(
+    sqlite_engine: None,
+) -> None:
+    """R1-002: a stale repair snapshot never deletes replacement attempt N+1."""
+
+    settings = _settings()
+    tenant_id, _, _, document_id = await _seed(chunk_texts=["old generation"])
+
+    class _ReplacementRaceStore(_FakeIndexStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.generations = {0}
+
+        async def ensure_index(self) -> None:
+            await super().ensure_index()
+            # The generic repair already read Ready attempt 0. Publish attempt 1
+            # before it performs any cleanup, exactly modelling the destructive
+            # delete-all replacement race from R1-002.
+            async with db_session.tenant_session_scope(tenant_id) as session:
+                newer = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+                assert newer is not None
+                replacement = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+                    document_id,
+                    [
+                        ChunkInput(
+                            text="new generation",
+                            char_start=0,
+                            char_end=14,
+                            embedding=[0.75] * _DIM,
+                            embedding_fingerprint=settings.embedding_space_fingerprint,
+                        )
+                    ],
+                    expected_attempt=newer.ingestion_attempts,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
+                )
+                assert replacement is not None
+                newer_attempt = newer.ingestion_attempts
+            self.generations.add(newer_attempt)
+            async with db_session.tenant_session_scope(tenant_id) as session:
+                ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+                    document_id, expected_attempt=newer_attempt
+                )
+                assert ready is not None
+
+        async def delete_document(
+            self,
+            *,
+            tenant_id: uuid.UUID,
+            document_id: uuid.UUID,
+            refresh: bool = False,
+        ) -> None:
+            await super().delete_document(
+                tenant_id=tenant_id, document_id=document_id, refresh=refresh
+            )
+            self.generations.clear()
+
+        async def delete_document_generation(
+            self,
+            *,
+            tenant_id: uuid.UUID,
+            document_id: uuid.UUID,
+            ingestion_attempt: int,
+            refresh: bool = False,
+        ) -> None:
+            await super().delete_document_generation(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=ingestion_attempt,
+                refresh=refresh,
+            )
+            self.generations.discard(ingestion_attempt)
+
+        async def delete_older_document_generations(
+            self,
+            *,
+            tenant_id: uuid.UUID,
+            document_id: uuid.UUID,
+            ingestion_attempt: int,
+            refresh: bool = False,
+        ) -> None:
+            await super().delete_older_document_generations(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                ingestion_attempt=ingestion_attempt,
+                refresh=refresh,
+            )
+            self.generations = {
+                attempt for attempt in self.generations if attempt >= ingestion_attempt
+            }
+
+        async def upsert_chunks(
+            self, chunks: Sequence[IndexedChunk], *, refresh: bool = False
+        ) -> None:
+            await super().upsert_chunks(chunks, refresh=refresh)
+            self.generations.update(chunk.ingestion_attempt for chunk in chunks)
+
+    store = _ReplacementRaceStore()
+    await sync_document_index_async(tenant_id, document_id, settings=settings, store=store)
+
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+    assert document is not None
+    assert document.status is DocumentStatus.READY
+    assert document.ingestion_attempts == 1
+    assert store.generations == {1}
+    assert store.deletes == []
 
 
 # --- Ingestion dual-write (ADR-0010 §5) ---------------------------------------
@@ -300,6 +476,130 @@ async def test_ingest_index_failure_is_retryable(sqlite_engine: None) -> None:
             gateway=_FakeGateway(),  # type: ignore[arg-type]
             search_store=store,  # type: ignore[arg-type]
         )
+
+    async with db_session.session_scope() as session:
+        document = await DocumentRepository(session, tenant_id).get(doc_id)
+    assert document is not None
+    assert document.status is DocumentStatus.FAILED
+    assert store.deleted_generations == [(tenant_id, doc_id, 1)]
+    assert store.upserts == []
+
+
+async def test_superseded_attempt_never_publishes_or_deletes_newer_generation(
+    sqlite_engine: None,
+) -> None:
+    """R1-001: a redelivered worker loses ownership before engine mutation."""
+
+    settings = _settings()
+    tenant_id, _, _, document_id = await _seed(chunk_texts=[])
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        first = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+        assert first is not None
+        persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+            document_id,
+            [
+                ChunkInput(
+                    text="first generation",
+                    char_start=0,
+                    char_end=16,
+                    embedding=[0.1] * _DIM,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
+                )
+            ],
+            expected_attempt=first.ingestion_attempts,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
+        )
+        assert persisted is not None
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        second = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+        assert second is not None
+
+    store = _FakeIndexStore()
+    result = await sync_document_index_async(
+        tenant_id,
+        document_id,
+        settings=settings,
+        store=store,
+        expected_attempt=first.ingestion_attempts,
+    )
+
+    assert result.superseded is True
+    assert store.ensured == 0
+    assert store.deletes == []
+    assert store.deleted_generations == []
+    assert store.deleted_older_generations == []
+    assert store.upserts == []
+
+
+async def test_partial_publication_cleanup_is_exact_when_newer_attempt_races(
+    sqlite_engine: None,
+) -> None:
+    """R1-001/R1-002: an old bulk failure cannot delete attempt N+1."""
+
+    settings = _settings()
+    tenant_id, _, _, document_id = await _seed(chunk_texts=[])
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        first = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+        assert first is not None
+        persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+            document_id,
+            [
+                ChunkInput(
+                    text="old publication",
+                    char_start=0,
+                    char_end=15,
+                    embedding=[0.1] * _DIM,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
+                )
+            ],
+            expected_attempt=first.ingestion_attempts,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
+        )
+        assert persisted is not None
+
+    class _RacingStore(_FakeIndexStore):
+        async def upsert_chunks(
+            self, chunks: Sequence[IndexedChunk], *, refresh: bool = False
+        ) -> None:
+            async with db_session.tenant_session_scope(tenant_id) as session:
+                newer = await DocumentRepository(session, tenant_id).begin_ingestion(document_id)
+                assert newer is not None
+                replacement = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+                    document_id,
+                    [
+                        ChunkInput(
+                            text="newer generation",
+                            char_start=0,
+                            char_end=16,
+                            embedding=[0.2] * _DIM,
+                            embedding_fingerprint=settings.embedding_space_fingerprint,
+                        )
+                    ],
+                    expected_attempt=newer.ingestion_attempts,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
+                )
+                assert replacement is not None
+            raise DependencyError("partial bulk", code="search_index_error")
+
+    store = _RacingStore()
+    with pytest.raises(DependencyError):
+        await sync_document_index_async(
+            tenant_id,
+            document_id,
+            settings=settings,
+            store=store,
+            expected_attempt=first.ingestion_attempts,
+        )
+
+    assert store.deleted_generations == [(tenant_id, document_id, first.ingestion_attempts)]
+    assert store.deleted_older_generations == []
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
+        assert document is not None
+        assert document.ingestion_attempts == first.ingestion_attempts + 1
+        assert document.status is DocumentStatus.PROCESSING
+        assert [chunk.text for chunk in chunks] == ["newer generation"]
 
 
 # --- Request-path deletion hooks (after-commit, via the single enqueue seam) --
@@ -376,10 +676,12 @@ async def test_reindex_tenant_sweeps_only_that_tenant(sqlite_engine: None) -> No
     tenant_b, _, _, doc_b = await _seed(chunk_texts=["b one"])
     store = _FakeIndexStore()
 
-    synced = await reindex_tenant(tenant_a, store=store, page_size=1)  # exercise keyset
+    synced = await reindex_tenant(
+        tenant_a, store=store, page_size=1, settings=_settings()
+    )  # exercise keyset
 
     assert synced == 2
-    synced_ids = {d for _, d in store.deletes}
+    synced_ids = {document_id for _, document_id, _attempt in store.deleted_generations}
     assert synced_ids == {doc_a1, doc_a2.id}
     assert doc_b not in synced_ids  # tenant B untouched (INV-1 enumeration)
 

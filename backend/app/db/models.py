@@ -321,7 +321,9 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     # Durable, content-safe ingestion diagnostics (#346).  The attempt count is
     # incremented when a worker claims the row; the structured failure contains
     # only a normalized code, safe operator copy, attempt, and correlation id.
-    ingestion_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ingestion_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     ingestion_failure: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
@@ -394,10 +396,52 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
         Embedding(LEGACY_EMBEDDING_DIMENSIONS),
         nullable=True,
     )
+    # Coordinate-space identity for ``embedding``. NULL only for legacy/not-yet
+    # re-embedded rows; retrieval and index publication require the current
+    # settings fingerprint before a chunk is eligible.
+    embedding_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class LegacyEmbeddingArchive(TenantScopedMixin, Base):
+    """Detached rollback vectors for connector content revisions during #346.
+
+    No document FK by design: full-source reconciliation may delete/recreate a
+    document, but rollback evidence must remain byte-for-byte until the 1,024
+    space is explicitly retired by a later migration.
+    """
+
+    __tablename__ = "embedding_legacy_archive_0044"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "content_revision",
+            "replacement_attempt",
+            "replacement_fingerprint",
+            "ord",
+            name="uq_embedding_legacy_archive_revision_ord",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    original_chunk_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    content_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    replacement_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    replacement_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    ord: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    char_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(
+        Embedding(LEGACY_EMBEDDING_DIMENSIONS), nullable=False
+    )
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ChatSession(TenantScopedMixin, TimestampMixin, Base):

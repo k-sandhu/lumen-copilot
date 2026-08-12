@@ -87,6 +87,8 @@ _ALL_TABLES = _MVP_TABLES | {
     # was modelled wide from the start.
     "groups",
     "group_members",
+    # 0044 lossless connector-revision rollback archive.
+    "embedding_legacy_archive_0044",
 }
 
 
@@ -346,6 +348,11 @@ def test_offline_embedding_contract_migration_is_lossless_and_reversible(
     assert "add column embedding vector(2048)" in up
     assert "ingestion_attempts" in up
     assert "ingestion_failure" in up
+    assert "server_default='0'" not in up  # rendered SQL, not Alembic source syntax
+    assert "default 0" in up
+    assert "active and parked native vector columns coexist" in up
+    assert "create table if not exists embedding_legacy_archive_0044" in up
+    assert "create policy rls_embedding_legacy_archive_0044" in up
     assert "array_fill" not in up
     assert "subvector" not in up
 
@@ -354,6 +361,8 @@ def test_offline_embedding_contract_migration_is_lossless_and_reversible(
     assert "rename column embedding to embedding_2048" in down
     assert "rename column embedding_legacy_1024 to embedding" in down
     assert "create index ix_chunks_embedding_hnsw" in down
+    assert "detached legacy archive populated" in down
+    assert "drop table embedding_legacy_archive_0044" in down
     assert "subvector" not in down
 
 
@@ -1198,9 +1207,10 @@ async def test_live_embedding_upgrade_downgrade_preserves_both_vector_sets() -> 
 
     from alembic import command
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.core.config import get_settings
+    from app.db import models
 
     tmp_db = f"lumen_embedmig_{uuid.uuid4().hex[:12]}"
     admin_url = _swap_db(_PG_URL, "postgres")
@@ -1318,6 +1328,56 @@ SELECT embedding_legacy_1024::text, embedding IS NULL,
                 )
             ).scalar_one()
 
+            # R1-011: every raw/live fixture may omit the attempt counter; the
+            # database default must remain a safe pre-claim zero.
+            raw_document_id = uuid.uuid4()
+            await conn.execute(
+                text(
+                    """
+INSERT INTO documents (
+    id, tenant_id, owner_id, collection_id, filename, mime_type,
+    size_bytes, storage_key, status, acl_enforced
+) VALUES (
+    :id, :tenant_id, :owner_id, :collection_id, 'raw.txt', 'text/plain',
+    1, 'migration/raw.txt', 'pending', false
+)
+"""
+                ),
+                {
+                    "id": raw_document_id,
+                    "tenant_id": tenant_id,
+                    "owner_id": user_id,
+                    "collection_id": collection_id,
+                },
+            )
+            assert (
+                await conn.execute(
+                    text("SELECT ingestion_attempts FROM documents WHERE id = :id"),
+                    {"id": raw_document_id},
+                )
+            ).scalar_one() == 0
+
+        # The ORM seam likewise remains valid when callers rely on its declared
+        # default rather than spelling the migration-only telemetry field.
+        orm_document_id = uuid.uuid4()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory.begin() as session:
+            orm_document = models.Document(
+                id=orm_document_id,
+                tenant_id=tenant_id,
+                owner_id=user_id,
+                collection_id=collection_id,
+                filename="orm.txt",
+                mime_type="text/plain",
+                size_bytes=1,
+                storage_key="migration/orm.txt",
+                status="pending",
+                acl_enforced=False,
+            )
+            session.add(orm_document)
+            await session.flush()
+            assert orm_document.ingestion_attempts == 0
+
         await asyncio.to_thread(
             command.downgrade,
             _alembic_config(),
@@ -1357,6 +1417,264 @@ SELECT embedding_legacy_1024::text, embedding IS NULL,
                 await conn.execute(text(f'DROP DATABASE IF EXISTS "{tmp_db}" WITH (FORCE)'))
         finally:
             await admin.dispose()
+
+
+@_live
+async def test_live_embedding_migration_odd_state_matrix_is_explicit_and_lossless() -> None:
+    """R1-007: every populated active/legacy/parked shape recovers or halts intact."""
+
+    import asyncio
+    import uuid
+
+    from alembic import command
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.core.config import get_settings
+
+    admin_url = _swap_db(_PG_URL, "postgres")
+    original_url = os.environ.get("DATABASE_URL")
+    legacy_literal = "[" + ",".join(["0.125"] * 1024) + "]"
+    alternate_legacy_literal = "[" + ",".join(["0.25"] * 1024) + "]"
+    native_literal = "[" + ",".join(["0.375"] * 2048) + "]"
+    parked_native_literal = "[" + ",".join(["0.5"] * 2048) + "]"
+
+    async def _create_database(database: str) -> None:
+        admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'CREATE DATABASE "{database}"'))
+        finally:
+            await admin.dispose()
+
+    async def _drop_database(database: str) -> None:
+        admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
+        finally:
+            await admin.dispose()
+
+    async def _seed_legacy_row(engine: object) -> uuid.UUID:
+        tenant_id, user_id, collection_id, document_id, chunk_id = (uuid.uuid4() for _ in range(5))
+        async with engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                text("INSERT INTO tenants (id, name) VALUES (:id, 'odd-state')"),
+                {"id": tenant_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO users (id, tenant_id, email, password_hash, roles) "
+                    "VALUES (:id, :tenant_id, :email, 'x', ARRAY['member'])"
+                ),
+                {"id": user_id, "tenant_id": tenant_id, "email": f"{user_id}@invalid.test"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO collections (id, tenant_id, owner_id, name) "
+                    "VALUES (:id, :tenant_id, :owner_id, 'migration')"
+                ),
+                {"id": collection_id, "tenant_id": tenant_id, "owner_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    """
+INSERT INTO documents (
+    id, tenant_id, owner_id, collection_id, filename, mime_type,
+    size_bytes, storage_key, status, acl_enforced
+) VALUES (
+    :id, :tenant_id, :owner_id, :collection_id, 'odd.txt', 'text/plain',
+    1, :storage_key, 'ready', false
+)
+"""
+                ),
+                {
+                    "id": document_id,
+                    "tenant_id": tenant_id,
+                    "owner_id": user_id,
+                    "collection_id": collection_id,
+                    "storage_key": f"migration/{document_id}",
+                },
+            )
+            await conn.execute(
+                text(
+                    """
+INSERT INTO chunks (
+    id, tenant_id, document_id, ord, text, embedding, char_start, char_end
+) VALUES (
+    :id, :tenant_id, :document_id, 0, 'legacy', CAST(:embedding AS vector), 0, 6
+)
+"""
+                ),
+                {
+                    "id": chunk_id,
+                    "tenant_id": tenant_id,
+                    "document_id": document_id,
+                    "embedding": legacy_literal,
+                },
+            )
+        return chunk_id
+
+    cases = (
+        ("recover_parked_native", None),
+        ("reject_active_and_parked_native", "active and parked native vector columns coexist"),
+        ("reject_duplicate_legacy", r"bad active vector type vector\(1024\)"),
+        ("reject_bad_parked_width", r"bad parked vector type vector\(1024\)"),
+    )
+
+    try:
+        for case, expected_error in cases:
+            database = f"lumen_embedstate_{uuid.uuid4().hex[:10]}"
+            await _create_database(database)
+            tmp_url = _swap_db(_PG_URL, database)
+            os.environ["DATABASE_URL"] = tmp_url
+            get_settings.cache_clear()
+            engine = create_async_engine(tmp_url)
+            try:
+                await asyncio.to_thread(
+                    command.upgrade,
+                    _alembic_config(),
+                    "0043_code_run_resolved_packages",
+                )
+                chunk_id = await _seed_legacy_row(engine)
+                async with engine.begin() as conn:
+                    if case == "recover_parked_native":
+                        await conn.execute(
+                            text("ALTER TABLE chunks ADD embedding_2048 vector(2048)")
+                        )
+                        await conn.execute(
+                            text(
+                                "UPDATE chunks SET embedding_2048 = CAST(:value AS vector) "
+                                "WHERE id = :id"
+                            ),
+                            {"value": native_literal, "id": chunk_id},
+                        )
+                    elif case == "reject_active_and_parked_native":
+                        await conn.execute(
+                            text("ALTER TABLE chunks RENAME embedding TO embedding_legacy_1024")
+                        )
+                        await conn.execute(text("ALTER TABLE chunks ADD embedding vector(2048)"))
+                        await conn.execute(
+                            text("ALTER TABLE chunks ADD embedding_2048 vector(2048)")
+                        )
+                        await conn.execute(
+                            text(
+                                "UPDATE chunks SET embedding = CAST(:active AS vector), "
+                                "embedding_2048 = CAST(:parked AS vector) WHERE id = :id"
+                            ),
+                            {
+                                "active": native_literal,
+                                "parked": parked_native_literal,
+                                "id": chunk_id,
+                            },
+                        )
+                    elif case == "reject_duplicate_legacy":
+                        await conn.execute(
+                            text("ALTER TABLE chunks ADD embedding_legacy_1024 vector(1024)")
+                        )
+                        await conn.execute(
+                            text(
+                                "UPDATE chunks SET embedding_legacy_1024 = CAST(:value AS vector) "
+                                "WHERE id = :id"
+                            ),
+                            {"value": alternate_legacy_literal, "id": chunk_id},
+                        )
+                    else:
+                        await conn.execute(
+                            text("ALTER TABLE chunks ADD embedding_2048 vector(1024)")
+                        )
+                        await conn.execute(
+                            text(
+                                "UPDATE chunks SET embedding_2048 = CAST(:value AS vector) "
+                                "WHERE id = :id"
+                            ),
+                            {"value": alternate_legacy_literal, "id": chunk_id},
+                        )
+
+                if expected_error is None:
+                    await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
+                    async with engine.connect() as conn:
+                        recovered = (
+                            await conn.execute(
+                                text(
+                                    "SELECT embedding_legacy_1024::text, embedding::text "
+                                    "FROM chunks WHERE id = :id"
+                                ),
+                                {"id": chunk_id},
+                            )
+                        ).one()
+                    assert recovered == (legacy_literal, native_literal)
+                    continue
+
+                with pytest.raises(Exception, match=expected_error):
+                    await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
+
+                async with engine.connect() as conn:
+                    revision = (
+                        await conn.execute(text("SELECT version_num FROM alembic_version"))
+                    ).scalar_one()
+                    rows = (
+                        await conn.execute(
+                            text(
+                                """
+SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+  FROM pg_attribute a
+ WHERE a.attrelid = 'chunks'::regclass
+   AND a.attname IN ('embedding', 'embedding_legacy_1024', 'embedding_2048')
+   AND NOT a.attisdropped
+ ORDER BY a.attname
+"""
+                            )
+                        )
+                    ).all()
+                assert revision == "0043_code_run_resolved_packages"
+                expected_shapes = {
+                    "reject_active_and_parked_native": [
+                        ("embedding", "vector(2048)"),
+                        ("embedding_2048", "vector(2048)"),
+                        ("embedding_legacy_1024", "vector(1024)"),
+                    ],
+                    "reject_duplicate_legacy": [
+                        ("embedding", "vector(1024)"),
+                        ("embedding_legacy_1024", "vector(1024)"),
+                    ],
+                    "reject_bad_parked_width": [
+                        ("embedding", "vector(1024)"),
+                        ("embedding_2048", "vector(1024)"),
+                    ],
+                }
+                assert rows == expected_shapes[case]
+                value_queries = {
+                    "reject_active_and_parked_native": (
+                        "SELECT embedding_legacy_1024::text, embedding::text, "
+                        "embedding_2048::text FROM chunks WHERE id = :id",
+                        (legacy_literal, native_literal, parked_native_literal),
+                    ),
+                    "reject_duplicate_legacy": (
+                        "SELECT embedding::text, embedding_legacy_1024::text "
+                        "FROM chunks WHERE id = :id",
+                        (legacy_literal, alternate_legacy_literal),
+                    ),
+                    "reject_bad_parked_width": (
+                        "SELECT embedding::text, embedding_2048::text "
+                        "FROM chunks WHERE id = :id",
+                        (legacy_literal, alternate_legacy_literal),
+                    ),
+                }
+                value_query, expected_values = value_queries[case]
+                async with engine.connect() as conn:
+                    values = (await conn.execute(text(value_query), {"id": chunk_id})).one()
+                assert values == expected_values
+            finally:
+                await engine.dispose()
+                get_settings.cache_clear()
+                await _drop_database(database)
+    finally:
+        if original_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original_url
+        get_settings.cache_clear()
 
 
 def test_offline_tenant_autonomy_policy_migration_round_trips(

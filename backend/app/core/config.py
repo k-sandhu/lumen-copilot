@@ -12,10 +12,12 @@ process refuses to boot misconfigured rather than failing deep in a request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from functools import lru_cache
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -29,6 +31,7 @@ from app.domain.models import ModelTier
 CANONICAL_EMBEDDING_MODEL = "openai/nvidia/nemotron-3-embed-1b:free"
 CANONICAL_EMBEDDING_DIMENSIONS = 2048
 LEGACY_EMBEDDING_DIMENSIONS = 1024
+EMBEDDING_SPACE_REVISION = "lumen-native-2048-v1"
 
 
 class ChatModelSetting(BaseModel):
@@ -1483,6 +1486,39 @@ class Settings(BaseSettings):
         may be left blank in ``.env``).
         """
         return bool(self.openrouter_api_key.strip())
+
+    @property
+    def embedding_space_fingerprint(self) -> str:
+        """Stable, credential-free identity of the configured coordinate space.
+
+        Width alone does not identify an embedding space.  Model, provider/base,
+        native dimension, and Lumen's normalization contract are hashed together
+        so persisted/indexed vectors and query vectors can fail closed when any
+        coordinate-defining input changes. URL credentials/query/fragment are
+        deliberately excluded from the persisted fingerprint.
+        """
+
+        raw_base = self.llm_embedding_api_base.strip()
+        parsed = urlsplit(raw_base)
+        host = (parsed.hostname or "").lower()
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        normalized_base = (
+            f"{parsed.scheme.lower()}://{host}{parsed.path.rstrip('/')}"
+            if parsed.scheme and host
+            else raw_base.rstrip("/")
+        )
+        payload = json.dumps(
+            {
+                "api_base": normalized_base,
+                "dimensions": self.llm_embedding_dimensions,
+                "model": self.llm_embedding_model.strip(),
+                "revision": EMBEDDING_SPACE_REVISION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
     # The base64 dev vault key baked into the ``secrets_encryption_key`` default —

@@ -232,6 +232,15 @@ class RetrievalService:
             row = rows.get(hit.chunk_id)
             if row is None:
                 continue
+            # OpenSearch is derived and can lag a retry/re-delivery. Hydration
+            # admits only the exact Ready Postgres generation and coordinate
+            # space that produced the hit; stale/failed publications are never
+            # citable even if their engine rows still exist (R1-002/R1-006).
+            if (
+                hit.ingestion_attempt != row.ingestion_attempt
+                or hit.embedding_fingerprint != row.embedding_fingerprint
+            ):
+                continue
             passages.append(
                 RetrievedPassage(
                     chunk_id=row.chunk_id,

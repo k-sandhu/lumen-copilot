@@ -21,7 +21,9 @@ touches several repositories commits atomically.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -35,6 +37,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.logging import get_logger
 from app.db import models
@@ -271,6 +274,7 @@ def _to_chunk(row: models.Chunk) -> Chunk:
         char_start=row.char_start,
         char_end=row.char_end,
         created_at=row.created_at,
+        embedding_fingerprint=row.embedding_fingerprint,
     )
 
 
@@ -2102,16 +2106,30 @@ class DocumentRepository(_TenantScopedRepository):
         self,
         document_id: UUID,
         *,
+        expected_attempt: int | None = None,
         code: str,
         message: str,
         correlation_id: str | None = None,
     ) -> Document | None:
-        """Persist a content-safe terminal failure in a fresh transaction."""
+        """Persist a content-safe terminal failure for the owning attempt.
 
-        stmt = select(models.Document).where(
+        ``expected_attempt`` is the compare-and-set token acquired by
+        :meth:`begin_ingestion`. A late worker therefore cannot turn a newer
+        attempt from processing/ready back into failed (R1-001).
+        """
+
+        conditions = [
             models.Document.tenant_id == self._tenant_id,
             models.Document.id == document_id,
-        )
+        ]
+        if expected_attempt is not None:
+            conditions.extend(
+                [
+                    models.Document.status == DocumentStatus.PROCESSING.value,
+                    models.Document.ingestion_attempts == expected_attempt,
+                ]
+            )
+        stmt = select(models.Document).where(*conditions).with_for_update()
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
@@ -2128,6 +2146,45 @@ class DocumentRepository(_TenantScopedRepository):
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
+
+    async def mark_ingestion_ready(
+        self,
+        document_id: UUID,
+        *,
+        expected_attempt: int,
+    ) -> Document | None:
+        """Publish ``ready`` only for the still-owning processing attempt."""
+
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+                models.Document.status == DocumentStatus.PROCESSING.value,
+                models.Document.ingestion_attempts == expected_attempt,
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = DocumentStatus.READY.value
+        row.error = None
+        row.ingestion_failure = None
+        await self._session.flush()
+        await self._session.refresh(row)
+        return to_document(row)
+
+    async def owns_ingestion_attempt(self, document_id: UUID, *, expected_attempt: int) -> bool:
+        """Whether a processing attempt still owns the document generation."""
+
+        stmt = select(models.Document.id).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+            models.Document.status == DocumentStatus.PROCESSING.value,
+            models.Document.ingestion_attempts == expected_attempt,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
 
 class ArtifactRepository(_TenantScopedRepository):
@@ -2294,6 +2351,7 @@ class ChunkInput:
     char_start: int
     char_end: int
     embedding: Sequence[float] | None = None
+    embedding_fingerprint: str | None = None
 
 
 class ChunkRepository(_TenantScopedRepository):
@@ -2354,6 +2412,55 @@ class ChunkRepository(_TenantScopedRepository):
         boundary, so the delete + inserts commit atomically — a re-run is never
         observed half-applied.
         """
+        return await self._replace_for_document(document_id, chunks)
+
+    async def replace_for_ingestion(
+        self,
+        document_id: UUID,
+        chunks: Sequence[ChunkInput],
+        *,
+        expected_attempt: int,
+        embedding_fingerprint: str,
+    ) -> list[Chunk] | None:
+        """CAS-owned chunk replacement for one ingestion generation.
+
+        The document row is locked before any chunk mutation and must still be
+        ``processing`` at ``expected_attempt``. A duplicate/late worker gets
+        ``None`` and cannot delete or overwrite the newer generation (R1-001).
+        """
+
+        owner_stmt = (
+            select(models.Document.id)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+                models.Document.status == DocumentStatus.PROCESSING.value,
+                models.Document.ingestion_attempts == expected_attempt,
+            )
+            .with_for_update()
+        )
+        owner = (await self._session.execute(owner_stmt)).scalar_one_or_none()
+        if owner is None:
+            return None
+        if not embedding_fingerprint or any(
+            chunk.embedding_fingerprint != embedding_fingerprint for chunk in chunks
+        ):
+            raise ValueError("Ingestion chunks require one non-null embedding fingerprint.")
+        return await self._replace_for_document(
+            document_id,
+            chunks,
+            archive_context=(expected_attempt, embedding_fingerprint),
+        )
+
+    async def _replace_for_document(
+        self,
+        document_id: UUID,
+        chunks: Sequence[ChunkInput],
+        *,
+        archive_context: tuple[int, str] | None = None,
+    ) -> list[Chunk]:
+        """Implement the atomic chunk replacement after any ownership check."""
+
         existing_stmt = (
             select(models.Chunk)
             .where(
@@ -2376,14 +2483,23 @@ class ChunkRepository(_TenantScopedRepository):
                 and row.char_end == chunk.char_end
                 for ordinal, (row, chunk) in enumerate(zip(existing, chunks, strict=True))
             )
-            if not same_shape:
+            if not same_shape and archive_context is None:
                 raise ValueError(
                     "Legacy embedding preservation requires unchanged chunk text and spans."
                 )
-            for row, chunk in zip(existing, chunks, strict=True):
-                row.embedding = list(chunk.embedding) if chunk.embedding is not None else None
-            await self._session.flush()
-            return [_to_chunk(row) for row in existing]
+            if same_shape:
+                for row, chunk in zip(existing, chunks, strict=True):
+                    row.embedding = list(chunk.embedding) if chunk.embedding is not None else None
+                    row.embedding_fingerprint = chunk.embedding_fingerprint
+                await self._session.flush()
+                return [_to_chunk(row) for row in existing]
+            assert archive_context is not None  # narrowed above  # noqa: S101
+            await self._archive_legacy_revision(
+                document_id,
+                existing,
+                replacement_attempt=archive_context[0],
+                replacement_fingerprint=archive_context[1],
+            )
 
         for row in existing:
             await self._session.delete(row)
@@ -2397,12 +2513,65 @@ class ChunkRepository(_TenantScopedRepository):
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 embedding=list(chunk.embedding) if chunk.embedding is not None else None,
+                embedding_fingerprint=chunk.embedding_fingerprint,
             )
             for ordinal, chunk in enumerate(chunks)
         ]
         self._session.add_all(rows)
         await self._session.flush()
         return [_to_chunk(row) for row in rows]
+
+    async def _archive_legacy_revision(
+        self,
+        document_id: UUID,
+        rows: Sequence[models.Chunk],
+        *,
+        replacement_attempt: int,
+        replacement_fingerprint: str,
+    ) -> None:
+        """Detach legacy bytes before a legitimate content revision replaces rows."""
+
+        revision_payload = [
+            [row.ord, row.text, row.char_start, row.char_end]
+            for row in sorted(rows, key=lambda row: row.ord)
+        ]
+        content_revision = hashlib.sha256(
+            json.dumps(
+                revision_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        existing_stmt = select(models.LegacyEmbeddingArchive.ord).where(
+            models.LegacyEmbeddingArchive.tenant_id == self._tenant_id,
+            models.LegacyEmbeddingArchive.document_id == document_id,
+            models.LegacyEmbeddingArchive.content_revision == content_revision,
+            models.LegacyEmbeddingArchive.replacement_attempt == replacement_attempt,
+            models.LegacyEmbeddingArchive.replacement_fingerprint == replacement_fingerprint,
+        )
+        archived_ords = set((await self._session.execute(existing_stmt)).scalars().all())
+        archives = []
+        for row in rows:
+            if row.legacy_embedding is None or row.ord in archived_ords:
+                continue
+            archives.append(
+                models.LegacyEmbeddingArchive(
+                    tenant_id=self._tenant_id,
+                    document_id=document_id,
+                    original_chunk_id=row.id,
+                    content_revision=content_revision,
+                    replacement_attempt=replacement_attempt,
+                    replacement_fingerprint=replacement_fingerprint,
+                    ord=row.ord,
+                    text=row.text,
+                    char_start=row.char_start,
+                    char_end=row.char_end,
+                    embedding=list(row.legacy_embedding),
+                )
+            )
+        self._session.add_all(archives)
+        if archives:
+            await self._session.flush()
 
     async def get(self, chunk_id: UUID) -> Chunk | None:
         stmt = select(models.Chunk).where(
@@ -5681,7 +5850,7 @@ class SandboxSessionRepository(_TenantScopedRepository):
 
 
 class SourceReconcileRepository:
-    """Cross-tenant read of connected managed sources — the sync-poll beat ONLY.
+    """Cross-tenant discovery/reservation for the sync-poll beat ONLY.
 
     **Not** tenant-scoped (the one source read that spans tenants), mirroring
     :class:`ScheduleReconcileRepository` / :class:`RunDeliveryReconcileRepository`:
@@ -5689,7 +5858,8 @@ class SourceReconcileRepository:
     connected managed sources so it can enqueue each sync through the existing
     per-tenant rate-limited seam. Runs under a **bypass**-scoped session
     (``bind_bypass``) — a deliberate, system-only path, never a request path
-    (requests stay tenant-scoped, INV-1). Read-only.
+    (requests stay tenant-scoped, INV-1). Source discovery is read-only; the
+    stranded-ingestion path performs only its explicit timestamp lease.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -5714,10 +5884,10 @@ class SourceReconcileRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
 
-    async def list_stranded_ingestion_documents(
+    async def reserve_stranded_ingestion_documents(
         self, *, older_than: datetime, limit: int
     ) -> list[tuple[UUID, UUID, DocumentStatus]]:
-        """``(tenant, document, status)`` for uploads/connectors stuck ingesting.
+        """Atomically lease stuck uploads/connectors for one recovery sweep.
 
         The recovery half of the incremental sync's commit discipline
         (ADR-0019 §3): a page's row + cursor commit **first**, then ingestion is
@@ -5729,10 +5899,15 @@ class SourceReconcileRepository:
         The same crash window exists after a direct upload commits and before its
         broker delivery.  Therefore this intentionally covers every document
         still ``pending``/``processing`` and untouched since ``older_than``.
-        Cross-tenant use is bypass-scoped/system-only and bounded by ``limit``.
+        Selection and ``updated_at`` renewal are one UPDATE...RETURNING CAS with
+        a SKIP-LOCKED candidate subquery. Parallel poll beats therefore divide
+        work instead of publishing duplicate recovery deliveries from the same
+        age-only snapshot (R1-001). Cross-tenant use is bypass-scoped/system-only
+        and bounded by ``limit``.
         """
-        stmt = (
-            select(models.Document.tenant_id, models.Document.id, models.Document.status)
+
+        candidate_ids = (
+            select(models.Document.id)
             .where(
                 models.Document.status.in_(
                     (DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value)
@@ -5741,9 +5916,29 @@ class SourceReconcileRepository:
             )
             .order_by(models.Document.updated_at.asc(), models.Document.id.asc())
             .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.id.in_(candidate_ids),
+                models.Document.status.in_(
+                    (DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value)
+                ),
+                models.Document.updated_at < older_than,
+            )
+            .values(updated_at=func.now())
+            .returning(
+                models.Document.tenant_id,
+                models.Document.id,
+                models.Document.status,
+            )
         )
         rows = (await self._session.execute(stmt)).all()
-        return [(row[0], row[1], DocumentStatus(row[2])) for row in rows]
+        return sorted(
+            [(row[0], row[1], DocumentStatus(row[2])) for row in rows],
+            key=lambda reservation: (str(reservation[0]), str(reservation[1])),
+        )
 
 
 class EmbeddingReconcileRepository:
@@ -5760,25 +5955,17 @@ class EmbeddingReconcileRepository:
         self,
         *,
         limit: int,
+        target_fingerprint: str,
         tenant_id: UUID | None = None,
     ) -> list[tuple[UUID, UUID]]:
-        """Documents with preserved legacy vectors but no native vector yet."""
+        """Ready documents missing a target-space vector or carrying another space."""
 
         stmt = (
             select(models.Document.tenant_id, models.Document.id)
-            .join(
-                models.Chunk,
-                and_(
-                    models.Chunk.tenant_id == models.Document.tenant_id,
-                    models.Chunk.document_id == models.Document.id,
-                ),
-            )
             .where(
-                models.Chunk.legacy_embedding.is_not(None),
-                models.Chunk.embedding.is_(None),
-                models.Document.status != DocumentStatus.PROCESSING.value,
+                models.Document.status == DocumentStatus.READY.value,
+                self._requires_reembedding(target_fingerprint),
             )
-            .distinct()
             .order_by(models.Document.tenant_id.asc(), models.Document.id.asc())
             .limit(limit)
         )
@@ -5786,6 +5973,104 @@ class EmbeddingReconcileRepository:
             stmt = stmt.where(models.Document.tenant_id == tenant_id)
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
+
+    async def reserve_reembedding(
+        self,
+        *,
+        limit: int,
+        target_fingerprint: str,
+        tenant_id: UUID | None = None,
+    ) -> list[tuple[UUID, UUID]]:
+        """Transactionally reserve one resumable page using ``pending`` state.
+
+        ``FOR UPDATE SKIP LOCKED`` lets parallel operators divide work without
+        publishing the same document. The caller commits this reservation
+        before broker I/O; failed publishes are explicitly released to Ready.
+        """
+
+        candidate_ids = (
+            select(models.Document.id)
+            .where(
+                models.Document.status == DocumentStatus.READY.value,
+                self._requires_reembedding(target_fingerprint),
+            )
+            .order_by(models.Document.tenant_id.asc(), models.Document.id.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        if tenant_id is not None:
+            candidate_ids = candidate_ids.where(models.Document.tenant_id == tenant_id)
+
+        # Keep selection and transition in one statement. PostgreSQL's row
+        # locks divide the candidate set across workers; the outer predicates
+        # are the compare-and-swap guard that also makes this safe on engines
+        # (including the SQLite test adapter) that ignore ``FOR UPDATE``.
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.id.in_(candidate_ids),
+                models.Document.status == DocumentStatus.READY.value,
+                self._requires_reembedding(target_fingerprint),
+            )
+            .values(
+                status=DocumentStatus.PENDING.value,
+                error=None,
+                ingestion_failure=None,
+            )
+            .returning(models.Document.tenant_id, models.Document.id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return sorted(
+            [(row[0], row[1]) for row in rows],
+            key=lambda reservation: (str(reservation[0]), str(reservation[1])),
+        )
+
+    async def release_reembedding(
+        self,
+        *,
+        tenant_id: UUID,
+        document_id: UUID,
+        target_fingerprint: str,
+    ) -> bool:
+        """Release a reservation whose broker publish definitely failed."""
+
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == tenant_id,
+                models.Document.id == document_id,
+                models.Document.status == DocumentStatus.PENDING.value,
+                self._requires_reembedding(target_fingerprint),
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        row.status = DocumentStatus.READY.value
+        await self._session.flush()
+        return True
+
+    @staticmethod
+    def _requires_reembedding(target_fingerprint: str) -> ColumnElement[bool]:
+        """Correlated candidate predicate shared by preview/reserve/release."""
+
+        return (
+            select(models.Chunk.id)
+            .where(
+                models.Chunk.tenant_id == models.Document.tenant_id,
+                models.Chunk.document_id == models.Document.id,
+                or_(
+                    and_(
+                        models.Chunk.legacy_embedding.is_not(None),
+                        models.Chunk.embedding.is_(None),
+                    ),
+                    models.Chunk.embedding_fingerprint.is_(None),
+                    models.Chunk.embedding_fingerprint != target_fingerprint,
+                ),
+            )
+            .exists()
+        )
 
 
 class CodeRunRepository(_TenantScopedRepository):

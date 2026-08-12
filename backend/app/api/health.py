@@ -2,12 +2,14 @@
 
 Implements ``GET /health`` and ``GET /health/ready`` exactly per
 ``contracts/openapi.yaml`` (``HealthStatus`` / ``ReadinessStatus`` /
-``DependencyStatus``). Liveness is a pure process check. Readiness actually
-reaches each critical dependency — including the fixed-width embedding schema,
-provider response, and OpenSearch mapping — and returns 200 ``ready`` only if all pass, else
-503 ``degraded`` with a per-dependency breakdown. Each check runs through that
-system's owning adapter (DB session, object store) so the boundary table holds;
-the Redis ping is a thin readiness-only client.
+``DependencyStatus``). Liveness is a pure process check. Readiness performs
+read-only checks of critical dependencies, the fixed-width embedding schema,
+and OpenSearch mapping, and observes the fingerprint validated at startup. It
+never creates an index or calls a paid/external model provider. It returns 200
+``ready`` only if all checks pass, else 503 ``degraded`` with a per-dependency
+breakdown. Each check runs through that system's owning adapter (DB session,
+object store) so the boundary table holds; the Redis ping is a thin
+readiness-only client.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from app.core.errors import DependencyError
 from app.core.logging import get_logger
 from app.db import session as db_session
 from app.db.embedding_contract import check_embedding_schema
-from app.llm.gateway import LLMGateway
+from app.ingestion.contract import embedding_contract_status
 from app.realtime import backplane
 from app.search import OpenSearchStore
 
@@ -120,12 +122,15 @@ async def _check_embedding_schema(settings: Settings) -> DependencyStatus:
 
 
 async def _check_opensearch_embedding(settings: Settings) -> DependencyStatus:
-    """Create/validate the versioned index through the search adapter."""
+    """Read-only mapping validation through the search adapter."""
     store = OpenSearchStore.from_settings(settings)
     try:
-        await store.ensure_index()
-        dimensions = await store.check_embedding_dimensions()
-        return DependencyStatus(name="opensearch_embedding", ok=True, detail=f"native={dimensions}")
+        dimensions, fingerprint = await store.check_embedding_contract()
+        return DependencyStatus(
+            name="opensearch_embedding",
+            ok=True,
+            detail=f"native={dimensions}; fingerprint={fingerprint}",
+        )
     except DependencyError as exc:
         return DependencyStatus(name="opensearch_embedding", ok=False, detail=exc.detail)
     except Exception:  # noqa: BLE001
@@ -139,27 +144,16 @@ async def _check_opensearch_embedding(settings: Settings) -> DependencyStatus:
 
 
 async def _check_embedding_provider(settings: Settings) -> DependencyStatus:
-    """Probe the configured route; the LLM adapter validates the native width."""
-    if not settings.llm_enabled:
-        # LLM-less local boot is an explicit existing contract. A configured
-        # provider, however, must prove its vector width before readiness passes.
-        return DependencyStatus(name="embedding_provider", ok=True, detail="not configured")
-    try:
-        vectors = await LLMGateway(settings).embed(
-            ["lumen embedding readiness probe"],
-            cache_namespace="readiness",
-        )
-        return DependencyStatus(
-            name="embedding_provider",
-            ok=True,
-            detail=f"native={len(vectors[0].vector)}",
-        )
-    except DependencyError as exc:
-        return DependencyStatus(name="embedding_provider", ok=False, detail=exc.detail)
-    except Exception:  # noqa: BLE001
-        return DependencyStatus(
-            name="embedding_provider", ok=False, detail="Embedding provider inspection failed."
-        )
+    """Read startup's validated fingerprint; never call the provider here."""
+
+    ready, code = embedding_contract_status(settings.embedding_space_fingerprint)
+    return DependencyStatus(
+        name="embedding_provider",
+        ok=ready,
+        detail=(
+            f"fingerprint={settings.embedding_space_fingerprint}" if ready else f"contract={code}"
+        ),
+    )
 
 
 @router.get(

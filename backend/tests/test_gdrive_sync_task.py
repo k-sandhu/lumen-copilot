@@ -12,6 +12,7 @@ and the wire's ``GdriveSource`` health surface (contract-validated).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -138,6 +139,26 @@ class _FakeIndexStore:
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
     ) -> None:
         type(self).events.append(("delete", document_id))
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_generation", document_id))
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_older", document_id))
 
     async def stamp_acl_stale(
         self,
@@ -1078,6 +1099,47 @@ async def test_sweep_recovers_uploads_but_ignores_ready_documents(
         poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
     )
     assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, upload.id)]
+
+
+async def test_parallel_stranded_sweeps_atomically_reserve_one_delivery(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-001: age discovery is a lease/CAS, not duplicate fan-out."""
+
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed()
+    async with db_session.session_scope() as session:
+        upload = await DocumentRepository(session, seeded.tenant_id).create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="reserved-recovery.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/reserved-recovery",
+            acl_enforced=False,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == upload.id)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+
+    poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
+    monkeypatch.setattr(
+        poll_module,
+        "enqueue_ingestion",
+        lambda tenant_id, document_id: enqueued.append((tenant_id, document_id)),
+    )
+
+    swept = await asyncio.gather(
+        poll_module._sweep_stranded(_settings()),
+        poll_module._sweep_stranded(_settings()),
+    )
+
+    assert sum(swept) == 1
     assert enqueued == [(seeded.tenant_id, upload.id)]
 
 

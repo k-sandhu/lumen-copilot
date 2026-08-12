@@ -31,8 +31,9 @@ import json
 import math
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Mapping, Sequence
+from numbers import Real
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 from app.core.config import Settings
@@ -300,7 +301,7 @@ def _embed_cache_put(key: _EmbedCacheKey, vector: list[float], *, max_entries: i
 
 
 def _validate_embedding_vectors(
-    vectors: Sequence[Sequence[float]],
+    vectors: Sequence[Sequence[object]],
     *,
     expected_count: int,
     expected_dimensions: int,
@@ -339,6 +340,93 @@ def _validate_embedding_vectors(
                 "Embedding provider returned an incompatible vector.",
                 code="embedding_dimension_mismatch",
             )
+        if any(
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, Real)
+            or not math.isfinite(float(coordinate))
+            for coordinate in vector
+        ):
+            log.error(
+                "embedding.provider_coordinate_invalid",
+                model=model,
+                vector_index=index,
+                configured_dimensions=expected_dimensions,
+            )
+            raise DependencyError(
+                "Embedding provider returned a malformed vector.",
+                code="embedding_response_invalid",
+            )
+
+
+def _ordered_embedding_vectors(
+    data: object,
+    *,
+    expected_count: int,
+    expected_dimensions: int,
+    model: str,
+) -> list[list[float]]:
+    """Validate vendor items and return vectors in input-index order.
+
+    OpenAI-compatible providers may return embedding items out of wire order.
+    The item ``index`` is therefore authoritative: consuming response order can
+    silently bind a valid vector to the wrong chunk. Malformed vendor shapes are
+    normalized here instead of leaking ``KeyError``/``TypeError`` upstream.
+    """
+
+    if not isinstance(data, Sequence) or isinstance(data, str | bytes | bytearray):
+        raise DependencyError(
+            "Embedding provider returned a malformed response.",
+            code="embedding_response_invalid",
+        )
+    if len(data) != expected_count:
+        log.error(
+            "embedding.provider_count_mismatch",
+            model=model,
+            expected_count=expected_count,
+            actual_count=len(data),
+            configured_dimensions=expected_dimensions,
+        )
+        raise DependencyError(
+            "Embedding provider returned an unexpected result count.",
+            code="embedding_count_mismatch",
+        )
+
+    ordered: list[list[object] | None] = [None] * expected_count
+    for item in data:
+        if isinstance(item, Mapping):
+            raw_index = item.get("index")
+            raw_vector = item.get("embedding")
+        else:
+            raw_index = getattr(item, "index", None)
+            raw_vector = getattr(item, "embedding", None)
+        if (
+            isinstance(raw_index, bool)
+            or not isinstance(raw_index, int)
+            or raw_index < 0
+            or raw_index >= expected_count
+            or ordered[raw_index] is not None
+            or not isinstance(raw_vector, Sequence)
+            or isinstance(raw_vector, str | bytes | bytearray)
+        ):
+            raise DependencyError(
+                "Embedding provider returned a malformed response.",
+                code="embedding_response_invalid",
+            )
+        ordered[raw_index] = list(raw_vector)
+
+    if any(vector is None for vector in ordered):
+        raise DependencyError(
+            "Embedding provider returned a malformed response.",
+            code="embedding_response_invalid",
+        )
+    vectors = [vector for vector in ordered if vector is not None]
+    _validate_embedding_vectors(
+        vectors,
+        expected_count=expected_count,
+        expected_dimensions=expected_dimensions,
+        model=model,
+    )
+    return [[float(cast(Real, coordinate)) for coordinate in vector] for vector in vectors]
 
 
 class LLMGateway:
@@ -728,9 +816,8 @@ class LLMGateway:
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
-        vectors = [list(item["embedding"]) for item in response.data]
-        _validate_embedding_vectors(
-            vectors,
+        vectors = _ordered_embedding_vectors(
+            getattr(response, "data", None),
             expected_count=len(inputs),
             expected_dimensions=self._settings.llm_embedding_dimensions,
             model=model_id,

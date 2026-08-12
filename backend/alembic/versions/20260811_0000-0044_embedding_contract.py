@@ -76,6 +76,13 @@ BEGIN
         RAISE EXCEPTION 'embedding contract: bad active vector type %', active_type;
     END IF;
 
+    IF parked_type IS NOT NULL AND parked_type <> 'vector(2048)' THEN
+        RAISE EXCEPTION 'embedding contract: bad parked vector type %', parked_type;
+    END IF;
+    IF active_type = 'vector(2048)' AND parked_type IS NOT NULL THEN
+        RAISE EXCEPTION 'embedding contract: active and parked native vector columns coexist';
+    END IF;
+
     IF legacy_type IS NULL OR legacy_type <> 'vector(1024)' THEN
         RAISE EXCEPTION 'embedding contract: bad legacy vector type %',
             coalesce(legacy_type, '<missing>');
@@ -96,6 +103,68 @@ $migration$;
     )
 
     op.add_column(
+        "chunks",
+        sa.Column("embedding_fingerprint", sa.String(length=64), nullable=True),
+    )
+
+    # A connector may legitimately revise document content while old vectors
+    # are still parked for rollback. Detach those old bytes before replacing
+    # chunk boundaries. Downgrade refuses to proceed while it contains evidence
+    # (rather than discarding bytes or restoring semantically stale content).
+    op.execute(
+        """
+CREATE TABLE IF NOT EXISTS embedding_legacy_archive_0044 (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    document_id uuid NOT NULL,
+    original_chunk_id uuid NOT NULL,
+    content_revision varchar(64) NOT NULL,
+    replacement_attempt integer NOT NULL,
+    replacement_fingerprint varchar(64) NOT NULL,
+    ord integer NOT NULL,
+    text text NOT NULL,
+    char_start integer NOT NULL,
+    char_end integer NOT NULL,
+    embedding vector(1024) NOT NULL,
+    archived_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_embedding_legacy_archive_revision_ord UNIQUE
+      (document_id, content_revision, replacement_attempt, replacement_fingerprint, ord)
+)
+"""
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_embedding_legacy_archive_0044_tenant_id "
+        "ON embedding_legacy_archive_0044 (tenant_id)"
+    )
+    op.execute("ALTER TABLE embedding_legacy_archive_0044 ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE embedding_legacy_archive_0044 FORCE ROW LEVEL SECURITY")
+    op.execute(
+        """
+DO $policy$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = current_schema()
+           AND tablename = 'embedding_legacy_archive_0044'
+           AND policyname = 'rls_embedding_legacy_archive_0044'
+    ) THEN
+        CREATE POLICY rls_embedding_legacy_archive_0044
+            ON embedding_legacy_archive_0044
+            USING (
+                current_setting('app.tenant_id', true) = 'bypass'
+                OR tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
+            )
+            WITH CHECK (
+                current_setting('app.tenant_id', true) = 'bypass'
+                OR tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
+            );
+    END IF;
+END
+$policy$
+"""
+    )
+
+    op.add_column(
         "documents",
         sa.Column(
             "ingestion_attempts",
@@ -104,9 +173,8 @@ $migration$;
             server_default=sa.text("0"),
         ),
     )
-    # Inserts must go through the repository claim seam; do not let the database
-    # silently manufacture attempt counts for future rows.
-    op.alter_column("documents", "ingestion_attempts", server_default=None)
+    # Keep the safe zero default. Raw/live seeds and operational SQL insert a
+    # document before any worker claim; attempt generation begins at claim time.
     op.add_column(
         "documents",
         sa.Column(
@@ -118,6 +186,29 @@ $migration$;
 
 
 def downgrade() -> None:
+    # A revised connector's detached vectors no longer describe its current
+    # chunks, so an automated rollback cannot truthfully restore them in-place.
+    # Halt before ANY DDL rather than discard bytes or roll content backward.
+    op.execute(
+        """
+DO $archive$
+BEGIN
+    IF EXISTS (SELECT 1 FROM embedding_legacy_archive_0044 LIMIT 1) THEN
+        RAISE EXCEPTION
+          'embedding rollback: detached legacy archive populated; reconcile before downgrade';
+    END IF;
+END
+$archive$
+"""
+    )
+    op.execute(
+        "DROP POLICY IF EXISTS rls_embedding_legacy_archive_0044 "
+        "ON embedding_legacy_archive_0044"
+    )
+    op.execute("ALTER TABLE embedding_legacy_archive_0044 NO FORCE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE embedding_legacy_archive_0044 DISABLE ROW LEVEL SECURITY")
+    op.execute("DROP TABLE embedding_legacy_archive_0044")
+    op.drop_column("chunks", "embedding_fingerprint")
     op.drop_column("documents", "ingestion_failure")
     op.drop_column("documents", "ingestion_attempts")
     op.execute(f"DROP INDEX IF EXISTS {_OLD_ANN_INDEX}")

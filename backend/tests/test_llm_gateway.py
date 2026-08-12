@@ -157,8 +157,17 @@ class _FakeStream:
 
 
 class _EmbeddingResponse:
-    def __init__(self, vectors: list[list[float]]) -> None:
-        self.data = [{"embedding": v} for v in vectors]
+    def __init__(
+        self,
+        vectors: list[list[object]],
+        *,
+        indices: list[int] | None = None,
+    ) -> None:
+        resolved = indices if indices is not None else list(range(len(vectors)))
+        self.data = [
+            {"embedding": vector, "index": index}
+            for vector, index in zip(vectors, resolved, strict=True)
+        ]
 
 
 # --- AC-1 / AC-5: chat returns a Completion with usage; model from config --
@@ -604,6 +613,102 @@ async def test_embed_rejects_provider_dimension_drift_before_persistence(
         await gw.embed(["dimension drift"])
 
     assert excinfo.value.code == "embedding_dimension_mismatch"
+
+
+async def test_embed_reorders_a_complete_provider_index_permutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-004: provider response order cannot attach a vector to the wrong text."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[20.0], [10.0]], indices=[1, 0])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    result = await LLMGateway(_settings()).embed(["first", "second"])
+
+    assert [embedding.vector for embedding in result] == [[10.0], [20.0]]
+
+
+@pytest.mark.parametrize(
+    ("items", "expected_code"),
+    [
+        (
+            [{"index": 0, "embedding": [1.0]}, {"index": 0, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        ([{"index": 0, "embedding": [1.0]}], "embedding_count_mismatch"),
+        (
+            [{"index": 0, "embedding": [1.0]}, {"index": 2, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        (
+            [{"index": -1, "embedding": [1.0]}, {"index": 1, "embedding": [2.0]}],
+            "embedding_response_invalid",
+        ),
+        ([{"embedding": [1.0]}, {"index": 1, "embedding": [2.0]}], "embedding_response_invalid"),
+        ([{"index": 0}, {"index": 1, "embedding": [2.0]}], "embedding_response_invalid"),
+    ],
+)
+async def test_embed_rejects_incomplete_or_malformed_provider_indices(
+    monkeypatch: pytest.MonkeyPatch,
+    items: list[dict[str, object]],
+    expected_code: str,
+) -> None:
+    """R1-004: indices must be a unique, complete 0..N-1 permutation."""
+
+    async def fake_aembedding(**kwargs: Any) -> object:
+        response = type("MalformedEmbeddingResponse", (), {})()
+        response.data = items
+        return response
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["first", "second"])
+
+    assert excinfo.value.code == expected_code
+
+
+@pytest.mark.parametrize("coordinate", [True, "1.0", float("nan"), float("inf"), -float("inf")])
+async def test_embed_rejects_nonfinite_or_nonreal_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinate: object,
+) -> None:
+    """R1-004: only finite real scalars (and never booleans) cross the boundary."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[coordinate]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["poison"])
+
+    assert excinfo.value.code == "embedding_response_invalid"
+
+
+async def test_embed_revalidates_a_poisoned_query_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-004: cache corruption is normalized instead of returning NaN downstream."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.5]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gateway = LLMGateway(_settings())
+    await gateway.embed(["cached"], cache_namespace="tenant")
+
+    import app.llm.gateway as gateway_module
+
+    key = next(iter(gateway_module._embed_cache))
+    stored_at, _ = gateway_module._embed_cache[key]
+    gateway_module._embed_cache[key] = (stored_at, [float("nan")])
+
+    with pytest.raises(DependencyError) as excinfo:
+        await gateway.embed(["cached"], cache_namespace="tenant")
+
+    assert excinfo.value.code == "embedding_response_invalid"
 
 
 async def test_embed_requests_float_encoding_format(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -28,7 +28,7 @@
    - apply a per-tenant fetch **rate limit**.
    These checks live in one `connectors/web/fetch.py` chokepoint with explicit negative tests. A bypass is a blocking defect.
 
-4. **Sources data model.** A tenant/owner-scoped `sources` table: `id, tenant_id, owner_id, type, config (jsonb: url, mode), status (pending|syncing|ready|error), last_synced_at, indexed_count, last_error`. Ingested documents link back via `source_id`. Sync runs as a **Celery task** (#21 tasks), never in the request path.
+4. **Sources data model.** A tenant/owner-scoped `sources` table: `id, tenant_id, owner_id, type, config (jsonb: url, mode), status (pending|syncing|ready|error), last_synced_at, indexed_count, last_error`. Ingested documents link back via `source_id`. Sync runs as a **Celery task** (#21 tasks), never in the request path. Source health is an aggregate of document truth: `ready` is permitted only when every document returned by the completed sync is itself `ready` for its current ingestion attempt. Any Failed or otherwise non-Ready document makes the source `error`; `indexed_count` counts only Ready documents and `last_error` records a content-safe failure summary. Partial success is therefore visible as Error with a non-zero Ready count, never falsely promoted to Ready.
 
 5. **Sources surface (contract, frozen first per [ADR-0006](0006-contract-first-parallel-implementation.md)):**
    - `GET /sources` — connector grid: per-source type, sync health/status, `indexed_count`, permission/owner.
