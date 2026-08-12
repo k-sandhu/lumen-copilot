@@ -25,7 +25,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.audit_transactions import durable_audit_repository
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.repositories import AuditEventRepository
 from app.domain.audit import AuditAction, AuditActor, validate_envelope
 from app.domain.entities import AuditEvent, AuditOutcome
@@ -157,20 +157,26 @@ class PermissionDeniedRecorder:
     Successful action events deliberately share the action transaction so they
     commit or roll back atomically. A denied action has no successful transaction
     to commit, and its 403/404 exception causes the request session to close with
-    a rollback. This recorder therefore opens a fresh session from the caller's
-    *engine* (never the caller's session/connection), binds the trusted tenant for
-    Postgres RLS, delegates the append to the canonical :class:`AuditSink`, and
-    commits only that audit transaction. Sink, flush, RLS, and commit failures all
-    propagate; returning an unaudited denial is forbidden by INV-6.
+    a rollback. This recorder therefore opens a fresh session from a separately
+    owned, bounded audit engine (never the caller's engine/session/connection),
+    binds the trusted tenant for Postgres RLS, delegates the append to the canonical
+    :class:`AuditSink`, and commits only that audit transaction. Sink, acquisition,
+    flush, RLS, and commit failures all propagate; returning an unaudited denial is
+    forbidden by INV-6.
     """
 
     def __init__(
         self,
-        request_session: AsyncSession,
+        transactions: DurableAuditTransactions,
         *,
         tenant_id: UUID,
+        request_session: AsyncSession,
     ) -> None:
-        self._request_session = request_session
+        # Validation happens at construction, before a service guard can perform
+        # an action write.  A caller engine/connection can never be silently
+        # reused as the durable boundary (R1-001).
+        transactions.assert_independent_from(request_session)
+        self._transactions = transactions
         self._tenant_id = tenant_id
 
     async def emit(
@@ -186,7 +192,7 @@ class PermissionDeniedRecorder:
         required_roles: Sequence[str] = (),
     ) -> AuditEvent:
         """Append and commit exactly one safe denial, or propagate the failure."""
-        async with durable_audit_repository(self._request_session, self._tenant_id) as repository:
+        async with self._transactions.repository(self._tenant_id) as repository:
             return await emit_permission_denied(
                 AuditSink(repository),
                 actor_id=actor_id,

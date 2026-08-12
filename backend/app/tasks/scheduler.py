@@ -204,7 +204,10 @@ async def _dispatch_fire(
     Returns a short outcome string (``enqueued`` / ``skipped_overlap`` / ``deferred_*``
     / ``no_schedule`` / ``assistant_unavailable``) for the task's structured log.
     """
+    from app.core.errors import NotFoundError, ValidationError
+    from app.db.session import get_durable_audit_transactions
     from app.domain.entities import RunTrigger
+    from app.services.audit import PermissionDeniedRecorder
     from app.services.runs_service import enqueue_manual_run
 
     limiter = rate_limiter or _run_rate_limiter(settings)
@@ -239,16 +242,24 @@ async def _dispatch_fire(
         # Enqueue a schedule-triggered run (published-assistant + head-version checks
         # are inside enqueue_manual_run; a disabled/unpublished assistant is rejected).
         try:
+            denials = PermissionDeniedRecorder(
+                get_durable_audit_transactions(settings),
+                tenant_id=tenant_id,
+                request_session=session,
+            )
             run = await enqueue_manual_run(
                 session,
                 tenant_id=tenant_id,
                 owner_id=schedule.owner_id,
                 assistant_id=schedule.assistant_id,
+                denials=denials,
+                request_id=f"schedule-fire:{schedule.id}",
+                source_ip="system",
                 inputs=schedule.input_params,
                 trigger=RunTrigger.SCHEDULE,
                 schedule_id=schedule.id,
             )
-        except Exception as exc:  # noqa: BLE001 — a bad assistant must not stall the schedule
+        except (NotFoundError, ValidationError) as exc:
             await schedules.record_fire(
                 schedule.id, last_run_at=now, last_status=RunStatus.FAILED, next_run_at=next_at
             )

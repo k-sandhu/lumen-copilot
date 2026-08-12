@@ -49,6 +49,10 @@ from app.domain.scheduling import (
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink
 from app.services.schedules_service import SchedulesService
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -95,13 +99,19 @@ class _Ctx:
 
 
 @pytest_asyncio.fixture
-async def ctx() -> AsyncIterator[_Ctx]:
+async def ctx(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[_Ctx]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        info={"durable_audit_ledger": durable_audit_ledger},
+    )
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -199,6 +209,7 @@ def _service(
         owner_id=owner_id or ctx.alice_id,
         roles=roles,
         audit=AuditSink(AuditEventRepository(session, tenant_id or ctx.tenant_a)),
+        denials=denial_recorder_from_session(session, tenant_id or ctx.tenant_a),
         request_id="test-req",
         source_ip="127.0.0.1",
         projector=projector or _RecordingProjector(),
@@ -310,7 +321,7 @@ async def test_get_other_owner_same_tenant_is_404(ctx: _Ctx) -> None:
             await bob_service.get(created.id)
         denied = [
             event
-            for event in await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=20)
+            for event in session.info["durable_audit_ledger"].events
             if event.action == "permission.denied" and event.resource_id == str(created.id)
         ]
         assert len(denied) == 1

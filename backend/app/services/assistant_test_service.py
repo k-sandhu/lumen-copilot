@@ -52,7 +52,7 @@ from app.llm import LLMGateway
 from app.llm.context import ContextConfig
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.assistants_service import config_from_assistant
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.chat_runtime import ChatRuntime
 from app.services.models_service import ChatModelService, is_allowed_model
 from app.services.provider_models import build_model_route_resolver
@@ -122,6 +122,7 @@ class AssistantTestService:
         principal: Principal,
         gateway: LLMGateway,
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
         settings: Settings | None = None,
@@ -135,6 +136,7 @@ class AssistantTestService:
         self._is_admin = principal.has_role(Role.ADMIN)
         self._gateway = gateway
         self._audit = audit
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
         self._settings = settings or get_settings()
@@ -163,6 +165,15 @@ class AssistantTestService:
         assistant = await self._assistants.get(assistant_id)
         if assistant is None or not self._may_manage(assistant):
             # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action="assistant.test",
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Assistant not found.")
 
         config = assemble_run_config(config_from_assistant(assistant))
@@ -171,14 +182,10 @@ class AssistantTestService:
 
         sink = DebugTraceSink(stream_id=f"test:{assistant_id}")
         started = datetime.now(UTC)
-        await self._drive_runtime(
-            config=config, model=model, question=question, sink=sink
-        )
+        await self._drive_runtime(config=config, model=model, question=question, sink=sink)
         duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
 
-        await self._audit_tested(
-            assistant_id=assistant_id, model=model, ok=sink.finished_ok()
-        )
+        await self._audit_tested(assistant_id=assistant_id, model=model, ok=sink.finished_ok())
 
         return AssistantTestTrace(
             prompt=config.system_prompt,

@@ -37,6 +37,7 @@ from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 from app.storage.keys import assert_key_owned_by, build_key
@@ -335,6 +336,7 @@ async def test_member_is_forbidden_on_every_admin_path(
     client: AsyncClient,
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
     path: str,
 ) -> None:
     token = await _login(client, seeded.member_a_email)
@@ -350,10 +352,9 @@ async def test_member_is_forbidden_on_every_admin_path(
     # never from request input, and the metadata is a deliberately small
     # allow-list (no body, secret, content, or provider error can enter it).
     async with sessionmaker() as session:
-        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
         member = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.member_a_email)
     assert member is not None
-    denied = [event for event in events if event.action == "permission.denied"]
+    denied = [event for event in durable_audit_ledger.events if event.action == "permission.denied"]
     assert len(denied) == 1
     event = denied[0]
     assert event.actor_id == member.id
@@ -376,6 +377,7 @@ async def test_member_every_registered_admin_route_is_403_and_audited_once(
     client: AsyncClient,
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     """The router-level guard owns exactly one safe denial for every Admin route."""
     token = await _login(client, seeded.member_a_email)
@@ -404,12 +406,12 @@ async def test_member_every_registered_admin_route_is_403_and_audited_once(
         assert response.status_code == 403, (method, route_template, response.text)
         expected[request_id] = (method, route_template)
 
+    denials = [
+        event
+        for event in durable_audit_ledger.events
+        if event.action == "permission.denied" and event.request_id in expected
+    ]
     async with sessionmaker() as session:
-        denials = [
-            event
-            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=100)
-            if event.action == "permission.denied" and event.request_id in expected
-        ]
         member = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.member_a_email)
     assert member is not None
     assert len(denials) == len(routes)
@@ -561,8 +563,6 @@ async def test_patch_tenant_settings_is_tenant_scoped(client: AsyncClient, seede
 async def test_patch_tenant_settings_emits_audit_event(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    from app.db.repositories import AuditEventRepository
-
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
         "/api/v1/admin/settings", headers=_auth(token), json={"max_tool_turns": 15}
@@ -713,8 +713,6 @@ async def test_tool_policy_is_tenant_scoped(client: AsyncClient, seeded: _Seeded
 async def test_patch_tool_policy_emits_audit_event(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    from app.db.repositories import AuditEventRepository
-
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
         "/api/v1/admin/tool-policy",
@@ -938,7 +936,6 @@ async def test_patch_sandbox_policy_emits_audit_event(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """AC-N (#233, INV-6): the write emits exactly one audit event for this tenant."""
-    from app.db.repositories import AuditEventRepository
 
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
@@ -1062,7 +1059,6 @@ async def test_patch_autonomy_policy_emits_audit_event(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """AC-N (#218, INV-6): the write emits exactly one autonomy_cap.updated event."""
-    from app.db.repositories import AuditEventRepository
 
     token = await _login(client, seeded.admin_a_email)
     resp = await client.patch(
@@ -1241,8 +1237,6 @@ async def test_put_branding_is_tenant_scoped(client: AsyncClient, seeded: _Seede
 async def test_put_branding_emits_audit_event(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    from app.db.repositories import AuditEventRepository
-
     token = await _login(client, seeded.admin_a_email)
     resp = await client.put("/api/v1/admin/branding", headers=_auth(token), files=_logo_file())
     assert resp.status_code == 200, resp.text

@@ -22,10 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
-from app.core.errors import ValidationError
+from app.core.errors import NotFoundError, ValidationError
 from app.db import models as db_models
 from app.db.base import Base
 from app.db.repositories import (
+    AssistantRepository,
     AuditEventRepository,
     ChatSessionRepository,
     ChunkRepository,
@@ -41,9 +42,11 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import (
+    AutonomyLevel,
     GrantPrincipalType,
     GrantResourceType,
     GrantRole,
+    KnowledgeScope,
     LlmProviderStatus,
     MessageRole,
     Role,
@@ -52,6 +55,10 @@ from app.realtime.backplane import InMemoryBackplane
 from app.services.audit import AuditSink
 from app.services.chat_service import ChatService
 from app.services.provider_models import make_provider_model_id
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -74,7 +81,9 @@ class _World:
 
 
 @pytest_asyncio.fixture
-async def world_and_factory() -> AsyncIterator[tuple[_World, async_sessionmaker[AsyncSession]]]:
+async def world_and_factory(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[tuple[_World, async_sessionmaker[AsyncSession]]]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -83,7 +92,11 @@ async def world_and_factory() -> AsyncIterator[tuple[_World, async_sessionmaker[
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            info={"durable_audit_ledger": durable_audit_ledger},
+        )
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
             tb = await TenantRepository(seed).create(name="Globex")
@@ -116,7 +129,15 @@ def _settings() -> Settings:
 
 
 def _service(session: AsyncSession, *, tenant_id: uuid.UUID, owner_id: uuid.UUID) -> ChatService:
-    return ChatService(session, tenant_id=tenant_id, owner_id=owner_id, settings=_settings())
+    return ChatService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=owner_id,
+        settings=_settings(),
+        denials=denial_recorder_from_session(session, tenant_id),
+        request_id="test-chat",
+        source_ip="203.0.113.9",
+    )
 
 
 # --- create / model validation ---------------------------------------------
@@ -134,6 +155,49 @@ async def test_create_session_defaults_model(
     default = next(m.id for m in _settings().chat_model_registry if m.is_default)
     assert view.session.model == default
     assert view.message_count == 0
+
+
+async def test_create_session_private_and_unknown_assistants_each_audit_once(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    """R1-002: same-tenant private and unknown assistant ids share a safe 404."""
+    world, factory = world_and_factory
+    unknown_id = uuid.uuid4()
+    async with factory() as session:
+        private = await AssistantRepository(session, world.tenant_a).create(
+            owner_id=world.bob,
+            name="Bob's private assistant",
+            knowledge_scope=KnowledgeScope.empty(),
+            tool_allowlist=(),
+            autonomy_level=AutonomyLevel.SUGGEST,
+        )
+        await session.commit()
+        service = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        with pytest.raises(NotFoundError):
+            await service.create_session(title=None, model=None, assistant_id=private.id)
+        with pytest.raises(NotFoundError):
+            await service.create_session(title=None, model=None, assistant_id=unknown_id)
+
+        denied = session.info["durable_audit_ledger"].events
+        assert len(denied) == 2
+        assert {event.resource_id for event in denied} == {str(private.id), str(unknown_id)}
+        assert all(event.actor_id == world.alice for event in denied)
+        assert all(
+            event.metadata == {"attempted_action": "chat.session.create", "reason": "not_visible"}
+            for event in denied
+        )
+
+
+async def test_create_session_denial_propagates_audit_failure(
+    world_and_factory: tuple[_World, async_sessionmaker[AsyncSession]],
+) -> None:
+    world, factory = world_and_factory
+    async with factory() as session:
+        ledger = session.info["durable_audit_ledger"]
+        ledger.fail_with = RuntimeError("audit unavailable")
+        service = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.create_session(title=None, model=None, assistant_id=uuid.uuid4())
 
 
 async def test_create_session_unknown_model_is_422(
@@ -1097,6 +1161,7 @@ async def test_withholding_a_passage_is_audited(
             owner_id=world.alice,
             settings=_settings(),
             audit=AuditSink(AuditEventRepository(session, world.tenant_a)),
+            denials=denial_recorder_from_session(session, world.tenant_a),
             request_id="req-1",
             source_ip="203.0.113.10",
         )

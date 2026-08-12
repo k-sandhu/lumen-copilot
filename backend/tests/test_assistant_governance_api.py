@@ -34,9 +34,11 @@ from app.auth import hash_password
 from app.db import models
 from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
-from app.domain.entities import Role
+from app.domain.entities import CertificationState, Role
 from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
+from app.services.assistant_governance_service import AssistantGovernanceService
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_recorder
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -254,9 +256,7 @@ async def test_admin_deprecates_and_features_assistant(
 # --- AC-2: a disabled assistant cannot be started (negative, INV-8) ----------
 
 
-async def test_disabled_assistant_cannot_start_chat(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_disabled_assistant_cannot_start_chat(client: AsyncClient, seeded: _Seeded) -> None:
     owner_token = await _login(client, seeded.member_a_email)
     aid = await _create_published_assistant(client, owner_token, backup_owner=seeded.member2_a)
     admin_token = await _login(client, seeded.admin_a_email)
@@ -285,9 +285,7 @@ async def test_disabled_assistant_cannot_start_chat(
     assert denied.json()["code"] == "assistant_not_published"
 
 
-async def test_disabled_assistant_cannot_be_scheduled(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_disabled_assistant_cannot_be_scheduled(client: AsyncClient, seeded: _Seeded) -> None:
     owner_token = await _login(client, seeded.member_a_email)
     aid = await _create_published_assistant(client, owner_token, backup_owner=seeded.member2_a)
     admin_token = await _login(client, seeded.admin_a_email)
@@ -307,9 +305,7 @@ async def test_disabled_assistant_cannot_be_scheduled(
     assert sched.json()["code"] == "assistant_not_runnable"
 
 
-async def test_reenable_returns_assistant_to_draft(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_reenable_returns_assistant_to_draft(client: AsyncClient, seeded: _Seeded) -> None:
     owner_token = await _login(client, seeded.member_a_email)
     aid = await _create_published_assistant(client, owner_token, backup_owner=seeded.member2_a)
     admin_token = await _login(client, seeded.admin_a_email)
@@ -447,33 +443,111 @@ async def test_non_admin_list_and_bulk_are_403(client: AsyncClient, seeded: _See
 
 
 async def test_governance_mutation_unauthenticated_is_401(
-    client: AsyncClient, seeded: _Seeded
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     resp = await client.post(
         f"/api/v1/admin/assistants/{uuid.uuid4()}/certify",
         json={"certificationState": "certified"},
     )
     assert resp.status_code == 401
+    assert durable_audit_ledger.events == []
 
 
 # --- INV-1: cross-tenant assistant id → 404 (existence non-disclosure) -------
 
 
-async def test_cross_tenant_certify_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_cross_tenant_certify_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
     owner_token = await _login(client, seeded.member_a_email)
     aid = await _create_published_assistant(client, owner_token, backup_owner=seeded.member2_a)
     # Tenant B's admin must not be able to govern tenant A's assistant → 404.
     admin_b_token = await _login(client, seeded.admin_b_email)
     resp = await client.post(
         f"/api/v1/admin/assistants/{aid}/certify",
-        headers=_auth(admin_b_token),
+        headers={**_auth(admin_b_token), "x-request-id": "req-governance-denied"},
         json={"certificationState": "certified"},
     )
     assert resp.status_code == 404, resp.text
+    denied = [event for event in durable_audit_ledger.events if event.resource_id == aid]
+    assert len(denied) == 1
+    assert denied[0].actor_id == seeded.admin_b
+    assert denied[0].tenant_id == seeded.tenant_b
+    assert denied[0].request_id == "req-governance-denied"
+    assert denied[0].metadata == {
+        "attempted_action": "assistant.certify",
+        "reason": "not_visible",
+    }
 
     # And it never appears in tenant B's library (INV-1).
     listed_b = await client.get("/api/v1/admin/assistants", headers=_auth(admin_b_token))
     assert all(a["id"] != aid for a in listed_b.json()["items"])
+
+
+async def test_unknown_governance_ids_emit_one_action_specific_denial_each(
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """Every direct-id governance mutation owns one non-enumerating denial."""
+    admin_token = await _login(client, seeded.admin_a_email)
+    cases = (
+        ("certify", {"certificationState": "certified"}, "assistant.certify"),
+        ("feature", {"featured": True}, "assistant.feature"),
+        ("disable", {"disabled": True}, "assistant.disable"),
+        (
+            "transfer-ownership",
+            {"newOwner": str(seeded.member2_a)},
+            "assistant.transfer_ownership",
+        ),
+    )
+    expected: dict[str, tuple[str, str]] = {}
+    for ordinal, (suffix, payload, attempted_action) in enumerate(cases):
+        assistant_id = str(uuid.uuid4())
+        request_id = f"req-governance-unknown-{ordinal}"
+        response = await client.post(
+            f"/api/v1/admin/assistants/{assistant_id}/{suffix}",
+            headers={**_auth(admin_token), "x-request-id": request_id},
+            json=payload,
+        )
+        assert response.status_code == 404
+        expected[request_id] = (assistant_id, attempted_action)
+
+    denied = [event for event in durable_audit_ledger.events if event.request_id in expected]
+    assert len(denied) == len(cases)
+    for event in denied:
+        assistant_id, attempted_action = expected[event.request_id]
+        assert event.resource_id == assistant_id
+        assert event.tenant_id == seeded.tenant_a
+        assert event.actor_id == seeded.admin_a
+        assert event.metadata == {
+            "attempted_action": attempted_action,
+            "reason": "not_visible",
+        }
+
+
+async def test_governance_denial_propagates_audit_failure(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    durable_audit_ledger.fail_with = RuntimeError("audit unavailable")
+    async with sessionmaker() as session:
+        service = AssistantGovernanceService(
+            session,
+            tenant_id=seeded.tenant_a,
+            actor_id=seeded.admin_a,
+            denials=denial_recorder(durable_audit_ledger, session, seeded.tenant_a),
+            request_id="req-governance-audit-failure",
+            source_ip="203.0.113.10",
+        )
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.certify(uuid.uuid4(), state=CertificationState.CERTIFIED)
+    assert durable_audit_ledger.events == []
 
 
 # --- INV-6: governance mutations are audited --------------------------------

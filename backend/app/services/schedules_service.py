@@ -148,6 +148,7 @@ class SchedulesService:
         owner_id: UUID,
         roles: tuple[Role, ...],
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
         projector: ScheduleProjector | None = None,
@@ -161,7 +162,7 @@ class SchedulesService:
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
         self._audit = audit
-        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
         self._projector = projector or NullScheduleProjector()
@@ -502,6 +503,9 @@ class SchedulesService:
             tenant_id=self._tenant_id,
             owner_id=schedule.owner_id,
             assistant_id=schedule.assistant_id,
+            denials=self._denials,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
             inputs=schedule.input_params,
             trigger=RunTrigger.MANUAL,
             schedule_id=schedule.id,

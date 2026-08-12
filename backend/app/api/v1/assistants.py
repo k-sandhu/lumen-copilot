@@ -64,8 +64,6 @@ router = APIRouter(prefix="/assistants", tags=["assistants"])
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
 
 
-
-
 class KnowledgeScopeModel(BaseModel):
     """``#/components/schemas/KnowledgeScope`` — the narrowing retrieval filter."""
 
@@ -343,6 +341,7 @@ def _build_service(
         owner_id=principal.user_id,
         roles=principal.roles,
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )
@@ -559,9 +558,7 @@ async def publish_assistant(
         make_audit_sink=make_audit_sink,
         request=request,
     )
-    version = await service.publish(
-        assistant_id, notes=body.notes if body is not None else None
-    )
+    version = await service.publish(assistant_id, notes=body.notes if body is not None else None)
     await session.commit()
     return _to_version_response(version)
 
@@ -718,6 +715,7 @@ async def test_assistant(
         principal=principal,
         gateway=get_llm_gateway(),
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

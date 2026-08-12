@@ -41,6 +41,7 @@ from app.domain.entities import (
 from app.domain.scheduling import cadence_from_cron
 from app.services.assistants_service import config_from_assistant
 from app.tasks import scheduler
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -68,11 +69,13 @@ class _Ctx:
         sessionmaker: async_sessionmaker[AsyncSession],
         tenant_a: uuid.UUID,
         alice_id: uuid.UUID,
+        bob_id: uuid.UUID,
         assistant_id: uuid.UUID,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.tenant_a = tenant_a
         self.alice_id = alice_id
+        self.bob_id = bob_id
         self.assistant_id = assistant_id
 
 
@@ -105,18 +108,29 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
             )
             assistants = AssistantRepository(seed, ta.id)
             published = await assistants.create(
-                owner_id=alice.id, name="Weekly", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=bob.id,
+                owner_id=alice.id,
+                name="Weekly",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=bob.id,
             )
             await assistants.update(published.id, fields={"status": AssistantStatus.PUBLISHED})
             head = await assistants.get(published.id)
             await AssistantVersionRepository(seed, ta.id).add(
-                assistant_id=published.id, version=1, author_id=alice.id,
+                assistant_id=published.id,
+                version=1,
+                author_id=alice.id,
                 config=config_from_assistant(head),
             )
             await seed.commit()
-            c = _Ctx(sessionmaker=factory, tenant_a=ta.id, alice_id=alice.id,
-                     assistant_id=published.id)
+            c = _Ctx(
+                sessionmaker=factory,
+                tenant_a=ta.id,
+                alice_id=alice.id,
+                bob_id=bob.id,
+                assistant_id=published.id,
+            )
             c.enqueued = enqueued  # type: ignore[attr-defined]
             yield c
     finally:
@@ -276,3 +290,62 @@ async def test_fire_on_missing_schedule_is_noop(ctx: _Ctx) -> None:
         uuid.uuid4(), ctx.tenant_a, settings=_settings(), rate_limiter=_AlwaysLimiter()
     )
     assert outcome == "no_schedule"
+
+
+async def test_fire_non_owner_assistant_records_owner_on_behalf_of_system_denial(
+    ctx: _Ctx,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """R1-002: scheduler denials retain the owner actor and honest system origin."""
+    schedule_id = await _make_schedule(ctx)
+    async with ctx.sessionmaker() as session:
+        await AssistantRepository(session, ctx.tenant_a).update(
+            ctx.assistant_id,
+            fields={"owner_id": ctx.bob_id},
+        )
+        await session.commit()
+
+    outcome = await scheduler._dispatch_fire(
+        schedule_id,
+        ctx.tenant_a,
+        settings=_settings(),
+        rate_limiter=_AlwaysLimiter(),
+    )
+
+    assert outcome == "assistant_unavailable"
+    denied = [
+        event for event in durable_audit_ledger.events if event.resource_id == str(ctx.assistant_id)
+    ]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == ctx.tenant_a
+    assert denied[0].actor_id == ctx.alice_id
+    assert denied[0].request_id == f"schedule-fire:{schedule_id}"
+    assert denied[0].source_origin == "system"
+    assert denied[0].source_ip is None
+    assert denied[0].metadata == {
+        "attempted_action": "run.enqueue",
+        "reason": "not_visible",
+    }
+
+
+async def test_fire_propagates_durable_denial_sink_failure(
+    ctx: _Ctx,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """INV-6: the scheduler must not turn an unavailable audit sink into success."""
+    schedule_id = await _make_schedule(ctx)
+    async with ctx.sessionmaker() as session:
+        await AssistantRepository(session, ctx.tenant_a).update(
+            ctx.assistant_id,
+            fields={"owner_id": ctx.bob_id},
+        )
+        await session.commit()
+    durable_audit_ledger.fail_with = RuntimeError("audit unavailable")
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await scheduler._dispatch_fire(
+            schedule_id,
+            ctx.tenant_a,
+            settings=_settings(),
+            rate_limiter=_AlwaysLimiter(),
+        )

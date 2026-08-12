@@ -24,8 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import InvalidTokenError, Principal, verify_access_token
 from app.connectors.oauth import OAuthStateStore, RedisOAuthStateStore
 from app.core.config import Settings, get_settings
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.repositories import AuditEventRepository
-from app.db.session import get_sessionmaker
+from app.db.session import get_durable_audit_transactions, get_sessionmaker
 from app.db.tenant_context import bind_tenant
 from app.domain.entities import Role
 from app.llm import LLMGateway
@@ -58,7 +59,51 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
-def make_audit_sink_factory(session: DbSession) -> Callable[[UUID], AuditSink]:
+async def get_durable_audit_transactions_dep(
+    settings: SettingsDep,
+) -> DurableAuditTransactions:
+    """Process-owned denial provider, initialized serially on the serving loop.
+
+    Keeping this dependency async avoids FastAPI dispatching the lazy singleton
+    constructor to multiple worker threads on concurrent first requests.  There
+    is no await between the singleton check and engine construction, so only one
+    owned audit pool can be installed and later disposed.
+    """
+    return get_durable_audit_transactions(settings)
+
+
+DurableAuditTransactionsDep = Annotated[
+    DurableAuditTransactions,
+    Depends(get_durable_audit_transactions_dep),
+]
+
+
+class AuditSinkFactoryValue:
+    """Request-scoped factory for atomic action sinks and durable denials."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        transactions: DurableAuditTransactions,
+    ) -> None:
+        self._session = session
+        self._transactions = transactions
+
+    def __call__(self, tenant_id: UUID) -> AuditSink:
+        return AuditSink(AuditEventRepository(self._session, tenant_id))
+
+    def denials(self, tenant_id: UUID) -> PermissionDeniedRecorder:
+        return PermissionDeniedRecorder(
+            self._transactions,
+            tenant_id=tenant_id,
+            request_session=self._session,
+        )
+
+
+def make_audit_sink_factory(
+    session: DbSession,
+    transactions: DurableAuditTransactionsDep,
+) -> AuditSinkFactoryValue:
     """Yield a factory that builds a tenant-scoped audit sink (CC-8, spec 0004 §2.4).
 
     The product-audit sink (mission filter #4) must be tenant-scoped, but the
@@ -71,13 +116,10 @@ def make_audit_sink_factory(session: DbSession) -> Callable[[UUID], AuditSink]:
     dependency can close over it and call this directly.
     """
 
-    def _make(tenant_id: UUID) -> AuditSink:
-        return AuditSink(AuditEventRepository(session, tenant_id))
-
-    return _make
+    return AuditSinkFactoryValue(session, transactions)
 
 
-AuditSinkFactory = Annotated[Callable[[UUID], AuditSink], Depends(make_audit_sink_factory)]
+AuditSinkFactory = Annotated[AuditSinkFactoryValue, Depends(make_audit_sink_factory)]
 
 
 @lru_cache(maxsize=1)
@@ -260,7 +302,7 @@ def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
         request: Request,
         principal: CurrentUser,
         tenant_id: CurrentTenant,
-        session: DbSession,
+        make_audit_sink: AuditSinkFactory,
     ) -> Principal:
         if any(principal.has_role(r) for r in roles):
             return principal
@@ -270,7 +312,7 @@ def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
         # context for the denial without disclosing any protected resource.
         route = request.scope.get("route")
         route_path = str(getattr(route, "path", request.url.path))
-        denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        denials = make_audit_sink.denials(tenant_id)
         await denials.emit(
             actor_id=principal.user_id,
             resource_type="api_route",

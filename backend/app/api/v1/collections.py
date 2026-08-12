@@ -150,6 +150,7 @@ def _build_service(
         owner_id=principal.user_id,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         # The audit envelope requires a non-empty request_id / source_ip (spec
         # 0004 §2.4); fall back to a sentinel when the client supplied neither so
         # the create/delete write never fails closed on a missing correlation id.

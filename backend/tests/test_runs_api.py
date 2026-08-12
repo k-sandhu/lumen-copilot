@@ -66,6 +66,7 @@ from app.domain.entities import (
 )
 from app.main import create_app
 from app.services.assistants_service import config_from_assistant
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -393,7 +394,7 @@ async def test_cross_tenant_run_detail_is_404(client: AsyncClient, seeded: _Seed
 async def test_other_owner_run_detail_is_404(
     client: AsyncClient,
     seeded: _Seeded,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     """INV-2: a run owned by another user in the same tenant is 404, never 403."""
     token = await _login(client, seeded.alice_email)
@@ -402,12 +403,11 @@ async def test_other_owner_run_detail_is_404(
         headers={**_auth(token), "x-request-id": "req-run-private-get"},
     )
     assert resp.status_code == 404
-    async with sessionmaker() as session:
-        denials = [
-            event
-            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=20)
-            if event.resource_id == str(seeded.bob_run) and event.action == "permission.denied"
-        ]
+    denials = [
+        event
+        for event in durable_audit_ledger.events
+        if event.resource_id == str(seeded.bob_run) and event.action == "permission.denied"
+    ]
     assert len(denials) == 1
     assert denials[0].actor_id == seeded.alice_id
     assert denials[0].request_id == "req-run-private-get"

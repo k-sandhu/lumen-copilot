@@ -225,6 +225,7 @@ def _build_service(
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )
@@ -244,6 +245,7 @@ def _build_control_service(
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

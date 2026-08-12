@@ -28,10 +28,11 @@ from sqlalchemy.pool import StaticPool
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
 from app.db.base import Base
-from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
+from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -333,7 +334,7 @@ async def test_cross_tenant_get_is_404(client: AsyncClient, seeded: _Seeded) -> 
 async def test_non_owner_same_tenant_is_404(
     client: AsyncClient,
     seeded: _Seeded,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     alice_token = await _login(client, seeded.alice_email)
     created = await client.post(
@@ -353,12 +354,11 @@ async def test_non_owner_same_tenant_is_404(
         json={"name": "x"},
     )
     assert patch.status_code == 404
-    async with sessionmaker() as session:
-        denials = [
-            event
-            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=20)
-            if event.resource_id == aid and event.action == "permission.denied"
-        ]
+    denials = [
+        event
+        for event in durable_audit_ledger.events
+        if event.resource_id == aid and event.action == "permission.denied"
+    ]
     assert len(denials) == 2  # service owns the event; the router never duplicates it
     assert {event.request_id for event in denials} == {
         "req-assistant-private-get",
@@ -412,7 +412,9 @@ async def test_start_chat_from_draft_assistant_is_422(client: AsyncClient, seede
 
 
 async def test_start_chat_from_cross_tenant_assistant_is_404(
-    client: AsyncClient, seeded: _Seeded
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     alice_token = await _login(client, seeded.alice_email)
     created = await client.post(
@@ -425,9 +427,20 @@ async def test_start_chat_from_cross_tenant_assistant_is_404(
 
     carol_token = await _login(client, seeded.carol_email)
     resp = await client.post(
-        "/api/v1/chat/sessions", headers=_auth(carol_token), json={"assistant_id": aid}
+        "/api/v1/chat/sessions",
+        headers={**_auth(carol_token), "x-request-id": "req-chat-assistant-denied"},
+        json={"assistant_id": aid},
     )
     assert resp.status_code == 404
+    denied = [event for event in durable_audit_ledger.events if event.resource_id == aid]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == seeded.tenant_b
+    assert denied[0].actor_id == seeded.carol
+    assert denied[0].request_id == "req-chat-assistant-denied"
+    assert denied[0].metadata == {
+        "attempted_action": "chat.session.create",
+        "reason": "not_visible",
+    }
 
 
 # --- Read-only test/preview/debug harness (E6-5, issue #215) ----------------
@@ -546,6 +559,7 @@ async def test_test_cross_tenant_assistant_is_404(
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     """INV-1/INV-2 (negative): testing a foreign tenant's assistant → 404 (non-disclosure)."""
     _wire_test_harness(monkeypatch, sessionmaker)
@@ -557,9 +571,19 @@ async def test_test_cross_tenant_assistant_is_404(
 
     carol_token = await _login(client, seeded.carol_email)
     resp = await client.post(
-        f"/api/v1/assistants/{aid}/test", headers=_auth(carol_token), json={"input": "x"}
+        f"/api/v1/assistants/{aid}/test",
+        headers={**_auth(carol_token), "x-request-id": "req-assistant-test-denied"},
+        json={"input": "x"},
     )
     assert resp.status_code == 404
+    denied = [event for event in durable_audit_ledger.events if event.resource_id == aid]
+    assert len(denied) == 1
+    assert denied[0].actor_id == seeded.carol
+    assert denied[0].tenant_id == seeded.tenant_b
+    assert denied[0].metadata == {
+        "attempted_action": "assistant.test",
+        "reason": "not_visible",
+    }
 
 
 async def test_test_without_token_is_401(client: AsyncClient, seeded: _Seeded) -> None:

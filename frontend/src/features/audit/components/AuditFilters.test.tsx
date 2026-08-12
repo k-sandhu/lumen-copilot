@@ -76,6 +76,16 @@ describe('AuditFilters form', () => {
     expect(onChange).toHaveBeenCalled();
   });
 
+  it('offers collection.deleted and sends the exact contract value', async () => {
+    const { onChange } = setup();
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText(/event type/i), 'collection.deleted');
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...EMPTY_DRAFT,
+      event_type: 'collection.deleted',
+    });
+  });
+
   it('applies on submit', async () => {
     const { onApply } = setup();
     const user = userEvent.setup();
@@ -95,8 +105,8 @@ describe('AuditFilters form', () => {
         onClear={vi.fn()}
       />,
     );
-    expect(screen.getAllByRole('button', { name: /clear/i }).some((b) => !b.hasAttribute('disabled'))).toBe(
-      true,
-    );
+    expect(
+      screen.getAllByRole('button', { name: /clear/i }).some((b) => !b.hasAttribute('disabled')),
+    ).toBe(true);
   });
 });

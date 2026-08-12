@@ -33,7 +33,6 @@ from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
-    AuditEventRepository,
     TenantRepository,
     UserRepository,
 )
@@ -45,6 +44,7 @@ from app.domain.entities import (
 )
 from app.main import create_app
 from app.services.assistants_service import config_from_assistant
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -368,7 +368,7 @@ async def test_list_filters_by_enabled(client: AsyncClient, seeded: _Seeded) -> 
 async def test_get_cross_tenant_schedule_is_404(
     client: AsyncClient,
     seeded: _Seeded,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     alice = await _login(client, seeded.alice_email)
     created = await _create(client, alice, seeded)
@@ -378,12 +378,11 @@ async def test_get_cross_tenant_schedule_is_404(
         headers={**_auth(carol), "x-request-id": "req-schedule-cross-tenant"},
     )
     assert resp.status_code == 404  # existence non-disclosure (INV-1)
-    async with sessionmaker() as session:
-        denials = [
-            event
-            for event in await AuditEventRepository(session, seeded.tenant_b).list_recent(limit=20)
-            if event.resource_id == created["id"] and event.action == "permission.denied"
-        ]
+    denials = [
+        event
+        for event in durable_audit_ledger.events
+        if event.resource_id == created["id"] and event.action == "permission.denied"
+    ]
     assert len(denials) == 1
     assert denials[0].actor_id == seeded.carol_id
     assert denials[0].tenant_id == seeded.tenant_b

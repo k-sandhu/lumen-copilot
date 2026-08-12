@@ -183,6 +183,9 @@ async def enqueue_manual_run(
     tenant_id: UUID,
     owner_id: UUID,
     assistant_id: UUID,
+    denials: PermissionDeniedRecorder,
+    request_id: str,
+    source_ip: str,
     inputs: dict[str, object] | None = None,
     trigger: RunTrigger = RunTrigger.MANUAL,
     schedule_id: UUID | None = None,
@@ -206,6 +209,15 @@ async def enqueue_manual_run(
     assistant = await AssistantRepository(session, tenant_id).get(assistant_id)
     if assistant is None or assistant.owner_id != owner_id:
         # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
+        await denials.emit(
+            actor_id=owner_id,
+            resource_type="assistant",
+            resource_id=str(assistant_id),
+            attempted_action="run.enqueue",
+            reason="not_visible",
+            request_id=request_id,
+            source_ip=source_ip,
+        )
         raise NotFoundError("Assistant not found.")
     if assistant.status is not AssistantStatus.PUBLISHED:
         raise ValidationError(
@@ -717,6 +729,7 @@ class RunsReadService:
         tenant_id: UUID,
         owner_id: UUID,
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -729,7 +742,7 @@ class RunsReadService:
         self._owner_id = owner_id
         self._allow_set: AllowSet | None = None
         self._audit = audit
-        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -883,6 +896,7 @@ class RunsControlService:
         tenant_id: UUID,
         owner_id: UUID,
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -892,7 +906,7 @@ class RunsControlService:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._audit = audit
-        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
 

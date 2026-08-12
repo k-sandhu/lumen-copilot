@@ -51,6 +51,10 @@ from app.domain.entities import (
 from app.services.assistants_service import AssistantsService
 from app.services.audit import AuditSink
 from app.services.tools.mcp_bridge import namespaced_tool_name, slug_for_server
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -61,7 +65,9 @@ import app.db.models  # noqa: F401  isort: skip
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[AsyncSession]:
     """A fresh in-memory SQLite schema + session per test (offline-safe)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -71,7 +77,11 @@ async def session() -> AsyncIterator[AsyncSession]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            info={"durable_audit_ledger": durable_audit_ledger},
+        )
         async with factory() as sess:
             yield sess
     finally:
@@ -127,6 +137,7 @@ def _service(
         owner_id=owner_id,
         roles=roles,
         audit=audit,
+        denials=denial_recorder_from_session(session, tenant_id),
         request_id="req-test",
         source_ip="203.0.113.1",
     )
@@ -423,7 +434,7 @@ async def test_cross_tenant_get_is_404(session: AsyncSession, world: _World) -> 
         await carol_svc.get(assistant.id)
     denied = [
         event
-        for event in await AuditEventRepository(session, world.tenant_b).list_recent(limit=10)
+        for event in session.info["durable_audit_ledger"].events
         if event.action == "permission.denied"
     ]
     assert len(denied) == 1
@@ -452,7 +463,7 @@ async def test_non_owner_same_tenant_get_is_404(session: AsyncSession, world: _W
         await bob_svc.delete(assistant.id)
     denied = [
         event
-        for event in await AuditEventRepository(session, world.tenant_a).list_recent(limit=20)
+        for event in session.info["durable_audit_ledger"].events
         if event.action == "permission.denied" and event.resource_id == str(assistant.id)
     ]
     assert len(denied) == 3
@@ -484,7 +495,7 @@ async def test_denial_does_not_commit_the_callers_transaction(
     caller_commit.assert_not_awaited()
     denied = [
         event
-        for event in await AuditEventRepository(session, world.tenant_a).list_recent(limit=10)
+        for event in session.info["durable_audit_ledger"].events
         if event.action == "permission.denied" and event.resource_id == str(assistant.id)
     ]
     assert len(denied) == 1

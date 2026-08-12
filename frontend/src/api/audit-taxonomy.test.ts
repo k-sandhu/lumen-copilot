@@ -42,12 +42,14 @@ function contractActions(): string[] {
   return out;
 }
 
-/** The string literals of the `AuditEventType` union in the hand-authored mirror. */
+/** The string literals of the runtime tuple that derives `AuditEventType`. */
 function mirrorActions(): string[] {
   const source = readFileSync(TYPES, 'utf8');
-  const start = source.indexOf('export type AuditEventType =');
-  expect(start, 'AuditEventType is missing from types.ts').toBeGreaterThan(-1);
-  const block = source.slice(start, source.indexOf(';', start));
+  const start = source.indexOf('export const AUDIT_EVENT_TYPES =');
+  expect(start, 'AUDIT_EVENT_TYPES is missing from types.ts').toBeGreaterThan(-1);
+  const end = source.indexOf('] as const;', start);
+  expect(end, 'AUDIT_EVENT_TYPES is not an immutable tuple').toBeGreaterThan(start);
+  const block = source.slice(start, end);
   return [...block.matchAll(/'([^']+)'/g)]
     .map((m) => m[1])
     .filter((v): v is string => v !== undefined);

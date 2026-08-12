@@ -39,7 +39,7 @@ from app.core.logging import get_logger
 from app.db.repositories import CollectionRepository, DocumentRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Collection
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -134,6 +134,7 @@ class CollectionsService:
         owner_id: UUID,
         object_store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -144,6 +145,7 @@ class CollectionsService:
         self._owner_id = owner_id
         self._object_store = object_store
         self._audit = audit
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -216,6 +218,7 @@ class CollectionsService:
         """
         collection = await self._repo.get(collection_id)
         if collection is None or not self._owns(collection):
+            await self._record_not_visible(collection_id, attempted_action="collection.read")
             return None
         return await self._view(collection)
 
@@ -236,6 +239,7 @@ class CollectionsService:
         """
         existing = await self._repo.get(collection_id)
         if existing is None or not self._owns(existing):
+            await self._record_not_visible(collection_id, attempted_action="collection.update")
             return None
         updated = await self._repo.update(
             collection_id,
@@ -272,6 +276,7 @@ class CollectionsService:
         """
         existing = await self._repo.get(collection_id)
         if existing is None or not self._owns(existing):
+            await self._record_not_visible(collection_id, attempted_action="collection.delete")
             return False
         # Enumerate the documents the cascade will remove *before* deleting, so
         # each can be individually audited (spec 0004 §2.4 ``document.deleted``).
@@ -323,6 +328,18 @@ class CollectionsService:
                         error=type(exc).__name__,
                     )
         return True
+
+    async def _record_not_visible(self, collection_id: UUID, *, attempted_action: str) -> None:
+        """Emit exactly one safe INV-1/INV-2 collection denial."""
+        await self._denials.emit(
+            actor_id=self._owner_id,
+            resource_type="collection",
+            resource_id=str(collection_id),
+            attempted_action=attempted_action,
+            reason="not_visible",
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+        )
 
     def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
         """Schedule a search-index sync to fire after the request commits.

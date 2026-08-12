@@ -171,6 +171,7 @@ class AssistantsService:
         owner_id: UUID,
         roles: tuple[Role, ...],
         audit: AuditSink,
+        denials: PermissionDeniedRecorder,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -191,7 +192,7 @@ class AssistantsService:
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
         self._audit = audit
-        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
 

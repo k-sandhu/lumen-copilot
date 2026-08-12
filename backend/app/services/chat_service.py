@@ -67,7 +67,7 @@ from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.citation_access import enforce_citation_permissions
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
@@ -231,6 +231,7 @@ class ChatService:
         settings: Settings,
         sandbox_lifecycle: SandboxLifecycle | None = None,
         audit: AuditSink | None = None,
+        denials: PermissionDeniedRecorder | None = None,
         request_id: str = "unknown",
         source_ip: str = "unknown",
     ) -> None:
@@ -256,6 +257,7 @@ class ChatService:
         # Optional so the many tests that construct this service directly need no
         # change; a transcript read that redacts nothing emits nothing either way.
         self._audit = audit
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
         self._allow_set_cache: AllowSet | None = None
@@ -356,6 +358,17 @@ class ChatService:
             # Cross-tenant / non-owned / non-granted → 404 (INV-1/INV-2). Sharing
             # via grants is a follow-up (ADR-0011 §1); for now only the owner may
             # start a session from an assistant.
+            if self._denials is None:
+                raise RuntimeError("Assistant visibility denials require an audit recorder.")
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action="chat.session.create",
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Assistant not found.")
         if assistant.status is not AssistantStatus.PUBLISHED:
             raise ValidationError(

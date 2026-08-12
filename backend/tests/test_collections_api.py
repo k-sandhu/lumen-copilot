@@ -46,8 +46,11 @@ from app.db.repositories import (
 )
 from app.domain.entities import Role
 from app.main import create_app
+from app.services.audit import AuditSink
+from app.services.collections_service import CollectionsService
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_recorder
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -95,12 +98,14 @@ class _Seeded:
         *,
         tenant_a: uuid.UUID,
         tenant_b: uuid.UUID,
+        alice_id: uuid.UUID,
         alice_email: str,
         bob_email: str,
         carol_email: str,
     ) -> None:
         self.tenant_a = tenant_a
         self.tenant_b = tenant_b
+        self.alice_id = alice_id
         self.alice_email = alice_email  # tenant A owner under test
         self.bob_email = bob_email  # tenant A, *other* owner
         self.carol_email = carol_email  # tenant B owner
@@ -121,7 +126,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
             tenant_b = await TenantRepository(seed).create(name="Globex")
-            await UserRepository(seed, tenant_a.id).create(
+            alice = await UserRepository(seed, tenant_a.id).create(
                 email="alice@acme.test", password_hash=hash_password(_PASSWORD), roles=[Role.MEMBER]
             )
             await UserRepository(seed, tenant_a.id).create(
@@ -136,6 +141,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         factory.lumen_seeded = _Seeded(  # type: ignore[attr-defined]
             tenant_a=tenant_a.id,
             tenant_b=tenant_b.id,
+            alice_id=alice.id,
             alice_email="alice@acme.test",
             bob_email="bob@acme.test",
             carol_email="carol@globex.test",
@@ -467,15 +473,28 @@ async def test_failed_collection_delete_never_emits_allowed_deletion(
 
 
 async def test_get_other_owner_same_tenant_is_404(
-    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     # Bob's collection in the same tenant — Alice must get 404 (not 403).
     coll_id = await _seed_collection(
         sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email
     )
     token = await _login(client, seeded.alice_email)
-    resp = await client.get(f"/api/v1/collections/{coll_id}", headers=_auth(token))
+    resp = await client.get(
+        f"/api/v1/collections/{coll_id}",
+        headers={**_auth(token), "x-request-id": "req-collection-get-denied"},
+    )
     assert resp.status_code == 404
+    denied = [event for event in durable_audit_ledger.events if event.resource_id == str(coll_id)]
+    assert len(denied) == 1
+    assert denied[0].actor_id == seeded.alice_id
+    assert denied[0].metadata == {
+        "attempted_action": "collection.read",
+        "reason": "not_visible",
+    }
 
 
 async def test_get_cross_tenant_is_404(
@@ -503,14 +522,28 @@ async def test_patch_other_owner_is_404(
 
 
 async def test_delete_cross_tenant_is_404_and_leaves_row(
-    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     coll_id = await _seed_collection(
         sessionmaker, tenant_id=seeded.tenant_b, owner_email=seeded.carol_email
     )
     token = await _login(client, seeded.alice_email)
-    resp = await client.delete(f"/api/v1/collections/{coll_id}", headers=_auth(token))
+    resp = await client.delete(
+        f"/api/v1/collections/{coll_id}",
+        headers={**_auth(token), "x-request-id": "req-collection-delete-denied"},
+    )
     assert resp.status_code == 404
+    denied = [event for event in durable_audit_ledger.events if event.resource_id == str(coll_id)]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == seeded.tenant_a
+    assert denied[0].actor_id == seeded.alice_id
+    assert denied[0].metadata == {
+        "attempted_action": "collection.delete",
+        "reason": "not_visible",
+    }
     # The owning tenant's row is untouched.
     async with sessionmaker() as session:
         still = await CollectionRepository(session, seeded.tenant_b).get(coll_id)
@@ -521,6 +554,82 @@ async def test_get_unknown_id_is_404(client: AsyncClient, seeded: _Seeded) -> No
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/collections/{uuid.uuid4()}", headers=_auth(token))
     assert resp.status_code == 404
+
+
+async def test_collection_guard_inventory_audits_all_id_classes_and_actions_once(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """R1-002: read/update/delete × private/cross-tenant/unknown are complete."""
+    private_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
+    )
+    cross_tenant_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_b,
+        owner_email=seeded.carol_email,
+    )
+    unknown_id = uuid.uuid4()
+    token = await _login(client, seeded.alice_email)
+    expected: dict[str, tuple[str, str]] = {}
+    actions = (
+        ("GET", "collection.read", None),
+        ("PATCH", "collection.update", {"name": "hijack"}),
+        ("DELETE", "collection.delete", None),
+    )
+    for action_ordinal, (method, attempted_action, payload) in enumerate(actions):
+        for id_ordinal, collection_id in enumerate((private_id, cross_tenant_id, unknown_id)):
+            request_id = f"req-collection-inventory-{action_ordinal}-{id_ordinal}"
+            response = await client.request(
+                method,
+                f"/api/v1/collections/{collection_id}",
+                headers={**_auth(token), "x-request-id": request_id},
+                json=payload,
+            )
+            assert response.status_code == 404
+            expected[request_id] = (str(collection_id), attempted_action)
+
+    denied = [event for event in durable_audit_ledger.events if event.request_id in expected]
+    assert len(denied) == len(expected) == 9
+    for denial in denied:
+        collection_id, attempted_action = expected[denial.request_id]
+        assert denial.tenant_id == seeded.tenant_a
+        assert denial.actor_id == seeded.alice_id
+        assert denial.resource_id == collection_id
+        assert denial.metadata == {
+            "attempted_action": attempted_action,
+            "reason": "not_visible",
+        }
+
+
+async def test_collection_denial_propagates_audit_failure(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    durable_audit_ledger.fail_with = RuntimeError("audit unavailable")
+    async with sessionmaker() as session:
+        service = CollectionsService(
+            session,
+            tenant_id=seeded.tenant_a,
+            owner_id=seeded.alice_id,
+            object_store=FakeObjectStore(),
+            audit=AuditSink(AuditEventRepository(session, seeded.tenant_a)),
+            denials=denial_recorder(
+                durable_audit_ledger,
+                session,
+                seeded.tenant_a,
+            ),
+            request_id="req-collection-audit-failure",
+            source_ip="203.0.113.10",
+        )
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await service.get(uuid.uuid4())
+    assert durable_audit_ledger.events == []
 
 
 # --- Negative: authentication (INV-4 → 401) --------------------------------

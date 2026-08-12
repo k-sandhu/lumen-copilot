@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    AuditSinkFactory,
     BackplaneDep,
     CurrentTenant,
     CurrentUser,
@@ -418,6 +419,7 @@ def _build_service(
     tenant_id: CurrentTenant,
     settings: SettingsDep,
     request: Request | None = None,
+    make_audit_sink: AuditSinkFactory | None = None,
 ) -> ChatService:
     """Assemble the per-request chat service.
 
@@ -435,8 +437,11 @@ def _build_service(
     )
     audit_kwargs: dict[str, object] = {}
     if request is not None:
+        if make_audit_sink is None:
+            raise RuntimeError("Request-audited chat operations require the audit factory.")
         audit_kwargs = {
-            "audit": AuditSink(AuditEventRepository(session, tenant_id)),
+            "audit": make_audit_sink(tenant_id),
+            "denials": make_audit_sink.denials(tenant_id),
             # The envelope requires a non-empty request_id / source_ip (spec 0004
             # §2.4); fall back to a sentinel when the client supplied neither.
             "request_id": extract_request_id(request) or "unknown",
@@ -523,14 +528,21 @@ async def list_sessions(
 )
 async def create_session(
     body: ChatSessionCreate,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> ChatSessionResponse:
     """Create a chat session owned by the caller (unknown model → 422)."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     view = await service.create_session(
         title=body.title, model=body.model, assistant_id=body.assistant_id
@@ -762,6 +774,7 @@ async def list_messages(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> MessageListResponse:
@@ -772,6 +785,7 @@ async def list_messages(
         tenant_id=tenant_id,
         settings=settings,
         request=request,
+        make_audit_sink=make_audit_sink,
     )
     page = await service.list_messages(session_id, cursor=cursor, limit=limit)
     if page is None:

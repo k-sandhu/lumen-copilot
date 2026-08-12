@@ -56,6 +56,10 @@ from app.llm import LLMGateway
 from app.services import assistant_test_service
 from app.services.assistant_test_service import AssistantTestService
 from app.services.audit import AuditSink
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 # --- Fakes ------------------------------------------------------------------
 
@@ -203,13 +207,20 @@ class _Ctx:
 
 
 @pytest_asyncio.fixture
-async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
+async def ctx(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[_Ctx]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        info={"durable_audit_ledger": durable_audit_ledger},
+    )
     monkeypatch.setattr("app.db.session.get_sessionmaker", lambda settings=None: factory)
     try:
         async with engine.begin() as conn:
@@ -302,6 +313,7 @@ async def _service(
         principal=principal,
         gateway=LLMGateway.__new__(LLMGateway),  # never called (runtime is patched)
         audit=AuditSink(AuditEventRepository(session, principal.tenant_id)),
+        denials=denial_recorder_from_session(session, principal.tenant_id),
         request_id="test-req",
         source_ip="127.0.0.1",
         runtime_sessionmaker=ctx.sessionmaker,
@@ -423,6 +435,14 @@ async def test_cross_tenant_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.Monk
         service = await _service(ctx, session, principal=stranger)
         with pytest.raises(NotFoundError):
             await service.run_test(ctx.assistant_id, input_text="hi")
+        denied = session.info["durable_audit_ledger"].events
+        assert len(denied) == 1
+        assert denied[0].tenant_id == ctx.tenant_b
+        assert denied[0].actor_id == stranger.user_id
+        assert denied[0].metadata == {
+            "attempted_action": "assistant.test",
+            "reason": "not_visible",
+        }
 
 
 async def test_non_owner_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -433,6 +453,51 @@ async def test_non_owner_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyP
     async with ctx.sessionmaker() as session:
         service = await _service(ctx, session, principal=ctx.bob)  # bob does not own it
         with pytest.raises(NotFoundError):
+            await service.run_test(ctx.assistant_id, input_text="hi")
+        denied = session.info["durable_audit_ledger"].events
+        assert len(denied) == 1
+        assert denied[0].actor_id == ctx.bob.user_id
+
+
+async def test_unknown_assistant_is_404_with_exactly_one_safe_denial(
+    ctx: _Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown id is indistinguishable from private and has the same envelope."""
+    _patch_runtime(
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx)),
+    )
+    unknown_id = uuid.uuid4()
+    async with ctx.sessionmaker() as session:
+        service = await _service(ctx, session, principal=ctx.alice)
+        with pytest.raises(NotFoundError):
+            await service.run_test(unknown_id, input_text="hi")
+        denied = session.info["durable_audit_ledger"].events
+        assert len(denied) == 1
+        assert denied[0].resource_id == str(unknown_id)
+        assert denied[0].metadata == {
+            "attempted_action": "assistant.test",
+            "reason": "not_visible",
+        }
+
+
+async def test_test_denial_fails_closed_when_durable_audit_is_unavailable(
+    ctx: _Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-6: the API cannot return its 404 if the denial record did not persist."""
+    _patch_runtime(
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx)),
+    )
+    async with ctx.sessionmaker() as session:
+        ledger = session.info["durable_audit_ledger"]
+        ledger.fail_with = RuntimeError("audit unavailable")
+        service = await _service(ctx, session, principal=ctx.bob)
+        with pytest.raises(RuntimeError, match="audit unavailable"):
             await service.run_test(ctx.assistant_id, input_text="hi")
 
 
