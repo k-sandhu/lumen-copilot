@@ -28,12 +28,25 @@ import {
   clearAccessTokenIfPrincipalUnchanged,
   getAccessToken,
   getAccessTokenAuthSlot,
+  getAuthIntentGeneration,
+  getPrincipalGeneration,
+  getRefreshAuthSlot,
   isAuthIntentCurrent,
   reserveAuthIntent,
   setLoginAccessToken,
   setRefreshedAccessToken,
+  supersedeForExternalAuthSelection,
 } from './token';
-import { authSlotHeaders, createAuthSlot, subscribeActiveAuthSlot } from './authSlot';
+import {
+  authLoginSlotHeaders,
+  authSlotHeaders,
+  createAuthSlot,
+  getAuthRefreshRevision,
+  publishAuthRefresh,
+  subscribeActiveAuthSlot,
+  waitForAuthRefresh,
+  withAuthRefreshLock,
+} from './authSlot';
 import type { CurrentUser, LoginRequest, TokenResponse } from './types';
 
 /** Exchange email + password for an access token (AC-1). Stores the token. */
@@ -43,12 +56,18 @@ export async function login(body: LoginRequest, signal?: AbortSignal): Promise<T
   // not surprise-log-out an already authenticated principal, while older login
   // responses can neither commit a token nor overwrite the newer cookie slot.
   const authIntentGeneration = reserveAuthIntent();
+  cancelPendingLoginAttempts();
   const authSlot = createAuthSlot();
   const outgoing = {
     bearer: getAccessToken(),
     authSlot: getAccessTokenAuthSlot(),
   };
-  const attempt: LoginAttempt = { authIntentGeneration, authSlot, cancelled: false };
+  const attempt: LoginAttempt = {
+    authIntentGeneration,
+    authSlot,
+    cancelled: false,
+    controller: new AbortController(),
+  };
 
   // An already-cancelled caller has not dispatched credentials, so there is no
   // server session to clean up. It still reserved an intent above: a cancelled
@@ -58,7 +77,10 @@ export async function login(body: LoginRequest, signal?: AbortSignal): Promise<T
     throw signal.reason ?? new DOMException('Login cancelled', 'AbortError');
   }
 
-  const transport = settleLoginAttempt(attempt, body, outgoing);
+  pendingLoginAttempts.add(attempt);
+  const transport = settleLoginAttempt(attempt, body, outgoing).finally(() => {
+    pendingLoginAttempts.delete(attempt);
+  });
   return awaitWithCancellation(transport, signal, attempt);
 }
 
@@ -66,15 +88,53 @@ interface LoginAttempt {
   authIntentGeneration: number;
   authSlot: string;
   cancelled: boolean;
+  controller: AbortController;
+}
+
+const pendingLoginAttempts = new Set<LoginAttempt>();
+
+function cancelPendingLoginAttempts(): void {
+  for (const pending of pendingLoginAttempts) {
+    pending.cancelled = true;
+    pending.controller.abort(new DOMException('Login superseded', 'AbortError'));
+  }
 }
 
 // One browser profile has one selected refresh session. If another tab changes
 // that selector, this tab must not keep refreshing/resurrecting its former
 // principal: revoke its own family and preserve the newer tab's storage value.
-subscribeActiveAuthSlot((selectedSlot) => {
-  const localSlot = getAccessTokenAuthSlot();
-  const bearer = getAccessToken();
-  if (bearer && localSlot && selectedSlot !== localSlot) void logout(bearer);
+subscribeActiveAuthSlot((selectedSlot, previousSlot) => {
+  // Everything through here is synchronous: advance both epochs, abort login
+  // and refresh transports, and notify PrincipalLifecycle before stale A work
+  // can commit after B's storage event. Do this even when both the selected
+  // slot and the in-memory token are null: a clear event can race a pre-token
+  // bootstrap whose A slot is visible only in ``previousSlot``.
+  const outgoing = supersedeForExternalAuthSelection();
+  cancelPendingLoginAttempts();
+  const refreshBarrier = cancelInFlightRefresh();
+  // ``storage.oldValue`` is the browser-profile selection being replaced. The
+  // in-memory bearer can briefly lag it (e.g. a prior selector event is still
+  // bootstrapping), so never attach that bearer to a different slot id.
+  const obsoleteSlot = previousSlot ?? outgoing.authSlot;
+
+  void (async () => {
+    if (refreshBarrier) await refreshBarrier;
+    if (
+      outgoing.bearer &&
+      outgoing.authSlot &&
+      obsoleteSlot === outgoing.authSlot &&
+      obsoleteSlot !== selectedSlot
+    ) {
+      void revokeSession(outgoing.bearer, obsoleteSlot);
+    } else if (obsoleteSlot && obsoleteSlot !== selectedSlot) {
+      void abandonUnknownLoginSlot(obsoleteSlot);
+    }
+    if (selectedSlot) {
+      // The selecting tab writes storage only after its HTTP response installed
+      // the HttpOnly cookie. Re-bootstrap this document into that principal.
+      await refresh().catch(() => undefined);
+    }
+  })();
 });
 
 async function settleLoginAttempt(
@@ -96,7 +156,8 @@ async function settleLoginAttempt(
       method: 'POST',
       json: body,
       skipAuth: true,
-      headers: authSlotHeaders(attempt.authSlot),
+      headers: authLoginSlotHeaders(attempt.authSlot, outgoing.authSlot),
+      signal: attempt.controller.signal,
     });
   } catch (error) {
     // A transport failure can occur after Set-Cookie was accepted but before
@@ -134,6 +195,7 @@ function awaitWithCancellation(
   return new Promise<TokenResponse>((resolve, reject) => {
     const cancel = () => {
       attempt.cancelled = true;
+      attempt.controller.abort(signal.reason);
       if (isAuthIntentCurrent(attempt.authIntentGeneration)) reserveAuthIntent();
       reject(signal.reason ?? new DOMException('Login cancelled', 'AbortError'));
     };
@@ -192,23 +254,58 @@ async function performRefresh({
   authIntentGeneration: number;
   authSlot: string | null;
 }): Promise<TokenResponse> {
-  const token = await request<TokenResponse>('/auth/refresh', {
-    method: 'POST',
-    skipAuth: true,
-    signal,
-    headers: authSlotHeaders(authSlot),
+  return withAuthRefreshLock(authSlot, async () => {
+    let revision = getAuthRefreshRevision(authSlot);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (
+        signal.aborted ||
+        getPrincipalGeneration() !== principalGeneration ||
+        getAuthIntentGeneration() !== authIntentGeneration ||
+        getRefreshAuthSlot() !== authSlot
+      ) {
+        throw new ApiError('Principal changed before refresh', 401);
+      }
+
+      let token: TokenResponse;
+      try {
+        token = await request<TokenResponse>('/auth/refresh', {
+          method: 'POST',
+          skipAuth: true,
+          signal,
+          headers: authSlotHeaders(authSlot),
+        });
+      } catch (error) {
+        if (
+          !(error instanceof ApiError) ||
+          error.status !== 401 ||
+          error.problem?.code !== 'refresh_superseded' ||
+          attempt === 2
+        ) {
+          throw error;
+        }
+        // The row is still valid but another document rotated it. Wait for its
+        // cookie completion marker; if APIs/storage are unavailable, a bounded
+        // delay then retry remains safe and cannot authorize a stolen old token.
+        await waitForAuthRefresh(authSlot, revision);
+        revision = getAuthRefreshRevision(authSlot);
+        continue;
+      }
+
+      if (
+        !setRefreshedAccessToken(
+          token.access_token,
+          principalGeneration,
+          authIntentGeneration,
+          authSlot,
+        )
+      ) {
+        throw new Error('Refresh result discarded after a principal transition');
+      }
+      publishAuthRefresh(authSlot);
+      return token;
+    }
+    throw new ApiError('Refresh session remained superseded', 401);
   });
-  if (
-    !setRefreshedAccessToken(
-      token.access_token,
-      principalGeneration,
-      authIntentGeneration,
-      authSlot,
-    )
-  ) {
-    throw new Error('Refresh result discarded after a principal transition');
-  }
-  return token;
 }
 
 /** The authenticated principal (AC-2). */

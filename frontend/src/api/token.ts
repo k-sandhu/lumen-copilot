@@ -146,6 +146,24 @@ export function clearAccessTokenIfPrincipalUnchanged(
   return true;
 }
 
+/**
+ * Supersede every local auth operation after another document changed the
+ * browser-profile selector. The newer shared selector is deliberately left
+ * untouched; this document owns only its in-memory bearer/cache generations.
+ */
+export function supersedeForExternalAuthSelection(): {
+  bearer: string | null;
+  authSlot: string | null;
+} {
+  const outgoing = { bearer: accessToken, authSlot: accessTokenAuthSlot };
+  reserveAuthIntent();
+  principalGeneration += 1;
+  accessToken = null;
+  accessTokenAuthSlot = null;
+  notify('clear');
+  return outgoing;
+}
+
 /** Subscribe to token changes. Returns an unsubscribe function. */
 export function subscribeToken(listener: TokenListener): () => void {
   listeners.add(listener);

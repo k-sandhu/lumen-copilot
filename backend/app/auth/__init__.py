@@ -13,7 +13,7 @@ behind this same surface (the adapter rule); callers never change.
 
 from __future__ import annotations
 
-from app.auth.errors import InvalidCredentialsError, InvalidTokenError
+from app.auth.errors import InvalidCredentialsError, InvalidTokenError, RefreshSupersededError
 from app.auth.hashing import (
     dummy_verify,
     dummy_verify_async,
@@ -33,6 +33,7 @@ from app.auth.tokens import (
 __all__ = [
     "InvalidCredentialsError",
     "InvalidTokenError",
+    "RefreshSupersededError",
     "MintedAccessToken",
     "Principal",
     "dummy_verify",

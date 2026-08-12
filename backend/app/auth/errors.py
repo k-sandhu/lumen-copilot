@@ -32,3 +32,18 @@ class InvalidTokenError(UnauthorizedError):
 
     def __init__(self, detail: str = "Not authenticated.") -> None:
         super().__init__(detail)
+
+
+class RefreshSupersededError(UnauthorizedError):
+    """A slot exists but the presented one-time refresh secret is obsolete.
+
+    The response remains a fail-closed 401. The distinct code lets a browser
+    that shares the cookie jar across tabs wait for the winning rotation and
+    retry; it grants no authority and never changes or revokes the current row.
+    """
+
+    code = "refresh_superseded"
+    title = "Unauthorized"
+
+    def __init__(self) -> None:
+        super().__init__("Refresh session was superseded.")

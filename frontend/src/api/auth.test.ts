@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { login, refresh, getCurrentUser, installAuthRefresh, logout } from './auth';
 import { ApiError } from './client';
+import { setActiveAuthSlot } from './authSlot';
 import { getAccessToken, setAccessToken, clearAccessToken } from './token';
 
 function jsonResponse(body: unknown, status = 200, contentType = 'application/json'): Response {
@@ -18,6 +19,7 @@ function problemResponse(status: number, body: Partial<Record<string, unknown>> 
 }
 
 beforeEach(() => {
+  localStorage.clear();
   clearAccessToken();
   installAuthRefresh();
 });
@@ -153,9 +155,9 @@ describe('login', () => {
       await expect(older).rejects.toThrow(/discarded|superseded|abort/i);
       await expect(newer).resolves.toMatchObject({ access_token: 'jwt-persona-b' });
       expect(getAccessToken()).toBe('jwt-persona-b');
-      // Supersession is logical: the old transport is allowed to settle so its
-      // unique server-side session can be revoked instead of orphaned.
-      expect(calls[0]?.signal).toBeNull();
+      // Supersession aborts transport eagerly, while the generation guard and
+      // exact-slot cleanup still handle a server that accepted it already.
+      expect(calls[0]?.signal?.aborted).toBe(true);
       expect(calls[0]?.slot).toMatch(/^[0-9a-f-]{36}$/i);
       expect(calls[1]?.slot).toMatch(/^[0-9a-f-]{36}$/i);
       expect(calls[0]?.slot).not.toBe(calls[1]?.slot);
@@ -243,6 +245,60 @@ describe('login', () => {
       expect(requests.filter((path) => path.endsWith('/auth/logout'))).toHaveLength(1),
     );
     expect(getAccessToken()).toBeNull();
+  });
+
+  it('aborts pre-token login when another tab selects a newer principal (R3-002)', async () => {
+    const slotB = '22222222-2222-4222-8222-222222222222';
+    let resolveLogin!: (response: Response) => void;
+    let loginSignal: AbortSignal | null = null;
+    const refreshSlots: Array<string | null> = [];
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      const slot = new Headers(init?.headers).get('X-Lumen-Auth-Slot');
+      if (path.endsWith('/auth/login')) {
+        loginSignal = init?.signal ?? null;
+        return new Promise<Response>((resolve) => {
+          resolveLogin = resolve;
+        });
+      }
+      if (path.endsWith('/auth/refresh')) {
+        refreshSlots.push(slot);
+        if (slot === slotB) {
+          return Promise.resolve(
+            jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+          );
+        }
+        return Promise.resolve(problemResponse(401));
+      }
+      if (path.endsWith('/auth/logout')) return Promise.resolve(jsonResponse(null, 204));
+      return Promise.resolve(problemResponse(404));
+    });
+
+    const pendingA = login({
+      email: 'persona-a@example.test',
+      password: 'persona-a-password',
+    });
+    await vi.waitFor(() => expect(resolveLogin).toBeTypeOf('function'));
+
+    localStorage.setItem('lumen.active-auth-slot', slotB);
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: 'lumen.active-auth-slot',
+        oldValue: null,
+        newValue: slotB,
+        storageArea: localStorage,
+      }),
+    );
+    expect((loginSignal as unknown as AbortSignal).aborted).toBe(true);
+
+    resolveLogin(
+      jsonResponse({ access_token: 'jwt-persona-a', token_type: 'bearer', expires_in: 900 }),
+    );
+    await expect(pendingA).rejects.toThrow(/abort|discarded|superseded/i);
+    await vi.waitFor(() => expect(getAccessToken()).toBe('jwt-persona-b'));
+    expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slotB);
+    expect(refreshSlots).toContain(slotB);
   });
 
   it('does not dispatch credentials when the login signal is already aborted', async () => {
@@ -337,6 +393,51 @@ describe('refresh', () => {
     await expect(second).resolves.toMatchObject({ access_token: 'jwt-shared' });
     expect(getAccessToken()).toBe('jwt-shared');
   });
+
+  it('recovers a losing cross-tab rotation when Web Locks is unavailable (R3-001)', async () => {
+    const slot = 'abababab-abab-4bab-8bab-abababababab';
+    setActiveAuthSlot(slot);
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+    let calls = 0;
+    const revisionKey = 'lumen.auth-refresh-revision';
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        const oldValue = localStorage.getItem(revisionKey);
+        const newValue = JSON.stringify({
+          slot,
+          revision: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+        });
+        queueMicrotask(() => {
+          localStorage.setItem(revisionKey, newValue);
+          window.dispatchEvent(
+            new StorageEvent('storage', {
+              key: revisionKey,
+              oldValue,
+              newValue,
+              storageArea: localStorage,
+            }),
+          );
+        });
+        return Promise.resolve(problemResponse(401, { code: 'refresh_superseded' }));
+      }
+      return Promise.resolve(
+        jsonResponse({ access_token: 'jwt-after-winner', token_type: 'bearer', expires_in: 900 }),
+      );
+    });
+
+    try {
+      await expect(refresh()).resolves.toMatchObject({ access_token: 'jwt-after-winner' });
+    } finally {
+      if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
+    expect(calls).toBe(2);
+    expect(getAccessToken()).toBe('jwt-after-winner');
+    expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slot);
+  });
 });
 
 describe('getCurrentUser', () => {
@@ -361,7 +462,15 @@ describe('logout', () => {
   it('calls the endpoint and clears the in-memory token (AC-2)', async () => {
     const { setAccessToken } = await import('./token');
     setAccessToken('jwt-abc');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(null, 204));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/refresh')) {
+        return Promise.resolve(
+          jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+        );
+      }
+      return Promise.resolve(jsonResponse(null, 204));
+    });
 
     await logout();
 
@@ -385,7 +494,15 @@ describe('logout', () => {
     const slotA = '11111111-1111-4111-8111-111111111111';
     const slotB = '22222222-2222-4222-8222-222222222222';
     setAccessToken('jwt-persona-a', 'login', slotA);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(null, 204));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      if (path.endsWith('/auth/refresh')) {
+        return Promise.resolve(
+          jsonResponse({ access_token: 'jwt-persona-b', token_type: 'bearer', expires_in: 900 }),
+        );
+      }
+      return Promise.resolve(jsonResponse(null, 204));
+    });
 
     localStorage.setItem('lumen.active-auth-slot', slotB);
     window.dispatchEvent(
@@ -396,13 +513,61 @@ describe('logout', () => {
         storageArea: localStorage,
       }),
     );
-
-    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
-    const headers = new Headers((fetchSpy.mock.calls[0]?.[1] as RequestInit).headers);
-    expect(headers.get('Authorization')).toBe('Bearer jwt-persona-a');
-    expect(headers.get('X-Lumen-Auth-Slot')).toBe(slotA);
     expect(getAccessToken()).toBeNull();
     expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slotB);
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const logoutCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(String(input), window.location.origin).pathname.endsWith('/auth/logout'),
+    );
+    const headers = new Headers((logoutCall?.[1] as RequestInit).headers);
+    expect(headers.get('Authorization')).toBe('Bearer jwt-persona-a');
+    expect(headers.get('X-Lumen-Auth-Slot')).toBe(slotA);
+    await vi.waitFor(() => expect(getAccessToken()).toBe('jwt-persona-b'));
+  });
+
+  it('never attaches a lagging bearer to a newer previous-slot cleanup hint', async () => {
+    const slotA = '31313131-3131-4131-8131-313131313131';
+    const slotB = '32323232-3232-4232-8232-323232323232';
+    const slotC = '33333333-3333-4333-8333-333333333333';
+    setAccessToken('jwt-persona-a', 'login', slotA);
+    const calls: Array<{ path: string; bearer: string | null; slot: string | null }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const path = new URL(String(input), window.location.origin).pathname;
+      const headers = new Headers(init?.headers);
+      calls.push({
+        path,
+        bearer: headers.get('Authorization'),
+        slot: headers.get('X-Lumen-Auth-Slot'),
+      });
+      return Promise.resolve(problemResponse(401));
+    });
+
+    // Model storage advancing A -> B -> C before this tab completed B's
+    // bootstrap. Its bearer still belongs to A, while oldValue now names B.
+    localStorage.setItem('lumen.active-auth-slot', slotC);
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: 'lumen.active-auth-slot',
+        oldValue: slotB,
+        newValue: slotC,
+        storageArea: localStorage,
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(calls.some((call) => call.path.endsWith('/auth/refresh') && call.slot === slotB)).toBe(
+        true,
+      ),
+    );
+    expect(
+      calls.some(
+        (call) =>
+          call.path.endsWith('/auth/logout') &&
+          call.slot === slotB &&
+          call.bearer === 'Bearer jwt-persona-a',
+      ),
+    ).toBe(false);
   });
 
   it('settles A logout before dispatching B login so B cookie/token wins (R1-002/R1-005)', async () => {

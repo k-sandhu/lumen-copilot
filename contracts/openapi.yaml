@@ -116,6 +116,7 @@ paths:
       security: []
       parameters:
         - { $ref: "#/components/parameters/AuthSlot" }
+        - { $ref: "#/components/parameters/PreviousAuthSlot" }
       requestBody:
         required: true
         content:
@@ -3053,7 +3054,23 @@ components:
       schema:
         type: string
         format: uuid
-        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+        title: X-Lumen-Auth-Slot
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    PreviousAuthSlot:
+      name: X-Lumen-Previous-Auth-Slot
+      in: header
+      required: false
+      description: >
+        Canonical lowercase UUIDv4 of the browser profile's currently selected
+        slot during a slot-aware login. It grants no authority; after valid
+        credentials resolve the same tenant/user, admission preserves this row
+        while establishing the new slot and deterministically evicts older
+        excess sessions. Omit when no slot is selected or for legacy clients.
+      schema:
+        type: string
+        format: uuid
+        title: X-Lumen-Previous-Auth-Slot
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     Cursor:
       name: cursor
       in: query

@@ -95,15 +95,30 @@ authorized and audited under the bearer attached at dispatch. It is never
 reissued from the queued holder under the next principal.
 
 The single-flight refresh coordinator owns its `AbortController`, and bootstrap,
-401 retry, login, and logout all use the same generation-checked transition path.
+401 retry, login, logout, and cross-document selector events all reserve the
+same generation-checked transition path before the first bearer exists. A
+selector event therefore aborts a pre-token login/bootstrap as well as an
+authenticated request; no late A success or failure can commit after B.
 Browser cancellation remains transport cleanup only: it cannot retract response
 headers the browser already accepted. Cookie safety therefore lives at the wire
 and server boundary. Each login's strict UUIDv4 slot is both its unique cookie
-suffix and the stable `refresh_tokens.id`; refresh rotates that row under a lock,
-and bearer-authenticated logout revokes the tenant/user-bound row even if it
-captured a pre-rotation cookie. A late logout expires only its own cookie name,
-never a later login's. Legacy fixed-cookie logout revokes server-side without a
-shared `Delete-Cookie` header.
+suffix and the stable `refresh_tokens.id`; only its canonical lowercase,
+hyphenated wire spelling is accepted. Refresh locks by row ID before verifying
+the token hash, so a blocked same-slot loser receives `refresh_superseded` without
+revoking the winner or deleting its cookie. Tabs use Web Locks when available and
+a non-secret completion revision for a quick retry; both are optional and the
+server remains correct for lockless/crashed/non-SPA clients. Bearer-authenticated
+logout revokes the tenant/user-bound row even if it captured a pre-rotation
+cookie. A late logout expires only its own cookie name, never a later login's.
+Legacy fixed-cookie logout revokes server-side without a shared `Delete-Cookie`
+header.
+
+The server serializes slot admission per tenant/user and bounds active families
+with `AUTH_SESSION_MAX_ACTIVE` (default 8, validated 2–16). It protects the new
+and currently selected active slots, revokes expired/excess families oldest-first
+with a UUID tie-break, and returns deletion headers only for exact stale slot
+names owned by that resolved user. This keeps the normal HttpOnly namespace and
+request header comfortably bounded without making cookies visible to JS.
 
 Superseded/cancelled successful logins revoke their own slot, a successful switch
 retires the outgoing slot, and cross-tab selector changes revoke the old tab's

@@ -18,6 +18,11 @@ describe('auth-slot routing metadata', () => {
     expect(isAuthSlot(SLOT_A)).toBe(true);
     expect(isAuthSlot('11111111-1111-1111-8111-111111111111')).toBe(false);
     expect(isAuthSlot('not-a-uuid')).toBe(false);
+    expect(isAuthSlot('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe(true);
+    expect(isAuthSlot('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA')).toBe(false);
+    expect(isAuthSlot(SLOT_A.replaceAll('-', ''))).toBe(false);
+    expect(isAuthSlot(`{${SLOT_A}}`)).toBe(false);
+    expect(isAuthSlot(`urn:uuid:${SLOT_A}`)).toBe(false);
   });
 
   it('discards malformed persisted metadata instead of sending an arbitrary cookie name', () => {
