@@ -3853,6 +3853,7 @@ components:
         - code_run.finished
         - code_run.started
         - collection.created
+        - collection.deleted
         - document.deleted
         - document.downloaded
         - document.uploaded

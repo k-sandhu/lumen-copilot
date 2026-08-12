@@ -28,7 +28,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
 from app.db.base import Base
-from app.db.repositories import TenantRepository, UserRepository
+from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
@@ -330,7 +330,11 @@ async def test_cross_tenant_get_is_404(client: AsyncClient, seeded: _Seeded) -> 
     assert resp.status_code == 404
 
 
-async def test_non_owner_same_tenant_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_non_owner_same_tenant_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     alice_token = await _login(client, seeded.alice_email)
     created = await client.post(
         "/api/v1/assistants", headers=_auth(alice_token), json={"name": "Alice's"}
@@ -338,12 +342,30 @@ async def test_non_owner_same_tenant_is_404(client: AsyncClient, seeded: _Seeded
     aid = created.json()["id"]
 
     bob_token = await _login(client, seeded.bob_email)
-    resp = await client.get(f"/api/v1/assistants/{aid}", headers=_auth(bob_token))
+    resp = await client.get(
+        f"/api/v1/assistants/{aid}",
+        headers={**_auth(bob_token), "x-request-id": "req-assistant-private-get"},
+    )
     assert resp.status_code == 404
     patch = await client.patch(
-        f"/api/v1/assistants/{aid}", headers=_auth(bob_token), json={"name": "x"}
+        f"/api/v1/assistants/{aid}",
+        headers={**_auth(bob_token), "x-request-id": "req-assistant-private-patch"},
+        json={"name": "x"},
     )
     assert patch.status_code == 404
+    async with sessionmaker() as session:
+        denials = [
+            event
+            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=20)
+            if event.resource_id == aid and event.action == "permission.denied"
+        ]
+    assert len(denials) == 2  # service owns the event; the router never duplicates it
+    assert {event.request_id for event in denials} == {
+        "req-assistant-private-get",
+        "req-assistant-private-patch",
+    }
+    assert all(event.actor_id == seeded.bob for event in denials)
+    assert all(event.outcome.value == "denied" for event in denials)
 
 
 async def test_list_without_token_is_401(client: AsyncClient) -> None:

@@ -33,6 +33,7 @@ from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
+    AuditEventRepository,
     TenantRepository,
     UserRepository,
 )
@@ -55,10 +56,20 @@ class _Seeded:
     def __init__(
         self,
         *,
+        tenant_a: uuid.UUID,
+        tenant_b: uuid.UUID,
+        alice_id: uuid.UUID,
+        bob_id: uuid.UUID,
+        carol_id: uuid.UUID,
         assistant_id: uuid.UUID,
         disabled_assistant_id: uuid.UUID,
         carol_assistant_id: uuid.UUID,
     ) -> None:
+        self.tenant_a = tenant_a
+        self.tenant_b = tenant_b
+        self.alice_id = alice_id
+        self.bob_id = bob_id
+        self.carol_id = carol_id
         self.alice_email = "alice@acme.test"
         self.bob_email = "bob@acme.test"
         self.carol_email = "carol@globex.test"
@@ -99,35 +110,56 @@ async def seeded(sessionmaker: async_sessionmaker[AsyncSession]) -> _Seeded:
         assistants = AssistantRepository(seed, ta.id)
         versions = AssistantVersionRepository(seed, ta.id)
         published = await assistants.create(
-            owner_id=alice.id, name="Weekly", knowledge_scope=KnowledgeScope.empty(),
-            tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=bob.id,
+            owner_id=alice.id,
+            name="Weekly",
+            knowledge_scope=KnowledgeScope.empty(),
+            tool_allowlist=(),
+            autonomy_level=AutonomyLevel.SUGGEST,
+            backup_owner_id=bob.id,
         )
         await assistants.update(published.id, fields={"status": AssistantStatus.PUBLISHED})
         head = await assistants.get(published.id)
         await versions.add(
-            assistant_id=published.id, version=1, author_id=alice.id,
+            assistant_id=published.id,
+            version=1,
+            author_id=alice.id,
             config=config_from_assistant(head),
         )
         disabled = await assistants.create(
-            owner_id=alice.id, name="Retired", knowledge_scope=KnowledgeScope.empty(),
-            tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=bob.id,
+            owner_id=alice.id,
+            name="Retired",
+            knowledge_scope=KnowledgeScope.empty(),
+            tool_allowlist=(),
+            autonomy_level=AutonomyLevel.SUGGEST,
+            backup_owner_id=bob.id,
         )
         await assistants.update(disabled.id, fields={"status": AssistantStatus.DISABLED})
 
         assistants_b = AssistantRepository(seed, tb.id)
         versions_b = AssistantVersionRepository(seed, tb.id)
         carol_ast = await assistants_b.create(
-            owner_id=carol.id, name="Globex", knowledge_scope=KnowledgeScope.empty(),
-            tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=None,
+            owner_id=carol.id,
+            name="Globex",
+            knowledge_scope=KnowledgeScope.empty(),
+            tool_allowlist=(),
+            autonomy_level=AutonomyLevel.SUGGEST,
+            backup_owner_id=None,
         )
         await assistants_b.update(carol_ast.id, fields={"status": AssistantStatus.PUBLISHED})
         head_b = await assistants_b.get(carol_ast.id)
         await versions_b.add(
-            assistant_id=carol_ast.id, version=1, author_id=carol.id,
+            assistant_id=carol_ast.id,
+            version=1,
+            author_id=carol.id,
             config=config_from_assistant(head_b),
         )
         await seed.commit()
         return _Seeded(
+            tenant_a=ta.id,
+            tenant_b=tb.id,
+            alice_id=alice.id,
+            bob_id=bob.id,
+            carol_id=carol.id,
             assistant_id=published.id,
             disabled_assistant_id=disabled.id,
             carol_assistant_id=carol_ast.id,
@@ -202,12 +234,12 @@ async def test_create_schedule_returns_next_run(client: AsyncClient, seeded: _Se
     assert body["cadence"] == {"cron": "0 8 * * *"}
 
 
-async def test_create_structured_cadence_round_trips(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_create_structured_cadence_round_trips(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     body = await _create(
-        client, token, seeded,
+        client,
+        token,
+        seeded,
         cadence={"structured": {"every": "week", "at": "09:30", "day_of_week": 1}},
     )
     assert body["cadence"]["structured"]["every"] == "week"
@@ -217,9 +249,13 @@ async def test_create_structured_cadence_round_trips(
 async def test_create_bad_cron_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
-        "/api/v1/schedules", headers=_auth(token),
-        json={"assistant_id": str(seeded.assistant_id), "cadence": {"cron": "not a cron"},
-              "timezone": _NY},
+        "/api/v1/schedules",
+        headers=_auth(token),
+        json={
+            "assistant_id": str(seeded.assistant_id),
+            "cadence": {"cron": "not a cron"},
+            "timezone": _NY,
+        },
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["code"] == "invalid_cron"
@@ -228,9 +264,13 @@ async def test_create_bad_cron_is_422(client: AsyncClient, seeded: _Seeded) -> N
 async def test_create_unknown_timezone_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
-        "/api/v1/schedules", headers=_auth(token),
-        json={"assistant_id": str(seeded.assistant_id), "cadence": {"cron": "0 8 * * *"},
-              "timezone": "Not/AZone"},
+        "/api/v1/schedules",
+        headers=_auth(token),
+        json={
+            "assistant_id": str(seeded.assistant_id),
+            "cadence": {"cron": "0 8 * * *"},
+            "timezone": "Not/AZone",
+        },
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["code"] == "invalid_timezone"
@@ -240,22 +280,28 @@ async def test_create_disabled_assistant_is_422(client: AsyncClient, seeded: _Se
     """Scheduling a disabled assistant is rejected 422 (the mandatory negative)."""
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
-        "/api/v1/schedules", headers=_auth(token),
-        json={"assistant_id": str(seeded.disabled_assistant_id), "cadence": {"cron": "0 8 * * *"},
-              "timezone": _NY},
+        "/api/v1/schedules",
+        headers=_auth(token),
+        json={
+            "assistant_id": str(seeded.disabled_assistant_id),
+            "cadence": {"cron": "0 8 * * *"},
+            "timezone": _NY,
+        },
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["code"] == "assistant_not_runnable"
 
 
-async def test_create_cross_tenant_assistant_is_404(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_create_cross_tenant_assistant_is_404(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
-        "/api/v1/schedules", headers=_auth(token),
-        json={"assistant_id": str(seeded.carol_assistant_id), "cadence": {"cron": "0 8 * * *"},
-              "timezone": _NY},
+        "/api/v1/schedules",
+        headers=_auth(token),
+        json={
+            "assistant_id": str(seeded.carol_assistant_id),
+            "cadence": {"cron": "0 8 * * *"},
+            "timezone": _NY,
+        },
     )
     assert resp.status_code == 404, resp.text
 
@@ -265,10 +311,13 @@ async def test_create_cadence_requires_exactly_one_form(
 ) -> None:
     token = await _login(client, seeded.alice_email)
     resp = await client.post(
-        "/api/v1/schedules", headers=_auth(token),
-        json={"assistant_id": str(seeded.assistant_id),
-              "cadence": {"cron": "0 8 * * *", "structured": {"every": "day", "at": "08:00"}},
-              "timezone": _NY},
+        "/api/v1/schedules",
+        headers=_auth(token),
+        json={
+            "assistant_id": str(seeded.assistant_id),
+            "cadence": {"cron": "0 8 * * *", "structured": {"every": "day", "at": "08:00"}},
+            "timezone": _NY,
+        },
     )
     assert resp.status_code == 422  # both forms present → contract oneOf violation
 
@@ -284,8 +333,11 @@ async def test_list_requires_auth(client: AsyncClient) -> None:
 async def test_create_requires_auth(client: AsyncClient, seeded: _Seeded) -> None:
     resp = await client.post(
         "/api/v1/schedules",
-        json={"assistant_id": str(seeded.assistant_id), "cadence": {"cron": "0 8 * * *"},
-              "timezone": _NY},
+        json={
+            "assistant_id": str(seeded.assistant_id),
+            "cadence": {"cron": "0 8 * * *"},
+            "timezone": _NY,
+        },
     )
     assert resp.status_code == 401
 
@@ -293,9 +345,7 @@ async def test_create_requires_auth(client: AsyncClient, seeded: _Seeded) -> Non
 # --- list / get / cross-tenant ---------------------------------------------
 
 
-async def test_list_returns_only_callers_schedules(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_list_returns_only_callers_schedules(client: AsyncClient, seeded: _Seeded) -> None:
     alice = await _login(client, seeded.alice_email)
     created = await _create(client, alice, seeded)
     bob = await _login(client, seeded.bob_email)
@@ -315,12 +365,30 @@ async def test_list_filters_by_enabled(client: AsyncClient, seeded: _Seeded) -> 
     assert off["id"] not in ids
 
 
-async def test_get_cross_tenant_schedule_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_get_cross_tenant_schedule_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     alice = await _login(client, seeded.alice_email)
     created = await _create(client, alice, seeded)
     carol = await _login(client, seeded.carol_email)
-    resp = await client.get(f"/api/v1/schedules/{created['id']}", headers=_auth(carol))
+    resp = await client.get(
+        f"/api/v1/schedules/{created['id']}",
+        headers={**_auth(carol), "x-request-id": "req-schedule-cross-tenant"},
+    )
     assert resp.status_code == 404  # existence non-disclosure (INV-1)
+    async with sessionmaker() as session:
+        denials = [
+            event
+            for event in await AuditEventRepository(session, seeded.tenant_b).list_recent(limit=20)
+            if event.resource_id == created["id"] and event.action == "permission.denied"
+        ]
+    assert len(denials) == 1
+    assert denials[0].actor_id == seeded.carol_id
+    assert denials[0].tenant_id == seeded.tenant_b
+    assert denials[0].request_id == "req-schedule-cross-tenant"
+    assert denials[0].outcome.value == "denied"
 
 
 async def test_get_unknown_schedule_is_404(client: AsyncClient, seeded: _Seeded) -> None:
@@ -336,7 +404,8 @@ async def test_patch_updates_cadence(client: AsyncClient, seeded: _Seeded) -> No
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded)
     resp = await client.patch(
-        f"/api/v1/schedules/{created['id']}", headers=_auth(token),
+        f"/api/v1/schedules/{created['id']}",
+        headers=_auth(token),
         json={"cadence": {"cron": "30 6 * * *"}},
     )
     assert resp.status_code == 200, resp.text
@@ -346,9 +415,7 @@ async def test_patch_updates_cadence(client: AsyncClient, seeded: _Seeded) -> No
 async def test_patch_empty_body_is_422(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded)
-    resp = await client.patch(
-        f"/api/v1/schedules/{created['id']}", headers=_auth(token), json={}
-    )
+    resp = await client.patch(f"/api/v1/schedules/{created['id']}", headers=_auth(token), json={})
     assert resp.status_code == 422  # minProperties: 1
 
 
@@ -356,7 +423,8 @@ async def test_patch_bad_timezone_is_422(client: AsyncClient, seeded: _Seeded) -
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded)
     resp = await client.patch(
-        f"/api/v1/schedules/{created['id']}", headers=_auth(token),
+        f"/api/v1/schedules/{created['id']}",
+        headers=_auth(token),
         json={"timezone": "Also/Bogus"},
     )
     assert resp.status_code == 422
@@ -381,16 +449,12 @@ async def test_delete_then_get_is_404(client: AsyncClient, seeded: _Seeded) -> N
 async def test_pause_then_resume(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded)
-    paused = await client.post(
-        f"/api/v1/schedules/{created['id']}/pause", headers=_auth(token)
-    )
+    paused = await client.post(f"/api/v1/schedules/{created['id']}/pause", headers=_auth(token))
     assert paused.status_code == 200
     assert paused.json()["enabled"] is False
     assert paused.json().get("next_run_at") is None
 
-    resumed = await client.post(
-        f"/api/v1/schedules/{created['id']}/resume", headers=_auth(token)
-    )
+    resumed = await client.post(f"/api/v1/schedules/{created['id']}/resume", headers=_auth(token))
     assert resumed.status_code == 200
     assert resumed.json()["enabled"] is True
     assert resumed.json()["next_run_at"] is not None
@@ -410,9 +474,7 @@ async def test_pause_is_idempotent(client: AsyncClient, seeded: _Seeded) -> None
 async def test_run_now_returns_202_and_run_id(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded)
-    resp = await client.post(
-        f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(token)
-    )
+    resp = await client.post(f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(token))
     assert resp.status_code == 202, resp.text
     run_id = resp.json()["run_id"]
     # The run is now visible in the caller's run inbox.
@@ -424,9 +486,7 @@ async def test_run_now_returns_202_and_run_id(client: AsyncClient, seeded: _Seed
 async def test_run_now_on_paused_schedule_is_409(client: AsyncClient, seeded: _Seeded) -> None:
     token = await _login(client, seeded.alice_email)
     created = await _create(client, token, seeded, enabled=False)
-    resp = await client.post(
-        f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(token)
-    )
+    resp = await client.post(f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(token))
     assert resp.status_code == 409, resp.text
     assert resp.json()["code"] == "schedule_paused"
 
@@ -435,7 +495,5 @@ async def test_run_now_cross_tenant_is_404(client: AsyncClient, seeded: _Seeded)
     alice = await _login(client, seeded.alice_email)
     created = await _create(client, alice, seeded)
     carol = await _login(client, seeded.carol_email)
-    resp = await client.post(
-        f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(carol)
-    )
+    resp = await client.post(f"/api/v1/schedules/{created['id']}/run-now", headers=_auth(carol))
     assert resp.status_code == 404

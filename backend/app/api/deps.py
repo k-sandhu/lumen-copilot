@@ -11,7 +11,7 @@ client-supplied tenant (spec 0004 §2.3).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
@@ -30,7 +30,7 @@ from app.db.tenant_context import bind_tenant
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.realtime.backplane import Backplane, RedisBackplane
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.auth_service import require_role
 from app.storage import ObjectStore
 
@@ -243,7 +243,7 @@ async def current_tenant(principal: CurrentUser, session: DbSession) -> UUID:
 CurrentTenant = Annotated[UUID, Depends(current_tenant)]
 
 
-def require_roles(*roles: Role) -> Callable[[Principal], Principal]:
+def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
     """Build a dependency that admits only principals holding one of ``roles``.
 
     The reusable RBAC seam for role-gated routes (INV-5): a wave-2 admin route
@@ -253,9 +253,34 @@ def require_roles(*roles: Role) -> Callable[[Principal], Principal]:
     from the 401 an unauthenticated caller gets.
     """
 
-    def _dependency(principal: CurrentUser) -> Principal:
+    if not roles:
+        raise ValueError("require_roles needs at least one role")
+
+    async def _dependency(
+        request: Request,
+        principal: CurrentUser,
+        tenant_id: CurrentTenant,
+        session: DbSession,
+    ) -> Principal:
         if any(principal.has_role(r) for r in roles):
             return principal
+        # This dependency runs only after `current_user` + `current_tenant`, so
+        # attribution is token-bound and RLS is armed. The matched route template
+        # is server-owned (unlike a body or query parameter), making it safe causal
+        # context for the denial without disclosing any protected resource.
+        route = request.scope.get("route")
+        route_path = str(getattr(route, "path", request.url.path))
+        denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+        await denials.emit(
+            actor_id=principal.user_id,
+            resource_type="api_route",
+            resource_id=route_path,
+            attempted_action=f"{request.method.upper()} {route_path}",
+            reason="missing_required_role",
+            request_id=extract_request_id(request) or "unknown",
+            source_ip=request.client.host if request.client else "unknown",
+            required_roles=tuple(role.value for role in roles),
+        )
         # Reuse the single-role assertion to raise the typed 403; pass the first
         # required role for the message (the set is small and homogeneous here).
         require_role(principal, roles[0])
@@ -270,4 +295,8 @@ def extract_request_id(request: Request) -> str | None:
     Used by routers to thread the correlation id into audit events without the
     service reaching into the request object (boundary discipline).
     """
-    return request.headers.get("x-request-id") or request.headers.get("X-Request-ID")
+    return (
+        request.headers.get("x-request-id")
+        or request.headers.get("X-Request-ID")
+        or getattr(request.state, "request_id", None)
+    )

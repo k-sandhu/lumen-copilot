@@ -390,11 +390,28 @@ async def test_cross_tenant_run_detail_is_404(client: AsyncClient, seeded: _Seed
     assert resp.status_code == 404
 
 
-async def test_other_owner_run_detail_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_other_owner_run_detail_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     """INV-2: a run owned by another user in the same tenant is 404, never 403."""
     token = await _login(client, seeded.alice_email)
-    resp = await client.get(f"/api/v1/runs/{seeded.bob_run}", headers=_auth(token))
+    resp = await client.get(
+        f"/api/v1/runs/{seeded.bob_run}",
+        headers={**_auth(token), "x-request-id": "req-run-private-get"},
+    )
     assert resp.status_code == 404
+    async with sessionmaker() as session:
+        denials = [
+            event
+            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=20)
+            if event.resource_id == str(seeded.bob_run) and event.action == "permission.denied"
+        ]
+    assert len(denials) == 1
+    assert denials[0].actor_id == seeded.alice_id
+    assert denials[0].request_id == "req-run-private-get"
+    assert denials[0].outcome.value == "denied"
 
 
 async def test_unknown_run_id_is_404(client: AsyncClient, seeded: _Seeded) -> None:

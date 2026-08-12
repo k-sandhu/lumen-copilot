@@ -539,7 +539,7 @@ export interface SearchQuery {
 // --- Audit (contracts/openapi.yaml §audit, M2 #80) ---
 
 /**
- * Audit event taxonomy (spec 0004 §2.4) — all 84 actions the backend can
+ * Audit event taxonomy (spec 0004 §2.4) — all 85 actions the backend can
  * emit. This had drifted to 14 (#545), so most emitted actions were untypeable
  * here and unfilterable through `GET /audit?type=`.
  *
@@ -576,6 +576,7 @@ export type AuditEventType =
   | 'code_run.finished'
   | 'code_run.started'
   | 'collection.created'
+  | 'collection.deleted'
   | 'document.deleted'
   | 'document.downloaded'
   | 'document.uploaded'

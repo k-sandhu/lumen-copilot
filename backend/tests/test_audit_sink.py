@@ -29,7 +29,7 @@ from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor, AuditEnvelopeError
 from app.domain.entities import AuditOutcome
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder, emit_permission_denied
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -156,6 +156,67 @@ async def test_emit_accepts_taxonomy_action_string(
         source_ip="203.0.113.7",
     )
     assert event.action == "permission.denied"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_origin"),
+    [("system", "system"), ("unknown", "unknown")],
+)
+async def test_permission_denial_helper_preserves_non_client_origin_and_safe_metadata(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    source: str,
+    expected_origin: str,
+) -> None:
+    """Background/socket-origin denials use the same closed safe envelope."""
+    actor_id = uuid.uuid4()
+    resource_id = str(uuid.uuid4())
+    event = await emit_permission_denied(
+        _sink(session, tenant_id),
+        actor_id=actor_id,
+        resource_type="assistant",
+        resource_id=resource_id,
+        attempted_action="assistant.read",
+        reason="not_visible",
+        request_id="req-denied",
+        source_ip=source,
+    )
+
+    assert event.actor_id == actor_id
+    assert event.outcome is AuditOutcome.DENIED
+    assert event.source_origin == expected_origin
+    assert event.source_ip is None
+    assert event.metadata == {
+        "attempted_action": "assistant.read",
+        "reason": "not_visible",
+    }
+
+
+async def test_durable_denial_propagates_canonical_sink_failure(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-6: a sink failure aborts the denial response; it is never swallowed."""
+    await session.commit()
+    recorder = PermissionDeniedRecorder(session, tenant_id=tenant_id)
+
+    async def _fail_emit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(AuditSink, "emit", _fail_emit)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await recorder.emit(
+            actor_id=uuid.uuid4(),
+            resource_type="assistant",
+            resource_id=str(uuid.uuid4()),
+            attempted_action="assistant.read",
+            reason="not_visible",
+            request_id="req-failed-denial",
+            source_ip="unknown",
+        )
+
+    assert await AuditEventRepository(session, tenant_id).list_recent() == []
 
 
 async def test_emit_defaults_metadata_to_empty_dict(

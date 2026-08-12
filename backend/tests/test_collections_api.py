@@ -382,8 +382,8 @@ async def test_create_emits_collection_created_audit(
 async def test_delete_emits_document_deleted_for_each_cascaded_doc(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    # The audit taxonomy (spec 0004 §2.4) defines document.deleted, not a
-    # collection-level delete event; the cascade audits each removed document.
+    # The collection deletion is one causal event; the cascade also audits each
+    # removed document so both the parent action and affected ids are provable.
     coll_id = await _seed_collection(
         sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email, documents=2
     )
@@ -397,6 +397,70 @@ async def test_delete_emits_document_deleted_for_each_cascaded_doc(
     assert len(deleted) == 2
     assert all(e.resource_type == "document" for e in deleted)
     assert all(e.metadata.get("collection_id") == str(coll_id) for e in deleted)
+    collection_deleted = [
+        e for e in events if e.action == "collection.deleted" and e.resource_id == str(coll_id)
+    ]
+    assert len(collection_deleted) == 1
+    assert collection_deleted[0].metadata == {"document_count": 2}
+
+
+async def test_delete_empty_collection_emits_exactly_one_collection_deleted(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """INV-6: an empty collection deletion still leaves one safe causal event."""
+    coll_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        documents=0,
+    )
+    token = await _login(client, seeded.alice_email)
+    resp = await client.delete(
+        f"/api/v1/collections/{coll_id}",
+        headers={**_auth(token), "x-request-id": "req-collection-delete"},
+    )
+    assert resp.status_code == 204
+
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    deleted = [
+        event
+        for event in events
+        if event.action == "collection.deleted" and event.resource_id == str(coll_id)
+    ]
+    assert len(deleted) == 1
+    event = deleted[0]
+    assert event.actor_id is not None
+    assert event.outcome.value == "allowed"
+    assert event.resource_type == "collection"
+    assert event.request_id == "req-collection-delete"
+    assert event.source_origin == "client"
+    assert event.source_ip is not None
+    assert event.metadata == {"document_count": 0}
+
+
+async def test_failed_collection_delete_never_emits_allowed_deletion(
+    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A 404 delete cannot fabricate a successful ``collection.deleted`` event."""
+    coll_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
+    )
+    token = await _login(client, seeded.alice_email)
+    resp = await client.delete(f"/api/v1/collections/{coll_id}", headers=_auth(token))
+    assert resp.status_code == 404
+
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+    assert not [
+        event
+        for event in events
+        if event.action == "collection.deleted"
+        and event.resource_id == str(coll_id)
+        and event.outcome.value == "allowed"
+    ]
 
 
 # --- Negative: tenancy / ownership (INV-1/INV-2 → 404, never 403) ----------

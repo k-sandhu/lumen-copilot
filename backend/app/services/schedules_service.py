@@ -63,7 +63,7 @@ from app.domain.scheduling import (
     compute_next_run,
     validate_timezone,
 )
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.runs_service import enqueue_manual_run
 from app.tasks.scheduler import NullScheduleProjector, ScheduleProjector
 
@@ -161,6 +161,7 @@ class SchedulesService:
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
         self._audit = audit
+        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._projector = projector or NullScheduleProjector()
@@ -171,7 +172,7 @@ class SchedulesService:
         """Whether the caller may edit/pause/delete ``schedule`` (owner or tenant admin)."""
         return self._is_admin or schedule.owner_id == self._owner_id
 
-    async def _load_managed_or_404(self, schedule_id: UUID) -> Schedule:
+    async def _load_managed_or_404(self, schedule_id: UUID, *, attempted_action: str) -> Schedule:
         """Load a schedule the caller may manage, or raise 404 (existence non-disclosure).
 
         Deny-by-default (INV-1/INV-2): the schedule must exist in this tenant **and**
@@ -181,10 +182,21 @@ class SchedulesService:
         """
         schedule = await self._schedules.get(schedule_id)
         if schedule is None or not self._may_manage(schedule):
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="schedule",
+                resource_id=str(schedule_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Schedule not found.")
         return schedule
 
-    async def _load_runnable_assistant_or_error(self, assistant_id: UUID) -> Assistant:
+    async def _load_runnable_assistant_or_error(
+        self, assistant_id: UUID, *, attempted_action: str
+    ) -> Assistant:
         """Load a published, owner-visible assistant, or raise (404 unknown / 422 not runnable).
 
         A schedule may only run an assistant the owner can run: unknown /
@@ -196,6 +208,15 @@ class SchedulesService:
         """
         assistant = await self._assistants.get(assistant_id)
         if assistant is None or (not self._is_admin and assistant.owner_id != self._owner_id):
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Assistant not found.")
         if assistant.status is not AssistantStatus.PUBLISHED:
             raise ValidationError(
@@ -250,7 +271,9 @@ class SchedulesService:
         ``next_run_at`` (null when created paused), persists, projects the RedBeat
         entry (best-effort), and audits ``schedule.created`` (INV-6).
         """
-        await self._load_runnable_assistant_or_error(assistant_id)
+        await self._load_runnable_assistant_or_error(
+            assistant_id, attempted_action="schedule.create"
+        )
         _validate_cadence(cadence, timezone)
         next_run_at = compute_next_run(cadence, timezone) if enabled else None
         schedule = await self._schedules.create(
@@ -279,7 +302,7 @@ class SchedulesService:
 
     async def get(self, schedule_id: UUID) -> Schedule:
         """Fetch one schedule the caller may see, or 404 (INV-1/INV-2)."""
-        return await self._load_managed_or_404(schedule_id)
+        return await self._load_managed_or_404(schedule_id, attempted_action="schedule.read")
 
     async def list_(
         self,
@@ -323,7 +346,7 @@ class SchedulesService:
         disabled, recomputed when re-enabled). Re-projects the RedBeat entry and
         audits ``schedule.updated``.
         """
-        existing = await self._load_managed_or_404(schedule_id)
+        existing = await self._load_managed_or_404(schedule_id, attempted_action="schedule.update")
 
         new_cadence = existing.cadence
         new_timezone = existing.timezone
@@ -389,8 +412,13 @@ class SchedulesService:
         await self._emit_audit(
             action=AuditAction.SCHEDULE_UPDATED,
             schedule_id=schedule_id,
-            metadata={"fields": sorted(self._changed_fields(cadence, timezone, input_params,
-                                                             delivery, overlap_policy, enabled))},
+            metadata={
+                "fields": sorted(
+                    self._changed_fields(
+                        cadence, timezone, input_params, delivery, overlap_policy, enabled
+                    )
+                )
+            },
         )
         return updated
 
@@ -401,7 +429,7 @@ class SchedulesService:
 
     async def delete(self, schedule_id: UUID) -> None:
         """Delete a schedule the caller owns (removes its RedBeat entry), or 404."""
-        schedule = await self._load_managed_or_404(schedule_id)
+        schedule = await self._load_managed_or_404(schedule_id, attempted_action="schedule.delete")
         await self._schedules.delete(schedule.id)
         self._projector.remove(schedule.id)
         await self._emit_audit(
@@ -418,12 +446,10 @@ class SchedulesService:
         Pausing an already-paused schedule returns it unchanged (200). Not
         visible/owned → 404. Audited ``schedule.paused``.
         """
-        schedule = await self._load_managed_or_404(schedule_id)
+        schedule = await self._load_managed_or_404(schedule_id, attempted_action="schedule.pause")
         if not schedule.enabled:
             return schedule  # idempotent — already paused
-        updated = await self._schedules.update(
-            schedule.id, enabled=False, clear_next_run_at=True
-        )
+        updated = await self._schedules.update(schedule.id, enabled=False, clear_next_run_at=True)
         assert updated is not None
         self._projector.remove(schedule.id)
         await self._emit_audit(
@@ -438,13 +464,11 @@ class SchedulesService:
         visible/owned → 404. Recomputes ``next_run_at`` tz/DST-correct. Audited
         ``schedule.resumed``.
         """
-        schedule = await self._load_managed_or_404(schedule_id)
+        schedule = await self._load_managed_or_404(schedule_id, attempted_action="schedule.resume")
         if schedule.enabled:
             return schedule  # idempotent — already firing
         next_run_at = compute_next_run(schedule.cadence, schedule.timezone)
-        updated = await self._schedules.update(
-            schedule.id, enabled=True, next_run_at=next_run_at
-        )
+        updated = await self._schedules.update(schedule.id, enabled=True, next_run_at=next_run_at)
         assert updated is not None
         self._projector.sync(updated)
         await self._emit_audit(
@@ -463,14 +487,16 @@ class SchedulesService:
         and audits ``schedule.run_now``. Returns the created run (the caller returns
         its id — the WS ``streamId`` for live attach).
         """
-        schedule = await self._load_managed_or_404(schedule_id)
+        schedule = await self._load_managed_or_404(schedule_id, attempted_action="schedule.run_now")
         if not schedule.enabled:
             raise ConflictError(
                 "Cannot run a paused schedule; resume it first.",
                 code="schedule_paused",
             )
         # Re-validate the assistant is still runnable (it may have been disabled).
-        await self._load_runnable_assistant_or_error(schedule.assistant_id)
+        await self._load_runnable_assistant_or_error(
+            schedule.assistant_id, attempted_action="schedule.run_now"
+        )
         run = await enqueue_manual_run(
             self._session,
             tenant_id=self._tenant_id,

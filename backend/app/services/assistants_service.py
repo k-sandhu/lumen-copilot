@@ -66,7 +66,7 @@ from app.domain.entities import (
     KnowledgeScope,
     Role,
 )
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.autonomy_policy_service import AutonomyPolicyReader
 from app.services.tools.mcp_bridge import (
     is_mcp_tool_name,
@@ -191,6 +191,7 @@ class AssistantsService:
         self._owner_id = owner_id
         self._is_admin = Role.ADMIN in roles
         self._audit = audit
+        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -200,7 +201,7 @@ class AssistantsService:
         """Whether the caller may edit/publish/delete ``assistant`` (owner or admin)."""
         return self._is_admin or assistant.owner_id == self._owner_id
 
-    async def _load_managed_or_404(self, assistant_id: UUID) -> Assistant:
+    async def _load_managed_or_404(self, assistant_id: UUID, *, attempted_action: str) -> Assistant:
         """Load an assistant the caller may manage, or raise 404 (existence non-disclosure).
 
         Deny-by-default: the assistant must exist in this tenant **and** be owned
@@ -211,6 +212,15 @@ class AssistantsService:
         """
         assistant = await self._assistants.get(assistant_id)
         if assistant is None or not self._may_manage(assistant):
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Assistant not found.")
         return assistant
 
@@ -451,7 +461,7 @@ class AssistantsService:
 
     async def get(self, assistant_id: UUID) -> Assistant:
         """Fetch one assistant the caller may see, or 404 (INV-1/INV-2)."""
-        assistant = await self._load_managed_or_404(assistant_id)
+        assistant = await self._load_managed_or_404(assistant_id, attempted_action="assistant.read")
         return await self._with_current_version(assistant)
 
     async def list_(
@@ -495,7 +505,7 @@ class AssistantsService:
         scope are re-validated when supplied; the backup owner (if changed) must be
         a distinct user.
         """
-        await self._load_managed_or_404(assistant_id)
+        await self._load_managed_or_404(assistant_id, attempted_action="assistant.update")
 
         fields: dict[str, object] = {}
         if name is not UNSET:
@@ -540,7 +550,9 @@ class AssistantsService:
 
     async def delete(self, assistant_id: UUID) -> None:
         """Delete an assistant the caller owns (cascades to versions), or 404."""
-        assistant = await self._load_managed_or_404(assistant_id)
+        assistant = await self._load_managed_or_404(
+            assistant_id, attempted_action="assistant.delete"
+        )
         await self._assistants.delete(assistant.id)
         await self._emit_audit(
             action=AuditAction.ASSISTANT_DELETED,
@@ -560,7 +572,9 @@ class AssistantsService:
         published`` (idempotent re-publish appends a further version). Audited
         ``assistant.published`` (INV-6).
         """
-        assistant = await self._load_managed_or_404(assistant_id)
+        assistant = await self._load_managed_or_404(
+            assistant_id, attempted_action="assistant.publish"
+        )
         if assistant.backup_owner_id is None:
             raise ValidationError(
                 "An assistant requires a backup owner before it can be published.",
@@ -606,7 +620,7 @@ class AssistantsService:
         self, assistant_id: UUID, *, cursor: str | None, limit: int | None
     ) -> VersionPage:
         """A keyset page of an assistant's immutable versions (newest first); not visible → 404."""
-        await self._load_managed_or_404(assistant_id)
+        await self._load_managed_or_404(assistant_id, attempted_action="assistant.versions.read")
         page_size = _clamp_limit(limit)
         after_id = _decode_cursor(_VERSION_CURSOR_PREFIX, cursor) if cursor else None
         rows = await self._versions.list_for_assistant_page(
@@ -629,7 +643,9 @@ class AssistantsService:
         re-applies that config to the mutable head, then re-publishes. An unknown /
         malformed ``version`` → **422** (INV-8). Audited ``assistant.rolled_back``.
         """
-        assistant = await self._load_managed_or_404(assistant_id)
+        assistant = await self._load_managed_or_404(
+            assistant_id, attempted_action="assistant.rollback"
+        )
         if version < 1:
             raise ValidationError("Version must be a positive integer.", code="invalid_version")
         target = await self._versions.get_by_number(assistant.id, version)

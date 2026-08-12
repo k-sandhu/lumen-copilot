@@ -34,6 +34,10 @@ class AuditAction(str, enum.Enum):
     AUTH_LOGIN_FAILED = "auth.login_failed"
     AUTH_LOGOUT = "auth.logout"
     COLLECTION_CREATED = "collection.created"
+    # A collection delete must remain visible even when it was empty (issue
+    # #579). Per-document cascade events cannot prove that the collection
+    # itself was removed, so this is additive to the §2.4 taxonomy.
+    COLLECTION_DELETED = "collection.deleted"
     DOCUMENT_UPLOADED = "document.uploaded"
     DOCUMENT_VIEWED = "document.viewed"
     DOCUMENT_DOWNLOADED = "document.downloaded"

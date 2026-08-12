@@ -73,7 +73,7 @@ from app.llm import LLMGateway
 from app.llm.context import ContextConfig
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.chat_runtime import ChatRuntime
 from app.services.citation_access import audit_withholding, resolve_permitted_documents
 from app.services.mcp_servers_service import build_mcp_servers_service
@@ -716,9 +716,9 @@ class RunsReadService:
         *,
         tenant_id: UUID,
         owner_id: UUID,
-        audit: AuditSink | None = None,
-        request_id: str = "unknown",
-        source_ip: str = "unknown",
+        audit: AuditSink,
+        request_id: str,
+        source_ip: str,
     ) -> None:
         self._session = session
         self._runs = RunRepository(session, tenant_id)
@@ -729,6 +729,7 @@ class RunsReadService:
         self._owner_id = owner_id
         self._allow_set: AllowSet | None = None
         self._audit = audit
+        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -767,6 +768,15 @@ class RunsReadService:
         """
         run = await self._runs.get(run_id)
         if run is None or run.owner_id != self._owner_id:
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="run",
+                resource_id=str(run_id),
+                attempted_action="run.read",
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Run not found.")
         steps = await self._steps.list_for_run(run.id)
         citations: list[CitationView] = []
@@ -882,6 +892,7 @@ class RunsControlService:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
         self._audit = audit
+        self._denials = PermissionDeniedRecorder(session, tenant_id=tenant_id)
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -892,7 +903,7 @@ class RunsControlService:
         re-drives it, and audits ``run.resumed``. Not escalated → 409; not visible →
         404. The router enqueues the task after-commit.
         """
-        run = await self._load_escalated(run_id)
+        run = await self._load_escalated(run_id, attempted_action="run.resume")
         requeued = await self._runs.mark_queued(run.id)
         assert requeued is not None
         await self._emit(AuditAction.RUN_RESUMED, run, metadata={"from_status": run.status.value})
@@ -907,7 +918,7 @@ class RunsControlService:
         **not** re-enqueue. Not escalated → 409; not visible → 404. An escalated run is
         never silently dropped: cancel is an explicit, audited human decision.
         """
-        run = await self._load_escalated(run_id)
+        run = await self._load_escalated(run_id, attempted_action="run.cancel")
         cancelled = await self._runs.mark_terminal(
             run.id,
             status=RunStatus.FAILED,
@@ -931,7 +942,7 @@ class RunsControlService:
         the current owner (else 422 — a no-op reroute is malformed). Not escalated →
         409; not visible → 404. Audits ``run.rerouted`` with both owners.
         """
-        run = await self._load_escalated(run_id)
+        run = await self._load_escalated(run_id, attempted_action="run.reroute")
         if to_owner_id == run.owner_id:
             raise ValidationError(
                 "Cannot reroute a run to its current owner.", code="reroute_same_owner"
@@ -939,6 +950,15 @@ class RunsControlService:
         target = await self._users.get(to_owner_id)
         if target is None:
             # A cross-tenant / unknown target is non-existent to this tenant (INV-1).
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="user",
+                resource_id=str(to_owner_id),
+                attempted_action="run.reroute",
+                reason="target_not_in_tenant",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Reroute target not found.")
         await self._runs.reassign_owner(run.id, owner_id=to_owner_id)
         requeued = await self._runs.mark_queued(run.id)
@@ -950,11 +970,20 @@ class RunsControlService:
         )
         return RunControlResult(run=requeued, requeued=True)
 
-    async def _load_escalated(self, run_id: UUID) -> Run:
+    async def _load_escalated(self, run_id: UUID, *, attempted_action: str) -> Run:
         """Load an owned, escalated run or raise (404 not visible / 409 not escalated)."""
         run = await self._runs.get(run_id)
         if run is None or run.owner_id != self._owner_id:
             # Cross-tenant / non-owned → 404 (existence non-disclosure, INV-1/INV-2).
+            await self._denials.emit(
+                actor_id=self._owner_id,
+                resource_type="run",
+                resource_id=str(run_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Run not found.")
         if run.status is not RunStatus.ESCALATED:
             # Only a run awaiting a human can be resumed/cancelled/rerouted (INV-8).

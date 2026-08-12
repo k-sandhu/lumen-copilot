@@ -203,8 +203,7 @@ class CollectionsService:
         # and defaults to 0, exactly as the single-id count returns.
         document_counts = await self._repo.count_documents_for([c.id for c in page])
         items = [
-            CollectionView(collection=c, document_count=document_counts.get(c.id, 0))
-            for c in page
+            CollectionView(collection=c, document_count=document_counts.get(c.id, 0)) for c in page
         ]
         return CollectionPage(items=items, next_cursor=next_cursor)
 
@@ -256,12 +255,12 @@ class CollectionsService:
         (INV-1/INV-2). On success the ORM ``delete-orphan`` cascade removes the
         collection's documents and *their* chunks in one transaction.
 
-        Audit (spec 0004 §2.4, INV-6): the taxonomy defines ``document.deleted``
-        (not a collection-level delete event), so each cascaded document is
-        audited with that action — the spec's event list is authoritative
-        (AGENTS.md §4) — capturing exactly which documents the deletion removed.
-        All audit rows flush within this request's transaction, committing
-        atomically with the delete.
+        Audit (spec 0004 §2.4, INV-6): the collection itself emits exactly one
+        ``collection.deleted`` event, including when empty; each cascaded
+        document also emits ``document.deleted``. All rows contain ids/counts
+        only and flush within this request's transaction, committing atomically
+        with the delete. A failed repository delete returns before the allowed
+        collection event, so it can never fabricate success.
 
         The backing **object-store** bytes of the cascaded documents ARE removed
         here (#269) — the row+chunk cascade clears retrievable content, but the
@@ -280,6 +279,16 @@ class CollectionsService:
         deleted = await self._repo.delete(collection_id)
         if not deleted:  # pragma: no cover — visibility already established
             return False
+        await self._audit.emit(
+            action=AuditAction.COLLECTION_DELETED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="collection",
+            resource_id=str(collection_id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={"document_count": len(documents)},
+        )
         for doc in documents:
             await self._audit.emit(
                 action=AuditAction.DOCUMENT_DELETED,

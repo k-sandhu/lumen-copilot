@@ -54,6 +54,7 @@ from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.services import runs_service
 from app.services.assistants_service import config_from_assistant
+from app.services.audit import AuditSink
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -319,6 +320,26 @@ async def _create_queued_run(
         return run.id
 
 
+def _read_service(
+    ctx: _Ctx,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    owner_id: uuid.UUID,
+    request_id: str = "test-run-read",
+    source_ip: str = "203.0.113.8",
+) -> runs_service.RunsReadService:
+    scoped_tenant = tenant_id or ctx.tenant_a
+    return runs_service.RunsReadService(
+        session,
+        tenant_id=scoped_tenant,
+        owner_id=owner_id,
+        audit=AuditSink(AuditEventRepository(session, scoped_tenant)),
+        request_id=request_id,
+        source_ip=source_ip,
+    )
+
+
 # --- AC-1: a run executes headless and persists a cited transcript ----------
 
 
@@ -361,9 +382,7 @@ async def test_run_detail_hydrates_grounded_citations(
     await runs_service.execute_run(run_id, ctx.tenant_a)
 
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        detail = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
         assert detail.run.status is RunStatus.SUCCEEDED
         assert len(detail.citations) == 1
         cite = detail.citations[0]
@@ -393,9 +412,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
     await runs_service.execute_run(bob_run, ctx.tenant_a)
 
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.bob_id
-        ).get(bob_run)
+        detail = await _read_service(ctx, session, owner_id=ctx.bob_id).get(bob_run)
         # Zero citations — bob's run could not read alice's document.
         assert detail.citations == []
         citation_steps = [s for s in detail.steps if s.kind is RunStepKind.CITATION]
@@ -406,9 +423,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
     alice_run = await _create_queued_run(ctx, owner_id=ctx.alice_id)
     await runs_service.execute_run(alice_run, ctx.tenant_a)
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(alice_run)
+        detail = await _read_service(ctx, session, owner_id=ctx.alice_id).get(alice_run)
         assert len(detail.citations) == 1
 
 
@@ -426,9 +441,7 @@ async def test_cross_tenant_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.Monk
     async with ctx.sessionmaker() as session:
         # A reader in tenant B (Globex) cannot see Acme's run — repository is
         # tenant-scoped, so the row does not resolve → NotFoundError (→ 404).
-        reader = runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_b, owner_id=ctx.alice_id
-        )
+        reader = _read_service(ctx, session, tenant_id=ctx.tenant_b, owner_id=ctx.alice_id)
         with pytest.raises(NotFoundError):
             await reader.get(run_id)
 
@@ -444,9 +457,30 @@ async def test_non_owner_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.MonkeyP
     async with ctx.sessionmaker() as session:
         # Bob (same tenant, not the owner) cannot see alice's run.
         with pytest.raises(NotFoundError):
-            await runs_service.RunsReadService(
-                session, tenant_id=ctx.tenant_a, owner_id=ctx.bob_id
+            await _read_service(
+                ctx,
+                session,
+                owner_id=ctx.bob_id,
+                request_id="req-run-denied",
+                source_ip="203.0.113.9",
             ).get(run_id)
+        denied = [
+            event
+            for event in await AuditEventRepository(session, ctx.tenant_a).list_recent(limit=100)
+            if event.action == "permission.denied" and event.resource_id == str(run_id)
+        ]
+        assert len(denied) == 1
+        event = denied[0]
+        assert event.actor_id == ctx.bob_id
+        assert event.outcome.value == "denied"
+        assert event.resource_type == "run"
+        assert event.request_id == "req-run-denied"
+        assert event.source_origin == "client"
+        assert event.source_ip == "203.0.113.9"
+        assert event.metadata == {
+            "attempted_action": "run.read",
+            "reason": "not_visible",
+        }
 
 
 # --- AC-4: a crash → failed status, never a stuck running -------------------
@@ -932,9 +966,7 @@ async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
 
     # While alice can still retrieve it, both surfaces carry the passage.
     async with ctx.sessionmaker() as session:
-        before = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        before = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
         assert "14,600" in before.citations[0].snippet
         cited_steps = [s for s in before.steps if s.kind is RunStepKind.CITATION]
         assert cited_steps, "the fixture should produce a citation step"
@@ -950,9 +982,7 @@ async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
         await session.commit()
 
     async with ctx.sessionmaker() as session:
-        after = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        after = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
 
         # Surface 1: the citation list.
         cite = after.citations[0]

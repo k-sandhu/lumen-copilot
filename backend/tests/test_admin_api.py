@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from re import sub
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -32,7 +34,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
 from app.db.base import Base
-from app.db.repositories import TenantRepository, UserRepository
+from app.db.repositories import AuditEventRepository, TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
 
@@ -330,12 +332,100 @@ async def test_risk_tiers_returns_T0_through_T3(client: AsyncClient, seeded: _Se
 
 @pytest.mark.parametrize("path", _ADMIN_PATHS)
 async def test_member_is_forbidden_on_every_admin_path(
-    client: AsyncClient, seeded: _Seeded, path: str
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    path: str,
 ) -> None:
     token = await _login(client, seeded.member_a_email)
-    resp = await client.get(path, headers=_auth(token))
+    resp = await client.get(
+        path,
+        headers={**_auth(token), "x-request-id": "req-admin-denied"},
+    )
     assert resp.status_code == 403, resp.text
     assert resp.headers["content-type"].startswith("application/problem+json")
+
+    # INV-6: the shared router-level role gate owns exactly one durable denial
+    # before the handler runs. The actor/tenant come from the verified token,
+    # never from request input, and the metadata is a deliberately small
+    # allow-list (no body, secret, content, or provider error can enter it).
+    async with sessionmaker() as session:
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+        member = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.member_a_email)
+    assert member is not None
+    denied = [event for event in events if event.action == "permission.denied"]
+    assert len(denied) == 1
+    event = denied[0]
+    assert event.actor_id == member.id
+    assert event.tenant_id == seeded.tenant_a
+    assert event.outcome.value == "denied"
+    assert event.resource_type == "api_route"
+    assert event.resource_id == path
+    assert event.request_id == "req-admin-denied"
+    assert event.source_origin == "client"
+    assert event.source_ip is not None
+    assert event.metadata == {
+        "attempted_action": f"GET {path}",
+        "reason": "missing_required_role",
+        "required_roles": ["admin"],
+    }
+
+
+async def test_member_every_registered_admin_route_is_403_and_audited_once(
+    app: FastAPI,
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The router-level guard owns exactly one safe denial for every Admin route."""
+    token = await _login(client, seeded.member_a_email)
+    routes = sorted(
+        (
+            (next(iter(route.methods)), route.path)
+            for route in app.routes
+            if isinstance(route, APIRoute) and route.path.startswith("/api/v1/admin")
+        ),
+        key=lambda item: (item[1], item[0]),
+    )
+    # This is deliberately discovered from the registered app, not a hand-kept
+    # path list. A new Admin route joins this behavioural gate automatically.
+    assert len(routes) >= 20
+
+    expected: dict[str, tuple[str, str]] = {}
+    for ordinal, (method, route_template) in enumerate(routes):
+        request_id = f"req-admin-all-{ordinal}"
+        path = sub(r"\{[^}]+\}", str(uuid.uuid4()), route_template)
+        response = await client.request(
+            method,
+            path,
+            headers={**_auth(token), "x-request-id": request_id},
+            json={},
+        )
+        assert response.status_code == 403, (method, route_template, response.text)
+        expected[request_id] = (method, route_template)
+
+    async with sessionmaker() as session:
+        denials = [
+            event
+            for event in await AuditEventRepository(session, seeded.tenant_a).list_recent(limit=100)
+            if event.action == "permission.denied" and event.request_id in expected
+        ]
+        member = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.member_a_email)
+    assert member is not None
+    assert len(denials) == len(routes)
+    assert len({event.request_id for event in denials}) == len(routes)
+    for event in denials:
+        method, route_template = expected[event.request_id]
+        assert event.actor_id == member.id
+        assert event.tenant_id == seeded.tenant_a
+        assert event.outcome.value == "denied"
+        assert event.resource_type == "api_route"
+        assert event.resource_id == route_template
+        assert event.metadata == {
+            "attempted_action": f"{method} {route_template}",
+            "reason": "missing_required_role",
+            "required_roles": ["admin"],
+        }
 
 
 @pytest.mark.parametrize("path", _ADMIN_PATHS)

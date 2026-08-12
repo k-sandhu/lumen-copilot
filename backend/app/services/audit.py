@@ -20,6 +20,12 @@ The two never share a path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.audit_transactions import durable_audit_repository
 from app.db.repositories import AuditEventRepository
 from app.domain.audit import AuditAction, AuditActor, validate_envelope
 from app.domain.entities import AuditEvent, AuditOutcome
@@ -102,4 +108,103 @@ class AuditSink:
         )
 
 
-__all__ = ["AuditAction", "AuditActor", "AuditOutcome", "AuditSink"]
+async def emit_permission_denied(
+    audit: AuditSink,
+    *,
+    actor_id: UUID,
+    resource_type: str,
+    resource_id: str,
+    attempted_action: str,
+    reason: str,
+    request_id: str,
+    source_ip: str,
+    required_roles: Sequence[str] = (),
+) -> AuditEvent:
+    """Emit one safe, authenticated denial through the canonical sink.
+
+    This is the shared INV-6 boundary for authenticated 403/404 decisions. Its
+    metadata surface is intentionally closed: callers can record only the
+    server-chosen attempted action, a stable reason code, and (for RBAC gates)
+    the required role names. Request bodies, content, secrets, and raw provider
+    errors have no parameter through which to enter the product audit log.
+
+    This low-level helper only appends to the supplied sink. Authenticated guard
+    paths use :class:`PermissionDeniedRecorder` below, which gives the denial a
+    deliberately independent transaction so an exception cannot roll it back
+    and persisting it cannot commit unrelated caller work.
+    """
+    metadata: dict[str, object] = {
+        "attempted_action": attempted_action,
+        "reason": reason,
+    }
+    if required_roles:
+        metadata["required_roles"] = list(required_roles)
+    return await audit.emit(
+        action=AuditAction.PERMISSION_DENIED,
+        actor=AuditActor.user(actor_id),
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome=AuditOutcome.DENIED,
+        request_id=request_id,
+        source_ip=source_ip,
+        metadata=metadata,
+    )
+
+
+class PermissionDeniedRecorder:
+    """Persist authenticated denials in an isolated tenant-bound transaction.
+
+    Successful action events deliberately share the action transaction so they
+    commit or roll back atomically. A denied action has no successful transaction
+    to commit, and its 403/404 exception causes the request session to close with
+    a rollback. This recorder therefore opens a fresh session from the caller's
+    *engine* (never the caller's session/connection), binds the trusted tenant for
+    Postgres RLS, delegates the append to the canonical :class:`AuditSink`, and
+    commits only that audit transaction. Sink, flush, RLS, and commit failures all
+    propagate; returning an unaudited denial is forbidden by INV-6.
+    """
+
+    def __init__(
+        self,
+        request_session: AsyncSession,
+        *,
+        tenant_id: UUID,
+    ) -> None:
+        self._request_session = request_session
+        self._tenant_id = tenant_id
+
+    async def emit(
+        self,
+        *,
+        actor_id: UUID,
+        resource_type: str,
+        resource_id: str,
+        attempted_action: str,
+        reason: str,
+        request_id: str,
+        source_ip: str,
+        required_roles: Sequence[str] = (),
+    ) -> AuditEvent:
+        """Append and commit exactly one safe denial, or propagate the failure."""
+        async with durable_audit_repository(self._request_session, self._tenant_id) as repository:
+            return await emit_permission_denied(
+                AuditSink(repository),
+                actor_id=actor_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                attempted_action=attempted_action,
+                reason=reason,
+                request_id=request_id,
+                source_ip=source_ip,
+                required_roles=required_roles,
+            )
+
+
+__all__ = [
+    "AuditAction",
+    "AuditActor",
+    "AuditOutcome",
+    "AuditSink",
+    "PermissionDeniedRecorder",
+    "emit_permission_denied",
+]
