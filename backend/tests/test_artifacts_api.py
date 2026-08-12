@@ -244,6 +244,7 @@ async def _seed_artifact(
             owner_id=owner.id,
             object_store=store,  # type: ignore[arg-type]  # the fake honours the surface
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            denials=None,  # seed helper is create-only
             request_id="seed",
             source_ip="127.0.0.1",
             artifact_allowed_content_types=settings.artifact_allowed_content_types,
@@ -270,16 +271,28 @@ async def test_list_returns_only_callers_artifacts(
     store: FakeObjectStore,
 ) -> None:
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        filename="mine.txt", data=b"a",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        filename="mine.txt",
+        data=b"a",
     )
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email,
-        filename="bobs.txt", data=b"b",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
+        filename="bobs.txt",
+        data=b"b",
     )
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_b, owner_email=seeded.carol_email,
-        filename="carols.txt", data=b"c",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_b,
+        owner_email=seeded.carol_email,
+        filename="carols.txt",
+        data=b"c",
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.get("/api/v1/artifacts", headers=_auth(token))
@@ -295,13 +308,22 @@ async def test_list_filters_by_session_and_produced_by(
     store: FakeObjectStore,
 ) -> None:
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        filename="from-tool.csv", content_type=_CSV, data=b"1,2,3",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        filename="from-tool.csv",
+        content_type=_CSV,
+        data=b"1,2,3",
         produced_by=ArtifactProducedBy.TOOL,
     )
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        filename="from-run.txt", data=b"run-output",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        filename="from-run.txt",
+        data=b"run-output",
         produced_by=ArtifactProducedBy.RUN,
     )
     token = await _login(client, seeded.alice_email)
@@ -332,8 +354,12 @@ async def test_list_cursor_pagination_walks_all_pages(
     created: set[str] = set()
     for i in range(5):
         art_id = await _seed_artifact(
-            sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-            filename=f"a{i}.txt", data=f"body-{i}".encode(),
+            sessionmaker,
+            store,
+            tenant_id=seeded.tenant_a,
+            owner_email=seeded.alice_email,
+            filename=f"a{i}.txt",
+            data=f"body-{i}".encode(),
         )
         created.add(str(art_id))
     token = await _login(client, seeded.alice_email)
@@ -367,8 +393,13 @@ async def test_get_artifact_returns_metadata(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        filename="deliverable.csv", content_type=_CSV, data=b"a,b\n1,2",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        filename="deliverable.csv",
+        content_type=_CSV,
+        data=b"a,b\n1,2",
         produced_by=ArtifactProducedBy.TOOL,
     )
     token = await _login(client, seeded.alice_email)
@@ -394,7 +425,10 @@ async def test_content_redirects_302_to_presigned_url(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.get(
@@ -415,7 +449,10 @@ async def test_content_streams_inline_when_redirect_disabled(
     get_settings.cache_clear()
     try:
         art_id = await _seed_artifact(
-            sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+            sessionmaker,
+            store,
+            tenant_id=seeded.tenant_a,
+            owner_email=seeded.alice_email,
             data=b"inline artifact bytes",
         )
         application = create_app()
@@ -451,7 +488,10 @@ async def test_delete_removes_row_and_object(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
     )
     assert len(store.objects) == 1
     token = await _login(client, seeded.alice_email)
@@ -475,7 +515,10 @@ async def test_content_emits_artifact_downloaded_audit(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
     )
     token = await _login(client, seeded.alice_email)
     await client.get(
@@ -483,9 +526,7 @@ async def test_content_emits_artifact_downloaded_audit(
     )
     async with sessionmaker() as session:
         events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
-    assert any(
-        e.action == "artifact.downloaded" and e.resource_id == str(art_id) for e in events
-    )
+    assert any(e.action == "artifact.downloaded" and e.resource_id == str(art_id) for e in events)
 
 
 async def test_delete_emits_artifact_deleted_audit(
@@ -495,7 +536,10 @@ async def test_delete_emits_artifact_deleted_audit(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
     )
     token = await _login(client, seeded.alice_email)
     await client.delete(f"/api/v1/artifacts/{art_id}", headers=_auth(token))
@@ -512,13 +556,22 @@ async def test_get_other_owner_same_tenant_is_404(
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
     store: FakeObjectStore,
+    durable_audit_ledger,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/artifacts/{art_id}", headers=_auth(token))
     assert resp.status_code == 404
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].metadata == {
+        "attempted_action": "artifact.read",
+        "reason": "not_visible",
+    }
 
 
 async def test_get_cross_tenant_is_404(
@@ -528,7 +581,10 @@ async def test_get_cross_tenant_is_404(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_b, owner_email=seeded.carol_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_b,
+        owner_email=seeded.carol_email,
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/artifacts/{art_id}", headers=_auth(token))
@@ -542,7 +598,10 @@ async def test_content_other_owner_is_404(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.get(
@@ -558,7 +617,10 @@ async def test_delete_cross_tenant_is_404_and_leaves_row_and_object(
     store: FakeObjectStore,
 ) -> None:
     art_id = await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_b, owner_email=seeded.carol_email,
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_b,
+        owner_email=seeded.carol_email,
     )
     token = await _login(client, seeded.alice_email)
     resp = await client.delete(f"/api/v1/artifacts/{art_id}", headers=_auth(token))
@@ -581,12 +643,20 @@ async def test_list_excludes_other_owners_for_member(
 ) -> None:
     """A member sees only their own artifacts — never another owner's (INV-2)."""
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.alice_email,
-        filename="alice.txt", data=b"alice",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+        filename="alice.txt",
+        data=b"alice",
     )
     await _seed_artifact(
-        sessionmaker, store, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email,
-        filename="bob.txt", data=b"bob",
+        sessionmaker,
+        store,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.bob_email,
+        filename="bob.txt",
+        data=b"bob",
     )
     # Bob lists — sees only his own, not Alice's.
     token = await _login(client, seeded.bob_email)

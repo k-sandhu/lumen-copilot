@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    AuditSinkFactory,
     BackplaneDep,
     CurrentTenant,
     CurrentUser,
@@ -417,14 +418,14 @@ def _build_service(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
-    request: Request | None = None,
+    request: Request,
+    make_audit_sink: AuditSinkFactory,
 ) -> ChatService:
     """Assemble the per-request chat service.
 
-    ``request`` is optional and only the transcript read supplies it: that path
-    re-checks citation permissions and audits when it withholds content (#536),
-    which needs the correlation context. Every other caller has nothing to audit
-    here, so threading a request through all nine would be noise.
+    Request correlation plus the canonical durable recorder are mandatory at
+    construction: every authenticated direct-resource guard owns its denial
+    audit, including the six session/message 404 paths (INV-1/INV-2/INV-6).
     """
     lifecycle = SandboxSessionService(
         session,
@@ -433,22 +434,18 @@ def _build_service(
         runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
     )
-    audit_kwargs: dict[str, object] = {}
-    if request is not None:
-        audit_kwargs = {
-            "audit": AuditSink(AuditEventRepository(session, tenant_id)),
-            # The envelope requires a non-empty request_id / source_ip (spec 0004
-            # §2.4); fall back to a sentinel when the client supplied neither.
-            "request_id": extract_request_id(request) or "unknown",
-            "source_ip": request.client.host if request.client else "unknown",
-        }
     return ChatService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         settings=settings,
         sandbox_lifecycle=lifecycle,
-        **audit_kwargs,  # type: ignore[arg-type]
+        audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
+        # The envelope requires a non-empty request_id / source_ip (spec 0004
+        # §2.4); fall back to a sentinel when the client supplied neither.
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
     )
 
 
@@ -500,16 +497,23 @@ def _sandbox_response(value: SandboxSession | None, *, enabled: bool) -> Sandbox
 
 @router.get("/sessions", response_model=ChatSessionListResponse, response_model_exclude_none=True)
 async def list_sessions(
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> ChatSessionListResponse:
     """List the caller's own chat sessions (cursor-paginated, newest first)."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     page = await service.list_sessions(cursor=cursor, limit=limit)
     return _session_list_to_response(page)
@@ -523,14 +527,21 @@ async def list_sessions(
 )
 async def create_session(
     body: ChatSessionCreate,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> ChatSessionResponse:
     """Create a chat session owned by the caller (unknown model → 422)."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     view = await service.create_session(
         title=body.title, model=body.model, assistant_id=body.assistant_id
@@ -546,14 +557,21 @@ async def create_session(
 )
 async def get_session(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> ChatSessionResponse:
     """Get one of the caller's sessions; not visible → 404 (INV-1/INV-2)."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     view = await service.get_session(session_id)
     if view is None:
@@ -568,10 +586,12 @@ async def get_session(
 )
 async def get_session_usage(
     session_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> SessionUsageResponse:
     """The session's token/context accounting (spec 0007 #429); not visible → 404.
 
@@ -581,7 +601,12 @@ async def get_session_usage(
     approximation).
     """
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     view = await service.session_usage(session_id)
     if view is None:
@@ -621,14 +646,21 @@ async def get_session_usage(
 async def update_session(
     session_id: UUID,
     body: ChatSessionUpdate,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> ChatSessionResponse:
     """Rename / re-model one of the caller's sessions; not visible → 404."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     view = await service.update_session(session_id, title=body.title, model=body.model)
     if view is None:
@@ -640,15 +672,22 @@ async def update_session(
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: UUID,
+    request: Request,
     response: Response,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> Response:
     """Delete one of the caller's sessions (cascades); not visible → 404."""
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     deleted = await service.delete_session(session_id)
     if not deleted:
@@ -762,6 +801,7 @@ async def list_messages(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> MessageListResponse:
@@ -772,6 +812,7 @@ async def list_messages(
         tenant_id=tenant_id,
         settings=settings,
         request=request,
+        make_audit_sink=make_audit_sink,
     )
     page = await service.list_messages(session_id, cursor=cursor, limit=limit)
     if page is None:
@@ -801,6 +842,7 @@ async def send_message(
     tenant_id: CurrentTenant,
     settings: SettingsDep,
     backplane: BackplaneDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> SendMessageResponse:
     """Persist the user message (202) and kick off the streamed grounded answer.
 
@@ -812,7 +854,12 @@ async def send_message(
     the 202 nor blocks graceful shutdown.
     """
     service = _build_service(
-        session=session, principal=principal, tenant_id=tenant_id, settings=settings
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        request=request,
+        make_audit_sink=make_audit_sink,
     )
     result = await service.send_message(
         session_id, content=body.content, model=body.model, backplane=backplane
@@ -1048,6 +1095,7 @@ def _build_mcp_tools_factory(
             owner_id=principal.user_id,
             roles=principal.roles,
             audit=audit,
+            denials=None,  # run-tool resolution is list-only, with no direct-id guard
             request_id=request_id,
             source_ip=source_ip,
         )

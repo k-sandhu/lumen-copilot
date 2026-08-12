@@ -54,6 +54,7 @@ from app.db.repositories import (
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
+from app.domain.audit import AuditActor
 from app.domain.entities import (
     AssistantStatus,
     ChatSession,
@@ -67,7 +68,7 @@ from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedRecorder
 from app.services.citation_access import enforce_citation_permissions
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
@@ -231,8 +232,9 @@ class ChatService:
         settings: Settings,
         sandbox_lifecycle: SandboxLifecycle | None = None,
         audit: AuditSink | None = None,
-        request_id: str = "unknown",
-        source_ip: str = "unknown",
+        denials: PermissionDeniedRecorder,
+        request_id: str,
+        source_ip: str,
     ) -> None:
         self._sessions = ChatSessionRepository(session, tenant_id)
         self._messages = MessageRepository(session, tenant_id)
@@ -253,9 +255,12 @@ class ChatService:
         self._owner_id = owner_id
         self._settings = settings
         self._sandbox_lifecycle = sandbox_lifecycle
-        # Optional so the many tests that construct this service directly need no
-        # change; a transcript read that redacts nothing emits nothing either way.
+        # The ordinary sink stays optional because only citation withholding uses
+        # it.  The durable denial recorder and origin context are mandatory:
+        # every authenticated direct-resource 404 guard below must be auditable
+        # even when a service is constructed outside the HTTP router.
         self._audit = audit
+        self._denials = denials
         self._request_id = request_id
         self._source_ip = source_ip
         self._allow_set_cache: AllowSet | None = None
@@ -318,6 +323,27 @@ class ChatService:
     def _owns(self, session: ChatSession) -> bool:
         return session.owner_id == self._owner_id
 
+    async def _visible_session(
+        self,
+        session_id: UUID,
+        *,
+        attempted_action: str,
+    ) -> ChatSession | None:
+        """Resolve one owned session or durably audit its non-disclosing 404."""
+        session = await self._sessions.get(session_id)
+        if session is not None and self._owns(session):
+            return session
+        await self._denials.emit(
+            actor=AuditActor.user(self._owner_id),
+            resource_type="chat_session",
+            resource_id=str(session_id),
+            attempted_action=attempted_action,
+            reason="not_visible",
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+        )
+        return None
+
     async def _view(self, session: ChatSession) -> SessionView:
         count = await self._sessions.count_messages(session.id)
         return SessionView(session=session, message_count=count)
@@ -356,6 +382,15 @@ class ChatService:
             # Cross-tenant / non-owned / non-granted → 404 (INV-1/INV-2). Sharing
             # via grants is a follow-up (ADR-0011 §1); for now only the owner may
             # start a session from an assistant.
+            await self._denials.emit(
+                actor=AuditActor.user(self._owner_id),
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action="chat.session.create",
+                reason="not_visible",
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            )
             raise NotFoundError("Assistant not found.")
         if assistant.status is not AssistantStatus.PUBLISHED:
             raise ValidationError(
@@ -409,8 +444,11 @@ class ChatService:
 
     async def get_session(self, session_id: UUID) -> SessionView | None:
         """Fetch one of the caller's sessions, or ``None`` if not visible (→ 404)."""
-        session = await self._sessions.get(session_id)
-        if session is None or not self._owns(session):
+        session = await self._visible_session(
+            session_id,
+            attempted_action="chat.session.read",
+        )
+        if session is None:
             return None
         return await self._view(session)
 
@@ -424,8 +462,11 @@ class ChatService:
         Visibility first (tenant + ownership → 404, INV-1/INV-2); a session with
         no answers yields all-zero totals, never an error.
         """
-        session = await self._sessions.get(session_id)
-        if session is None or not self._owns(session):
+        session = await self._visible_session(
+            session_id,
+            attempted_action="chat.session.usage",
+        )
+        if session is None:
             return None
         totals = await self._usage.totals_for_session(session_id)
         last = await self._usage.last_for_session(session_id)
@@ -465,8 +506,11 @@ class ChatService:
         non-owner's session is never mutated and is reported as 404 (INV-2). A
         supplied ``model`` is validated against the allow-list (422 if unknown).
         """
-        existing = await self._sessions.get(session_id)
-        if existing is None or not self._owns(existing):
+        existing = await self._visible_session(
+            session_id,
+            attempted_action="chat.session.update",
+        )
+        if existing is None:
             return None
         resolved_model = await self._resolve_model(model) if model is not None else None
         updated = await self._sessions.update(session_id, title=title, model=resolved_model)
@@ -476,8 +520,11 @@ class ChatService:
 
     async def delete_session(self, session_id: UUID) -> bool:
         """Delete one of the caller's sessions (cascades to messages/citations)."""
-        existing = await self._sessions.get(session_id)
-        if existing is None or not self._owns(existing):
+        existing = await self._visible_session(
+            session_id,
+            attempted_action="chat.session.delete",
+        )
+        if existing is None:
             return False
         if self._sandbox_lifecycle is not None:
             try:
@@ -544,8 +591,11 @@ class ChatService:
         Citations are hydrated in one batched join (no N+1); assistant messages
         carry their passage-level citations, user messages carry ``[]``.
         """
-        session = await self._sessions.get(session_id)
-        if session is None or not self._owns(session):
+        session = await self._visible_session(
+            session_id,
+            attempted_action="chat.messages.read",
+        )
+        if session is None:
             return None
         page_size = _clamp_limit(limit)
         after_id = _decode_cursor(_MESSAGE_CURSOR_PREFIX, cursor) if cursor else None
@@ -596,8 +646,11 @@ class ChatService:
         another user's answer (incl. permitted-only citation snippets). The WS
         consumer verifies this binding before relaying a single envelope.
         """
-        session = await self._sessions.get(session_id)
-        if session is None or not self._owns(session):
+        session = await self._visible_session(
+            session_id,
+            attempted_action="chat.message.send",
+        )
+        if session is None:
             return None
         # Per-turn override validated against the allow-list; else the session's
         # default (itself a validated allow-list id at create/update time).

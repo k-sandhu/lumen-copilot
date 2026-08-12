@@ -211,29 +211,23 @@ def _build_service(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
-    make_audit_sink: AuditSinkFactory | None = None,
-    request: Request | None = None,
+    make_audit_sink: AuditSinkFactory,
+    request: Request,
 ) -> RunsReadService:
-    """Assemble the run read service, with its audit seam when the caller audits.
+    """Assemble the read service with trusted request and audit context.
 
-    Only the DETAIL read can audit: it re-checks stored evidence against current
-    permissions and records when it withholds some (#558, INV-6). The inbox list
-    serves no citations, so threading a sink through it would be noise — the same
-    split ``chat._build_service`` makes for the transcript.
+    Detail reads audit both permission withholding (#558) and a non-visible run
+    denial (#579). The list route reuses the same constructor even though it has
+    no direct-resource denial of its own.
     """
-    audit_kwargs: dict[str, object] = {}
-    if make_audit_sink is not None and request is not None:
-        audit_kwargs = {
-            "audit": make_audit_sink(tenant_id),
-            # The envelope requires both (spec 0004 section 2.4).
-            "request_id": extract_request_id(request) or "unknown",
-            "source_ip": request.client.host if request.client else "unknown",
-        }
     return RunsReadService(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
-        **audit_kwargs,  # type: ignore[arg-type]
+        audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
     )
 
 
@@ -251,6 +245,7 @@ def _build_control_service(
         tenant_id=tenant_id,
         owner_id=principal.user_id,
         audit=make_audit_sink(tenant_id),
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )
@@ -266,9 +261,11 @@ def _control_to_response(result: RunControlResult) -> RunResponse:
 
 @router.get("", response_model=RunListResponse, response_model_exclude_none=True)
 async def list_runs(
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
     assistant_id: Annotated[UUID | None, Query()] = None,
     schedule_id: Annotated[UUID | None, Query()] = None,
     status_filter: Annotated[RunStatus | None, Query(alias="status")] = None,
@@ -276,7 +273,13 @@ async def list_runs(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> RunListResponse:
     """The run inbox — list the caller's runs (newest first), filterable (ADR-0015 §8)."""
-    service = _build_service(session=session, principal=principal, tenant_id=tenant_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     page = await service.list_(
         cursor=cursor,
         limit=limit,

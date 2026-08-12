@@ -65,6 +65,11 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             method=request.method,
         )
+        # Audit-producing dependencies/services need the exact correlation id
+        # the middleware minted and echoes. Keeping it on request state avoids
+        # falling back to an unrelated "unknown" id when the client omitted the
+        # header; actor/tenant attribution is still resolved later by auth/.
+        request.state.request_id = request_id
         try:
             response = await call_next(request)
         finally:

@@ -74,7 +74,7 @@ from app.mcp import (
 )
 from app.mcp.client import RateLimitCheck
 from app.net.egress import EgressBlockedError, resolve_safe_ip
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.services.secrets_service import SecretsService, build_secrets_service
 from app.services.tools.mcp_bridge import tools_for_servers
 from app.services.tools.types import ToolDefinition
@@ -244,6 +244,7 @@ class McpServersService:
         rate_limiter: AsyncRateLimiter,
         user_agent: str,
         audit: AuditSink,
+        denials: PermissionDeniedContext | None,
         request_id: str,
         source_ip: str,
         allowed_transports: frozenset[McpTransport] | None = None,
@@ -261,6 +262,9 @@ class McpServersService:
         self._rate_limiter = rate_limiter
         self._user_agent = user_agent
         self._audit = audit
+        self._denials = denials
+        if self._denials is not None:
+            self._denials.assert_user(owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._allowed_transports = (
@@ -276,7 +280,7 @@ class McpServersService:
         """Deny-by-default ownership check (spec 0004 §2.2, owner-or-admin)."""
         return self._is_admin or server.owner_id == self._owner_id
 
-    async def _visible(self, server_id: UUID) -> McpServer | None:
+    async def _visible(self, server_id: UUID, *, attempted_action: str) -> McpServer | None:
         """Fetch a server the caller may see, or ``None`` (→ 404).
 
         ``None`` for a missing id, a foreign-tenant id (the repository sees no row),
@@ -285,6 +289,14 @@ class McpServersService:
         """
         server = await self._servers.get(server_id)
         if server is None or not self._may_access(server):
+            if self._denials is None:
+                raise RuntimeError("MCP direct-resource guards require a denial context.")
+            await self._denials.emit(
+                resource_type="mcp_server",
+                resource_id=str(server_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             return None
         return server
 
@@ -506,7 +518,7 @@ class McpServersService:
 
     async def get(self, server_id: UUID) -> McpServer | None:
         """Fetch one of the caller's servers, or ``None`` if not visible (→ 404)."""
-        return await self._visible(server_id)
+        return await self._visible(server_id, attempted_action="mcp_server.read")
 
     async def update(
         self,
@@ -529,7 +541,7 @@ class McpServersService:
         credential value is never returned — only the updated masked ``secret_hint``.
         Audits ``mcp_server.updated`` (INV-6). ``None`` when not visible (→ 404).
         """
-        server = await self._visible(server_id)
+        server = await self._visible(server_id, attempted_action="mcp_server.update")
         if server is None:
             return None
 
@@ -586,7 +598,7 @@ class McpServersService:
         row. Audits ``mcp_server.deleted`` (INV-6). Returns ``False`` when not
         visible.
         """
-        server = await self._visible(server_id)
+        server = await self._visible(server_id, attempted_action="mcp_server.delete")
         if server is None:
             return False
 
@@ -621,7 +633,7 @@ class McpServersService:
         fetched in-process from CC-C at connect time and never returned. Audits
         ``mcp_server.tested`` (INV-6). ``None`` when not visible (→ 404).
         """
-        server = await self._visible(server_id)
+        server = await self._visible(server_id, attempted_action="mcp_server.test")
         if server is None:
             return None
 
@@ -697,7 +709,7 @@ class McpServersService:
         a server-annotated read-only tool, else the default T2 (trust is earned).
         ``None`` when the server is not visible (→ 404).
         """
-        server = await self._visible(server_id)
+        server = await self._visible(server_id, attempted_action="mcp_server.tools.read")
         if server is None:
             return None
         slug = _slug_for(server.id)
@@ -812,6 +824,7 @@ def build_mcp_servers_service(
     owner_id: UUID,
     roles: tuple[Role, ...],
     audit: AuditSink,
+    denials: PermissionDeniedContext | None,
     request_id: str,
     source_ip: str,
     client_factory: McpClientFactory | None = None,
@@ -856,6 +869,7 @@ def build_mcp_servers_service(
         rate_limiter=limiter,
         user_agent=settings.web_user_agent,
         audit=audit,
+        denials=denials,
         request_id=request_id,
         source_ip=source_ip,
         allowed_transports=frozenset(McpTransport(t) for t in settings.mcp_allowed_transports),

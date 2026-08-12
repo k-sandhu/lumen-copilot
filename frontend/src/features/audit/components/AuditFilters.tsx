@@ -7,28 +7,13 @@
  * The event-type options mirror the FROZEN contract taxonomy (api/types
  * `AuditEventType`, spec 0004 §2.4). Each input is labelled for keyboard + AT.
  */
-import type { AuditEventType } from '@/api';
+import { AUDIT_EVENT_TYPES, type AuditEventType } from '@/api';
 import { Icon } from '@/ui';
 import { eventTypeLabel } from '../model/presentation';
 import { isEmptyDraft, type AuditFilterDraft } from '../model/filterDraft';
 
-/** Every wire event_type, grouped roughly by the four row kinds, for the select. */
-const EVENT_TYPES: AuditEventType[] = [
-  'retrieval.query',
-  'answer.generated',
-  'permission.denied',
-  'auth.login',
-  'auth.login_failed',
-  'auth.logout',
-  'document.viewed',
-  'document.downloaded',
-  'document.uploaded',
-  'document.deleted',
-  'collection.created',
-  'action.requested',
-  'action.approved',
-  'action.executed',
-];
+/** Every wire event_type, mechanically sourced from the contract mirror. */
+const EVENT_TYPES: readonly AuditEventType[] = AUDIT_EVENT_TYPES;
 
 interface AuditFiltersProps {
   draft: AuditFilterDraft;

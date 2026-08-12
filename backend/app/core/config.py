@@ -341,6 +341,18 @@ class Settings(BaseSettings):
 
     # --- Datastores / infra (required: misconfig should fail fast) ---
     database_url: str = Field(alias="DATABASE_URL")
+    # Authenticated denials must survive the request rollback without ever
+    # re-entering/committing the caller's pool transaction (#579, R1-001).  The
+    # durable-audit engine therefore owns a small bounded pool over the same
+    # database.  Pool acquisition and the complete bind/write/commit operation
+    # are independently bounded so a degraded audit store fails closed promptly.
+    audit_db_pool_size: int = Field(default=4, ge=1, le=64, alias="AUDIT_DB_POOL_SIZE")
+    audit_db_pool_timeout_seconds: float = Field(
+        default=2.0, gt=0, le=30, alias="AUDIT_DB_POOL_TIMEOUT_SECONDS"
+    )
+    audit_db_operation_timeout_seconds: float = Field(
+        default=5.0, gt=0, le=60, alias="AUDIT_DB_OPERATION_TIMEOUT_SECONDS"
+    )
     redis_url: str = Field(alias="REDIS_URL")
     celery_broker_url: str = Field(alias="CELERY_BROKER_URL")
     celery_result_backend: str = Field(alias="CELERY_RESULT_BACKEND")

@@ -304,7 +304,7 @@ async def test_missing_bearer_is_401(client: AsyncClient) -> None:
 
 
 async def test_group_from_another_tenant_is_404_not_403(
-    client: AsyncClient, seeded: _Seeded
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
 ) -> None:
     """A tenant-B group is invisible to a tenant-A admin — 404, never 403."""
     token_b = await _login(client, seeded.admin_b_email)
@@ -320,6 +320,13 @@ async def test_group_from_another_tenant_is_404_not_403(
         await client.get(f"/api/v1/admin/groups/{group_b}/members", headers=_auth(token_a)),
     ):
         assert resp.status_code == 404, resp.text
+
+    assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+        "group.read",
+        "group.update",
+        "group.delete",
+        "group.members.read",
+    ]
 
     # ...and tenant A's list never leaks it.
     listed = await client.get("/api/v1/admin/groups", headers=_auth(token_a))

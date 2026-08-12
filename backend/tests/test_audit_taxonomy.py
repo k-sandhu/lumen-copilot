@@ -43,6 +43,7 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "auth.login_failed",
         "auth.logout",
         "collection.created",
+        "collection.deleted",
         "document.uploaded",
         "document.viewed",
         "document.downloaded",

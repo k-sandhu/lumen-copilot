@@ -59,7 +59,7 @@ from app.db.repositories import AuditEventRepository, SourceRepository, UserRepo
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role, SecretKind, SourceStatus
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.services.secrets_service import build_secrets_service
 from app.services.sources_service import _dispatch_off_loop
 
@@ -207,23 +207,15 @@ class ConnectorOAuthService:
             )
         return connector, spec
 
-    async def _emit_denied_initiation(
-        self, tenant_id: UUID, actor_id: UUID, source_id: UUID, reason: str
-    ) -> None:
-        await self._audit(tenant_id).emit(
-            action=AuditAction.PERMISSION_DENIED,
-            actor=AuditActor.user(actor_id),
-            resource_type="source",
-            resource_id=str(source_id),
-            outcome=AuditOutcome.DENIED,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={"reason": reason},
-        )
-
     # --- use-cases ----------------------------------------------------------
 
-    async def start_connect(self, source_id: UUID, *, principal: Principal) -> str:
+    async def start_connect(
+        self,
+        source_id: UUID,
+        *,
+        principal: Principal,
+        denials: PermissionDeniedContext,
+    ) -> str:
         """Begin (or restart) the flow; return the provider consent URL.
 
         Admin-gated **at action time** (ADR-0019 §1): the check runs against the
@@ -232,17 +224,25 @@ class ConnectorOAuthService:
         (INV-1); a non-OAuth type is 409 ``oauth_not_supported``; a source mid-
         sync is 409 ``not_connectable``.
         """
+        denials.assert_user(principal.user_id)
         sources = SourceRepository(self._session, principal.tenant_id)
         source = await sources.get(source_id)
         if source is None:
+            await denials.emit(
+                resource_type="source",
+                resource_id=str(source_id),
+                attempted_action="source.connect",
+                reason="not_visible",
+            )
             raise NotFoundError("Source not found.")
         if not principal.has_role(Role.ADMIN):
-            await self._emit_denied_initiation(
-                principal.tenant_id, principal.user_id, source_id, "not_admin"
+            await denials.emit(
+                resource_type="source",
+                resource_id=str(source_id),
+                attempted_action="source.connect",
+                reason="not_admin",
+                required_roles=(Role.ADMIN.value,),
             )
-            # Commit the deny-audit before the typed 403 aborts the request
-            # (INV-6 — nothing else has been written at this point).
-            await self._session.commit()
             raise ForbiddenError("Managed-source mutations require the admin role.")
         _connector, spec = self._oauth_connector(source.type)
         if source.status == SourceStatus.SYNCING:

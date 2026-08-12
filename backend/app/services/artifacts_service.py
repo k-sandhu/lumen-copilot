@@ -66,7 +66,7 @@ from app.core.errors import ValidationError
 from app.db.repositories import ArtifactRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Artifact, ArtifactProducedBy, AuditOutcome
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.storage import ObjectStore
 from app.storage.validation import validate_upload
 
@@ -170,6 +170,7 @@ class ArtifactsService:
         owner_id: UUID,
         object_store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedContext | None,
         request_id: str,
         source_ip: str,
         artifact_allowed_content_types: frozenset[str],
@@ -182,6 +183,9 @@ class ArtifactsService:
         self._owner_id = owner_id
         self._store = object_store
         self._audit = audit
+        self._denials = denials
+        if self._denials is not None:
+            self._denials.assert_user(owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._allowed_content_types = artifact_allowed_content_types
@@ -194,7 +198,7 @@ class ArtifactsService:
         """Deny-by-default ownership check (spec 0004 §2.2, INV-2)."""
         return artifact.owner_id == self._owner_id
 
-    async def _visible(self, artifact_id: UUID) -> Artifact | None:
+    async def _visible(self, artifact_id: UUID, *, attempted_action: str) -> Artifact | None:
         """Fetch an artifact the caller may see, or ``None`` (→ 404).
 
         ``None`` for a missing id, a foreign-tenant id (the repository sees no
@@ -204,6 +208,14 @@ class ArtifactsService:
         """
         artifact = await self._artifacts.get(artifact_id)
         if artifact is None or not self._owns(artifact):
+            if self._denials is None:
+                raise RuntimeError("Artifact direct-resource guards require a denial context.")
+            await self._denials.emit(
+                resource_type="artifact",
+                resource_id=str(artifact_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             return None
         return artifact
 
@@ -325,7 +337,7 @@ class ArtifactsService:
 
     async def get_artifact(self, artifact_id: UUID) -> Artifact | None:
         """Fetch one of the caller's artifacts, or ``None`` if not visible (→ 404)."""
-        return await self._visible(artifact_id)
+        return await self._visible(artifact_id, attempted_action="artifact.read")
 
     async def get_artifact_content(self, artifact_id: UUID) -> ArtifactContent | None:
         """Read the stored bytes for one of the caller's artifacts (→ 404 if not).
@@ -335,7 +347,7 @@ class ArtifactsService:
         adapter). Audits ``artifact.downloaded`` (INV-6). Returns ``None`` when the
         artifact is not the caller's.
         """
-        artifact = await self._visible(artifact_id)
+        artifact = await self._visible(artifact_id, attempted_action="artifact.download")
         if artifact is None:
             return None
         data = await self._store.get_artifact(str(self._tenant_id), artifact.storage_key)
@@ -364,7 +376,7 @@ class ArtifactsService:
         from storage, not through the API process. Audits ``artifact.downloaded``
         (INV-6). Returns ``None`` when the artifact is not the caller's.
         """
-        artifact = await self._visible(artifact_id)
+        artifact = await self._visible(artifact_id, attempted_action="artifact.download")
         if artifact is None:
             return None
         url = await self._store.presign_get_artifact(str(self._tenant_id), artifact.storage_key)
@@ -393,7 +405,7 @@ class ArtifactsService:
         is a no-op), then the row, so a row never outlives its bytes silently; both
         commit within this request's transaction at the caller.
         """
-        artifact = await self._visible(artifact_id)
+        artifact = await self._visible(artifact_id, attempted_action="artifact.delete")
         if artifact is None:
             return False
         await self._store.delete_artifact(str(self._tenant_id), artifact.storage_key)

@@ -78,7 +78,7 @@ from app.db.repositories import AuditEventRepository, TenantRepository, UserRepo
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role, User
 from app.domain.models import ModelTier
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.services.models_service import ChatModelService
 from app.storage import ObjectStore
 
@@ -374,9 +374,7 @@ class AdminService:
         self,
         member_id: UUID,
         *,
-        actor_id: UUID,
-        request_id: str,
-        source_ip: str,
+        denials: PermissionDeniedContext,
     ) -> User | None:
         """Attest a member's email identity for connector-ACL mapping (ADR-0019 §2).
 
@@ -387,19 +385,26 @@ class AdminService:
         ``None`` for a missing / foreign-tenant id (→ 404, INV-1). Role gating
         is the router's ``require_roles`` dependency, like every /admin route.
         """
+        actor_id = denials.require_user()
         attested = await UserRepository(self._session, self._tenant_id).attest_email(
             member_id, attested_by=actor_id
         )
         if attested is None:
+            await denials.emit(
+                resource_type="user",
+                resource_id=str(member_id),
+                attempted_action="user.identity.attest",
+                reason="not_visible",
+            )
             return None
         await AuditSink(AuditEventRepository(self._session, self._tenant_id)).emit(
             action=AuditAction.USER_IDENTITY_ATTESTED,
-            actor=AuditActor.user(actor_id),
+            actor=denials.actor,
             resource_type="user",
             resource_id=str(member_id),
             outcome=AuditOutcome.ALLOWED,
-            request_id=request_id,
-            source_ip=source_ip,
+            request_id=denials.request_id,
+            source_ip=denials.source_ip,
             metadata={"basis": "admin_attestation"},
         )
         return attested

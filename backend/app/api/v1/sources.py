@@ -43,6 +43,7 @@ from app.api.deps import (
     OAuthTokenHttpDep,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
 )
 from app.connectors.oauth import REAUTHORIZE_REQUIRED
@@ -404,6 +405,12 @@ def _build_service(
         roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )
@@ -588,6 +595,7 @@ async def connect_source(
     settings: SettingsDep,
     state_store: OAuthStateStoreDep,
     token_http: OAuthTokenHttpDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> SourceConnectResponse:
     """Start (or restart) a managed source's OAuth consent flow (admin only).
 
@@ -597,10 +605,9 @@ async def connect_source(
     ``not_connectable``; unknown/foreign is **404** (INV-1). The returned URL
     carries only the opaque single-use state handle (ADR-0019 §1).
 
-    ``tenant_id`` is depended on for its side effect (RLS GUC binding); the
-    service reads the tenant from the principal.
+    ``tenant_id`` both arms the RLS GUC and scopes the durable denial context;
+    it comes from the same token-bound principal the service receives.
     """
-    del tenant_id  # dependency retained for the RLS bind side effect
     service = _build_oauth_service(
         session=session,
         settings=settings,
@@ -608,7 +615,16 @@ async def connect_source(
         token_http=token_http,
         request=request,
     )
-    authorization_url = await service.start_connect(source_id, principal=principal)
+    authorization_url = await service.start_connect(
+        source_id,
+        principal=principal,
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
+    )
     await session.commit()
     return SourceConnectResponse(authorization_url=authorization_url)
 

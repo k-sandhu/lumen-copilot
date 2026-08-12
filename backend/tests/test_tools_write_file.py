@@ -120,6 +120,7 @@ class _World:
             owner_id=self.user_id,
             object_store=self.store,  # type: ignore[arg-type]  # structural fake
             audit=audit,
+            denials=None,  # write_file only creates artifacts
             request_id="req-test",
             source_ip="203.0.113.1",
             artifact_allowed_content_types=_ALLOWED,
@@ -153,9 +154,7 @@ async def world() -> AsyncIterator[_World]:
                 email="alice@acme.test", password_hash="x", roles=[Role.MEMBER]
             )
             await session.commit()
-            yield _World(
-                session=session, store=_FakeStore(), tenant_id=tenant.id, user_id=user.id
-            )
+            yield _World(session=session, store=_FakeStore(), tenant_id=tenant.id, user_id=user.id)
     finally:
         await engine.dispose()
 
@@ -213,7 +212,9 @@ async def test_text_write_persists_and_round_trips(world: _World) -> None:
 async def test_base64_write_round_trips_binary(world: _World) -> None:
     svc = world.service()
     ctx = ToolContext(
-        principal=world.principal, retrieval=object(), artifacts=svc  # type: ignore[arg-type]
+        principal=world.principal,
+        retrieval=object(),
+        artifacts=svc,  # type: ignore[arg-type]
     )
     raw = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03"
     result = await _write_file(

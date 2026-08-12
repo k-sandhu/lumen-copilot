@@ -48,6 +48,7 @@ from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
 from app.tasks.sync_source import SyncResult, sync_source_async
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -205,6 +206,9 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
             owner_id=user.id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, tenant.id, user.id
+            ),
             request_id="r",
             source_ip="203.0.113.1",
         )
@@ -565,6 +569,9 @@ async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: u
             owner_id=owner_id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, tenant_id, owner_id
+            ),
             request_id="r",
             source_ip="203.0.113.1",
         )

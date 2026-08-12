@@ -45,6 +45,7 @@ from app.api.deps import (
     DbSession,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
     require_roles,
 )
@@ -506,6 +507,7 @@ async def attest_member_identity(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> MemberResponse:
     """Attest a member's email identity for connector-ACL mapping (ADR-0019 §2).
 
@@ -516,9 +518,12 @@ async def attest_member_identity(
     service = AdminService(session, tenant_id=tenant_id, settings=settings)
     attested = await service.attest_member_identity(
         member_id,
-        actor_id=principal.user_id,
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
     )
     if attested is None:
         raise NotFoundError("Member not found.")
@@ -711,6 +716,7 @@ def _build_governance_service(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
     request: Request,
 ) -> AssistantGovernanceService:
     """Assemble the per-request governance service from the identity + correlation seams."""
@@ -718,6 +724,7 @@ def _build_governance_service(
         session,
         tenant_id=tenant_id,
         actor_id=principal.user_id,
+        denials=make_audit_sink.denials(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )
@@ -732,6 +739,7 @@ async def list_governed_assistants(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> GovernedAssistantListResponse:
@@ -743,7 +751,11 @@ async def list_governed_assistants(
     (INV-5); tenant-scoped via ``current_tenant`` (INV-1); a malformed cursor → 422.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     page = await service.list_all(cursor=cursor, limit=limit)
     return _to_governed_list(page)
@@ -760,6 +772,7 @@ async def certify_assistant(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> GovernedAssistantResponse:
     """Set an assistant's certification verdict (certify / deprecate / clear; admin only).
 
@@ -767,7 +780,11 @@ async def certify_assistant(
     ``assistant.deprecated`` (INV-6). Cross-tenant/missing id → 404.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     assistant = await service.certify(assistant_id, state=body.certificationState)
     await session.commit()
@@ -785,6 +802,7 @@ async def feature_assistant(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> GovernedAssistantResponse:
     """Feature / unfeature an assistant in the library (admin only; #217).
 
@@ -792,7 +810,11 @@ async def feature_assistant(
     (INV-6). Cross-tenant/missing id → 404.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     assistant = await service.set_featured(assistant_id, featured=body.featured)
     await session.commit()
@@ -810,6 +832,7 @@ async def disable_assistant(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> GovernedAssistantResponse:
     """Disable / re-enable an assistant (admin only; #217, INV-8 enforcement).
 
@@ -820,7 +843,11 @@ async def disable_assistant(
     (INV-6). Cross-tenant/missing id → 404.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     assistant = await service.set_disabled(assistant_id, disabled=body.disabled)
     await session.commit()
@@ -838,6 +865,7 @@ async def transfer_assistant_ownership(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> GovernedAssistantResponse:
     """Reassign an assistant's accountable owner to another tenant member (admin only; #217).
 
@@ -847,7 +875,11 @@ async def transfer_assistant_ownership(
     missing id → 404.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     assistant = await service.transfer_ownership(assistant_id, new_owner_id=body.newOwner)
     await session.commit()
@@ -860,6 +892,7 @@ async def disable_orphaned_assistants(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> BulkOrphanResponse:
     """Disable every orphaned assistant (owner deprovisioned) in the tenant (admin only; #217).
 
@@ -868,7 +901,11 @@ async def disable_orphaned_assistants(
     (INV-6). Idempotent — an already-disabled orphan is skipped.
     """
     service = _build_governance_service(
-        session=session, principal=principal, tenant_id=tenant_id, request=request
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
     )
     result = await service.bulk_disable_orphans()
     await session.commit()
@@ -1155,6 +1192,12 @@ def _build_llm_provider_service(
         owner_id=principal.user_id,
         roles=principal.roles,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

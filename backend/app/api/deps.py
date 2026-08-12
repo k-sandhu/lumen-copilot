@@ -11,7 +11,7 @@ client-supplied tenant (spec 0004 §2.3).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
@@ -24,13 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import InvalidTokenError, Principal, verify_access_token
 from app.connectors.oauth import OAuthStateStore, RedisOAuthStateStore
 from app.core.config import Settings, get_settings
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.repositories import AuditEventRepository
-from app.db.session import get_sessionmaker
+from app.db.session import get_durable_audit_transactions, get_sessionmaker
 from app.db.tenant_context import bind_tenant
+from app.domain.audit import AuditActor
 from app.domain.entities import Role
 from app.llm import LLMGateway
 from app.realtime.backplane import Backplane, RedisBackplane
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
 from app.services.auth_service import require_role
 from app.storage import ObjectStore
 
@@ -58,7 +60,67 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
-def make_audit_sink_factory(session: DbSession) -> Callable[[UUID], AuditSink]:
+async def get_durable_audit_transactions_dep(
+    settings: SettingsDep,
+) -> DurableAuditTransactions:
+    """Process-owned denial provider, initialized serially on the serving loop.
+
+    Keeping this dependency async avoids FastAPI dispatching the lazy singleton
+    constructor to multiple worker threads on concurrent first requests.  There
+    is no await between the singleton check and engine construction, so only one
+    owned audit pool can be installed and later disposed.
+    """
+    return get_durable_audit_transactions(settings)
+
+
+DurableAuditTransactionsDep = Annotated[
+    DurableAuditTransactions,
+    Depends(get_durable_audit_transactions_dep),
+]
+
+
+class AuditSinkFactoryValue:
+    """Request-scoped factory for atomic action sinks and durable denials."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        transactions: DurableAuditTransactions,
+    ) -> None:
+        self._session = session
+        self._transactions = transactions
+
+    def __call__(self, tenant_id: UUID) -> AuditSink:
+        return AuditSink(AuditEventRepository(self._session, tenant_id))
+
+    def denials(self, tenant_id: UUID) -> PermissionDeniedRecorder:
+        return PermissionDeniedRecorder(
+            self._transactions,
+            tenant_id=tenant_id,
+            request_session=self._session,
+        )
+
+    def denial_context(
+        self,
+        tenant_id: UUID,
+        *,
+        actor: AuditActor,
+        request_id: str,
+        source_ip: str,
+    ) -> PermissionDeniedContext:
+        """Bundle the canonical recorder with trusted request attribution."""
+        return PermissionDeniedContext(
+            self.denials(tenant_id),
+            actor=actor,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+
+
+def make_audit_sink_factory(
+    session: DbSession,
+    transactions: DurableAuditTransactionsDep,
+) -> AuditSinkFactoryValue:
     """Yield a factory that builds a tenant-scoped audit sink (CC-8, spec 0004 §2.4).
 
     The product-audit sink (mission filter #4) must be tenant-scoped, but the
@@ -71,13 +133,26 @@ def make_audit_sink_factory(session: DbSession) -> Callable[[UUID], AuditSink]:
     dependency can close over it and call this directly.
     """
 
-    def _make(tenant_id: UUID) -> AuditSink:
-        return AuditSink(AuditEventRepository(session, tenant_id))
-
-    return _make
+    return AuditSinkFactoryValue(session, transactions)
 
 
-AuditSinkFactory = Annotated[Callable[[UUID], AuditSink], Depends(make_audit_sink_factory)]
+AuditSinkFactory = Annotated[AuditSinkFactoryValue, Depends(make_audit_sink_factory)]
+
+
+def authenticated_denial_context(
+    make_audit_sink: AuditSinkFactoryValue,
+    *,
+    tenant_id: UUID,
+    principal: Principal,
+    request: Request,
+) -> PermissionDeniedContext:
+    """The one API seam for token-bound durable-denial attribution."""
+    return make_audit_sink.denial_context(
+        tenant_id,
+        actor=AuditActor.user(principal.user_id),
+        request_id=extract_request_id(request) or "unknown",
+        source_ip=request.client.host if request.client else "unknown",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -243,7 +318,7 @@ async def current_tenant(principal: CurrentUser, session: DbSession) -> UUID:
 CurrentTenant = Annotated[UUID, Depends(current_tenant)]
 
 
-def require_roles(*roles: Role) -> Callable[[Principal], Principal]:
+def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
     """Build a dependency that admits only principals holding one of ``roles``.
 
     The reusable RBAC seam for role-gated routes (INV-5): a wave-2 admin route
@@ -253,9 +328,34 @@ def require_roles(*roles: Role) -> Callable[[Principal], Principal]:
     from the 401 an unauthenticated caller gets.
     """
 
-    def _dependency(principal: CurrentUser) -> Principal:
+    if not roles:
+        raise ValueError("require_roles needs at least one role")
+
+    async def _dependency(
+        request: Request,
+        principal: CurrentUser,
+        tenant_id: CurrentTenant,
+        make_audit_sink: AuditSinkFactory,
+    ) -> Principal:
         if any(principal.has_role(r) for r in roles):
             return principal
+        # This dependency runs only after `current_user` + `current_tenant`, so
+        # attribution is token-bound and RLS is armed. The matched route template
+        # is server-owned (unlike a body or query parameter), making it safe causal
+        # context for the denial without disclosing any protected resource.
+        route = request.scope.get("route")
+        route_path = str(getattr(route, "path", request.url.path))
+        denials = make_audit_sink.denials(tenant_id)
+        await denials.emit(
+            actor=AuditActor.user(principal.user_id),
+            resource_type="api_route",
+            resource_id=route_path,
+            attempted_action=f"{request.method.upper()} {route_path}",
+            reason="missing_required_role",
+            request_id=extract_request_id(request) or "unknown",
+            source_ip=request.client.host if request.client else "unknown",
+            required_roles=tuple(role.value for role in roles),
+        )
         # Reuse the single-role assertion to raise the typed 403; pass the first
         # required role for the message (the set is small and homogeneous here).
         require_role(principal, roles[0])
@@ -270,4 +370,8 @@ def extract_request_id(request: Request) -> str | None:
     Used by routers to thread the correlation id into audit events without the
     service reaching into the request object (boundary discipline).
     """
-    return request.headers.get("x-request-id") or request.headers.get("X-Request-ID")
+    return (
+        request.headers.get("x-request-id")
+        or request.headers.get("X-Request-ID")
+        or getattr(request.state, "request_id", None)
+    )

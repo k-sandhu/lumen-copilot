@@ -70,7 +70,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Document, DocumentStatus
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document, permitted_document_ids
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext
 from app.storage import ObjectStore
 from app.storage.validation import validate_upload
 
@@ -240,6 +240,7 @@ class DocumentService:
         owner_id: UUID,
         object_store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
         upload_allowed_content_types: frozenset[str],
@@ -260,6 +261,8 @@ class DocumentService:
         self._allow_set_cache: AllowSet | None = None
         self._store = object_store
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._allowed_content_types = upload_allowed_content_types
@@ -288,7 +291,7 @@ class DocumentService:
         count = await self._documents.count_chunks(document.id)
         return DocumentView(document=document, chunk_count=count)
 
-    async def _visible(self, document_id: UUID) -> Document | None:
+    async def _visible(self, document_id: UUID, *, attempted_action: str) -> Document | None:
         """Fetch a document the caller may **read**, or ``None`` (→ 404).
 
         Delegates to the permission chokepoint
@@ -308,11 +311,19 @@ class DocumentService:
         or a document the requester is not permitted — INV-1/INV-2 collapse all
         three to 404 at the router.
         """
-        return await get_permitted_document(
+        document = await get_permitted_document(
             self._session, allow_set=await self._resolve_allow_set(), document_id=document_id
         )
+        if document is None:
+            await self._denials.emit(
+                resource_type="document",
+                resource_id=str(document_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
+        return document
 
-    async def _owned(self, document_id: UUID) -> Document | None:
+    async def _owned(self, document_id: UUID, *, attempted_action: str) -> Document | None:
         """Fetch a document the caller **manages**, or ``None`` (→ 404).
 
         Document *management* (delete) stays an ownership decision and is
@@ -324,6 +335,12 @@ class DocumentService:
         """
         document = await self._documents.get(document_id)
         if document is None or not self._owns(document):
+            await self._denials.emit(
+                resource_type="document",
+                resource_id=str(document_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             return None
         return document
 
@@ -359,6 +376,12 @@ class DocumentService:
         # 1. Target collection must be the caller's (deny by default; INV-1/INV-2).
         collection = await self._collections.get(collection_id)
         if collection is None or collection.owner_id != self._owner_id:
+            await self._denials.emit(
+                resource_type="collection",
+                resource_id=str(collection_id),
+                attempted_action="document.upload",
+                reason="not_visible",
+            )
             return None
 
         # 2. Allowlist + size cap (reuse #22's single rule owner), mapped to the
@@ -520,14 +543,12 @@ class DocumentService:
         # no chunks is absent from the mapping and defaults to 0, exactly as the
         # single-id count returns for a document ingestion has not populated yet.
         chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
-        items = [
-            DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible
-        ]
+        items = [DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible]
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:
         """Fetch one of the caller's documents, or ``None`` if not visible (→ 404)."""
-        document = await self._visible(document_id)
+        document = await self._visible(document_id, attempted_action="document.read")
         if document is None:
             return None
         return await self._view(document)
@@ -540,7 +561,7 @@ class DocumentService:
         ``document.downloaded`` (INV-6). Returns ``None`` when the document is not
         the caller's.
         """
-        document = await self._visible(document_id)
+        document = await self._visible(document_id, attempted_action="document.download")
         if document is None:
             return None
         data = await self._store.get(str(self._tenant_id), document.storage_key)
@@ -572,7 +593,7 @@ class DocumentService:
         ``max_bytes`` UTF-8 bytes on a character boundary with ``truncated``
         set. Audited ``document.viewed`` (INV-6).
         """
-        document = await self._visible(document_id)
+        document = await self._visible(document_id, attempted_action="document.text.read")
         if document is None:
             return None
         if document.status is not DocumentStatus.READY:
@@ -609,7 +630,7 @@ class DocumentService:
         bytes directly from storage, not through the API process. Audits
         ``document.downloaded`` (INV-6).
         """
-        document = await self._visible(document_id)
+        document = await self._visible(document_id, attempted_action="document.download")
         if document is None:
             return None
         url = await self._store.presign_get(str(self._tenant_id), document.storage_key)
@@ -649,7 +670,7 @@ class DocumentService:
         ``count_by_storage_key`` read would still see the just-deleted row. All of
         this commits within this request's transaction at the router.
         """
-        document = await self._owned(document_id)
+        document = await self._owned(document_id, attempted_action="document.delete")
         if document is None:
             return False
         deleted = await self._documents.delete(document_id)

@@ -44,6 +44,10 @@ from app.services.collections_service import (
     _encode_cursor,
 )
 from app.storage.keys import assert_key_owned_by
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -119,7 +123,9 @@ def test_clamp_limit(requested: int | None, expected: int) -> None:
 
 
 @pytest_asyncio.fixture
-async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+async def sessionmaker(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """A StaticPool SQLite engine + schema, seeded with one tenant + owner.
 
     ``autoflush=False`` mirrors the production sessionmaker (``db/session.py``):
@@ -134,7 +140,12 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+        factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            autoflush=False,
+            info={"durable_audit_ledger": durable_audit_ledger},
+        )
         async with factory() as seed:
             tenant = await TenantRepository(seed).create(name="Acme")
             owner = await UserRepository(seed, tenant.id).create(
@@ -170,6 +181,7 @@ def _service(
         owner_id=owner_id,
         object_store=store,  # type: ignore[arg-type]
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=denial_recorder_from_session(session, tenant_id),
         request_id="req-1",
         source_ip="203.0.113.5",
     )

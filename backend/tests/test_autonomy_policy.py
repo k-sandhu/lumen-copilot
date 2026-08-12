@@ -39,6 +39,10 @@ from app.services.autonomy_policy_service import (
     AutonomyPolicyReader,
     AutonomyPolicyService,
 )
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -65,7 +69,9 @@ def test_clamped_to_lowers_but_never_raises() -> None:
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -74,7 +80,11 @@ async def session() -> AsyncIterator[AsyncSession]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            info={"durable_audit_ledger": durable_audit_ledger},
+        )
         async with factory() as sess:
             yield sess
     finally:
@@ -132,6 +142,7 @@ def _assistants_service(
         owner_id=owner_id,
         roles=(Role.MEMBER,),
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=denial_recorder_from_session(session, tenant_id),
         request_id="req-test",
         source_ip="203.0.113.1",
     )

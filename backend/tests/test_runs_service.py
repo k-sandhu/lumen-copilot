@@ -41,6 +41,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
+from app.domain.audit import AuditActor
 from app.domain.entities import (
     AssistantStatus,
     AutonomyLevel,
@@ -54,6 +55,12 @@ from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.services import runs_service
 from app.services.assistants_service import config_from_assistant
+from app.services.audit import AuditSink
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -176,30 +183,41 @@ class _Ctx:
         tenant_b: uuid.UUID,
         alice_id: uuid.UUID,
         bob_id: uuid.UUID,
+        carol_id: uuid.UUID,
         assistant_id: uuid.UUID,
         version_id: uuid.UUID,
         document_id: uuid.UUID,
         chunk_id: uuid.UUID,
+        durable_audit: RecordingDurableAuditTransactions,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.tenant_a = tenant_a
         self.tenant_b = tenant_b
         self.alice_id = alice_id
         self.bob_id = bob_id
+        self.carol_id = carol_id
         self.assistant_id = assistant_id
         self.version_id = version_id
         self.document_id = document_id
         self.chunk_id = chunk_id
+        self.durable_audit = durable_audit
 
 
 @pytest_asyncio.fixture
-async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
+async def ctx(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[_Ctx]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        info={"durable_audit_ledger": durable_audit_ledger},
+    )
     # ``execute_run`` opens its own sessions via ``tenant_session_scope`` +
     # ``get_sessionmaker`` — point both at this one offline engine.
     monkeypatch.setattr("app.db.session.get_sessionmaker", lambda settings=None: factory)
@@ -214,6 +232,9 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
             )
             bob = await UserRepository(seed, ta.id).create(
                 email="bob@acme.test", password_hash="x", roles=[Role.MEMBER]
+            )
+            carol = await UserRepository(seed, tb.id).create(
+                email="carol@globex.test", password_hash="x", roles=[Role.MEMBER]
             )
             coll = await CollectionRepository(seed, ta.id).create(owner_id=alice.id, name="c")
             doc = await DocumentRepository(seed, ta.id).create(
@@ -261,10 +282,12 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
                 tenant_b=tb.id,
                 alice_id=alice.id,
                 bob_id=bob.id,
+                carol_id=carol.id,
                 assistant_id=assistant.id,
                 version_id=version.id,
                 document_id=doc.id,
                 chunk_id=chunks[0].id,
+                durable_audit=durable_audit_ledger,
             )
     finally:
         await engine.dispose()
@@ -319,6 +342,27 @@ async def _create_queued_run(
         return run.id
 
 
+def _read_service(
+    ctx: _Ctx,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    owner_id: uuid.UUID,
+    request_id: str = "test-run-read",
+    source_ip: str = "203.0.113.8",
+) -> runs_service.RunsReadService:
+    scoped_tenant = tenant_id or ctx.tenant_a
+    return runs_service.RunsReadService(
+        session,
+        tenant_id=scoped_tenant,
+        owner_id=owner_id,
+        audit=AuditSink(AuditEventRepository(session, scoped_tenant)),
+        denials=denial_recorder_from_session(session, scoped_tenant),
+        request_id=request_id,
+        source_ip=source_ip,
+    )
+
+
 # --- AC-1: a run executes headless and persists a cited transcript ----------
 
 
@@ -361,9 +405,7 @@ async def test_run_detail_hydrates_grounded_citations(
     await runs_service.execute_run(run_id, ctx.tenant_a)
 
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        detail = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
         assert detail.run.status is RunStatus.SUCCEEDED
         assert len(detail.citations) == 1
         cite = detail.citations[0]
@@ -393,9 +435,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
     await runs_service.execute_run(bob_run, ctx.tenant_a)
 
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.bob_id
-        ).get(bob_run)
+        detail = await _read_service(ctx, session, owner_id=ctx.bob_id).get(bob_run)
         # Zero citations — bob's run could not read alice's document.
         assert detail.citations == []
         citation_steps = [s for s in detail.steps if s.kind is RunStepKind.CITATION]
@@ -406,9 +446,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
     alice_run = await _create_queued_run(ctx, owner_id=ctx.alice_id)
     await runs_service.execute_run(alice_run, ctx.tenant_a)
     async with ctx.sessionmaker() as session:
-        detail = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(alice_run)
+        detail = await _read_service(ctx, session, owner_id=ctx.alice_id).get(alice_run)
         assert len(detail.citations) == 1
 
 
@@ -426,11 +464,19 @@ async def test_cross_tenant_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.Monk
     async with ctx.sessionmaker() as session:
         # A reader in tenant B (Globex) cannot see Acme's run — repository is
         # tenant-scoped, so the row does not resolve → NotFoundError (→ 404).
-        reader = runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_b, owner_id=ctx.alice_id
-        )
+        assert await UserRepository(session, ctx.tenant_b).get(ctx.carol_id) is not None
+        assert await UserRepository(session, ctx.tenant_b).get(ctx.alice_id) is None
+        reader = _read_service(ctx, session, tenant_id=ctx.tenant_b, owner_id=ctx.carol_id)
         with pytest.raises(NotFoundError):
             await reader.get(run_id)
+    denied = [event for event in ctx.durable_audit.events if event.resource_id == str(run_id)]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == ctx.tenant_b
+    assert denied[0].actor_id == ctx.carol_id
+    assert denied[0].metadata == {
+        "attempted_action": "run.read",
+        "reason": "not_visible",
+    }
 
 
 async def test_non_owner_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,9 +490,30 @@ async def test_non_owner_run_is_not_found(ctx: _Ctx, monkeypatch: pytest.MonkeyP
     async with ctx.sessionmaker() as session:
         # Bob (same tenant, not the owner) cannot see alice's run.
         with pytest.raises(NotFoundError):
-            await runs_service.RunsReadService(
-                session, tenant_id=ctx.tenant_a, owner_id=ctx.bob_id
+            await _read_service(
+                ctx,
+                session,
+                owner_id=ctx.bob_id,
+                request_id="req-run-denied",
+                source_ip="203.0.113.9",
             ).get(run_id)
+        denied = [
+            event
+            for event in ctx.durable_audit.events
+            if event.action == "permission.denied" and event.resource_id == str(run_id)
+        ]
+        assert len(denied) == 1
+        event = denied[0]
+        assert event.actor_id == ctx.bob_id
+        assert event.outcome.value == "denied"
+        assert event.resource_type == "run"
+        assert event.request_id == "req-run-denied"
+        assert event.source_origin == "client"
+        assert event.source_ip == "203.0.113.9"
+        assert event.metadata == {
+            "attempted_action": "run.read",
+            "reason": "not_visible",
+        }
 
 
 # --- AC-4: a crash → failed status, never a stuck running -------------------
@@ -548,6 +615,10 @@ async def test_enqueue_manual_run_creates_queued_pinned_run(ctx: _Ctx) -> None:
             tenant_id=ctx.tenant_a,
             owner_id=ctx.alice_id,
             assistant_id=ctx.assistant_id,
+            denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+            denial_actor=AuditActor.user(ctx.alice_id),
+            request_id="enqueue-success",
+            source_ip="203.0.113.8",
             inputs={"prompt": "go"},
         )
         await session.commit()
@@ -561,14 +632,26 @@ async def test_enqueue_manual_run_creates_queued_pinned_run(ctx: _Ctx) -> None:
 async def test_enqueue_manual_run_unknown_assistant_is_404(ctx: _Ctx) -> None:
     from app.core.errors import NotFoundError
 
+    unknown_id = uuid.uuid4()
     async with ctx.sessionmaker() as session:
         with pytest.raises(NotFoundError):
             await runs_service.enqueue_manual_run(
                 session,
                 tenant_id=ctx.tenant_a,
                 owner_id=ctx.alice_id,
-                assistant_id=uuid.uuid4(),
+                assistant_id=unknown_id,
+                denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
+                request_id="enqueue-unknown",
+                source_ip="203.0.113.8",
             )
+    denied = [event for event in ctx.durable_audit.events if event.resource_id == str(unknown_id)]
+    assert len(denied) == 1
+    assert denied[0].actor_id == ctx.alice_id
+    assert denied[0].metadata == {
+        "attempted_action": "run.enqueue",
+        "reason": "not_visible",
+    }
 
 
 async def test_enqueue_manual_run_non_owner_is_404(ctx: _Ctx) -> None:
@@ -582,6 +665,62 @@ async def test_enqueue_manual_run_non_owner_is_404(ctx: _Ctx) -> None:
                 tenant_id=ctx.tenant_a,
                 owner_id=ctx.bob_id,  # bob does not own alice's assistant
                 assistant_id=ctx.assistant_id,
+                denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.bob_id),
+                request_id="enqueue-non-owner",
+                source_ip="203.0.113.8",
+            )
+    denied = [
+        event for event in ctx.durable_audit.events if event.resource_id == str(ctx.assistant_id)
+    ]
+    assert len(denied) == 1
+    assert denied[0].actor_id == ctx.bob_id
+    assert denied[0].metadata == {
+        "attempted_action": "run.enqueue",
+        "reason": "not_visible",
+    }
+
+
+async def test_enqueue_manual_run_cross_tenant_actor_is_404_and_audited(ctx: _Ctx) -> None:
+    """A valid tenant-B actor cannot enqueue tenant A's assistant by id."""
+    from app.core.errors import NotFoundError
+
+    async with ctx.sessionmaker() as session:
+        assert await UserRepository(session, ctx.tenant_b).get(ctx.carol_id) is not None
+        with pytest.raises(NotFoundError):
+            await runs_service.enqueue_manual_run(
+                session,
+                tenant_id=ctx.tenant_b,
+                owner_id=ctx.carol_id,
+                assistant_id=ctx.assistant_id,
+                denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_b),
+                denial_actor=AuditActor.user(ctx.carol_id),
+                request_id="enqueue-cross-tenant",
+                source_ip="203.0.113.8",
+            )
+    denied = [
+        event for event in ctx.durable_audit.events if event.request_id == "enqueue-cross-tenant"
+    ]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == ctx.tenant_b
+    assert denied[0].actor_id == ctx.carol_id
+    assert denied[0].resource_id == str(ctx.assistant_id)
+
+
+async def test_enqueue_manual_run_propagates_audit_failure(ctx: _Ctx) -> None:
+    """INV-6: an enqueue denial cannot return 404 without a durable record."""
+    ctx.durable_audit.fail_with = RuntimeError("audit unavailable")
+    async with ctx.sessionmaker() as session:
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await runs_service.enqueue_manual_run(
+                session,
+                tenant_id=ctx.tenant_a,
+                owner_id=ctx.alice_id,
+                assistant_id=uuid.uuid4(),
+                denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
+                request_id="enqueue-audit-failure",
+                source_ip="203.0.113.8",
             )
 
 
@@ -608,6 +747,10 @@ async def test_enqueue_manual_run_unpublished_assistant_is_422(ctx: _Ctx) -> Non
                 tenant_id=ctx.tenant_a,
                 owner_id=ctx.alice_id,
                 assistant_id=draft_id,
+                denials=denial_recorder(ctx.durable_audit, session, ctx.tenant_a),
+                denial_actor=AuditActor.user(ctx.alice_id),
+                request_id="enqueue-draft",
+                source_ip="203.0.113.8",
             )
 
 
@@ -776,6 +919,7 @@ def _control_service(
         tenant_id=ctx.tenant_a,
         owner_id=owner_id,
         audit=AuditSink(AuditEventRepository(session, ctx.tenant_a)),
+        denials=denial_recorder_from_session(session, ctx.tenant_a),
         request_id="test-req",
         source_ip="203.0.113.1",
     )
@@ -874,16 +1018,27 @@ async def test_cross_tenant_cannot_resume_escalated_run_404(
 
     run_id = await _escalate_run(ctx, monkeypatch)
     async with ctx.sessionmaker() as session:
+        assert await UserRepository(session, ctx.tenant_b).get(ctx.carol_id) is not None
+        assert await UserRepository(session, ctx.tenant_b).get(ctx.alice_id) is None
         control = runs_service.RunsControlService(
             session,
             tenant_id=ctx.tenant_b,  # a different tenant
-            owner_id=ctx.alice_id,
+            owner_id=ctx.carol_id,
             audit=AuditSink(AuditEventRepository(session, ctx.tenant_b)),
+            denials=denial_recorder_from_session(session, ctx.tenant_b),
             request_id="r",
             source_ip="203.0.113.1",
         )
         with pytest.raises(NotFoundError):
             await control.resume(run_id)
+    denied = [event for event in ctx.durable_audit.events if event.resource_id == str(run_id)]
+    assert len(denied) == 1
+    assert denied[0].tenant_id == ctx.tenant_b
+    assert denied[0].actor_id == ctx.carol_id
+    assert denied[0].metadata == {
+        "attempted_action": "run.resume",
+        "reason": "not_visible",
+    }
 
 
 async def test_reroute_to_current_owner_is_422(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -932,9 +1087,7 @@ async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
 
     # While alice can still retrieve it, both surfaces carry the passage.
     async with ctx.sessionmaker() as session:
-        before = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        before = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
         assert "14,600" in before.citations[0].snippet
         cited_steps = [s for s in before.steps if s.kind is RunStepKind.CITATION]
         assert cited_steps, "the fixture should produce a citation step"
@@ -950,9 +1103,7 @@ async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
         await session.commit()
 
     async with ctx.sessionmaker() as session:
-        after = await runs_service.RunsReadService(
-            session, tenant_id=ctx.tenant_a, owner_id=ctx.alice_id
-        ).get(run_id)
+        after = await _read_service(ctx, session, owner_id=ctx.alice_id).get(run_id)
 
         # Surface 1: the citation list.
         cite = after.citations[0]

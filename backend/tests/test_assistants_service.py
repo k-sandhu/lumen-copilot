@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -50,6 +51,10 @@ from app.domain.entities import (
 from app.services.assistants_service import AssistantsService
 from app.services.audit import AuditSink
 from app.services.tools.mcp_bridge import namespaced_tool_name, slug_for_server
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -60,7 +65,9 @@ import app.db.models  # noqa: F401  isort: skip
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[AsyncSession]:
     """A fresh in-memory SQLite schema + session per test (offline-safe)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -70,7 +77,11 @@ async def session() -> AsyncIterator[AsyncSession]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        factory = async_sessionmaker(
+            bind=engine,
+            expire_on_commit=False,
+            info={"durable_audit_ledger": durable_audit_ledger},
+        )
         async with factory() as sess:
             yield sess
     finally:
@@ -126,6 +137,7 @@ def _service(
         owner_id=owner_id,
         roles=roles,
         audit=audit,
+        denials=denial_recorder_from_session(session, tenant_id),
         request_id="req-test",
         source_ip="203.0.113.1",
     )
@@ -420,6 +432,20 @@ async def test_cross_tenant_get_is_404(session: AsyncSession, world: _World) -> 
     carol_svc = _service(session, tenant_id=world.tenant_b, owner_id=world.carol)
     with pytest.raises(NotFoundError):
         await carol_svc.get(assistant.id)
+    denied = [
+        event
+        for event in session.info["durable_audit_ledger"].events
+        if event.action == "permission.denied"
+    ]
+    assert len(denied) == 1
+    assert denied[0].actor_id == world.carol
+    assert denied[0].tenant_id == world.tenant_b
+    assert denied[0].resource_id == str(assistant.id)
+    assert denied[0].outcome.value == "denied"
+    assert denied[0].metadata == {
+        "attempted_action": "assistant.read",
+        "reason": "not_visible",
+    }
 
 
 async def test_non_owner_same_tenant_get_is_404(session: AsyncSession, world: _World) -> None:
@@ -435,6 +461,44 @@ async def test_non_owner_same_tenant_get_is_404(session: AsyncSession, world: _W
         await bob_svc.update(assistant.id, name="hijack")
     with pytest.raises(NotFoundError):
         await bob_svc.delete(assistant.id)
+    denied = [
+        event
+        for event in session.info["durable_audit_ledger"].events
+        if event.action == "permission.denied" and event.resource_id == str(assistant.id)
+    ]
+    assert len(denied) == 3
+    assert all(event.actor_id == world.bob for event in denied)
+    assert all(event.outcome.value == "denied" for event in denied)
+    assert {event.metadata["attempted_action"] for event in denied} == {
+        "assistant.read",
+        "assistant.update",
+        "assistant.delete",
+    }
+    assert all(event.metadata["reason"] == "not_visible" for event in denied)
+
+
+async def test_denial_does_not_commit_the_callers_transaction(
+    session: AsyncSession, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable denial owns a separate transaction, never the use-case session."""
+    alice_svc = _service(session, tenant_id=world.tenant_a, owner_id=world.alice)
+    assistant = await alice_svc.create(name="Alice's")
+    await session.commit()
+
+    caller_commit = AsyncMock(side_effect=AssertionError("caller session was committed"))
+    monkeypatch.setattr(session, "commit", caller_commit)
+    bob_svc = _service(session, tenant_id=world.tenant_a, owner_id=world.bob)
+
+    with pytest.raises(NotFoundError):
+        await bob_svc.get(assistant.id)
+
+    caller_commit.assert_not_awaited()
+    denied = [
+        event
+        for event in session.info["durable_audit_ledger"].events
+        if event.action == "permission.denied" and event.resource_id == str(assistant.id)
+    ]
+    assert len(denied) == 1
 
 
 async def test_tenant_admin_may_manage_others(session: AsyncSession, world: _World) -> None:

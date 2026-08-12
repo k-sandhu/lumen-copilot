@@ -49,6 +49,10 @@ from app.domain.scheduling import (
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink
 from app.services.schedules_service import SchedulesService
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_recorder_from_session,
+)
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -95,13 +99,19 @@ class _Ctx:
 
 
 @pytest_asyncio.fixture
-async def ctx() -> AsyncIterator[_Ctx]:
+async def ctx(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[_Ctx]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        info={"durable_audit_ledger": durable_audit_ledger},
+    )
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -122,21 +132,30 @@ async def ctx() -> AsyncIterator[_Ctx]:
 
             # A published assistant owned by alice, pinned to one version.
             published = await assistants_a.create(
-                owner_id=alice.id, name="Weekly summary",
-                knowledge_scope=KnowledgeScope.empty(), tool_allowlist=(),
-                autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=bob.id,
+                owner_id=alice.id,
+                name="Weekly summary",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=bob.id,
             )
             await assistants_a.update(published.id, fields={"status": AssistantStatus.PUBLISHED})
             head = await assistants_a.get(published.id)
             await versions_a.add(
-                assistant_id=published.id, version=1, author_id=alice.id,
+                assistant_id=published.id,
+                version=1,
+                author_id=alice.id,
                 config=config_from_assistant(head),
             )
 
             # A DISABLED assistant owned by alice (cannot be scheduled/run).
             disabled = await assistants_a.create(
-                owner_id=alice.id, name="Retired", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=bob.id,
+                owner_id=alice.id,
+                name="Retired",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=bob.id,
             )
             await assistants_a.update(disabled.id, fields={"status": AssistantStatus.DISABLED})
 
@@ -144,13 +163,19 @@ async def ctx() -> AsyncIterator[_Ctx]:
             assistants_b = AssistantRepository(seed, tb.id)
             versions_b = AssistantVersionRepository(seed, tb.id)
             carol_ast = await assistants_b.create(
-                owner_id=carol.id, name="Globex", knowledge_scope=KnowledgeScope.empty(),
-                tool_allowlist=(), autonomy_level=AutonomyLevel.SUGGEST, backup_owner_id=None,
+                owner_id=carol.id,
+                name="Globex",
+                knowledge_scope=KnowledgeScope.empty(),
+                tool_allowlist=(),
+                autonomy_level=AutonomyLevel.SUGGEST,
+                backup_owner_id=None,
             )
             await assistants_b.update(carol_ast.id, fields={"status": AssistantStatus.PUBLISHED})
             head_b = await assistants_b.get(carol_ast.id)
             await versions_b.add(
-                assistant_id=carol_ast.id, version=1, author_id=carol.id,
+                assistant_id=carol_ast.id,
+                version=1,
+                author_id=carol.id,
                 config=config_from_assistant(head_b),
             )
             await seed.commit()
@@ -184,6 +209,7 @@ def _service(
         owner_id=owner_id or ctx.alice_id,
         roles=roles,
         audit=AuditSink(AuditEventRepository(session, tenant_id or ctx.tenant_a)),
+        denials=denial_recorder_from_session(session, tenant_id or ctx.tenant_a),
         request_id="test-req",
         source_ip="127.0.0.1",
         projector=projector or _RecordingProjector(),
@@ -277,9 +303,7 @@ async def test_get_cross_tenant_schedule_is_404(ctx: _Ctx) -> None:
         )
         await session.commit()
     async with ctx.sessionmaker() as session:
-        carol_service = _service(
-            ctx, session, tenant_id=ctx.tenant_b, owner_id=ctx.carol_id
-        )
+        carol_service = _service(ctx, session, tenant_id=ctx.tenant_b, owner_id=ctx.carol_id)
         with pytest.raises(NotFoundError):
             await carol_service.get(created.id)
 
@@ -295,6 +319,20 @@ async def test_get_other_owner_same_tenant_is_404(ctx: _Ctx) -> None:
         bob_service = _service(ctx, session, owner_id=ctx.bob_id)
         with pytest.raises(NotFoundError):
             await bob_service.get(created.id)
+        denied = [
+            event
+            for event in session.info["durable_audit_ledger"].events
+            if event.action == "permission.denied" and event.resource_id == str(created.id)
+        ]
+        assert len(denied) == 1
+        event = denied[0]
+        assert event.actor_id == ctx.bob_id
+        assert event.outcome.value == "denied"
+        assert event.resource_type == "schedule"
+        assert event.metadata == {
+            "attempted_action": "schedule.read",
+            "reason": "not_visible",
+        }
 
 
 async def test_admin_may_manage_another_owners_schedule(ctx: _Ctx) -> None:
@@ -305,9 +343,7 @@ async def test_admin_may_manage_another_owners_schedule(ctx: _Ctx) -> None:
         )
         await session.commit()
     async with ctx.sessionmaker() as session:
-        admin_service = _service(
-            ctx, session, owner_id=ctx.bob_id, roles=(Role.MEMBER, Role.ADMIN)
-        )
+        admin_service = _service(ctx, session, owner_id=ctx.bob_id, roles=(Role.MEMBER, Role.ADMIN))
         got = await admin_service.get(created.id)
         assert got.id == created.id
 
@@ -324,9 +360,7 @@ async def test_update_cadence_recomputes_next_run_and_audits(ctx: _Ctx) -> None:
         before = created.next_run_at
         updated = await service.update(
             created.id,
-            cadence=cadence_from_structured(
-                StructuredCadence(every=CadenceUnit.DAY, at="23:59")
-            ),
+            cadence=cadence_from_structured(StructuredCadence(every=CadenceUnit.DAY, at="23:59")),
         )
         await session.commit()
         assert updated.cadence.cron == "59 23 * * *"
@@ -380,8 +414,10 @@ async def test_pause_is_idempotent(ctx: _Ctx) -> None:
     async with ctx.sessionmaker() as session:
         service = _service(ctx, session)
         created = await service.create(
-            assistant_id=ctx.assistant_id, cadence=cadence_from_cron("0 8 * * *"),
-            timezone=_NY, enabled=False,
+            assistant_id=ctx.assistant_id,
+            cadence=cadence_from_cron("0 8 * * *"),
+            timezone=_NY,
+            enabled=False,
         )
         again = await service.pause(created.id)  # already paused
         assert again.enabled is False
@@ -392,8 +428,10 @@ async def test_resume_re_enables_recomputes_next_run_and_audits(ctx: _Ctx) -> No
     async with ctx.sessionmaker() as session:
         service = _service(ctx, session, projector=projector)
         created = await service.create(
-            assistant_id=ctx.assistant_id, cadence=cadence_from_cron("0 8 * * *"),
-            timezone=_NY, enabled=False,
+            assistant_id=ctx.assistant_id,
+            cadence=cadence_from_cron("0 8 * * *"),
+            timezone=_NY,
+            enabled=False,
         )
         resumed = await service.resume(created.id)
         await session.commit()
@@ -446,8 +484,10 @@ async def test_run_now_on_paused_schedule_is_409(ctx: _Ctx) -> None:
     async with ctx.sessionmaker() as session:
         service = _service(ctx, session)
         created = await service.create(
-            assistant_id=ctx.assistant_id, cadence=cadence_from_cron("0 8 * * *"),
-            timezone=_NY, enabled=False,
+            assistant_id=ctx.assistant_id,
+            cadence=cadence_from_cron("0 8 * * *"),
+            timezone=_NY,
+            enabled=False,
         )
         with pytest.raises(ConflictError) as exc:
             await service.run_now(created.id)
@@ -505,8 +545,10 @@ async def test_list_filters_by_enabled(ctx: _Ctx) -> None:
             assistant_id=ctx.assistant_id, cadence=cadence_from_cron("0 8 * * *"), timezone=_NY
         )
         await service.create(
-            assistant_id=ctx.assistant_id, cadence=cadence_from_cron("0 9 * * *"),
-            timezone=_NY, enabled=False,
+            assistant_id=ctx.assistant_id,
+            cadence=cadence_from_cron("0 9 * * *"),
+            timezone=_NY,
+            enabled=False,
         )
         await session.commit()
         page = await service.list_(cursor=None, limit=20, enabled=True)
