@@ -28,4 +28,10 @@ describe('CitationChip', () => {
     await user.click(screen.getByRole('button'));
     expect(onClick).toHaveBeenCalledOnce();
   });
+
+  it('shows a media timestamp in both visible and accessible labels', () => {
+    render(<CitationChip index={2} sourceTitle="meeting.mp4" timeStartMs={72_500} />);
+    const chip = screen.getByRole('button', { name: 'Citation 2: meeting.mp4 at 1:12' });
+    expect(chip).toHaveTextContent('2· 1:12');
+  });
 });

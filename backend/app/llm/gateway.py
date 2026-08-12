@@ -32,6 +32,7 @@ import math
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -46,10 +47,13 @@ from app.domain.llm import (
     TokenUsage,
     ToolCall,
     ToolSpec,
+    Transcription,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+    import httpx
 
 
 class LlmProviderError(DependencyError):
@@ -681,6 +685,32 @@ class LLMGateway:
                 max_entries=self._settings.llm_embed_cache_max_entries,
             )
         return embeddings
+
+    async def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> Transcription:
+        """Transcribe one bounded audio chunk through ADR-0023's STT seam.
+
+        Unlike chat/embeddings, OpenRouter STT cannot currently preserve the
+        required diarization fields through the pinned LiteLLM version.  The
+        narrow direct adapter remains encapsulated in ``app.llm`` and this
+        provider-neutral method is the only surface ingestion consumes.
+        """
+        from app.llm.openrouter_stt import OpenRouterTranscriber
+
+        adapter = OpenRouterTranscriber(
+            api_key=self._settings.openrouter_api_key,
+            base_url=self._settings.transcription_base_url,
+            model=self._settings.transcription_model,
+            timeout_seconds=self._settings.transcription_timeout_seconds,
+            provider_options=dict(self._settings.transcription_provider_options_json),
+            require_diarization=self._settings.transcription_require_diarization,
+            http_client=http_client,
+        )
+        return await adapter.transcribe(audio_path)
 
 
 class _ToolCallAccumulator:

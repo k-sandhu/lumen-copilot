@@ -50,6 +50,7 @@ celery_app.conf.update(
         "app.tasks.run_digest",
         "app.tasks.run_sandbox",
         "app.tasks.summarize",
+        "app.tasks.upload_janitor",
     ),
     # Fail fast when publishing to an unreachable broker rather than looping
     # through a long reconnect cycle: a producer (the API after-commit enqueue)
@@ -69,6 +70,12 @@ celery_app.conf.update(
     },
     broker_pool_limit=0,
     task_publish_retry=False,
+    beat_schedule={
+        "expired-upload-sweep": {
+            "task": "lumen.sweep_expired_uploads",
+            "schedule": float(_settings.upload_janitor_interval_seconds),
+        }
+    },
 )
 
 

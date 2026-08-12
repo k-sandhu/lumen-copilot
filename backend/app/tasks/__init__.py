@@ -24,6 +24,7 @@ from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import enqueue_index_sync, sync_document_index
 from app.tasks.ingest import enqueue_ingestion, ingest_document
 from app.tasks.sync_source import enqueue_source_sync, sync_source
+from app.tasks.upload_janitor import sweep_expired_uploads
 
 __all__ = [
     "celery_app",
@@ -34,4 +35,5 @@ __all__ = [
     "purge_expired_artifacts",
     "sync_document_index",
     "sync_source",
+    "sweep_expired_uploads",
 ]

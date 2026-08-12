@@ -45,6 +45,14 @@ class RetrievedPassage:
     char_start: int
     char_end: int
     score: float
+    # Media provenance (spec 0008 / #571). The pair is null for ordinary
+    # documents; citation policy validates paired, ordered, in-duration values
+    # before an answer may expose them.
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

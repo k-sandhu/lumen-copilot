@@ -136,7 +136,12 @@ function errorEnv(seq: number): ErrorEnvelope {
     type: 'error',
     streamId: SID,
     seq,
-    problem: { title: 'Upstream error', status: 502, detail: 'model unavailable', code: 'upstream' },
+    problem: {
+      title: 'Upstream error',
+      status: 502,
+      detail: 'model unavailable',
+      code: 'upstream',
+    },
   };
 }
 /** A `done` that opts into the post-terminal suggestions window (#489). */
@@ -242,6 +247,76 @@ describe('reduceStream', () => {
     expect(s.citations).toHaveLength(0);
   });
 
+  it('rejects an unpaired or reversed media timestamp before it reaches the viewer', () => {
+    const base = {
+      id: 'media-bad',
+      documentId: 'doc-1',
+      documentName: 'meeting.mp4',
+      chunkId: 'chunk-1',
+      snippet: 'said this',
+      charStart: 0,
+      charEnd: 9,
+    };
+    const unpaired: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'citation',
+      data: { ...base, timeStartMs: 1000 },
+    };
+    const reversed: EventEnvelope = {
+      ...unpaired,
+      seq: 3,
+      data: { ...base, timeStartMs: 2000, timeEndMs: 1000 },
+    };
+    const s = fold(initialStreamState, start(0), unpaired, reversed);
+    expect(s.citations).toHaveLength(0);
+  });
+
+  it('rejects speaker/segment metadata without valid paired integer timestamps', () => {
+    const base = {
+      id: 'media-metadata-bad',
+      documentId: 'doc-1',
+      documentName: 'meeting.mp4',
+      chunkId: 'chunk-1',
+      snippet: 'said this',
+      charStart: 0,
+      charEnd: 9,
+    };
+    const payloads = [
+      { ...base, speakerId: 'speaker-1' },
+      { ...base, timeStartMs: 1000, timeEndMs: 2000, speakerName: 7 },
+      { ...base, timeStartMs: 1000, timeEndMs: 2000, transcriptSegmentId: false },
+      { ...base, timeStartMs: 1000.5, timeEndMs: 2000, speakerId: 'speaker-1' },
+    ];
+    const events = payloads.map<EventEnvelope>((data, index) => ({
+      type: 'event',
+      streamId: SID,
+      seq: index + 2,
+      name: 'citation',
+      data,
+    }));
+
+    const rejected = fold(initialStreamState, start(0), ...events);
+    expect(rejected.citations).toHaveLength(0);
+
+    const valid: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 9,
+      name: 'citation',
+      data: {
+        ...base,
+        timeStartMs: 1000,
+        timeEndMs: 2000,
+        transcriptSegmentId: 'segment-1',
+        speakerId: 'speaker-1',
+        speakerName: 'John',
+      },
+    };
+    expect(fold(initialStreamState, start(0), valid).citations).toHaveLength(1);
+  });
+
   it('reaches done with the terminal summary (AC-2 persist trigger)', () => {
     const s = fold(initialStreamState, start(0), delta(1, 'hi'), citation(2, 'c'), done(3, 1));
     expect(s.phase).toBe('done');
@@ -328,7 +403,12 @@ describe('reduceStream', () => {
   it('assembles a code run: creates it running on the first code_output chunk (AC-1)', () => {
     const s = fold(initialStreamState, start(0), codeOutput(1, 'run-1', 'stdout', 'Hello'));
     expect(s.codeRuns).toHaveLength(1);
-    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-1', status: 'running', stdout: 'Hello', stderr: '' });
+    expect(s.codeRuns[0]).toMatchObject({
+      runId: 'run-1',
+      status: 'running',
+      stdout: 'Hello',
+      stderr: '',
+    });
   });
 
   it('appends streamed stdout/stderr chunks in order onto the matching run (AC-1)', () => {
@@ -368,7 +448,12 @@ describe('reduceStream', () => {
     // reducer still records it so the inspector is never blank.
     const s = fold(initialStreamState, start(0), codeResult(1, 'run-x', 'denied'));
     expect(s.codeRuns).toHaveLength(1);
-    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-x', status: 'denied', stdout: '', stderr: '' });
+    expect(s.codeRuns[0]).toMatchObject({
+      runId: 'run-x',
+      status: 'denied',
+      stdout: '',
+      stderr: '',
+    });
   });
 
   it('tracks two concurrent runs independently by runId', () => {
@@ -433,7 +518,10 @@ describe('spec 0006 events (#429)', () => {
     s = reduceStream(s, stepEvent(1, 'prepare', 'started'));
     s = reduceStream(s, stepEvent(2, 'prepare', 'completed'));
     s = reduceStream(s, stepEvent(3, 'think', 'started', { turn: 1 }));
-    s = reduceStream(s, stepEvent(4, 'think', 'completed', { turn: 1, detail: 'requested 1 tool' }));
+    s = reduceStream(
+      s,
+      stepEvent(4, 'think', 'completed', { turn: 1, detail: 'requested 1 tool' }),
+    );
     s = reduceStream(s, stepEvent(5, 'think', 'started', { turn: 2 }));
     expect(s.steps.map((x) => [x.key, x.state])).toEqual([
       ['prepare', 'completed'],

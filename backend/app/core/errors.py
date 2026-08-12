@@ -137,6 +137,16 @@ class ForbiddenError(AppError):
     status = 403
     code = "forbidden"
     title = "Forbidden"
+
+
+class GoneError(AppError):
+    """A deliberately retired resource/operation (contract 410)."""
+
+    status = 410
+    code = "gone"
+    title = "Gone"
+
+
 class PayloadTooLargeError(AppError):
     """An upload exceeds the configured size cap (contract 413)."""
 

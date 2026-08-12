@@ -1,11 +1,11 @@
 /**
  * ResultPreviewDrawer (#375) — the right-side document preview a search result
  * opens into, so search-to-open is one click instead of a filename hunt through
- * Documents. Embeds the ONE shared `DocumentPreviewBody` (#242/#245): PDF as an
- * authenticated blob iframe, office/text types as server-extracted text, and a
+ * Documents. Embeds the ONE shared `DocumentPreviewBody`: PDF/media through
+ * short-lived signed storage URLs, office/text as server-extracted text, and a
  * download-original affordance — identical behavior to the documents drawer and
  * the chat citation viewer. The search wire carries no MIME type, so the body
- * decides by the fetched content-type (the chat-citation path).
+ * decides by the access capability's MIME type (the chat-citation path).
  *
  * INV-2 stays intact downstream: a document the caller can no longer see 404s
  * and the shared body renders "no longer available" with no retry.
@@ -21,10 +21,16 @@ interface ResultPreviewDrawerProps {
   documentId: string;
   /** The result title — the document's filename for corpus results. */
   title: string;
+  initialTimeMs?: number;
   onClose: () => void;
 }
 
-export function ResultPreviewDrawer({ documentId, title, onClose }: ResultPreviewDrawerProps) {
+export function ResultPreviewDrawer({
+  documentId,
+  title,
+  initialTimeMs,
+  onClose,
+}: ResultPreviewDrawerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
@@ -61,7 +67,11 @@ export function ResultPreviewDrawer({ documentId, title, onClose }: ResultPrevie
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="h-full min-h-[24rem] overflow-hidden rounded-md border border-border bg-surface-muted/40">
-            <DocumentPreviewBody documentId={documentId} filename={title} />
+            <DocumentPreviewBody
+              documentId={documentId}
+              filename={title}
+              {...(initialTimeMs !== undefined ? { initialTimeMs } : {})}
+            />
           </div>
         </div>
       </div>

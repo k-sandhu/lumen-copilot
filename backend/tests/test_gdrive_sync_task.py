@@ -53,7 +53,7 @@ from app.db.repositories import (
 )
 from app.db.session import session_scope
 from app.db.tenant_context import bind_bypass
-from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
+from app.domain.entities import DocumentKind, DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.search.filters import acl_freshness_floor
 from app.tasks.sync_source import sync_source_async
@@ -1016,10 +1016,12 @@ async def test_crash_between_page_commit_and_ingestion_is_recovered_by_the_sweep
 
     # A document still inside the recovery window is left alone...
     poll_module = import_module("app.tasks.connector_poll")
-    enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
-    monkeypatch.setattr(
-        poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
-    )
+    enqueued: list[tuple[uuid.UUID, uuid.UUID, bool]] = []
+
+    def _record_enqueue(tid: uuid.UUID, did: uuid.UUID, *, media: bool = False) -> None:
+        enqueued.append((tid, did, media))
+
+    monkeypatch.setattr(poll_module, "enqueue_ingestion", _record_enqueue)
     assert await poll_module._sweep_stranded(_settings()) == 0
     assert enqueued == []
 
@@ -1032,15 +1034,13 @@ async def test_crash_between_page_commit_and_ingestion_is_recovered_by_the_sweep
         )
         await session.commit()
     assert await poll_module._sweep_stranded(_settings()) == 1
-    assert enqueued == [(seeded.tenant_id, stranded_id)]
+    assert enqueued == [(seeded.tenant_id, stranded_id, False)]
 
 
-async def test_sweep_ignores_non_connector_and_ready_documents(
+async def test_sweep_includes_uploads_but_ignores_ready_failed_and_deleted_documents(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep is connector-scoped and status-scoped: a plain upload pending
-    ingestion (its own task owns it) and a ready connector document are both
-    left alone."""
+    """Recovery covers both post-commit producers but no terminal/deleted row."""
     from sqlalchemy import update as sa_update
 
     seeded = await _seed()
@@ -1067,20 +1067,80 @@ async def test_sweep_ignores_non_connector_and_ready_documents(
             external_id="done",
             status=DocumentStatus.READY,
         )
+        failed = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="failed.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/failed",
+            acl_enforced=True,
+            source_id=seeded.source_id,
+            external_id="failed",
+            status=DocumentStatus.FAILED,
+        )
+        deleted = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="deleted.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/deleted",
+            acl_enforced=False,
+        )
+        assert await documents.delete(deleted.id) is True
         await session.execute(
             sa_update(models.Document)
-            .where(models.Document.id.in_([upload.id, done.id]))
+            .where(models.Document.id.in_([upload.id, done.id, failed.id]))
             .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
         )
         await session.commit()
 
     poll_module = import_module("app.tasks.connector_poll")
-    enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
-    monkeypatch.setattr(
-        poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
-    )
-    assert await poll_module._sweep_stranded(_settings()) == 0
-    assert enqueued == []
+    enqueued: list[tuple[uuid.UUID, uuid.UUID, bool]] = []
+
+    def _record_enqueue(tid: uuid.UUID, did: uuid.UUID, *, media: bool = False) -> None:
+        enqueued.append((tid, did, media))
+
+    monkeypatch.setattr(poll_module, "enqueue_ingestion", _record_enqueue)
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, upload.id, False)]
+
+
+async def test_sweep_routes_stranded_direct_media_to_bounded_queue(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed()
+    async with db_session.session_scope() as session:
+        media = await DocumentRepository(session, seeded.tenant_id).create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="stranded-meeting.wav",
+            mime_type="audio/wav",
+            size_bytes=100,
+            storage_key=f"{seeded.tenant_id}/quarantine/stranded-meeting.wav",
+            acl_enforced=False,
+            status=DocumentStatus.PENDING,
+            kind=DocumentKind.AUDIO,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == media.id)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await session.commit()
+
+    poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID, bool]] = []
+
+    def _record_enqueue(tid: uuid.UUID, did: uuid.UUID, *, media: bool = False) -> None:
+        enqueued.append((tid, did, media))
+
+    monkeypatch.setattr(poll_module, "enqueue_ingestion", _record_enqueue)
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, media.id, True)]
 
 
 async def test_cursor_expired_falls_back_to_full_resync(

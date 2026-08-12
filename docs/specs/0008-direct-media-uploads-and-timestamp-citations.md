@@ -25,7 +25,7 @@ or an unambiguous direct-address/response exchange); otherwise the UI says
 
 ## 2. Direct multipart upload behavior
 
-1. The authenticated browser initiates an upload at `POST /v2/document-uploads`
+1. The authenticated browser initiates an upload at `POST /api/v2/document-uploads`
    with JSON metadata only:
    filename, declared MIME type, byte size, collection, and optional client
    last-modified time. File bytes are not accepted by a Lumen API route.
@@ -46,7 +46,7 @@ or an unambiguous direct-address/response exchange); otherwise the UI says
 6. Abort is idempotent before completion. Expired sessions are failed closed and
    a janitor aborts abandoned provider uploads. A completed session cannot be
    aborted (`409`). Cross-tenant or non-owned sessions are hidden as `404`.
-7. The replacement upload/playback/transcript surface is versioned under `/v2`.
+7. The replacement upload/playback/transcript surface is versioned under `/api/v2`.
    The former multipart `POST /documents` upload is disabled with an authenticated
    `410` in the coordinated frontend/backend migration, so there is no supported
    file-body path through FastAPI.
@@ -126,9 +126,11 @@ logs or audit metadata. Native `<audio>` and `<video>` elements use that URL wit
 The shared viewer presents the native player above an independently scrollable,
 paginated transcript. A transcript timestamp or citation seeks after metadata is
 loaded without autoplay. The active segment is visually highlighted. A URL that
-expires during playback is refreshed once while preserving current time and
-play/pause state. Loading, processing, empty, permission-revoked, transient-error,
-and retry states are explicit and keyboard accessible.
+expires during playback is refreshed once for that failed capability while
+preserving current time and play/pause state; a later independently expired
+capability may be renewed in the same way. Codec failures never create a refresh
+loop. Loading, processing, empty, permission-revoked, transient-error, and retry
+states are explicit and keyboard accessible.
 
 ## 7. Security, audit, and negative acceptance
 
@@ -143,7 +145,15 @@ and retry states are explicit and keyboard accessible.
   (INV-8). Unsupported type is `415`; declared/stored oversize is `413`.
 - Storage CORS permits only configured frontend origins and methods
   `PUT/GET/HEAD`; it exposes `ETag`, `Content-Length`, `Content-Range`, and
-  `Accept-Ranges` and never permits credentials.
+  `Accept-Ranges`. Browser data-plane requests never send Lumen bearer tokens,
+  cookies, or credential mode. S3-compatible deployments install bucket CORS;
+  community MinIO receives the same allow-list through its process-level CORS
+  setting because that distribution does not implement `PutBucketCors`.
+- Incomplete multipart uploads have an independent provider-side backstop. S3
+  deployments merge a named `AbortIncompleteMultipartUpload` lifecycle rule;
+  community MinIO Compose runs a pinned `mc rm --incomplete --older-than` reaper
+  because that lifecycle action is not implemented by its S3 API. The ordinary
+  database janitor remains responsible for known upload-session state.
 
 ## 8. Scope fence
 

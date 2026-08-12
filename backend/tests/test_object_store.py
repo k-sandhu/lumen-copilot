@@ -20,13 +20,16 @@ import os
 import socket
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
+from httpx import AsyncClient
 
 from app.core.config import Settings
-from app.core.errors import ForbiddenError, NotFoundError, ValidationError
+from app.core.errors import DependencyError, ForbiddenError, NotFoundError, ValidationError
 from app.storage.keys import (
     assert_artifact_key_owned_by,
     assert_key_owned_by,
@@ -284,6 +287,173 @@ def store() -> ObjectStore:
     return ObjectStore(_unit_settings())
 
 
+async def test_ensure_bucket_merges_named_incomplete_multipart_lifecycle(
+    store: ObjectStore,
+) -> None:
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock()
+    unrelated = {
+        "ID": "retain-reports",
+        "Status": "Enabled",
+        "Filter": {"Prefix": "reports/"},
+        "Expiration": {"Days": 30},
+    }
+    client.get_bucket_lifecycle_configuration = AsyncMock(return_value={"Rules": [unrelated]})
+    client.put_bucket_lifecycle_configuration = AsyncMock()
+    _install_mock_client(store, client)
+
+    await store.ensure_bucket()
+
+    lifecycle = client.put_bucket_lifecycle_configuration.await_args.kwargs[
+        "LifecycleConfiguration"
+    ]
+    assert lifecycle["Rules"][0] == unrelated
+    assert lifecycle["Rules"][1] == {
+        "ID": "lumen-abort-incomplete-multipart",
+        "Status": "Enabled",
+        "Filter": {"Prefix": ""},
+        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2},
+    }
+
+
+async def test_ensure_bucket_upserts_only_lumen_lifecycle_rule(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock()
+    unrelated = {
+        "ID": "retain-reports",
+        "Status": "Enabled",
+        "Filter": {"Prefix": "reports/"},
+        "Expiration": {"Days": 30},
+    }
+    stale_lumen = {
+        "ID": "lumen-abort-incomplete-multipart",
+        "Status": "Disabled",
+        "Filter": {"Prefix": ""},
+        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 9},
+    }
+    client.get_bucket_lifecycle_configuration = AsyncMock(
+        return_value={"Rules": [stale_lumen, unrelated]}
+    )
+    client.put_bucket_lifecycle_configuration = AsyncMock()
+    _install_mock_client(store, client)
+
+    await store.ensure_bucket()
+
+    rules = client.put_bucket_lifecycle_configuration.await_args.kwargs["LifecycleConfiguration"][
+        "Rules"
+    ]
+    assert rules[0] == unrelated
+    assert rules[1]["ID"] == "lumen-abort-incomplete-multipart"
+    assert rules[1]["Status"] == "Enabled"
+    assert rules[1]["AbortIncompleteMultipartUpload"] == {"DaysAfterInitiation": 2}
+
+
+async def test_externally_managed_cors_skips_bucket_api_but_keeps_lifecycle_and_readiness() -> None:
+    """OSS MinIO uses its process-level CORS setting, not PutBucketCors."""
+    store = ObjectStore(_unit_settings(S3_CORS_MANAGED_EXTERNALLY=True))
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock()
+    client.get_bucket_lifecycle_configuration = AsyncMock(
+        side_effect=ClientError(
+            {"Error": {"Code": "NoSuchLifecycleConfiguration"}},
+            "GetBucketLifecycleConfiguration",
+        )
+    )
+    client.put_bucket_lifecycle_configuration = AsyncMock()
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    await store.ensure_bucket()
+    await store.ping()
+
+    client.put_bucket_cors.assert_not_awaited()
+    client.put_bucket_lifecycle_configuration.assert_awaited_once()
+    client.list_buckets.assert_awaited_once()
+
+
+async def test_externally_managed_minio_controls_skip_unsupported_bucket_apis() -> None:
+    """Compose supplies MinIO CORS plus a bounded ``mc`` multipart reaper."""
+    store = ObjectStore(
+        _unit_settings(
+            S3_CORS_MANAGED_EXTERNALLY=True,
+            S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY=True,
+        )
+    )
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock()
+    client.get_bucket_lifecycle_configuration = AsyncMock()
+    client.put_bucket_lifecycle_configuration = AsyncMock()
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    await store.ensure_bucket()
+    await store.ping()
+
+    client.put_bucket_cors.assert_not_awaited()
+    client.get_bucket_lifecycle_configuration.assert_not_awaited()
+    client.put_bucket_lifecycle_configuration.assert_not_awaited()
+    client.list_buckets.assert_awaited_once()
+
+
+async def test_ping_requires_successful_full_bucket_bootstrap(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    with pytest.raises(DependencyError) as exc_info:
+        await store.ping()
+
+    assert exc_info.value.code == "storage_bootstrap_incomplete"
+    client.list_buckets.assert_not_awaited()
+
+
+async def test_cors_bootstrap_failure_keeps_readiness_degraded(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock(
+        side_effect=ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "policy detail"}},
+            "PutBucketCors",
+        )
+    )
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    with pytest.raises(DependencyError) as bootstrap_error:
+        await store.ensure_bucket()
+    assert bootstrap_error.value.code == "storage_bootstrap_failed"
+    assert "policy detail" not in str(bootstrap_error.value)
+
+    with pytest.raises(DependencyError) as readiness_error:
+        await store.ping()
+    assert readiness_error.value.code == "storage_bootstrap_incomplete"
+    client.list_buckets.assert_not_awaited()
+
+
+async def test_ping_reaches_provider_after_successful_bootstrap(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.head_bucket = AsyncMock()
+    client.put_bucket_cors = AsyncMock()
+    client.get_bucket_lifecycle_configuration = AsyncMock(
+        side_effect=ClientError(
+            {"Error": {"Code": "NoSuchLifecycleConfiguration"}},
+            "GetBucketLifecycleConfiguration",
+        )
+    )
+    client.put_bucket_lifecycle_configuration = AsyncMock()
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    await store.ensure_bucket()
+    await store.ping()
+
+    client.list_buckets.assert_awaited_once()
+
+
 async def test_put_validates_then_stores(store: ObjectStore) -> None:
     client = MagicMock()
     client.put_object = AsyncMock()
@@ -361,6 +531,66 @@ async def test_get_missing_object_maps_to_not_found(store: ObjectStore) -> None:
         await store.get("tenant-a", key)
 
 
+async def test_download_to_path_streams_and_returns_metadata(
+    store: ObjectStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = build_key("tenant-a", b"streamed", "media.mp3")
+    body = _streaming_body(b"")
+    body.read = AsyncMock(side_effect=[b"stre", b"amed", b""])
+    client = MagicMock()
+    client.get_object = AsyncMock(
+        return_value={
+            "Body": body,
+            "ContentLength": 8,
+            "ContentType": "audio/mpeg",
+            "Metadata": {"lumen-document-id": "doc-1"},
+        }
+    )
+    _install_mock_client(store, client)
+    written = bytearray()
+
+    class _Output:
+        async def __aenter__(self) -> _Output:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def write(self, chunk: bytes) -> None:
+            written.extend(chunk)
+
+    async def open_output(destination: Path, mode: str) -> _Output:
+        assert destination == Path("media.mp3")
+        assert mode == "wb"
+        return _Output()
+
+    monkeypatch.setattr("app.storage.object_store.open_file", open_output)
+
+    metadata = await store.download_to_path("tenant-a", key, Path("media.mp3"))
+
+    assert bytes(written) == b"streamed"
+    assert metadata.size_bytes == 8
+    assert metadata.content_type == "audio/mpeg"
+    assert metadata.metadata == {"lumen-document-id": "doc-1"}
+
+
+async def test_download_to_path_maps_vendor_failure_to_typed_dependency(
+    store: ObjectStore,
+) -> None:
+    from botocore.exceptions import ClientError
+
+    key = build_key("tenant-a", b"x", "media.mp3")
+    client = MagicMock()
+    client.get_object = AsyncMock(
+        side_effect=ClientError({"Error": {"Code": "AccessDenied"}}, "GetObject")
+    )
+    _install_mock_client(store, client)
+
+    with pytest.raises(DependencyError) as exc_info:
+        await store.download_to_path("tenant-a", key, Path("media.mp3"))
+    assert exc_info.value.code == "storage_unavailable"
+
+
 async def test_delete_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
     client = MagicMock()
     client.delete_object = AsyncMock()
@@ -430,6 +660,123 @@ async def test_presign_get_returns_url_for_owning_tenant(store: ObjectStore) -> 
     call = client.generate_presigned_url.await_args
     assert call.args[0] == "get_object"
     assert call.kwargs["ExpiresIn"] == 120
+
+
+@pytest.mark.parametrize("failure_kind", ["client", "transport"])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create",
+        "sign_part",
+        "list_parts",
+        "complete",
+        "abort",
+        "head",
+        "access_url",
+        "delete",
+    ],
+)
+async def test_direct_transfer_provider_failures_are_opaque_dependencies(
+    store: ObjectStore, operation: str, failure_kind: str
+) -> None:
+    failure: Exception
+    if failure_kind == "client":
+        failure = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "vendor secret"}},
+            "S3Operation",
+        )
+    else:
+        failure = EndpointConnectionError(endpoint_url="http://private-storage")
+    client = MagicMock()
+    method_name = {
+        "create": "create_multipart_upload",
+        "sign_part": "generate_presigned_url",
+        "list_parts": "list_parts",
+        "complete": "complete_multipart_upload",
+        "abort": "abort_multipart_upload",
+        "head": "head_object",
+        "access_url": "generate_presigned_url",
+        "delete": "delete_object",
+    }[operation]
+    setattr(client, method_name, AsyncMock(side_effect=failure))
+    _install_mock_client(store, client)
+    key = "tenant-a/quarantine/doc-1/meeting.mp3"
+
+    with pytest.raises(DependencyError) as exc_info:
+        if operation == "create":
+            await store.create_multipart_upload(
+                tenant_id="tenant-a",
+                document_id="doc-1",
+                upload_id="upload-1",
+                filename="meeting.mp3",
+                content_type="audio/mpeg",
+            )
+        elif operation == "sign_part":
+            await store.presign_upload_part(
+                tenant_id="tenant-a",
+                key=key,
+                provider_upload_id="provider-1",
+                part_number=1,
+            )
+        elif operation == "list_parts":
+            await store.list_multipart_parts(
+                tenant_id="tenant-a",
+                key=key,
+                provider_upload_id="provider-1",
+            )
+        elif operation == "complete":
+            await store.complete_multipart_upload(
+                tenant_id="tenant-a",
+                key=key,
+                provider_upload_id="provider-1",
+                parts=[(1, '"etag-1"')],
+            )
+        elif operation == "abort":
+            await store.abort_multipart_upload(
+                tenant_id="tenant-a",
+                key=key,
+                provider_upload_id="provider-1",
+            )
+        elif operation == "head":
+            await store.head("tenant-a", key)
+        elif operation == "access_url":
+            await store.presign_get("tenant-a", key)
+        else:
+            await store.delete("tenant-a", key)
+
+    assert exc_info.value.code == "storage_unavailable"
+    assert "vendor secret" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("operation", ["list", "complete", "abort"])
+async def test_no_such_multipart_upload_preserves_terminal_semantics(
+    store: ObjectStore, operation: str
+) -> None:
+    client = MagicMock()
+    failure = ClientError({"Error": {"Code": "NoSuchUpload", "Message": "gone"}}, "Multipart")
+    method_name = {
+        "list": "list_parts",
+        "complete": "complete_multipart_upload",
+        "abort": "abort_multipart_upload",
+    }[operation]
+    setattr(client, method_name, AsyncMock(side_effect=failure))
+    _install_mock_client(store, client)
+    kwargs = {
+        "tenant_id": "tenant-a",
+        "key": "tenant-a/quarantine/doc-1/meeting.mp3",
+        "provider_upload_id": "provider-1",
+    }
+
+    if operation == "abort":
+        await store.abort_multipart_upload(**kwargs)
+    elif operation == "list":
+        with pytest.raises(NotFoundError) as exc_info:
+            await store.list_multipart_parts(**kwargs)
+        assert exc_info.value.code == "multipart_upload_not_found"
+    else:
+        with pytest.raises(NotFoundError) as exc_info:
+            await store.complete_multipart_upload(**kwargs, parts=[(1, '"etag-1"')])
+        assert exc_info.value.code == "multipart_upload_not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +874,8 @@ async def test_presign_get_artifact_returns_url_for_owning_tenant(store: ObjectS
     call = client.generate_presigned_url.await_args
     assert call.args[0] == "get_object"
     assert call.kwargs["ExpiresIn"] == 120
+
+
 # Presigned URLs are minted against the PUBLIC endpoint (issue #241).
 #
 # SigV4 binds the signature to the Host header, so a URL presigned against the
@@ -540,9 +889,7 @@ async def test_presign_get_artifact_returns_url_for_owning_tenant(store: ObjectS
 
 
 async def test_presign_get_uses_public_endpoint_when_configured() -> None:
-    store_public = ObjectStore(
-        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
-    )
+    store_public = ObjectStore(_unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184"))
     key = build_key("tenant-a", b"data", "f.txt")
 
     url = await store_public.presign_get("tenant-a", key)
@@ -553,9 +900,7 @@ async def test_presign_get_uses_public_endpoint_when_configured() -> None:
 
 
 async def test_presign_put_uses_public_endpoint_when_configured() -> None:
-    store_public = ObjectStore(
-        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
-    )
+    store_public = ObjectStore(_unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184"))
 
     _key, url = await store_public.presign_put("tenant-a", b"data", "text/plain", "f.txt")
 
@@ -576,9 +921,7 @@ async def test_presign_get_defaults_to_internal_endpoint_when_unset() -> None:
 async def test_put_keeps_internal_endpoint_when_public_configured() -> None:
     # Only URL MINTING moves to the public endpoint; object I/O stays on the
     # in-network client (the API/worker cannot necessarily reach the public URL).
-    store_public = ObjectStore(
-        _unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184")
-    )
+    store_public = ObjectStore(_unit_settings(S3_PUBLIC_ENDPOINT_URL="http://public.example:47184"))
     client = MagicMock()
     client.put_object = AsyncMock()
     _install_mock_client(store_public, client)
@@ -605,11 +948,12 @@ def _minio_reachable(endpoint: str) -> bool:
 
 
 _INTEGRATION_ENDPOINT = os.environ.get("S3_ENDPOINT_URL", "http://localhost:47184")
+_RUN_LIVE = os.environ.get("RUN_LIVE") == "1"
 _integration = pytest.mark.skipif(
-    not _minio_reachable(_INTEGRATION_ENDPOINT),
+    not _RUN_LIVE,
     reason=(
-        f"MinIO not reachable at {_INTEGRATION_ENDPOINT}; "
-        "integration test skipped (offline-safe)."
+        "live MinIO tests opted out: set RUN_LIVE=1 exactly "
+        "(offline-safe; no socket is opened by default)."
     ),
 )
 
@@ -624,14 +968,22 @@ def _integration_settings() -> Settings:
         S3_ACCESS_KEY=os.environ.get("S3_ACCESS_KEY", "lumen"),
         S3_SECRET_KEY=os.environ.get("S3_SECRET_KEY", "lumen_local_dev_secret"),
         S3_BUCKET=os.environ.get("S3_BUCKET", "lumen-uploads"),
+        S3_PUBLIC_ENDPOINT_URL=os.environ.get("S3_PUBLIC_ENDPOINT_URL", _INTEGRATION_ENDPOINT),
+        S3_CORS_ALLOWED_ORIGINS="http://localhost:47180",
+        S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY=os.environ.get(
+            "S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY", "false"
+        ),
     )  # type: ignore[call-arg]
 
 
 @pytest.fixture
 def integration_store() -> Iterator[ObjectStore]:
+    if not _minio_reachable(_INTEGRATION_ENDPOINT):
+        pytest.skip(f"RUN_LIVE=1 but MinIO is not reachable at {_INTEGRATION_ENDPOINT}")
     yield ObjectStore(_integration_settings())
 
 
+@pytest.mark.live
 @_integration
 async def test_minio_put_get_round_trip(integration_store: ObjectStore) -> None:
     store = integration_store
@@ -663,6 +1015,7 @@ async def test_minio_put_get_round_trip(integration_store: ObjectStore) -> None:
                 await store.get(tenant, stored.key)
 
 
+@pytest.mark.live
 @_integration
 async def test_minio_rejects_disallowed_type_without_storing(
     integration_store: ObjectStore,
@@ -671,3 +1024,84 @@ async def test_minio_rejects_disallowed_type_without_storing(
     tenant = f"itest-{uuid.uuid4().hex[:12]}"
     with pytest.raises(ValidationError):
         await integration_store.put(tenant, b"x", "application/zip", "a.zip")
+
+
+@pytest.mark.live
+@_integration
+async def test_minio_direct_multipart_cors_etag_and_range_round_trip(
+    integration_store: ObjectStore,
+) -> None:
+    """Spec 0008 §9 browser data-plane proof with unique state + teardown."""
+    store = integration_store
+    await store.ensure_bucket()
+    tenant = f"itest-{uuid.uuid4().hex[:12]}"
+    document_id = uuid.uuid4().hex
+    upload_id = uuid.uuid4().hex
+    origin = "http://localhost:47180"
+    first_part = b"a" * (5 * 1024 * 1024)
+    second_part = b"range-proof-571"
+    multipart = await store.create_multipart_upload(
+        tenant_id=tenant,
+        document_id=document_id,
+        upload_id=upload_id,
+        filename="meeting.mp3",
+        content_type="audio/mpeg",
+    )
+    completed = False
+    try:
+        etags: list[tuple[int, str]] = []
+        async with AsyncClient(timeout=30.0) as client:
+            for part_number, payload in enumerate((first_part, second_part), 1):
+                url = await store.presign_upload_part(
+                    tenant_id=tenant,
+                    key=multipart.key,
+                    provider_upload_id=multipart.provider_upload_id,
+                    part_number=part_number,
+                )
+                preflight = await client.options(
+                    url,
+                    headers={
+                        "Origin": origin,
+                        "Access-Control-Request-Method": "PUT",
+                    },
+                )
+                assert preflight.status_code in {200, 204}
+                assert preflight.headers["access-control-allow-origin"] == origin
+                assert "PUT" in preflight.headers["access-control-allow-methods"]
+
+                uploaded = await client.put(url, content=payload, headers={"Origin": origin})
+                assert uploaded.status_code == 200, uploaded.text
+                assert uploaded.headers["access-control-allow-origin"] == origin
+                assert "etag" in uploaded.headers["access-control-expose-headers"].lower()
+                etags.append((part_number, uploaded.headers["etag"]))
+
+            stored = await store.complete_multipart_upload(
+                tenant_id=tenant,
+                key=multipart.key,
+                provider_upload_id=multipart.provider_upload_id,
+                parts=etags,
+            )
+            completed = True
+            assert stored.size_bytes == len(first_part) + len(second_part)
+
+            read_url = await store.presign_get(tenant, multipart.key, content_type="audio/mpeg")
+            ranged = await client.get(
+                read_url,
+                headers={"Origin": origin, "Range": "bytes=0-15"},
+            )
+            assert ranged.status_code == 206
+            assert ranged.content == first_part[:16]
+            assert ranged.headers["access-control-allow-origin"] == origin
+            exposed = ranged.headers["access-control-expose-headers"].lower()
+            assert "content-range" in exposed
+            assert ranged.headers["content-range"].startswith("bytes 0-15/")
+    finally:
+        if not completed:
+            await store.abort_multipart_upload(
+                tenant_id=tenant,
+                key=multipart.key,
+                provider_upload_id=multipart.provider_upload_id,
+            )
+        await store.delete(tenant, multipart.key)
+        with pytest.raises(NotFoundError):
+            await store.head(tenant, multipart.key)

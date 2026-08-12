@@ -57,7 +57,10 @@ from app.domain.entities import (
     Collection,
     DigestCadence,
     Document,
+    DocumentKind,
     DocumentStatus,
+    DocumentUpload,
+    DocumentUploadState,
     Grant,
     GrantPrincipalType,
     GrantResourceType,
@@ -103,6 +106,9 @@ from app.domain.entities import (
     TenantSandboxPolicy,
     TenantToolPolicy,
     ToolInvocation,
+    TranscriptionCheckpoint,
+    TranscriptSegment,
+    TranscriptSpeaker,
     User,
     UserPreferences,
 )
@@ -234,6 +240,33 @@ def to_document(row: models.Document) -> Document:
         acl_synced_at=row.acl_synced_at,
         acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
         external_id=row.external_id,
+        kind=DocumentKind(row.kind),
+        duration_ms=row.duration_ms,
+        transcript_language=row.transcript_language,
+        transcription_model=row.transcription_model,
+    )
+
+
+def _to_document_upload(row: models.DocumentUpload) -> DocumentUpload:
+    return DocumentUpload(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        document_id=row.document_id,
+        owner_id=row.owner_id,
+        collection_id=row.collection_id,
+        filename=row.filename,
+        mime_type=row.mime_type,
+        size_bytes=row.size_bytes,
+        storage_key=row.storage_key,
+        provider_upload_id=row.provider_upload_id,
+        state=DocumentUploadState(row.state),
+        part_size_bytes=row.part_size_bytes,
+        part_count=row.part_count,
+        expires_at=row.expires_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_modified_at=row.last_modified_at,
+        error=row.error,
     )
 
 
@@ -267,6 +300,59 @@ def _to_chunk(row: models.Chunk) -> Chunk:
         char_start=row.char_start,
         char_end=row.char_end,
         created_at=row.created_at,
+        time_start_ms=row.time_start_ms,
+        time_end_ms=row.time_end_ms,
+        transcript_segment_id=row.transcript_segment_id,
+        speaker_id=row.speaker_id,
+        speaker_name=row.speaker_name,
+    )
+
+
+def _to_transcript_speaker(row: models.TranscriptSpeaker) -> TranscriptSpeaker:
+    return TranscriptSpeaker(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        document_id=row.document_id,
+        speaker_id=row.speaker_id,
+        display_name=row.display_name,
+        name_status=row.name_status,
+        name_confidence=row.name_confidence,
+        name_method=row.name_method,
+        evidence_segment_ids=tuple(UUID(value) for value in row.evidence_segment_ids),
+    )
+
+
+def _to_transcript_segment(row: models.TranscriptSegment) -> TranscriptSegment:
+    return TranscriptSegment(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        document_id=row.document_id,
+        ordinal=row.ordinal,
+        speaker_id=row.speaker_id,
+        start_ms=row.start_ms,
+        end_ms=row.end_ms,
+        char_start=row.char_start,
+        char_end=row.char_end,
+        text=row.text,
+        confidence=row.confidence,
+    )
+
+
+def _to_transcription_checkpoint(
+    row: models.TranscriptionCheckpoint,
+) -> TranscriptionCheckpoint:
+    return TranscriptionCheckpoint(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        document_id=row.document_id,
+        chunk_index=row.chunk_index,
+        model=row.model,
+        start_ms=row.start_ms,
+        end_ms=row.end_ms,
+        language=row.language,
+        words=tuple(dict(word) for word in row.words),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -340,6 +426,11 @@ def _to_citation(row: models.Citation) -> Citation:
         char_end=row.char_end,
         score=row.score,
         created_at=row.created_at,
+        time_start_ms=row.time_start_ms,
+        time_end_ms=row.time_end_ms,
+        transcript_segment_id=row.transcript_segment_id,
+        speaker_id=row.speaker_id,
+        speaker_name=row.speaker_name,
     )
 
 
@@ -1149,11 +1240,13 @@ class CollectionRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_collection(row)
 
-    async def get(self, collection_id: UUID) -> Collection | None:
+    async def get(self, collection_id: UUID, *, lock: bool = False) -> Collection | None:
         stmt = select(models.Collection).where(
             models.Collection.tenant_id == self._tenant_id,
             models.Collection.id == collection_id,
         )
+        if lock:
+            stmt = stmt.with_for_update()
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_collection(row) if row is not None else None
 
@@ -1612,6 +1705,7 @@ class DocumentRepository(_TenantScopedRepository):
     async def create(
         self,
         *,
+        document_id: UUID | None = None,
         owner_id: UUID,
         collection_id: UUID,
         filename: str,
@@ -1625,6 +1719,7 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None = None,
         acl_synced_at: datetime | None = None,
         acl_scope_ids: Sequence[str] | None = None,
+        kind: DocumentKind = DocumentKind.DOCUMENT,
     ) -> Document:
         """Create a document row — the ACL-mode write seam (ADR-0019 §2).
 
@@ -1636,6 +1731,7 @@ class DocumentRepository(_TenantScopedRepository):
         persisted ``acl_enforced=False`` is a defect the write-mode tests pin.
         """
         row = models.Document(
+            id=document_id or uuid4(),
             tenant_id=self._tenant_id,
             owner_id=owner_id,
             collection_id=collection_id,
@@ -1650,9 +1746,49 @@ class DocumentRepository(_TenantScopedRepository):
             acl_synced_at=acl_synced_at,
             acl_scope_ids=list(acl_scope_ids) if acl_scope_ids is not None else None,
             external_id=external_id,
+            kind=kind.value,
         )
         self._session.add(row)
         await self._session.flush()
+        return to_document(row)
+
+    async def update_media_metadata(
+        self,
+        document_id: UUID,
+        *,
+        kind: DocumentKind,
+        duration_ms: int,
+        transcript_language: str | None,
+        transcription_model: str,
+        ingestion_run_id: UUID | None = None,
+    ) -> Document | None:
+        """Persist validated media/transcription provenance, tenant-scoped.
+
+        Ingestion passes its durable run token. The optional form remains for
+        administrative/test metadata setup, while the worker path is fenced on
+        both ``processing`` and the exact claimant token.
+        """
+        predicates = [
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        ]
+        if ingestion_run_id is not None:
+            predicates.extend(
+                [
+                    models.Document.status == DocumentStatus.PROCESSING.value,
+                    models.Document.ingestion_run_id == ingestion_run_id,
+                ]
+            )
+        stmt = select(models.Document).where(*predicates)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.kind = kind.value
+        row.duration_ms = duration_ms
+        row.transcript_language = transcript_language
+        row.transcription_model = transcription_model
+        await self._session.flush()
+        await self._session.refresh(row)
         return to_document(row)
 
     async def get_by_external_id(self, source_id: UUID, external_id: str) -> Document | None:
@@ -1853,6 +1989,36 @@ class DocumentRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return to_document(row) if row is not None else None
 
+    async def get_for_update(self, document_id: UUID) -> Document | None:
+        """Tenant-scoped row lock for exactly-once worker transitions."""
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return to_document(row) if row is not None else None
+
+    async def get_claimed_for_update(
+        self, document_id: UUID, ingestion_run_id: UUID
+    ) -> Document | None:
+        """Lock and return only the PROCESSING row owned by this ingestion run."""
+        stmt = (
+            select(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+                models.Document.status == DocumentStatus.PROCESSING.value,
+                models.Document.ingestion_run_id == ingestion_run_id,
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return to_document(row) if row is not None else None
+
     async def get_many(self, document_ids: Iterable[UUID]) -> dict[UUID, Document]:
         """Fetch many documents by id in **one** query — the batch form of :meth:`get`.
 
@@ -2013,12 +2179,11 @@ class DocumentRepository(_TenantScopedRepository):
     async def count_by_storage_key(self, storage_key: str) -> int:
         """Count this tenant's documents backed by ``storage_key``.
 
-        Objects are content-addressed (``{tenant}/{sha256}/{filename}``), so two
-        documents with identical bytes+filename share one object. Before deleting
-        a stored object for a removed document, a caller checks this is ``0`` so
-        it never deletes bytes another live document still references (INV-1:
-        tenant-scoped, so a foreign tenant's identical bytes are a different key
-        anyway).
+        Some connector/legacy objects are content-addressed and may be shared;
+        direct multipart objects have unique quarantine keys. Before deleting a
+        stored object for any removed document, callers check this is ``0`` so
+        they never delete bytes another live document still references (INV-1:
+        the query remains tenant-scoped).
         """
         stmt = (
             select(func.count())
@@ -2069,6 +2234,296 @@ class DocumentRepository(_TenantScopedRepository):
         # reload so the mapper reads the new value without a lazy emit.
         await self._session.refresh(row)
         return to_document(row)
+
+    async def claim_ingestion(
+        self,
+        document_id: UUID,
+        *,
+        ingestion_run_id: UUID,
+        stale_before: datetime,
+    ) -> Document | None:
+        """Atomically claim pending/ready work or take over a stale PROCESSING lease.
+
+        A single conditional ``UPDATE … RETURNING`` is the admission gate. Fresh
+        concurrent/redelivered deliveries lose without doing provider work;
+        recovery may replace only a lease whose heartbeat is older than the
+        caller-supplied settings-derived threshold. READY remains claimable for
+        explicit/idempotent re-ingestion; media reuses its paid checkpoints.
+        """
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+                or_(
+                    models.Document.status.in_(
+                        (DocumentStatus.PENDING.value, DocumentStatus.READY.value)
+                    ),
+                    and_(
+                        models.Document.status == DocumentStatus.PROCESSING.value,
+                        models.Document.updated_at < stale_before,
+                    ),
+                ),
+            )
+            .values(
+                status=DocumentStatus.PROCESSING.value,
+                error=None,
+                ingestion_run_id=ingestion_run_id,
+                updated_at=func.now(),
+            )
+            .returning(models.Document)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        await self._session.flush()
+        return to_document(row) if row is not None else None
+
+    async def touch_processing(self, document_id: UUID, ingestion_run_id: UUID) -> bool:
+        """Refresh this claimant's live lease; return false after takeover/terminalization."""
+        row_id = (
+            await self._session.execute(
+                update(models.Document)
+                .where(
+                    models.Document.tenant_id == self._tenant_id,
+                    models.Document.id == document_id,
+                    models.Document.status == DocumentStatus.PROCESSING.value,
+                    models.Document.ingestion_run_id == ingestion_run_id,
+                )
+                .values(updated_at=func.now())
+                .returning(models.Document.id)
+            )
+        ).scalar_one_or_none()
+        await self._session.flush()
+        return row_id is not None
+
+    async def finish_ingestion(
+        self,
+        document_id: UUID,
+        *,
+        ingestion_run_id: UUID,
+        status: DocumentStatus,
+        error: str | None = None,
+    ) -> Document | None:
+        """CAS one claimant to READY/FAILED and clear its durable lease token."""
+        if status not in (DocumentStatus.READY, DocumentStatus.FAILED):
+            raise ValueError("finish_ingestion requires a terminal document status")
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+                models.Document.status == DocumentStatus.PROCESSING.value,
+                models.Document.ingestion_run_id == ingestion_run_id,
+            )
+            .values(
+                status=status.value,
+                error=error,
+                ingestion_run_id=None,
+                updated_at=func.now(),
+            )
+            .returning(models.Document)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        await self._session.flush()
+        return to_document(row) if row is not None else None
+
+    async def release_ingestion(self, document_id: UUID, ingestion_run_id: UUID) -> bool:
+        """Conditionally release this claimant to PENDING before Celery retry."""
+        row_id = (
+            await self._session.execute(
+                update(models.Document)
+                .where(
+                    models.Document.tenant_id == self._tenant_id,
+                    models.Document.id == document_id,
+                    models.Document.status == DocumentStatus.PROCESSING.value,
+                    models.Document.ingestion_run_id == ingestion_run_id,
+                )
+                .values(
+                    status=DocumentStatus.PENDING.value,
+                    error=None,
+                    ingestion_run_id=None,
+                    updated_at=func.now(),
+                )
+                .returning(models.Document.id)
+            )
+        ).scalar_one_or_none()
+        await self._session.flush()
+        return row_id is not None
+
+
+class DocumentUploadRepository(_TenantScopedRepository):
+    """Owner/tenant-scoped multipart sessions; provider ids never escape services."""
+
+    async def create(
+        self,
+        *,
+        upload_id: UUID,
+        document_id: UUID,
+        owner_id: UUID,
+        collection_id: UUID,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+        storage_key: str,
+        provider_upload_id: str,
+        part_size_bytes: int,
+        part_count: int,
+        expires_at: datetime,
+        last_modified_at: datetime | None = None,
+    ) -> DocumentUpload:
+        row = models.DocumentUpload(
+            id=upload_id,
+            tenant_id=self._tenant_id,
+            document_id=document_id,
+            owner_id=owner_id,
+            collection_id=collection_id,
+            filename=filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            storage_key=storage_key,
+            provider_upload_id=provider_upload_id,
+            state=DocumentUploadState.INITIATED.value,
+            part_size_bytes=part_size_bytes,
+            part_count=part_count,
+            expires_at=expires_at,
+            last_modified_at=last_modified_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_document_upload(row)
+
+    async def get_for_owner(
+        self, upload_id: UUID, owner_id: UUID, *, lock: bool = False
+    ) -> DocumentUpload | None:
+        stmt = select(models.DocumentUpload).where(
+            models.DocumentUpload.tenant_id == self._tenant_id,
+            models.DocumentUpload.id == upload_id,
+            models.DocumentUpload.owner_id == owner_id,
+        )
+        if lock:
+            stmt = stmt.with_for_update()
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_document_upload(row) if row is not None else None
+
+    async def list_active_for_collection(
+        self, collection_id: UUID, owner_id: UUID, *, lock: bool = False
+    ) -> list[DocumentUpload]:
+        """Active provider sessions that must be aborted before collection delete."""
+        stmt = (
+            select(models.DocumentUpload)
+            .where(
+                models.DocumentUpload.tenant_id == self._tenant_id,
+                models.DocumentUpload.collection_id == collection_id,
+                models.DocumentUpload.owner_id == owner_id,
+                models.DocumentUpload.state.in_(
+                    [
+                        DocumentUploadState.INITIATED.value,
+                        DocumentUploadState.COMPLETING.value,
+                    ]
+                ),
+            )
+            .order_by(models.DocumentUpload.created_at.asc())
+        )
+        if lock:
+            stmt = stmt.with_for_update()
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_document_upload(row) for row in rows]
+
+    async def set_state(
+        self,
+        upload_id: UUID,
+        owner_id: UUID,
+        state: DocumentUploadState,
+        *,
+        error: str | None = None,
+    ) -> DocumentUpload | None:
+        stmt = select(models.DocumentUpload).where(
+            models.DocumentUpload.tenant_id == self._tenant_id,
+            models.DocumentUpload.id == upload_id,
+            models.DocumentUpload.owner_id == owner_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.state = state.value
+        row.error = error
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_document_upload(row)
+
+    async def delete(self, upload_id: UUID, owner_id: UUID) -> bool:
+        """Remove a terminal/control-plane row after provider cleanup."""
+        row = (
+            await self._session.execute(
+                select(models.DocumentUpload).where(
+                    models.DocumentUpload.tenant_id == self._tenant_id,
+                    models.DocumentUpload.id == upload_id,
+                    models.DocumentUpload.owner_id == owner_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def delete_for_document(self, document_id: UUID) -> bool:
+        """Remove the private upload-control record once its document is deleted."""
+        row = (
+            await self._session.execute(
+                select(models.DocumentUpload).where(
+                    models.DocumentUpload.tenant_id == self._tenant_id,
+                    models.DocumentUpload.document_id == document_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def list_expired(self, *, now: datetime, limit: int) -> list[DocumentUpload]:
+        stmt = (
+            select(models.DocumentUpload)
+            .where(
+                models.DocumentUpload.tenant_id == self._tenant_id,
+                models.DocumentUpload.expires_at <= now,
+                models.DocumentUpload.state.in_(
+                    [DocumentUploadState.INITIATED.value, DocumentUploadState.COMPLETING.value]
+                ),
+            )
+            .order_by(models.DocumentUpload.expires_at.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_document_upload(row) for row in rows]
+
+
+class DocumentUploadReconcileRepository:
+    """Cross-tenant expired-session discovery for the system janitor only.
+
+    The caller binds the RLS bypass sentinel, then processes every returned row
+    through a tenant-bound transaction. Request paths never construct this type.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_expired(self, *, now: datetime, limit: int) -> list[DocumentUpload]:
+        stmt = (
+            select(models.DocumentUpload)
+            .where(
+                models.DocumentUpload.expires_at <= now,
+                models.DocumentUpload.state.in_(
+                    [DocumentUploadState.INITIATED.value, DocumentUploadState.COMPLETING.value]
+                ),
+            )
+            .order_by(models.DocumentUpload.expires_at.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_document_upload(row) for row in rows]
 
 
 class ArtifactRepository(_TenantScopedRepository):
@@ -2235,6 +2690,11 @@ class ChunkInput:
     char_start: int
     char_end: int
     embedding: Sequence[float] | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 class ChunkRepository(_TenantScopedRepository):
@@ -2249,6 +2709,11 @@ class ChunkRepository(_TenantScopedRepository):
         char_start: int,
         char_end: int,
         embedding: Sequence[float] | None = None,
+        time_start_ms: int | None = None,
+        time_end_ms: int | None = None,
+        transcript_segment_id: UUID | None = None,
+        speaker_id: str | None = None,
+        speaker_name: str | None = None,
     ) -> Chunk:
         row = models.Chunk(
             tenant_id=self._tenant_id,
@@ -2258,6 +2723,11 @@ class ChunkRepository(_TenantScopedRepository):
             char_start=char_start,
             char_end=char_end,
             embedding=list(embedding) if embedding is not None else None,
+            time_start_ms=time_start_ms,
+            time_end_ms=time_end_ms,
+            transcript_segment_id=transcript_segment_id,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
         )
         self._session.add(row)
         await self._session.flush()
@@ -2305,6 +2775,11 @@ class ChunkRepository(_TenantScopedRepository):
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 embedding=list(chunk.embedding) if chunk.embedding is not None else None,
+                time_start_ms=chunk.time_start_ms,
+                time_end_ms=chunk.time_end_ms,
+                transcript_segment_id=chunk.transcript_segment_id,
+                speaker_id=chunk.speaker_id,
+                speaker_name=chunk.speaker_name,
             )
             for ordinal, chunk in enumerate(chunks)
         ]
@@ -2331,6 +2806,366 @@ class ChunkRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_chunk(r) for r in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSpeakerInput:
+    speaker_id: str
+    display_name: str | None = None
+    name_status: str = "unknown"
+    name_confidence: float | None = None
+    name_method: str | None = None
+    evidence_segment_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSegmentInput:
+    id: UUID
+    ordinal: int
+    speaker_id: str
+    start_ms: int
+    end_ms: int
+    char_start: int
+    char_end: int
+    text: str
+    confidence: float | None = None
+
+
+class TranscriptRepository(_TenantScopedRepository):
+    """Normalized diarized speakers/segments for one tenant (spec 0008 §4)."""
+
+    async def replace_for_document(
+        self,
+        document_id: UUID,
+        *,
+        speakers: Sequence[TranscriptSpeakerInput],
+        segments: Sequence[TranscriptSegmentInput],
+    ) -> tuple[list[TranscriptSpeaker], list[TranscriptSegment]]:
+        """Atomically replace a transcript; a foreign document writes nothing."""
+        document = (
+            await self._session.execute(
+                select(models.Document).where(
+                    models.Document.tenant_id == self._tenant_id,
+                    models.Document.id == document_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if document is None:
+            return [], []
+        if document.kind not in {DocumentKind.AUDIO.value, DocumentKind.VIDEO.value}:
+            raise ValueError("transcripts can only be stored for media documents")
+        if document.duration_ms is None or document.duration_ms <= 0:
+            raise ValueError("media duration must be stored before its transcript")
+        if not segments:
+            raise ValueError("a media transcript must contain at least one segment")
+
+        speaker_ids = {speaker.speaker_id for speaker in speakers}
+        segment_ids = {segment.id for segment in segments}
+        if len(speaker_ids) != len(speakers):
+            raise ValueError("transcript speaker ids must be unique")
+        if len(segment_ids) != len(segments):
+            raise ValueError("transcript segment ids must be unique")
+        if [segment.ordinal for segment in segments] != list(range(len(segments))):
+            raise ValueError("transcript ordinals must be contiguous from zero")
+        if speaker_ids != {segment.speaker_id for segment in segments}:
+            raise ValueError("transcript speakers must exactly match segment speakers")
+        prior_start = -1
+        prior_end = -1
+        expected_char_start = 0
+        for segment in segments:
+            if segment.speaker_id not in speaker_ids:
+                raise ValueError("transcript segment references an unknown speaker")
+            if not (0 <= segment.start_ms < segment.end_ms <= document.duration_ms):
+                raise ValueError("transcript segment has an invalid time span")
+            if segment.start_ms < prior_start or segment.end_ms < prior_end:
+                raise ValueError("transcript segment timing must be ordered")
+            if (
+                segment.char_start != expected_char_start
+                or segment.char_end != segment.char_start + len(segment.text)
+                or not segment.text
+            ):
+                raise ValueError("transcript character spans must match canonical text")
+            if segment.confidence is not None and not 0 <= segment.confidence <= 1:
+                raise ValueError("transcript segment confidence must be between zero and one")
+            prior_start = segment.start_ms
+            prior_end = segment.end_ms
+            expected_char_start = segment.char_end + 1
+        for speaker in speakers:
+            evidence_ids = set(speaker.evidence_segment_ids)
+            if len(evidence_ids) != len(speaker.evidence_segment_ids):
+                raise ValueError("speaker-name evidence ids must be unique")
+            if not evidence_ids <= segment_ids:
+                raise ValueError("speaker-name evidence references an unknown segment")
+            if speaker.name_status == "unknown":
+                if (
+                    any(
+                        value is not None
+                        for value in (
+                            speaker.display_name,
+                            speaker.name_confidence,
+                            speaker.name_method,
+                        )
+                    )
+                    or speaker.evidence_segment_ids
+                ):
+                    raise ValueError("unknown speakers cannot carry inferred-name evidence")
+            elif speaker.name_status == "inferred":
+                if (
+                    speaker.display_name is None
+                    or not speaker.display_name.strip()
+                    or speaker.name_confidence is None
+                    or not 0 <= speaker.name_confidence <= 1
+                    or speaker.name_method not in {"self_introduction", "contextual_dialogue"}
+                    or not speaker.evidence_segment_ids
+                ):
+                    raise ValueError("inferred speaker names require coherent evidence")
+            else:
+                raise ValueError("speaker name status is invalid")
+
+        old_speakers = (
+            (
+                await self._session.execute(
+                    select(models.TranscriptSpeaker).where(
+                        models.TranscriptSpeaker.tenant_id == self._tenant_id,
+                        models.TranscriptSpeaker.document_id == document_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        old_segments = (
+            (
+                await self._session.execute(
+                    select(models.TranscriptSegment).where(
+                        models.TranscriptSegment.tenant_id == self._tenant_id,
+                        models.TranscriptSegment.document_id == document_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for old_speaker in old_speakers:
+            await self._session.delete(old_speaker)
+        for old_segment in old_segments:
+            await self._session.delete(old_segment)
+        await self._session.flush()
+
+        segment_rows = [
+            models.TranscriptSegment(
+                id=segment.id,
+                tenant_id=self._tenant_id,
+                document_id=document_id,
+                ordinal=segment.ordinal,
+                speaker_id=segment.speaker_id,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                char_start=segment.char_start,
+                char_end=segment.char_end,
+                text=segment.text,
+                confidence=segment.confidence,
+            )
+            for segment in segments
+        ]
+        speaker_rows = [
+            models.TranscriptSpeaker(
+                tenant_id=self._tenant_id,
+                document_id=document_id,
+                speaker_id=speaker.speaker_id,
+                display_name=speaker.display_name,
+                name_status=speaker.name_status,
+                name_confidence=speaker.name_confidence,
+                name_method=speaker.name_method,
+                evidence_segment_ids=[str(value) for value in speaker.evidence_segment_ids],
+            )
+            for speaker in speakers
+        ]
+        self._session.add_all([*segment_rows, *speaker_rows])
+        await self._session.flush()
+        return (
+            [_to_transcript_speaker(row) for row in speaker_rows],
+            [_to_transcript_segment(row) for row in segment_rows],
+        )
+
+    async def list_speakers(self, document_id: UUID) -> list[TranscriptSpeaker]:
+        stmt = (
+            select(models.TranscriptSpeaker)
+            .where(
+                models.TranscriptSpeaker.tenant_id == self._tenant_id,
+                models.TranscriptSpeaker.document_id == document_id,
+            )
+            .order_by(models.TranscriptSpeaker.speaker_id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_transcript_speaker(row) for row in rows]
+
+    async def list_segments(
+        self,
+        document_id: UUID,
+        *,
+        after_ordinal: int | None = None,
+        around_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[TranscriptSegment]:
+        start_ordinal = after_ordinal + 1 if after_ordinal is not None else 0
+        if around_ms is not None:
+            containing = (
+                await self._session.execute(
+                    select(models.TranscriptSegment.ordinal)
+                    .where(
+                        models.TranscriptSegment.tenant_id == self._tenant_id,
+                        models.TranscriptSegment.document_id == document_id,
+                        models.TranscriptSegment.end_ms > around_ms,
+                    )
+                    .order_by(models.TranscriptSegment.ordinal.asc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if containing is not None:
+                start_ordinal = max(start_ordinal, containing)
+        stmt = (
+            select(models.TranscriptSegment)
+            .where(
+                models.TranscriptSegment.tenant_id == self._tenant_id,
+                models.TranscriptSegment.document_id == document_id,
+                models.TranscriptSegment.ordinal >= start_ordinal,
+            )
+            .order_by(models.TranscriptSegment.ordinal.asc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_transcript_segment(row) for row in rows]
+
+
+class TranscriptionCheckpointRepository(_TenantScopedRepository):
+    """Idempotent paid STT chunk checkpoints, persisted before embedding."""
+
+    async def get(
+        self, document_id: UUID, *, chunk_index: int, model: str
+    ) -> TranscriptionCheckpoint | None:
+        stmt = select(models.TranscriptionCheckpoint).where(
+            models.TranscriptionCheckpoint.tenant_id == self._tenant_id,
+            models.TranscriptionCheckpoint.document_id == document_id,
+            models.TranscriptionCheckpoint.chunk_index == chunk_index,
+            models.TranscriptionCheckpoint.model == model,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_transcription_checkpoint(row) if row is not None else None
+
+    async def upsert(
+        self,
+        document_id: UUID,
+        *,
+        ingestion_run_id: UUID | None = None,
+        chunk_index: int,
+        model: str,
+        start_ms: int,
+        end_ms: int,
+        language: str | None,
+        words: Sequence[dict[str, object]],
+    ) -> TranscriptionCheckpoint | None:
+        document_predicates = [
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        ]
+        if ingestion_run_id is not None:
+            document_predicates.extend(
+                [
+                    models.Document.status == DocumentStatus.PROCESSING.value,
+                    models.Document.ingestion_run_id == ingestion_run_id,
+                ]
+            )
+        document_exists = (
+            await self._session.execute(
+                select(models.Document.id).where(*document_predicates).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if document_exists is None:
+            return None
+        stmt = select(models.TranscriptionCheckpoint).where(
+            models.TranscriptionCheckpoint.tenant_id == self._tenant_id,
+            models.TranscriptionCheckpoint.document_id == document_id,
+            models.TranscriptionCheckpoint.chunk_index == chunk_index,
+            models.TranscriptionCheckpoint.model == model,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            row = models.TranscriptionCheckpoint(
+                tenant_id=self._tenant_id,
+                document_id=document_id,
+                chunk_index=chunk_index,
+                model=model,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                language=language,
+                words=[dict(word) for word in words],
+            )
+            self._session.add(row)
+        else:
+            row.start_ms = start_ms
+            row.end_ms = end_ms
+            row.language = language
+            row.words = [dict(word) for word in words]
+        await self._session.flush()
+        await self._session.refresh(row)
+        return _to_transcription_checkpoint(row)
+
+    async def list_for_document(
+        self, document_id: UUID, *, model: str
+    ) -> list[TranscriptionCheckpoint]:
+        stmt = (
+            select(models.TranscriptionCheckpoint)
+            .where(
+                models.TranscriptionCheckpoint.tenant_id == self._tenant_id,
+                models.TranscriptionCheckpoint.document_id == document_id,
+                models.TranscriptionCheckpoint.model == model,
+            )
+            .order_by(models.TranscriptionCheckpoint.chunk_index.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_transcription_checkpoint(row) for row in rows]
+
+    async def delete_other_models(
+        self,
+        document_id: UUID,
+        *,
+        keep_model: str,
+        ingestion_run_id: UUID | None = None,
+    ) -> int:
+        if ingestion_run_id is not None:
+            claimed = (
+                await self._session.execute(
+                    select(models.Document.id)
+                    .where(
+                        models.Document.tenant_id == self._tenant_id,
+                        models.Document.id == document_id,
+                        models.Document.status == DocumentStatus.PROCESSING.value,
+                        models.Document.ingestion_run_id == ingestion_run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if claimed is None:
+                return 0
+        rows = (
+            (
+                await self._session.execute(
+                    select(models.TranscriptionCheckpoint).where(
+                        models.TranscriptionCheckpoint.tenant_id == self._tenant_id,
+                        models.TranscriptionCheckpoint.document_id == document_id,
+                        models.TranscriptionCheckpoint.model != keep_model,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            await self._session.delete(row)
+        await self._session.flush()
+        return len(rows)
 
 
 class ChatSessionRepository(_TenantScopedRepository):
@@ -2866,6 +3701,11 @@ class CitationView:
     char_start: int
     char_end: int
     score: float | None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
     #: True when the reader may no longer retrieve the cited document, in which
     #: case ``snippet`` and ``document_name`` have been emptied. The row itself is
     #: kept so a claim's provenance stays visible rather than silently vanishing.
@@ -2873,7 +3713,17 @@ class CitationView:
 
     def redact(self) -> CitationView:
         """This citation with everything disclosing removed, shell intact."""
-        return replace(self, snippet="", document_name="", redacted=True)
+        return replace(
+            self,
+            snippet="",
+            document_name="",
+            time_start_ms=None,
+            time_end_ms=None,
+            transcript_segment_id=None,
+            speaker_id=None,
+            speaker_name=None,
+            redacted=True,
+        )
 
 
 class CitationRepository(_TenantScopedRepository):
@@ -2887,7 +3737,84 @@ class CitationRepository(_TenantScopedRepository):
         char_start: int,
         char_end: int,
         score: float | None = None,
+        time_start_ms: int | None = None,
+        time_end_ms: int | None = None,
+        transcript_segment_id: UUID | None = None,
+        speaker_id: str | None = None,
+        speaker_name: str | None = None,
     ) -> Citation:
+        if (time_start_ms is None) != (time_end_ms is None):
+            raise ValueError("citation timestamp fields must be supplied as a pair")
+        source = (
+            await self._session.execute(
+                select(models.Chunk, models.Document)
+                .join(models.Document, models.Document.id == models.Chunk.document_id)
+                .where(
+                    models.Chunk.tenant_id == self._tenant_id,
+                    models.Chunk.id == chunk_id,
+                    models.Document.tenant_id == self._tenant_id,
+                )
+            )
+        ).one_or_none()
+        if source is None:
+            raise ValueError("citation source chunk is not in the repository tenant")
+        source_chunk, source_document = source
+        is_media = source_document.kind in {DocumentKind.AUDIO.value, DocumentKind.VIDEO.value}
+        has_media_metadata = any(
+            value is not None
+            for value in (
+                time_start_ms,
+                time_end_ms,
+                transcript_segment_id,
+                speaker_id,
+                speaker_name,
+            )
+        )
+        if is_media and time_start_ms is None:
+            raise ValueError("media citations require a timestamp span")
+        if not is_media and has_media_metadata:
+            raise ValueError("ordinary document citations cannot carry media metadata")
+        if time_start_ms is not None and time_end_ms is not None:
+            if time_start_ms < 0 or time_end_ms <= time_start_ms:
+                raise ValueError("citation timestamp span is invalid")
+            if source_document.duration_ms is None or time_end_ms > source_document.duration_ms:
+                raise ValueError("citation timestamp exceeds the media duration")
+            if (
+                source_chunk.time_start_ms is None
+                or source_chunk.time_end_ms is None
+                or time_start_ms < source_chunk.time_start_ms
+                or time_end_ms > source_chunk.time_end_ms
+            ):
+                raise ValueError("citation timestamp is outside its source chunk")
+        if (
+            transcript_segment_id is not None
+            and transcript_segment_id != source_chunk.transcript_segment_id
+        ):
+            raise ValueError("citation transcript segment does not match its source chunk")
+        if transcript_segment_id is not None:
+            segment = (
+                await self._session.execute(
+                    select(models.TranscriptSegment).where(
+                        models.TranscriptSegment.tenant_id == self._tenant_id,
+                        models.TranscriptSegment.id == transcript_segment_id,
+                        models.TranscriptSegment.document_id == source_document.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if segment is None:
+                raise ValueError("citation transcript segment does not belong to the source")
+            if (
+                time_start_ms is not None
+                and time_end_ms is not None
+                and (time_start_ms < segment.start_ms or time_end_ms > segment.end_ms)
+            ):
+                raise ValueError("citation timestamp is outside its transcript segment")
+            if speaker_id is not None and speaker_id != segment.speaker_id:
+                raise ValueError("citation speaker does not match its transcript segment")
+        if speaker_id is not None and speaker_id != source_chunk.speaker_id:
+            raise ValueError("citation speaker does not match its source chunk")
+        if speaker_name is not None and speaker_name != source_chunk.speaker_name:
+            raise ValueError("citation speaker name does not match its source chunk")
         row = models.Citation(
             tenant_id=self._tenant_id,
             message_id=message_id,
@@ -2895,6 +3822,11 @@ class CitationRepository(_TenantScopedRepository):
             char_start=char_start,
             char_end=char_end,
             score=score,
+            time_start_ms=time_start_ms,
+            time_end_ms=time_end_ms,
+            transcript_segment_id=transcript_segment_id,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
         )
         self._session.add(row)
         await self._session.flush()
@@ -2929,6 +3861,11 @@ class CitationRepository(_TenantScopedRepository):
                 models.Citation.char_start,
                 models.Citation.char_end,
                 models.Citation.score,
+                models.Citation.time_start_ms,
+                models.Citation.time_end_ms,
+                models.Citation.transcript_segment_id,
+                models.Citation.speaker_id,
+                models.Citation.speaker_name,
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
@@ -2952,9 +3889,14 @@ class CitationRepository(_TenantScopedRepository):
                 char_start=row[3],
                 char_end=row[4],
                 score=row[5],
-                snippet=row[6],
-                document_id=row[7],
-                document_name=row[8],
+                time_start_ms=row[6],
+                time_end_ms=row[7],
+                transcript_segment_id=row[8],
+                speaker_id=row[9],
+                speaker_name=row[10],
+                snippet=row[11],
+                document_id=row[12],
+                document_name=row[13],
             )
             for row in rows
         ]
@@ -2975,6 +3917,11 @@ class CitationRepository(_TenantScopedRepository):
                 models.Citation.char_start,
                 models.Citation.char_end,
                 models.Citation.score,
+                models.Citation.time_start_ms,
+                models.Citation.time_end_ms,
+                models.Citation.transcript_segment_id,
+                models.Citation.speaker_id,
+                models.Citation.speaker_name,
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
@@ -2998,9 +3945,14 @@ class CitationRepository(_TenantScopedRepository):
                 char_start=row[3],
                 char_end=row[4],
                 score=row[5],
-                snippet=row[6],
-                document_id=row[7],
-                document_name=row[8],
+                time_start_ms=row[6],
+                time_end_ms=row[7],
+                transcript_segment_id=row[8],
+                speaker_id=row[9],
+                speaker_name=row[10],
+                snippet=row[11],
+                document_id=row[12],
+                document_name=row[13],
             )
             for row in rows
         ]
@@ -3024,6 +3976,11 @@ class CitationRepository(_TenantScopedRepository):
                 models.Citation.char_start,
                 models.Citation.char_end,
                 models.Citation.score,
+                models.Citation.time_start_ms,
+                models.Citation.time_end_ms,
+                models.Citation.transcript_segment_id,
+                models.Citation.speaker_id,
+                models.Citation.speaker_name,
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
@@ -3049,9 +4006,14 @@ class CitationRepository(_TenantScopedRepository):
                     char_start=row[3],
                     char_end=row[4],
                     score=row[5],
-                    snippet=row[6],
-                    document_id=row[7],
-                    document_name=row[8],
+                    time_start_ms=row[6],
+                    time_end_ms=row[7],
+                    transcript_segment_id=row[8],
+                    speaker_id=row[9],
+                    speaker_name=row[10],
+                    snippet=row[11],
+                    document_id=row[12],
+                    document_name=row[13],
                 )
             )
         return grouped
@@ -5622,29 +6584,25 @@ class SourceReconcileRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
 
-    async def list_stranded_connector_documents(
+    async def list_stranded_documents(
         self, *, older_than: datetime, limit: int
-    ) -> list[tuple[UUID, UUID]]:
-        """``(tenant_id, document_id)`` for connector docs stuck pre-ingestion.
+    ) -> list[tuple[UUID, UUID, DocumentKind]]:
+        """``(tenant_id, document_id, kind)`` for documents stuck pre-ingestion.
 
-        The recovery half of the incremental sync's commit discipline
-        (ADR-0019 §3): a page's row + cursor commit **first**, then ingestion is
-        driven post-commit. A worker that dies in between leaves a ``pending``
-        document with no chunks that the advanced cursor will never revisit —
-        invisible to retrieval forever, and not repairable by the reindex
-        backfill (which cannot create chunks that were never parsed).
+        Covers both post-commit crash windows: an incremental connector page
+        commits its row/cursor before task publication, and a direct upload
+        commits its completed session/document before publication. In either
+        case a broker fault can leave a durable ``pending``/``processing`` row
+        with no live task. The idempotent pipeline is the recovery mechanism.
 
-        This finds those rows — a **connector-owned** document (``source_id``
-        set) still ``pending``/``processing`` and untouched since
-        ``older_than`` — so the poll beat can re-drive the idempotent ingestion
-        task for each. The age threshold is what keeps a legitimately in-flight
-        ingestion out of the result. Cross-tenant (bypass-scoped, system-only)
-        and bounded by ``limit`` so one sweep can never fan out unbounded.
+        The age threshold keeps a legitimately in-flight ingestion out of the
+        result. Ready/failed rows and physically deleted rows are absent by the
+        status/query predicates. Cross-tenant (bypass-scoped, system-only) and
+        bounded by ``limit`` so one sweep can never fan out unbounded.
         """
         stmt = (
-            select(models.Document.tenant_id, models.Document.id)
+            select(models.Document.tenant_id, models.Document.id, models.Document.kind)
             .where(
-                models.Document.source_id.is_not(None),
                 models.Document.status.in_(
                     (DocumentStatus.PENDING.value, DocumentStatus.PROCESSING.value)
                 ),
@@ -5654,7 +6612,7 @@ class SourceReconcileRepository:
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).all()
-        return [(row[0], row[1]) for row in rows]
+        return [(row[0], row[1], DocumentKind(row[2])) for row in rows]
 
 
 class CodeRunRepository(_TenantScopedRepository):

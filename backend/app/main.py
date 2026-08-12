@@ -24,6 +24,7 @@ from starlette.responses import Response
 from app.api.deps import aclose_backplane, get_object_store
 from app.api.health import router as health_router
 from app.api.v1 import router as v1_router
+from app.api.v2 import router as v2_router
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     PROBLEM_CONTENT_TYPE,
@@ -206,6 +207,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     # Versioned feature routes mount under /api/v1 (empty in the skeleton).
     app.include_router(v1_router, prefix="/api/v1")
+    app.include_router(v2_router, prefix="/api/v2")
     # WebSocket transport: the health heartbeat (proves the WS path + envelope)
     # and the chat answer stream consumer (CC-6 #24 / CC-11 #26).
     app.include_router(health_ws_router)

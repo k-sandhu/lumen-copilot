@@ -119,7 +119,11 @@ describe('buildRetrievalSummary', () => {
 
   it('counts distinct sources and summed passages', () => {
     const result = buildRetrievalSummary(
-      [cite({ documentId: 'doc-1' }), cite({ id: 'c2', documentId: 'doc-2' }), cite({ id: 'c3', documentId: 'doc-1' })],
+      [
+        cite({ documentId: 'doc-1' }),
+        cite({ id: 'c2', documentId: 'doc-2' }),
+        cite({ id: 'c3', documentId: 'doc-1' }),
+      ],
       [doneTool({ hitCount: 800 }), doneTool({ callId: 't2', hitCount: 404 })],
     );
     expect(result.summary).toBe('Looked at 2 sources · 1,204 passages');
@@ -246,8 +250,8 @@ describe('sourceMetadataRows', () => {
   });
 
   it('marks last-indexed unknown when no source-indexing value is supplied (GUARD #120)', () => {
-    // The chat/citation wire carries no source-indexing timestamp. The only time
-    // a chat turn has is the ANSWER/message time — which is NOT source provenance.
+    // The chat/citation wire carries no source-indexing timestamp. Media offsets
+    // locate playback and answer time locates generation; neither is recency.
     // With nothing real supplied, "Last indexed" must be "Not available", so a
     // doc indexed months ago can never render "Last indexed: Just now".
     const indexed = sourceMetadataRows({}).find((r) => r.label === 'Last indexed');

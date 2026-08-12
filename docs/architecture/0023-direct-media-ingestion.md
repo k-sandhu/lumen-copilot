@@ -39,7 +39,7 @@ object storage. The browser receives only short-lived, least-privilege URLs for
 expected part numbers or one visible object. Raw provider upload ids and storage
 keys remain server-side.
 
-The new control plane is a versioned `/v2` surface. The same release migrates the
+The new control plane is a versioned `/api/v2` surface. The same release migrates the
 SPA and retires the unsafe v1 byte operations with authenticated `410` responses.
 This is the coordinated breaking migration allowed by the contracts rule; the old
 upload cannot remain functional behind a flag because its very availability would
@@ -113,7 +113,12 @@ until expiry. URLs are never logged or persisted.
 
 - API memory and bandwidth no longer scale with object size; transfers can resume
   by part and native playback can seek efficiently.
-- Storage CORS and lifecycle cleanup become required deployment mechanisms.
+- Storage CORS and incomplete-multipart cleanup become required deployment
+  mechanisms. Community MinIO's CORS allow-list is process-level and its S3
+  compatibility layer does not implement `AbortIncompleteMultipartUpload`;
+  Compose therefore explicitly marks both controls externally managed and runs
+  a pinned `mc` reaper for incomplete uploads older than the configured limit.
+  S3 providers install bucket CORS and merge the named lifecycle rule instead.
 - Multipart completion crosses storage and database transaction boundaries, so a
   `completing` state plus janitor recovery is necessary.
 - Quarantined random keys trade pre-upload deduplication for safe direct transfer.

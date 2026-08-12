@@ -40,6 +40,11 @@ class GroundedCitation:
     char_end: int
     score: float | None = None
     id: UUID | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
     @classmethod
     def from_passage(cls, passage: RetrievedPassage) -> GroundedCitation:
@@ -59,6 +64,11 @@ class GroundedCitation:
             char_start=passage.char_start,
             char_end=passage.char_end,
             score=passage.score,
+            time_start_ms=passage.time_start_ms,
+            time_end_ms=passage.time_end_ms,
+            transcript_segment_id=passage.transcript_segment_id,
+            speaker_id=passage.speaker_id,
+            speaker_name=passage.speaker_name,
         )
 
 
