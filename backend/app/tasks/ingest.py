@@ -400,6 +400,7 @@ async def _sync_index(
             expected_attempt=expected_attempt,
             settings=settings,
             store=store,
+            require_search_visibility=True,
         )
         return not result.superseded
     except DependencyError as exc:

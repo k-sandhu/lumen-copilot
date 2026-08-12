@@ -1331,6 +1331,8 @@ paths:
         redirect hop; ADR-0009 §3). An invalid OR SSRF-blocked URL is rejected with
         **422** (INV-8) — a blocked URL is a validation failure, not a 403. The
         created `web` source returns `pending` and its first sync is enqueued.
+        If API startup has already proved the embedding contract unavailable,
+        creation is rejected with **503 before any collection/source write**.
         For a **managed** connector (`gdrive`) the body is `{type: gdrive,
         config}` — **tenant-admin only** (every managed-source mutation is
         admin-gated at action time, ADR-0019 §1; any other role is **403**,
@@ -1353,6 +1355,7 @@ paths:
               schema: { $ref: "#/components/schemas/Source" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Problem" }
         "422":
           description: >
             Malformed body or invalid configuration (INV-8). `Problem.code` is
@@ -1402,7 +1405,9 @@ paths:
         non-owner or cross-tenant source is **404** (INV-1/INV-2). **Managed
         sources are admin-gated at action time** (ADR-0019 §1): a non-admin is
         **403** (INV-5); a `pending_auth` source cannot sync — **409** (INV-8).
-        Emits an audit event.
+        If the startup embedding contract is unavailable, a fresh enqueue
+        returns **503 without changing the source's durable status**. Emits an
+        audit event only for a successful fresh enqueue.
       tags: [sources]
       responses:
         "200":
@@ -1425,6 +1430,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   # --- Managed-connector OAuth (ADR-0019 §1; F-CB-0 #451) --------------------
   /sources/{sourceId}/connect:

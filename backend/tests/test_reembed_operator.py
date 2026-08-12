@@ -96,6 +96,30 @@ async def test_preview_is_read_only(operator_db: None, capsys: pytest.CaptureFix
     assert capsys.readouterr().out == ""
 
 
+async def test_preview_reports_total_independently_from_bounded_page(
+    operator_db: None,
+) -> None:
+    """R2-004: preview inventory is truthful when backlog exceeds ``--limit``."""
+
+    tenant_id, document_ids = await _seed_candidates(5)
+
+    first = await reembed_module._preview(limit=2, tenant_id=tenant_id)
+    assert first.total_requiring == 5
+    assert first.page_selected == 2
+    assert first.limit == 2
+    assert {document_id for _tenant, document_id in first.candidates} <= set(document_ids)
+
+    reserved = await reembed_module._reserve(limit=2, tenant_id=tenant_id)
+    assert len(reserved) == 2
+    second = await reembed_module._preview(limit=2, tenant_id=tenant_id)
+    assert second.total_requiring == 3
+    assert second.page_selected == 2
+    assert second.limit == 2
+    assert {document_id for _tenant, document_id in second.candidates}.isdisjoint(
+        {document_id for _tenant, document_id in reserved}
+    )
+
+
 async def test_same_width_foreign_model_is_selected_until_reembedded(
     operator_db: None,
 ) -> None:

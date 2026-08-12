@@ -152,11 +152,15 @@ BEGIN
             ON embedding_legacy_archive_0044
             USING (
                 current_setting('app.tenant_id', true) = 'bypass'
-                OR tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
+                OR tenant_id = nullif(
+                    nullif(current_setting('app.tenant_id', true), ''), 'bypass'
+                )::uuid
             )
             WITH CHECK (
                 current_setting('app.tenant_id', true) = 'bypass'
-                OR tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
+                OR tenant_id = nullif(
+                    nullif(current_setting('app.tenant_id', true), ''), 'bypass'
+                )::uuid
             );
     END IF;
 END
@@ -189,6 +193,12 @@ def downgrade() -> None:
     # A revised connector's detached vectors no longer describe its current
     # chunks, so an automated rollback cannot truthfully restore them in-place.
     # Halt before ANY DDL rather than discard bytes or roll content backward.
+    # The archive is FORCE-RLS even for its NOSUPERUSER/NOBYPASSRLS owner. Bind
+    # the policy's deliberate, transaction-local migration sentinel before the
+    # guard; otherwise the owner sees an empty relation and can silently drop
+    # populated rollback evidence (R2-003). This grants no PostgreSQL role
+    # attribute and rolls back with the migration transaction.
+    op.execute("SELECT set_config('app.tenant_id', 'bypass', true)")
     op.execute(
         """
 DO $archive$

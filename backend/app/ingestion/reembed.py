@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from dataclasses import dataclass
 from uuid import UUID
 
 import structlog
@@ -34,6 +35,19 @@ from app.tasks.ingest import enqueue_ingestion
 log = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class ReembeddingPreview:
+    """Truthful inventory separated from the bounded operator page."""
+
+    total_requiring: int
+    candidates: tuple[tuple[UUID, UUID], ...]
+    limit: int
+
+    @property
+    def page_selected(self) -> int:
+        return len(self.candidates)
+
+
 async def _preflight() -> None:
     """Prove every fixed-width boundary before publishing any work."""
 
@@ -47,14 +61,25 @@ async def _preflight() -> None:
 
 
 async def _candidates(*, limit: int, tenant_id: UUID | None) -> list[tuple[UUID, UUID]]:
+    return list((await _preview(limit=limit, tenant_id=tenant_id)).candidates)
+
+
+async def _preview(*, limit: int, tenant_id: UUID | None) -> ReembeddingPreview:
+    """Count the full matching backlog and select one bounded page atomically."""
+
     settings = get_settings()
     async with session_scope() as session:
         await bind_bypass(session)
-        return await EmbeddingReconcileRepository(session).list_requiring_reembedding(
+        inventory = await EmbeddingReconcileRepository(session).preview_reembedding(
             limit=limit,
             target_fingerprint=settings.embedding_space_fingerprint,
             tenant_id=tenant_id,
         )
+    return ReembeddingPreview(
+        total_requiring=inventory.total_requiring,
+        candidates=inventory.candidates,
+        limit=limit,
+    )
 
 
 async def _reserve(*, limit: int, tenant_id: UUID | None) -> list[tuple[UUID, UUID]]:
@@ -87,9 +112,10 @@ async def _main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     try:
         if not args.execute:
-            candidates = await _candidates(limit=args.limit, tenant_id=args.tenant)
+            preview = await _preview(limit=args.limit, tenant_id=args.tenant)
             print(  # noqa: T201 — operator CLI feedback is the purpose
-                f"preview: {len(candidates)} document(s) require native re-embedding; "
+                f"preview: total_requiring={preview.total_requiring}; "
+                f"page_selected={preview.page_selected}; limit={preview.limit}; "
                 "no jobs published"
             )
             return

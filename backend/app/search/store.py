@@ -35,7 +35,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
@@ -49,6 +49,7 @@ log = get_logger(__name__)
 
 # Bulk NDJSON content type (the _bulk endpoint rejects application/json).
 _NDJSON = "application/x-ndjson"
+_PublicationRefresh = bool | Literal["wait_for"]
 
 # Chunks per _bulk request (#258). Bounds the request body no matter how large a
 # document is — fixed-width vectors make each chunk sizable NDJSON, so an
@@ -467,14 +468,20 @@ class OpenSearchStore:
 
     # --- writes (ingestion path; never the request path) ----------------------
 
-    async def upsert_chunks(self, chunks: Sequence[IndexedChunk], *, refresh: bool = False) -> None:
+    async def upsert_chunks(
+        self,
+        chunks: Sequence[IndexedChunk],
+        *,
+        refresh: _PublicationRefresh = False,
+    ) -> None:
         """Bulk-index chunk docs (id = chunk_id, routed by tenant — ADR-0010 §5).
 
-        ``refresh=True`` makes the writes immediately searchable — for tests and
-        the backfill command only; the ingestion path leaves the engine's
-        refresh cadence alone. A partial bulk failure fails the call (the
-        ingestion task retries as a unit; the index must never silently hold a
-        subset).
+        ``refresh=True`` forces each bulk request visible (tests/operators).
+        ``refresh="wait_for"`` is the ingestion publication contract: all
+        bounded bulks are accepted first, then one explicit index refresh is
+        acknowledged before the caller may publish PostgreSQL ``Ready``. A
+        partial bulk or refresh failure fails the call (the ingestion task
+        retries as a unit; the index must never silently hold a subset).
 
         The write is issued in bounded sub-batches of ``_BULK_BATCH_SIZE``
         chunks (#258): each chunk carries a ~20KB embedding, so one request per
@@ -496,8 +503,18 @@ class OpenSearchStore:
                     "The chunk does not share the configured embedding dimension.",
                     code="embedding_dimension_mismatch",
                 )
+        force_each_batch = refresh is True
         for start in range(0, len(chunks), _BULK_BATCH_SIZE):
-            await self._bulk_batch(chunks[start : start + _BULK_BATCH_SIZE], refresh=refresh)
+            await self._bulk_batch(
+                chunks[start : start + _BULK_BATCH_SIZE],
+                refresh=force_each_batch,
+            )
+        if chunks and refresh == "wait_for":
+            # One explicit refresh covers every batch and every routing shard,
+            # unlike putting wait_for only on the final bulk. The response is
+            # the visibility acknowledgement ingestion needs before its Ready
+            # CAS (R2-001).
+            await self._request("POST", f"/{self._index}/_refresh")
 
     async def _bulk_batch(self, chunks: Sequence[IndexedChunk], *, refresh: bool) -> None:
         """Issue one bounded ``_bulk`` request for ``chunks`` (fail closed)."""

@@ -205,6 +205,56 @@ async def test_upsert_bulk_is_ndjson_with_tenant_routing() -> None:
     assert doc["embedding_fingerprint"] == _FINGERPRINT
 
 
+async def test_publication_refresh_acknowledges_all_bulk_batches_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-001: Ready publication waits for one index-wide visibility barrier."""
+
+    import app.search.store as store_module
+
+    monkeypatch.setattr(store_module, "_BULK_BATCH_SIZE", 2)
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.path.endswith("/_bulk"):
+            return httpx.Response(200, json={"errors": False, "items": []})
+        assert request.url.path == "/lumen-test/_refresh"
+        return httpx.Response(200, json={"_shards": {"failed": 0}})
+
+    store = _store(httpx.MockTransport(handler))
+    tenant, owner = uuid.uuid4(), uuid.uuid4()
+    chunks = [_chunk(tenant_id=tenant, owner_id=owner) for _ in range(5)]
+
+    await store.upsert_chunks(chunks, refresh="wait_for")
+
+    assert requests == [
+        ("POST", "/_bulk", {}),
+        ("POST", "/_bulk", {}),
+        ("POST", "/_bulk", {}),
+        ("POST", "/lumen-test/_refresh", {}),
+    ]
+
+
+async def test_publication_refresh_failure_is_typed_and_fail_closed() -> None:
+    """R2-001: a missing visibility acknowledgement cannot publish success."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/_bulk"):
+            return httpx.Response(200, json={"errors": False, "items": []})
+        return httpx.Response(503, json={"error": "refresh unavailable"})
+
+    store = _store(httpx.MockTransport(handler))
+    with pytest.raises(DependencyError) as excinfo:
+        await store.upsert_chunks(
+            [_chunk(tenant_id=uuid.uuid4(), owner_id=uuid.uuid4())],
+            refresh="wait_for",
+        )
+
+    assert excinfo.value.code == "search_error"
+    assert "refresh unavailable" not in str(excinfo.value)
+
+
 async def test_bulk_partial_failure_raises() -> None:
     """A partial bulk failure fails the whole call — never a silent subset."""
 

@@ -5941,6 +5941,14 @@ class SourceReconcileRepository:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ReembeddingInventory:
+    """One bounded candidate page plus the full matching-row inventory."""
+
+    total_requiring: int
+    candidates: tuple[tuple[UUID, UUID], ...]
+
+
 class EmbeddingReconcileRepository:
     """System-only discovery for the lossless #346 re-embedding cut-over.
 
@@ -5960,8 +5968,33 @@ class EmbeddingReconcileRepository:
     ) -> list[tuple[UUID, UUID]]:
         """Ready documents missing a target-space vector or carrying another space."""
 
+        inventory = await self.preview_reembedding(
+            limit=limit,
+            target_fingerprint=target_fingerprint,
+            tenant_id=tenant_id,
+        )
+        return list(inventory.candidates)
+
+    async def preview_reembedding(
+        self,
+        *,
+        limit: int,
+        target_fingerprint: str,
+        tenant_id: UUID | None = None,
+    ) -> ReembeddingInventory:
+        """Return a truthful total and one bounded page in a single snapshot.
+
+        ``count() OVER ()`` runs after the matching predicate but before
+        ``LIMIT``. It avoids materializing the full backlog while ensuring the
+        operator never mistakes a page size for the total required (R2-004).
+        """
+
         stmt = (
-            select(models.Document.tenant_id, models.Document.id)
+            select(
+                models.Document.tenant_id,
+                models.Document.id,
+                func.count().over().label("total_requiring"),
+            )
             .where(
                 models.Document.status == DocumentStatus.READY.value,
                 self._requires_reembedding(target_fingerprint),
@@ -5972,7 +6005,10 @@ class EmbeddingReconcileRepository:
         if tenant_id is not None:
             stmt = stmt.where(models.Document.tenant_id == tenant_id)
         rows = (await self._session.execute(stmt)).all()
-        return [(row[0], row[1]) for row in rows]
+        return ReembeddingInventory(
+            total_requiring=int(rows[0][2]) if rows else 0,
+            candidates=tuple((row[0], row[1]) for row in rows),
+        )
 
     async def reserve_reembedding(
         self,

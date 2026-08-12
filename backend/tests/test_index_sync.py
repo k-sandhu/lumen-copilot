@@ -17,6 +17,7 @@ itself is proven live in ``test_search_store.py``; these tests prove the
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import ClassVar
@@ -456,6 +457,78 @@ async def test_ingest_dual_writes_to_the_index(sqlite_engine: None) -> None:
     assert all(c.embedding == tuple([1.0] * _DIM) for c in batch)
 
 
+async def test_ingest_ready_waits_for_search_visible_current_generation(
+    sqlite_engine: None,
+) -> None:
+    """R2-001: observing Ready permits one immediate, non-polling search.
+
+    The fake models OpenSearch's refresh boundary explicitly: a bulk write is
+    acknowledged immediately unless the caller requests ``refresh=wait_for``.
+    The DB row must remain Processing while that visibility barrier is held,
+    then one search immediately after Ready must find the current generation.
+    """
+
+    tenant_id, _, _, document_id = await _seed(chunk_texts=[])
+    objects = _FakeObjectStore()
+    async with db_session.session_scope() as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None
+        objects.put(str(tenant_id), document.storage_key, b"search-visible publication " * 20)
+
+    class _VisibilityStore(_FakeIndexStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.publication_started = asyncio.Event()
+            self.allow_visibility = asyncio.Event()
+            self.searchable: set[tuple[uuid.UUID, int]] = set()
+            self.search_calls = 0
+
+        async def upsert_chunks(
+            self,
+            chunks: Sequence[IndexedChunk],
+            *,
+            refresh: bool | str = False,
+        ) -> None:
+            await super().upsert_chunks(chunks, refresh=bool(refresh))
+            self.publication_started.set()
+            if refresh != "wait_for":
+                return
+            await self.allow_visibility.wait()
+            self.searchable.update((chunk.document_id, chunk.ingestion_attempt) for chunk in chunks)
+
+        def search_once(self, target_document_id: uuid.UUID, attempt: int) -> bool:
+            self.search_calls += 1
+            return (target_document_id, attempt) in self.searchable
+
+    store = _VisibilityStore()
+    task = asyncio.create_task(
+        ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=_settings(INGESTION_CHUNK_SIZE="120", INGESTION_CHUNK_OVERLAP="20"),
+            object_store=objects,  # type: ignore[arg-type]
+            gateway=_FakeGateway(),  # type: ignore[arg-type]
+            search_store=store,  # type: ignore[arg-type]
+        )
+    )
+    await store.publication_started.wait()
+    try:
+        # Let every non-refresh continuation run. Without a visibility barrier
+        # the task reaches Ready; with ``wait_for`` it must still be suspended.
+        await asyncio.sleep(0.01)
+        assert task.done() is False
+    finally:
+        store.allow_visibility.set()
+        result = await task
+
+    assert result.status is DocumentStatus.READY
+    async with db_session.session_scope() as session:
+        ready = await DocumentRepository(session, tenant_id).get(document_id)
+    assert ready is not None and ready.status is DocumentStatus.READY
+    assert store.search_once(document_id, ready.ingestion_attempts) is True
+    assert store.search_calls == 1
+
+
 async def test_ingest_index_failure_is_retryable(sqlite_engine: None) -> None:
     """Engine down during ingest → IngestionError (Celery retries the unit)."""
     tenant_id, _, _, doc_id = await _seed(chunk_texts=[])
@@ -589,6 +662,7 @@ async def test_partial_publication_cleanup_is_exact_when_newer_attempt_races(
             settings=settings,
             store=store,
             expected_attempt=first.ingestion_attempts,
+            require_search_visibility=True,
         )
 
     assert store.deleted_generations == [(tenant_id, document_id, first.ingestion_attempts)]

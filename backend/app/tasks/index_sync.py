@@ -109,6 +109,7 @@ async def sync_document_index_async(
     store: OpenSearchStore | None = None,
     refresh: bool = False,
     expected_attempt: int | None = None,
+    require_search_visibility: bool = False,
 ) -> IndexSyncResult:
     """Make the search index match Postgres for one document (idempotent).
 
@@ -213,7 +214,10 @@ async def sync_document_index_async(
             embedding_fingerprint=settings.embedding_space_fingerprint,
         )
         try:
-            await active.upsert_chunks(indexed, refresh=refresh)
+            await active.upsert_chunks(
+                indexed,
+                refresh="wait_for" if require_search_visibility else refresh,
+            )
         except DependencyError:
             # A bulk request may have committed a prefix before reporting a
             # partial failure. Delete only this attempt; never touch a newer

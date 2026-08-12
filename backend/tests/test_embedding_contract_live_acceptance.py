@@ -131,26 +131,25 @@ def _wait_source(client: httpx.Client, source_id: str) -> dict[str, object]:
     pytest.fail(f"source {source_id} did not become terminal; latest={latest}")
 
 
-def _wait_search(
+def _search_once(
     client: httpx.Client,
     *,
     query: str,
     document_id: str,
     collection_id: str | None = None,
 ) -> dict[str, object]:
-    deadline = time.monotonic() + 90.0
-    latest: dict[str, object] = {}
-    while time.monotonic() < deadline:
-        params = {"q": query, "limit": "10"}
-        if collection_id is not None:
-            params["collection_id"] = collection_id
-        response = client.get("/api/v1/search", params=params)
-        response.raise_for_status()
-        latest = response.json()
-        if any(str(item.get("document_id")) == document_id for item in latest.get("results", [])):
-            return latest
-        time.sleep(2.0)
-    pytest.fail(f"search never returned document {document_id}; latest={latest}")
+    """Search exactly once: observing Ready is the visibility contract (R2-001)."""
+
+    params = {"q": query, "limit": "10"}
+    if collection_id is not None:
+        params["collection_id"] = collection_id
+    response = client.get("/api/v1/search", params=params)
+    response.raise_for_status()
+    payload = response.json()
+    assert any(
+        str(item.get("document_id")) == document_id for item in payload.get("results", [])
+    ), f"first search after Ready did not return document {document_id}: {payload}"
+    return payload
 
 
 def _assert_denied(client: httpx.Client, *, document_id: str, marker: str) -> None:
@@ -172,12 +171,9 @@ def _assert_cited_answer(payload: dict[str, object]) -> None:
     result_ids = {str(item["id"]) for item in results if isinstance(item, dict)}
     citations = cited.get("citations", [])
     assert isinstance(citations, list) and citations
-    assert {
-        str(item["result_id"]) for item in citations if isinstance(item, dict)
-    } <= result_ids
+    assert {str(item["result_id"]) for item in citations if isinstance(item, dict)} <= result_ids
     assert all(
-        isinstance(item, dict) and str(item.get("snippet", "")).strip()
-        for item in citations
+        isinstance(item, dict) and str(item.get("snippet", "")).strip() for item in citations
     )
 
 
@@ -222,7 +218,7 @@ def test_isolated_six_formats_public_source_retrieval_citation_and_tenant_denial
             assert int(terminal["chunk_count"]) > 0
 
         search_payloads = [
-            _wait_search(
+            _search_once(
                 owner,
                 query=fixture.marker,
                 document_id=document_id,
@@ -252,7 +248,7 @@ def test_isolated_six_formats_public_source_retrieval_citation_and_tenant_denial
         source_documents = after_source - before_source
         assert source_documents
         public_document_id = sorted(source_documents)[0]
-        public_search = _wait_search(
+        public_search = _search_once(
             owner,
             query="reserved top level dns names",
             document_id=public_document_id,

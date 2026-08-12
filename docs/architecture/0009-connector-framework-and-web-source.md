@@ -32,8 +32,8 @@
 
 5. **Sources surface (contract, frozen first per [ADR-0006](0006-contract-first-parallel-implementation.md)):**
    - `GET /sources` — connector grid: per-source type, sync health/status, `indexed_count`, permission/owner.
-   - `POST /sources` — add a source (`type: web`, `url`); validates + SSRF-checks the URL, enqueues the first sync. **A write → read-before-write tier** (T1, owner-gated; spec 0004).
-   - `POST /sources/{id}/sync` — re-sync. `DELETE /sources/{id}` — remove (cascades its docs).
+   - `POST /sources` — add a source (`type: web`, `url`); validates + SSRF-checks the URL, enqueues the first sync. If API startup has already proved the embedding/storage/index contract incompatible, it returns a typed **503 before creating the backing collection or source row**. **A write → read-before-write tier** (T1, owner-gated; spec 0004).
+   - `POST /sources/{id}/sync` — re-sync. The same failed-startup admission gate returns **503 without changing the existing source status**. A message accepted before a dependency failure is retried with the bounded ingestion backoff policy; exhaustion durably terminalizes the source as `error` with only a stable, content-safe dependency code, never leaves it `pending` forever. `DELETE /sources/{id}` — remove (cascades its docs).
    - Every add/sync/delete emits an **audit** event.
 
 6. **Deferred (separate decisions, not this scope):** OAuth/third-party connectors (Drive/Slack/Confluence/etc.) — each needs source-side app registration + per-source ACL mirroring and its own ADR.

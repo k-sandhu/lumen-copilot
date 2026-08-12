@@ -687,6 +687,60 @@ async def test_embed_rejects_nonfinite_or_nonreal_coordinates(
     assert excinfo.value.code == "embedding_response_invalid"
 
 
+@pytest.mark.parametrize("sign", [1, -1], ids=["huge-positive", "huge-negative"])
+async def test_embed_normalizes_huge_json_integers_without_value_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    sign: int,
+) -> None:
+    """R2-005: arbitrary-size JSON ints cannot escape as ``OverflowError``."""
+
+    coordinate = sign * 10**10000
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[coordinate]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+
+    with pytest.raises(DependencyError) as excinfo:
+        await LLMGateway(_settings()).embed(["overflow poison"])
+
+    assert excinfo.value.code == "embedding_response_invalid"
+    assert excinfo.value.detail == "Embedding provider returned a malformed vector."
+
+
+@pytest.mark.parametrize("poison_kind", ["huge", "nested", "mapping"])
+async def test_embed_normalizes_malformed_poisoned_cache_scalars(
+    monkeypatch: pytest.MonkeyPatch,
+    poison_kind: str,
+) -> None:
+    """R2-005: cache corruption shares the typed, content-safe provider boundary."""
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbeddingResponse:
+        return _EmbeddingResponse([[0.5]])
+
+    monkeypatch.setattr(litellm, "aembedding", fake_aembedding)
+    gateway = LLMGateway(_settings())
+    await gateway.embed(["cached scalar"], cache_namespace="tenant")
+
+    import app.llm.gateway as gateway_module
+
+    huge = -(10**10000)
+    poison: object = {
+        "huge": huge,
+        "nested": [huge],
+        "mapping": {"coordinate": huge},
+    }[poison_kind]
+    key = next(iter(gateway_module._embed_cache))
+    stored_at, _ = gateway_module._embed_cache[key]
+    gateway_module._embed_cache[key] = (stored_at, [poison])  # type: ignore[list-item]
+
+    with pytest.raises(DependencyError) as excinfo:
+        await gateway.embed(["cached scalar"], cache_namespace="tenant")
+
+    assert excinfo.value.code == "embedding_response_invalid"
+    assert excinfo.value.detail == "Embedding provider returned a malformed vector."
+
+
 async def test_embed_revalidates_a_poisoned_query_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

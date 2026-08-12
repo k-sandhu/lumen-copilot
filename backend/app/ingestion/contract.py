@@ -67,6 +67,25 @@ def ingestion_enqueue_allowed(expected_fingerprint: str) -> bool:
     return _validated_fingerprint is None and _last_failure_code is None
 
 
+def require_embedding_work_admission(expected_fingerprint: str) -> None:
+    """Reject new ingestion work after this process proved the contract invalid.
+
+    An unvalidated process is still allowed to publish for compatibility with
+    beat-only/API-test processes; the consuming worker performs the complete
+    preflight. Once API startup has *explicitly* failed, however, accepting a
+    web source would create a durable Pending row that cannot make progress.
+    Surface the stable dependency code before any write instead (R2-002).
+    """
+
+    if ingestion_enqueue_allowed(expected_fingerprint):
+        return
+    _ready, code = embedding_contract_status(expected_fingerprint)
+    raise DependencyError(
+        "Embedding work is unavailable until the deployment contract is restored.",
+        code=code or "embedding_contract_unavailable",
+    )
+
+
 async def provision_embedding_contract(settings: Settings) -> str:
     """Mutating startup/operator preflight; cache only after every gate passes."""
 
@@ -117,5 +136,6 @@ __all__ = [
     "mark_embedding_contract_invalid",
     "mark_embedding_contract_valid",
     "provision_embedding_contract",
+    "require_embedding_work_admission",
     "reset_embedding_contract_gate",
 ]

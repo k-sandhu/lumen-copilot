@@ -48,9 +48,12 @@ Postgres ingestion attempt.
 5. Call `/health/ready`. This endpoint is observational: it reads the schema,
    mapping, ordinary dependencies, and startup's validated fingerprint. It does
    **not** create an index/pipeline or call the provider, so health polling cannot
-   incur model spend or poison an old index. Upload/source publication is
-   deferred after a failed API preflight; each worker independently enforces the
-   same preflight before claiming ingestion work.
+   incur model spend or poison an old index. After a failed API preflight, a web
+   source create or any source resync returns a typed 503 before changing durable
+   state. Work accepted before the failure is retried with the bounded ingestion
+   backoff policy and terminalized as source `error` on exhaustion; it cannot stay
+   `pending` forever. Each worker independently enforces the same preflight before
+   claiming ingestion work.
 
    ```powershell
    cd backend
@@ -60,8 +63,11 @@ Postgres ingestion attempt.
 
 ## Controlled re-embedding and index cutover
 
-The operator command is read-only by default. It reports only counts/opaque
-ids internally; it never logs document text, vectors, or credentials.
+The operator command is read-only by default. Its preview reports
+`total_requiring` across **all** matching Ready documents separately from the
+bounded `page_selected` and `limit`; the total is computed in the same database
+snapshot without materializing the full backlog. It reports only counts/opaque
+ids internally and never logs document text, vectors, or credentials.
 
 ```powershell
 cd backend
@@ -99,8 +105,10 @@ counts beyond `CONNECTOR_INGEST_RECOVERY_MINUTES` without document content.
 Each worker claim increments `documents.ingestion_attempts`; chunk persistence,
 OpenSearch ids/publication, Ready/Failed finalization, retries, and stale recovery
 all compare that generation. OpenSearch ids are `chunk_id:attempt`. `ready` is
-published only after the current generation's bulk write succeeds. Failed or
-superseded generations are deleted exactly by attempt where possible and are
+published only after every current-generation bulk succeeds and OpenSearch
+acknowledges one index-wide refresh. Therefore the first search after observing
+Ready must see that generation; do not use retrieval polling as cutover evidence.
+Failed or superseded generations are deleted exactly by attempt where possible and are
 always invalidated by the Postgres Ready/attempt/fingerprint hydration gate, so
 a late worker cannot publish, delete, or fail a newer result.
 
@@ -145,6 +153,10 @@ Pause workers and stop API traffic before rollback. Migration 0044 downgrade:
 - **halts before any DDL** if `embedding_legacy_archive_0044` contains a revised
   connector's detached legacy bytes. Reconcile/export that archive explicitly;
   an automatic downgrade cannot truthfully attach an old vector to new content.
+  The guard binds the RLS policy's transaction-local `bypass` sentinel itself,
+  so it sees every archive row even when the migration/database owner is
+  `NOSUPERUSER NOBYPASSRLS` and the table is `FORCE ROW LEVEL SECURITY`. It does
+  not disable RLS or grant a persistent role attribute.
 
 ```powershell
 cd backend

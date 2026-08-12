@@ -1150,7 +1150,23 @@ def sync_source(self: object, tenant_id: str, source_id: str) -> dict[str, objec
             gateway=gateway,
         )
 
-    result = run_task(_run())
+    try:
+        result = run_task(_run())
+    except DependencyError as exc:
+        # Contract/dependency faults before the source core claims its row are
+        # retryable. Use the same bounded exponential policy as document
+        # ingestion, then publish an explicit terminal Error so a broker-
+        # accepted source can never remain Pending forever (R2-002). Persist
+        # only the stable adapter code, never provider detail/payload.
+        retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+        if retries < settings.ingestion_max_retries:
+            countdown = settings.ingestion_retry_backoff_seconds * (2**retries)
+            raise self.retry(exc=exc, countdown=countdown) from exc  # type: ignore[attr-defined]
+        reason = (
+            "Embedding contract preflight failed after "
+            f"{settings.ingestion_max_retries} retries ({exc.code})."
+        )
+        result = run_task(_fail(tid, sid, reason))
     return _as_dict(result)
 
 

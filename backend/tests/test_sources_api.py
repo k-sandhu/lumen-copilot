@@ -32,6 +32,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
+from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
@@ -238,6 +239,39 @@ async def test_add_feed_url_seeds_mode_feed(client: AsyncClient, seeded: _Seeded
     resp = await _add(client, token, f"http://{_PUBLIC}/blog/rss")
     assert resp.status_code == 201, resp.text
     assert resp.json()["config"] == {"url": f"http://{_PUBLIC}/blog/rss", "mode": "feed"}
+
+
+async def test_failed_embedding_contract_returns_503_without_source_state_drift(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """R2-002: real HTTP create/resync admission is typed and write-free."""
+
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        mark_embedding_contract_valid,
+    )
+
+    token = await _login(client, seeded.alice_email)
+    created = await _add(client, token, f"http://{_PUBLIC}/before-contract-failure")
+    assert created.status_code == 201
+    source_id = created.json()["id"]
+    mark_embedding_contract_invalid("embedding_dimension_mismatch")
+    try:
+        blocked_create = await _add(client, token, f"http://{_PUBLIC}/blocked-create")
+        assert blocked_create.status_code == 503
+        assert blocked_create.json()["code"] == "embedding_dimension_mismatch"
+
+        blocked_sync = await client.post(f"/api/v1/sources/{source_id}/sync", headers=_auth(token))
+        assert blocked_sync.status_code == 503
+        assert blocked_sync.json()["code"] == "embedding_dimension_mismatch"
+
+        listed = await client.get("/api/v1/sources", headers=_auth(token))
+        assert listed.status_code == 200
+        assert [(item["id"], item["status"]) for item in listed.json()["items"]] == [
+            (source_id, "pending")
+        ]
+    finally:
+        mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
 
 
 # --- SSRF / validation negatives (422) --------------------------------------

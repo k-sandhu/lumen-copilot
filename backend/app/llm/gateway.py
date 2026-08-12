@@ -33,7 +33,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from numbers import Real
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from app.core.config import Settings
@@ -306,7 +306,7 @@ def _validate_embedding_vectors(
     expected_count: int,
     expected_dimensions: int,
     model: str,
-) -> None:
+) -> list[list[float]]:
     """Fail at the provider boundary before a fixed-width store sees drift.
 
     Telemetry intentionally contains only counts, dimensions, and route id; input
@@ -326,6 +326,7 @@ def _validate_embedding_vectors(
             code="embedding_count_mismatch",
         )
 
+    normalized_vectors: list[list[float]] = []
     for index, vector in enumerate(vectors):
         actual_dimensions = len(vector)
         if actual_dimensions != expected_dimensions:
@@ -340,12 +341,26 @@ def _validate_embedding_vectors(
                 "Embedding provider returned an incompatible vector.",
                 code="embedding_dimension_mismatch",
             )
-        if any(
-            isinstance(coordinate, bool)
-            or not isinstance(coordinate, Real)
-            or not math.isfinite(float(coordinate))
-            for coordinate in vector
-        ):
+        normalized: list[float] = []
+        for coordinate in vector:
+            if isinstance(coordinate, bool) or not isinstance(coordinate, Real):
+                normalized = []
+                break
+            try:
+                # Convert exactly once. Python's JSON decoder accepts integers
+                # of arbitrary precision, and ``float(10**10000)`` raises an
+                # OverflowError; vendor scalar objects may raise TypeError or
+                # ValueError from ``__float__`` as well. No raw value or vendor
+                # exception may cross this adapter boundary (R2-005).
+                converted = float(coordinate)
+            except Exception:  # noqa: BLE001 — untrusted provider scalar boundary
+                normalized = []
+                break
+            if not math.isfinite(converted):
+                normalized = []
+                break
+            normalized.append(converted)
+        if len(normalized) != expected_dimensions:
             log.error(
                 "embedding.provider_coordinate_invalid",
                 model=model,
@@ -356,6 +371,8 @@ def _validate_embedding_vectors(
                 "Embedding provider returned a malformed vector.",
                 code="embedding_response_invalid",
             )
+        normalized_vectors.append(normalized)
+    return normalized_vectors
 
 
 def _ordered_embedding_vectors(
@@ -420,13 +437,12 @@ def _ordered_embedding_vectors(
             code="embedding_response_invalid",
         )
     vectors = [vector for vector in ordered if vector is not None]
-    _validate_embedding_vectors(
+    return _validate_embedding_vectors(
         vectors,
         expected_count=expected_count,
         expected_dimensions=expected_dimensions,
         model=model,
     )
-    return [[float(cast(Real, coordinate)) for coordinate in vector] for vector in vectors]
 
 
 class LLMGateway:
@@ -789,7 +805,7 @@ class LLMGateway:
                 cache_key, ttl_seconds=self._settings.llm_embed_cache_ttl_seconds
             )
             if cached is not None:
-                _validate_embedding_vectors(
+                [normalized] = _validate_embedding_vectors(
                     [cached],
                     expected_count=1,
                     expected_dimensions=self._settings.llm_embedding_dimensions,
@@ -797,7 +813,7 @@ class LLMGateway:
                 )
                 # Copy on the way out so a caller mutating its vector cannot
                 # poison the cache.
-                return [Embedding(vector=list(cached), model=model_id)]
+                return [Embedding(vector=normalized, model=model_id)]
 
         try:
             response = await litellm.aembedding(

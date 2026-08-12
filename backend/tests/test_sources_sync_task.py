@@ -25,13 +25,15 @@ from typing import ClassVar
 
 import pytest
 import pytest_asyncio
+from celery.exceptions import Retry
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.db.session as db_session
 from app.connectors.base import FetchedDoc
 from app.connectors.web.fetch import UrlBlockedError
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
+from app.core.errors import DependencyError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -48,7 +50,7 @@ from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
 from app.tasks.ingest import IngestionResult
-from app.tasks.sync_source import SyncResult, sync_source_async
+from app.tasks.sync_source import SyncResult, sync_source, sync_source_async
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -228,6 +230,7 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
             request_id="r",
             source_ip="203.0.113.1",
+            embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
         )
         # The after-commit enqueue is a no-op here (no broker / not committed in
         # this scope path); we drive the sync task directly below.
@@ -643,6 +646,120 @@ async def test_sync_missing_source_is_noop(
     assert result.error == "source not found"
 
 
+# --- Celery wrapper: contract retry / exhaustion / restored recovery --------
+
+
+_sync_source_wrapper = sync_source.__wrapped__.__func__
+
+
+class _FakeSourceTaskRequest:
+    def __init__(self, retries: int) -> None:
+        self.retries = retries
+        self.id = "source-contract-task"
+
+
+class _FakeSourceTask:
+    def __init__(self, retries: int) -> None:
+        self.request = _FakeSourceTaskRequest(retries)
+        self.retry_calls: list[dict[str, object]] = []
+
+    def retry(self, *, exc: BaseException, countdown: float) -> Retry:
+        self.retry_calls.append({"exc": exc, "countdown": countdown})
+        raise Retry("retrying", exc=exc, when=countdown)
+
+
+def _patch_source_wrapper_adapters(monkeypatch: pytest.MonkeyPatch, *, settings: Settings) -> None:
+    monkeypatch.setattr(sync_source_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(sync_source_module, "ObjectStore", lambda _settings: object())
+    monkeypatch.setattr(sync_source_module, "LLMGateway", lambda _settings: object())
+
+
+def test_source_task_preflight_retries_then_terminalizes_with_safe_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-002: pre-claim DependencyError has bounded retry then durable Error."""
+
+    settings = _settings(
+        OPENROUTER_API_KEY="configured",
+        INGESTION_MAX_RETRIES="2",
+        INGESTION_RETRY_BACKOFF_SECONDS="3",
+    )
+    _patch_source_wrapper_adapters(monkeypatch, settings=settings)
+
+    async def _contract_down(_settings: Settings) -> str:
+        raise DependencyError(
+            "provider payload must never be copied to source state",
+            code="embedding_dimension_mismatch",
+        )
+
+    core_called = False
+
+    async def _must_not_claim(*_args: object, **_kwargs: object) -> SyncResult:
+        nonlocal core_called
+        core_called = True
+        raise AssertionError("source core must not claim before preflight")
+
+    monkeypatch.setattr(sync_source_module, "ensure_embedding_contract", _contract_down)
+    monkeypatch.setattr(sync_source_module, "sync_source_async", _must_not_claim)
+
+    tenant_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    retrying = _FakeSourceTask(retries=0)
+    with pytest.raises(Retry):
+        _sync_source_wrapper(retrying, str(tenant_id), str(source_id))
+    assert retrying.retry_calls[0]["countdown"] == 3
+    assert isinstance(retrying.retry_calls[0]["exc"], DependencyError)
+    assert core_called is False
+
+    terminal_calls: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    async def _terminalize(tid: uuid.UUID, sid: uuid.UUID, reason: str) -> SyncResult:
+        terminal_calls.append((tid, sid, reason))
+        return SyncResult(sid, SourceStatus.ERROR, 0, reason)
+
+    monkeypatch.setattr(sync_source_module, "_fail", _terminalize)
+    exhausted = _FakeSourceTask(retries=2)
+    result = _sync_source_wrapper(exhausted, str(tenant_id), str(source_id))
+
+    assert exhausted.retry_calls == []
+    assert result["status"] == SourceStatus.ERROR.value
+    assert terminal_calls == [
+        (
+            tenant_id,
+            source_id,
+            "Embedding contract preflight failed after 2 retries "
+            "(embedding_dimension_mismatch).",
+        )
+    ]
+    assert "provider payload" not in str(result)
+
+
+def test_source_task_recovers_to_ready_after_contract_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-002: a later/manual delivery converges Error/Pending work to Ready."""
+
+    settings = _settings(OPENROUTER_API_KEY="configured")
+    _patch_source_wrapper_adapters(monkeypatch, settings=settings)
+
+    async def _contract_ready(active: Settings) -> str:
+        return active.embedding_space_fingerprint
+
+    async def _ready(
+        _tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        **_kwargs: object,
+    ) -> SyncResult:
+        return SyncResult(source_id, SourceStatus.READY, 1)
+
+    monkeypatch.setattr(sync_source_module, "ensure_embedding_contract", _contract_ready)
+    monkeypatch.setattr(sync_source_module, "sync_source_async", _ready)
+
+    result = _sync_source_wrapper(_FakeSourceTask(retries=0), str(uuid.uuid4()), str(uuid.uuid4()))
+    assert result["status"] == SourceStatus.READY.value
+    assert result["indexed_count"] == 1
+
+
 # --- delete cleanup (regression for #139) -----------------------------------
 
 
@@ -657,6 +774,7 @@ async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: u
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
             request_id="r",
             source_ip="203.0.113.1",
+            embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
         )
         ok = await svc.delete(source_id)
         await session.commit()
