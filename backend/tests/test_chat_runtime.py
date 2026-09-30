@@ -1233,6 +1233,7 @@ async def test_oversized_tool_results_never_exceed_budget(
     import types as _types
 
     from app.llm.context import ContextConfig
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 
     # Force the assembler's counting/resolver onto their deterministic fallbacks
     # (conservative UTF-8 bytes; the configured fallback window) by making litellm
@@ -1278,6 +1279,15 @@ async def test_oversized_tool_results_never_exceed_budget(
         model="some/unknown-model-not-in-map",
         history=[],
         collection_ids=None,
+        # Keep this test on the immutable legacy tool schema: it pins the
+        # context guard's byte-budget behavior, not the independently tested
+        # v2 tool catalog's larger schemas.
+        assistant_config=AssistantRunConfig(
+            system_prompt=GROUNDED_SYSTEM_PROMPT,
+            allowed=frozenset({"search_text", "search_documents", "get_document", "ask_user"}),
+            collection_ids=None,
+            model=None,
+        ),
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
@@ -1432,6 +1442,7 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     import types as _types
 
     from app.llm.context import ContextConfig
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 
     def _raise(**_kw: object) -> int:
         raise RuntimeError("no tokenizer in test")
@@ -1470,6 +1481,14 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
         model="some/unknown-model-not-in-map",
         history=[],
         collection_ids=None,
+        # Use the legacy immutable tool catalog so the original compaction
+        # byte thresholds remain scoped to tool-result degradation.
+        assistant_config=AssistantRunConfig(
+            system_prompt=GROUNDED_SYSTEM_PROMPT,
+            allowed=frozenset({"search_text", "search_documents", "get_document", "ask_user"}),
+            collection_ids=None,
+            model=None,
+        ),
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
@@ -4946,6 +4965,7 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
     a fitting question into context_too_large — the answer degrades to the
     verbatim window."""
     from app.llm.context import ContextConfig as _CC
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 
     retrieval = _FakeRetrieval([])
     gateway = _RecordingScriptedGateway(
@@ -4970,6 +4990,13 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
         history=[],
         collection_ids=None,
         summary="H" * 40_000,  # far beyond the 3k-token window
+        # No tools: isolate summary shedding from catalog-schema token costs.
+        assistant_config=AssistantRunConfig(
+            system_prompt=GROUNDED_SYSTEM_PROMPT,
+            allowed=frozenset(),
+            collection_ids=None,
+            model=None,
+        ),
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert envs[-1]["type"] == "done"  # no context_too_large terminal

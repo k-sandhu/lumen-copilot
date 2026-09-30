@@ -100,8 +100,11 @@ class _ScriptedGateway:
             )
             yield StreamEvent(finish_reason="stop")
         else:
+            tool_specs = tools if isinstance(tools, list | tuple) else []
+            offered_names = {getattr(spec, "name", None) for spec in tool_specs}
+            search_tool = "search_passages" if "search_passages" in offered_names else "search_text"
             yield StreamEvent(
-                tool_calls=(ToolCall(id="c1", name="search_text", arguments={"query": "x"}),),
+                tool_calls=(ToolCall(id="c1", name=search_tool, arguments={"query": "x"}),),
                 finish_reason="tool_calls",
             )
 
