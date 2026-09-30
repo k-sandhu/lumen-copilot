@@ -16,9 +16,17 @@
 import { useRef } from 'react';
 import type { Document } from '@/api';
 import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
+import { StatusBadge } from '@/components/StatusBadge';
 import { SourceInspector, StatusDot, type SourcePassage } from '@/ui';
 import { useFocusTrap } from '@/lib/useFocusTrap';
-import { formatBytes, fileKind, ingestSteps, type IngestStep } from '../model/presentation';
+import {
+  documentStatusPresentation,
+  formatBytes,
+  fileKind,
+  ingestSteps,
+  isIngesting,
+  type IngestStep,
+} from '../model/presentation';
 
 interface DocumentViewerProps {
   doc: Document;
@@ -32,6 +40,7 @@ const INGEST_TONE: Record<IngestStep['state'], 'ok' | 'sync' | 'muted' | 'danger
   active: 'sync',
   pending: 'muted',
   failed: 'danger',
+  unknown: 'muted',
 };
 
 export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerProps) {
@@ -101,7 +110,7 @@ export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerPro
                   />
                   <span
                     className={
-                      step.state === 'pending'
+                      step.state === 'pending' || step.state === 'unknown'
                         ? 'text-foreground-muted'
                         : step.state === 'failed'
                           ? 'text-danger'
@@ -167,22 +176,10 @@ function Meta({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 function StatusLine({ doc }: { doc: Document }) {
-  const tone =
-    doc.status === 'ready'
-      ? ('ok' as const)
-      : doc.status === 'failed'
-        ? ('danger' as const)
-        : doc.status === 'processing'
-          ? ('sync' as const)
-          : ('muted' as const);
-  const label =
-    doc.status === 'ready'
-      ? 'Indexed'
-      : doc.status === 'failed'
-        ? 'Failed'
-        : doc.status === 'processing'
-          ? 'Processing…'
-          : 'Queued';
-  return <StatusDot tone={tone} label={label} />;
+  const status = documentStatusPresentation(doc);
+  return (
+    <StatusBadge tone={status.tone} detail={status.detail} pulse={isIngesting(doc.status)}>
+      {status.label}
+    </StatusBadge>
+  );
 }
-

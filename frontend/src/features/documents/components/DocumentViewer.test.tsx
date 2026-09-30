@@ -95,6 +95,50 @@ describe('DocumentViewer', () => {
     expect(within(ingestion).getByText(/indexed & permission-scoped/i)).toBeInTheDocument();
   });
 
+  it('uses the extraction outcome explanation in the viewer status', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    renderWithQuery(
+      <DocumentViewer
+        doc={{ ...doc, ingestion_outcome: 'partial', searchable: true }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole('button', { name: /some pdf pages have no native text/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Partial native text')).toBeInTheDocument();
+  });
+
+  it('does not describe an empty or zero-chunk document as searchable', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    renderWithQuery(
+      <DocumentViewer
+        doc={{ ...doc, chunk_count: 0, ingestion_outcome: 'empty', searchable: false }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole('button', { name: /no native text was extracted/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('No native text')).toBeInTheDocument();
+    expect(screen.queryByText(/native text is indexed and searchable/i)).not.toBeInTheDocument();
+  });
+
+  it('does not infer completed extraction stages for a legacy ready document with zero chunks', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    renderWithQuery(<DocumentViewer doc={{ ...doc, chunk_count: 0 }} onClose={() => {}} />);
+
+    const ingestion = screen.getByRole('region', { name: /ingestion/i });
+    expect(within(ingestion).getByText('No indexed text')).toBeInTheDocument();
+    expect(within(ingestion).queryByText(/indexed & permission-scoped/i)).not.toBeInTheDocument();
+    expect(within(ingestion).getByText('Parse status unknown')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /extraction outcome is unknown/i }),
+    ).toBeInTheDocument();
+  });
+
   it('surfaces a cited passage when one is supplied (#89 viewer drawer)', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
     renderWithQuery(

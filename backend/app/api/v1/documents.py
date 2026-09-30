@@ -46,6 +46,7 @@ from app.api.deps import (
 )
 from app.core.errors import NotFoundError, ValidationError
 from app.domain.entities import DocumentStatus
+from app.domain.ingestion import ExtractionOutcome
 from app.services.document_service import (
     DocumentPage,
     DocumentService,
@@ -85,6 +86,8 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     source_locations: list[SourceLocationResponse] = Field(default_factory=list)
+    ingestion_outcome: ExtractionOutcome | None = None
+    searchable: bool = False
 
 
 class DocumentListResponse(BaseModel):
@@ -119,6 +122,8 @@ def _to_response(view: DocumentView) -> DocumentResponse:
         collection_id=d.collection_id,
         owner_id=d.owner_id,
         status=d.status,
+        ingestion_outcome=d.ingestion_outcome,
+        searchable=view.searchable,
         error=d.error,
         chunk_count=view.chunk_count,
         created_at=d.created_at,

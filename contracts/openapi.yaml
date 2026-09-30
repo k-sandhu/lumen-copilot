@@ -3242,6 +3242,11 @@ components:
       description: Ingestion lifecycle.
       enum: [pending, processing, ready, failed]
 
+    IngestionOutcome:
+      type: string
+      description: Native extraction result; partial means some PDF pages have no native text, which may be intentional. Indexed does not imply complete visual content coverage.
+      enum: [empty, failed, partial, unsupported, indexed]
+
     SourceLocation:
       type: object
       additionalProperties: false
@@ -3267,6 +3272,14 @@ components:
         collection_id: { type: string, format: uuid }
         owner_id: { type: string, format: uuid }
         status: { $ref: "#/components/schemas/DocumentStatus" }
+        ingestion_outcome:
+          oneOf:
+            - { $ref: "#/components/schemas/IngestionOutcome" }
+            - { type: "null" }
+          description: Unknown for legacy or unfinished ingestion attempts.
+        searchable:
+          type: boolean
+          description: True only for ready documents with at least one chunk; false for empty native extraction.
         source_locations:
           type: array
           description: Permissioned source-part map. Empty or absent means unknown until re-ingestion; never inferred for legacy documents.

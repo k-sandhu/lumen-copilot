@@ -21,13 +21,12 @@ import { cn } from '@/lib/cn';
 import { useDeleteDocument, useDocuments, type DocumentFilters } from '../model/queries';
 import {
   documentFreshness,
+  documentStatusPresentation,
   fileKind,
   fileKindTone,
   ingestSteps,
   isIngesting,
   ownerLabel,
-  statusLabel,
-  statusTone,
   visibility,
   type FileKindTone,
 } from '../model/presentation';
@@ -262,9 +261,10 @@ function StatusCell({ doc }: { doc: Document }) {
       />
     );
   }
+  const status = documentStatusPresentation(doc);
   return (
-    <StatusBadge tone={statusTone(doc.status)} detail={doc.error}>
-      {statusLabel(doc.status)}
+    <StatusBadge tone={status.tone} detail={status.detail}>
+      {status.label}
     </StatusBadge>
   );
 }
@@ -336,9 +336,7 @@ function DocumentRow({
             </div>
           </div>
         </td>
-        <td className="px-3 py-2.5 align-middle text-foreground-muted">
-          {collectionName ?? '—'}
-        </td>
+        <td className="px-3 py-2.5 align-middle text-foreground-muted">{collectionName ?? '—'}</td>
         <td className="px-3 py-2.5 align-middle">
           <PermissionPill level={vis.level} label={vis.label} title={vis.title} />
         </td>

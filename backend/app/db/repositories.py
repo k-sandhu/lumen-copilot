@@ -2101,6 +2101,22 @@ class DocumentRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return to_document(row)
 
+    async def update_ingestion_metadata(
+        self, document_id: UUID, values: dict[str, object]
+    ) -> Document | None:
+        """Merge one attempt's metadata without losing its retained source map."""
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.ingestion_metadata = {**(row.ingestion_metadata or {}), **values}
+        await self._session.flush()
+        await self._session.refresh(row)
+        return to_document(row)
+
 
 class ArtifactRepository(_TenantScopedRepository):
     """Agent/run-produced artifacts within one tenant (issue #208).
