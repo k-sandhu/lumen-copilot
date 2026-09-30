@@ -90,7 +90,11 @@ def select_cited_handles(answer: str, available: set[str]) -> tuple[str, list[st
             elif child.type == "text" and not link_depth:
                 for match in _HANDLE.finditer(child.content):
                     handle = match.group(1)
-                    if not handle.startswith("D") and handle in available and handle not in selected:
+                    if (
+                        not handle.startswith("D")
+                        and handle in available
+                        and handle not in selected
+                    ):
                         selected.append(handle)
 
     def resolve(match: re.Match[str]) -> str:
