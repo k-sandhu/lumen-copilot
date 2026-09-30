@@ -36,13 +36,23 @@ Feature (`features/documents`):
   (server state), which is NOT mirrored here (frontend/AGENTS.md).
 - `model/useUploadDocuments.ts` — bridges `uploadDocument` to the store; maps a
   413/415/422/404/network failure to a clear, user-facing message.
-- `model/presentation.ts` — pure status→tone/label and byte-formatting helpers,
-  plus the #89 trust-signal derivation: `ingestSteps` (the parse → chunk → embed →
+- `model/presentation.ts` — pure lifecycle and extraction-outcome→tone/label/detail
+  helpers and byte formatting, plus the #89 trust-signal derivation: `ingestSteps`
+  (the parse → chunk → embed →
   ready pipeline projected from `status` + `chunk_count`), `statusDotTone`, and
   `fileKind`. The #119 table polish adds `fileKindTone` (type-badge family),
   `relativeTime`/`documentFreshness` (the Updated column, from `updated_at`),
-  `ownerLabel` ("You" vs. an honest short id — there is NO display-name field on the
-  wire), and `visibility` (the Visibility column, derived from the **real** INV-2
+  `documentStatusPresentation` is shared by the list and viewer: pending/processing
+  takes precedence over an older outcome, and settled documents distinguish no
+  native text, unsupported format, ingestion failure, partial PDF text, and ready
+  documents with indexed text. Its `searchable` value requires a ready lifecycle
+  and positive chunk count, excludes empty/failed/unsupported outcomes, and honors
+  an explicit false wire value. Legacy documents retain their status label unless
+  a ready record has zero chunks; it reads “No indexed text” while its extraction
+  outcome and processing stages remain unknown. Partial PDF
+  text is described as incomplete native coverage because blank pages may be
+  intentional. `ownerLabel` ("You" vs. an honest short id — there is NO display-name
+  field on the wire), and `visibility` (the Visibility column, derived from the **real** INV-2
   owner-only invariant — the MVP backend carries no Confidential/Team/Org taxonomy,
   so we never fabricate one). No I/O — unit-tested directly.
 - `components/CollectionsSidebar.tsx` — list / create / rename / delete (AC-1).
@@ -63,6 +73,8 @@ Feature (`features/documents`):
   and previews it: PDFs render in an (unsandboxed) iframe via the browser's native
   viewer, while office and text/markdown render as server-extracted text (AC-3). A
   non-ready document explains it has no preview yet and skips the content fetch.
+  Its status label and extraction explanation use the same presentation helper as
+  the document list.
 - `components/DocumentsPanel.tsx` — the feature root; the `/documents` route
   ([`routes/DocumentsRoute.tsx`](../../routes/DocumentsRoute.tsx)) wraps it in the
   auth guard + app chrome, reachable from the chat shell's Pages overlay.

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   statusTone,
   statusLabel,
+  documentStatusPresentation,
   isIngesting,
   formatBytes,
   statusDotTone,
@@ -37,6 +38,58 @@ describe('document presentation helpers', () => {
     expect(isIngesting('failed')).toBe(false);
   });
 
+  it('prioritizes active ingestion and never infers searchability without chunks', () => {
+    const active = documentStatusPresentation({
+      id: 'd-1',
+      filename: 'a.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 1,
+      collection_id: 'c-1',
+      owner_id: 'u-1',
+      status: 'processing',
+      chunk_count: 0,
+      ingestion_outcome: 'indexed',
+      searchable: true,
+      created_at: '',
+      updated_at: '',
+    });
+    expect(active.label).toBe('Processing');
+    expect(active.searchable).toBe(false);
+
+    const legacyEmpty = documentStatusPresentation({
+      id: 'd-2',
+      filename: 'a.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 1,
+      collection_id: 'c-1',
+      owner_id: 'u-1',
+      status: 'ready',
+      chunk_count: 0,
+      searchable: true,
+      created_at: '',
+      updated_at: '',
+    });
+    expect(legacyEmpty.label).toBe('No indexed text');
+    expect(legacyEmpty.tone).toBe('degraded');
+    expect(legacyEmpty.detail).toMatch(/extraction outcome is unknown/i);
+    expect(legacyEmpty.searchable).toBe(false);
+
+    const legacyIndexed = documentStatusPresentation({
+      id: 'd-3',
+      filename: 'a.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 1,
+      collection_id: 'c-1',
+      owner_id: 'u-1',
+      status: 'ready',
+      chunk_count: 2,
+      created_at: '',
+      updated_at: '',
+    });
+    expect(legacyIndexed.label).toBe('Ready');
+    expect(legacyIndexed.searchable).toBe(true);
+  });
+
   it('formats bytes compactly', () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(512)).toBe('512 B');
@@ -67,6 +120,12 @@ describe('#89 trust-signal helpers', () => {
       const steps = ingestSteps({ status: 'ready', chunk_count: 142 });
       expect(steps.map((s) => s.state)).toEqual(['done', 'done', 'done', 'done']);
       expect(steps[1]?.label).toBe('Chunked into 142 passages');
+    });
+
+    it('keeps every stage unknown for a legacy ready document with no chunks', () => {
+      const steps = ingestSteps({ status: 'ready', chunk_count: 0 });
+      expect(steps.map((step) => step.state)).toEqual(['unknown', 'unknown', 'unknown', 'unknown']);
+      expect(steps[3]?.label).toBe('No indexed text');
     });
 
     it('shows embed as the active stage while processing (chunks counted)', () => {
