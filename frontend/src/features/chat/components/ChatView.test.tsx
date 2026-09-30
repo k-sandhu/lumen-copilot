@@ -460,7 +460,7 @@ describe('ChatView (critical flow)', () => {
     expect(web).not.toBeDisabled();
     expect(web).toHaveAttribute('aria-pressed', 'true');
 
-    // Send a message and stream a web-search tool + a web citation.
+    // Send a message and stream a web-search tool + a separate web citation.
     await user.type(screen.getByLabelText('Message'), 'latest AI regulations?');
     await user.click(screen.getByRole('button', { name: /send/i }));
     await waitFor(() => expect(liveSocket).not.toBeNull());
@@ -490,22 +490,19 @@ describe('ChatView (critical flow)', () => {
         type: 'delta',
         streamId: 'stream-1',
         seq: 3,
-        data: { text: 'The EU AI Act phases in through 2026.' },
+        data: { text: 'The EU AI Act phases in through 2026. [W1]' },
       });
       liveSocket!.emit({
         type: 'event',
         streamId: 'stream-1',
         seq: 4,
-        name: 'citation',
-        // A web citation: url + no documentId (the additive shape #219 emits).
+        name: 'web_citation',
         data: {
           id: 'web-cite-1',
-          documentName: 'EU AI Act overview',
+          handle: 'W1',
+          title: 'EU AI Act overview',
           snippet: 'The Act enters into force in stages through 2026.',
-          charStart: 0,
-          charEnd: 49,
           url: 'https://www.example.org/eu-ai-act',
-          webTitle: 'EU AI Act overview',
         },
       });
       liveSocket!.emit({
@@ -524,6 +521,14 @@ describe('ChatView (critical flow)', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(link).toHaveAttribute('target', '_blank');
     expect(screen.getByText(/web sources were used/i)).toBeInTheDocument();
+
+    // The inline W handle resolves to the web inspector. It never fabricates a
+    // corpus document id or routes through the document viewer.
+    await user.click(screen.getByRole('button', { name: 'Citation W1: EU AI Act overview' }));
+    expect(
+      await screen.findByRole('region', { name: 'Cited web page: EU AI Act overview' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /Cited document:/i })).not.toBeInTheDocument();
   });
 });
 

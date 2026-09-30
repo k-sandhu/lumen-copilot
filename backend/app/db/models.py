@@ -402,6 +402,7 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     model: Mapped[str] = mapped_column(String(255), nullable=False)
+    handle_next: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Optional assistant pin (ADR-0011 §1): a session started from an assistant
     # records both which assistant and the exact pinned version it ran, so the
     # transcript is reproducible after the assistant is edited/rolled back. Both
@@ -421,6 +422,21 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     messages: Mapped[list[Message]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+
+
+class SourceHandle(TenantScopedMixin, Base):
+    """Durable conversation evidence identities; no corpus source text."""
+
+    __tablename__ = "source_handles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "session_id", "handle", name="uq_source_handles_identity"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    handle: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False)
 
 
 class UserPreference(TenantScopedMixin, TimestampMixin, Base):
@@ -572,8 +588,24 @@ class Citation(TenantScopedMixin, TimestampMixin, Base):
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     score: Mapped[float | None] = mapped_column(nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     message: Mapped[Message] = relationship(back_populates="citations")
+
+
+class WebCitation(TenantScopedMixin, Base):
+    __tablename__ = "web_citations"
+    id: Mapped[uuid.UUID] = _pk()
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    handle: Mapped[str] = mapped_column(String(32), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    snippet: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class AuditEvent(TenantScopedMixin, Base):

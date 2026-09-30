@@ -187,7 +187,25 @@ function MessageBubbleComponent({
                   }
                 : {})}
             >
-              <MarkdownView className="lc-answer" streaming={streaming}>
+              <MarkdownView
+                className="lc-answer"
+                streaming={streaming}
+                resolveCitationHandle={(handle) => {
+                  const citation = citations.find((c) => c.handle === handle);
+                  return citation
+                    ? {
+                        title: citation.kind === 'web' ? citation.webTitle : citation.documentName,
+                        onClick: () =>
+                          onOpenCitation(
+                            citation,
+                            citation.kind === 'document'
+                              ? sourceMeta?.[citation.documentId]
+                              : undefined,
+                          ),
+                      }
+                    : undefined;
+                }}
+              >
                 {content}
               </MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
@@ -348,7 +366,7 @@ function WebSources({
   citations,
   onOpen,
 }: {
-  citations: UiCitation[];
+  citations: Extract<UiCitation, { kind: 'web' }>[];
   onOpen: (citation: UiCitation) => void;
 }) {
   return (
@@ -357,7 +375,7 @@ function WebSources({
       <ul className="lc-web-sources" aria-label="Web sources">
         {citations.map((citation) => {
           const host = hostOf(citation.url);
-          const title = citation.webTitle ?? citation.documentName ?? host ?? 'Web result';
+          const title = citation.webTitle ?? host ?? 'Web result';
           const safeHref = isSafeHttpUrl(citation.url) ? citation.url : undefined;
           return (
             <li key={citation.id} className="lc-web-source">

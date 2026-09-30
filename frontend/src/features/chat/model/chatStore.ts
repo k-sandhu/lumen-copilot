@@ -15,19 +15,28 @@ import type { KnowledgeMode } from '@/api';
  * the answer's age — not when the source was indexed — so the viewer never
  * presents it as source provenance (#120 GUARD against fabricated provenance).
  */
-export interface ViewerTarget {
+export interface DocumentViewerTarget {
+  kind: 'document';
+  id: string;
+  handle?: string | null;
   documentId: string;
   documentName: string;
   charStart: number;
   charEnd: number;
   snippet: string;
-  /**
-   * Present when the citation is a web page (#221): its URL. Absent ⇒ a corpus
-   * document. Drives the web variant of the inspector/viewer (globe + host +
-   * "Open page") vs the document viewer.
-   */
-  url?: string;
 }
+
+/** Public web source target; deliberately carries no corpus document identity. */
+export interface WebViewerTarget {
+  kind: 'web';
+  id: string;
+  handle: string;
+  url: string;
+  webTitle: string;
+  snippet: string;
+}
+
+export type ViewerTarget = DocumentViewerTarget | WebViewerTarget;
 
 /**
  * The knowledge-scope facts a session was started with (#221). The running

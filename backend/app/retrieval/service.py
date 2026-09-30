@@ -246,6 +246,37 @@ class RetrievalService:
             )
         return passages
 
+    async def read_passages(
+        self,
+        *,
+        principal: Principal,
+        chunk_ids: list[UUID],
+        collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
+    ) -> list[RetrievedPassage]:
+        """Rehydrate exact evidence under current permissions and effective scope."""
+        allow_set = await self._resolve_allow_set(principal)
+        rows = await queries.load_passages(
+            self._session,
+            allow_set=allow_set,
+            chunk_ids=chunk_ids,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+        return [
+            RetrievedPassage(
+                chunk_id=row.chunk_id,
+                document_id=row.document_id,
+                document_name=row.document_name,
+                ord=row.ord,
+                text=row.text,
+                char_start=row.char_start,
+                char_end=row.char_end,
+                score=0.0,
+            )
+            for row in rows.values()
+        ]
+
     # --- agent tools (the WS ChatToolCall vocabulary, AC-3) -----------------
 
     async def search_text(

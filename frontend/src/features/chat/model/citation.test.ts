@@ -5,32 +5,41 @@
  * web citation from ever producing an unsafe outbound link.
  */
 import { describe, it, expect } from 'vitest';
-import type { ChatCitation, Citation } from '@/api';
+import type { ChatCitation, ChatWebCitation, Citation, WebCitation } from '@/api';
 import {
   fromRestCitation,
+  fromRestWebCitation,
   fromWsCitation,
+  fromWsWebCitation,
   hostOf,
   isSafeHttpUrl,
   kindOfCitation,
-  type WebCitationExtras,
 } from './citation';
 
 describe('kindOfCitation', () => {
-  it('classifies a citation with a safe http(s) url as web', () => {
-    expect(kindOfCitation({ url: 'https://example.com/a' })).toBe('web');
-    expect(kindOfCitation({ url: 'http://example.com' })).toBe('web');
-  });
-
-  it('classifies a citation with no url as a document', () => {
-    expect(kindOfCitation({})).toBe('document');
-    expect(kindOfCitation({ url: '' })).toBe('document');
-    expect(kindOfCitation({ url: '   ' })).toBe('document');
-  });
-
-  it('never promotes an unsafe (non-http) url to a web citation', () => {
-    expect(kindOfCitation({ url: 'javascript:alert(1)' })).toBe('document');
-    expect(kindOfCitation({ url: 'data:text/html,<x>' })).toBe('document');
-    expect(kindOfCitation({ url: 'not a url' })).toBe('document');
+  it('uses the normalized source discriminator', () => {
+    expect(
+      kindOfCitation({
+        kind: 'web',
+        id: 'w1',
+        handle: 'W1',
+        url: 'https://example.com/a',
+        webTitle: 'Page',
+        snippet: 'text',
+      }),
+    ).toBe('web');
+    expect(
+      kindOfCitation({
+        kind: 'document',
+        id: 'c1',
+        documentId: 'doc-1',
+        documentName: 'Doc.pdf',
+        chunkId: 'chunk-1',
+        snippet: 'text',
+        charStart: 0,
+        charEnd: 4,
+      }),
+    ).toBe('document');
   });
 });
 
@@ -57,49 +66,69 @@ describe('isSafeHttpUrl', () => {
   });
 });
 
-describe('normalization carries additive web fields', () => {
-  it('fromRestCitation keeps url + webTitle when present', () => {
-    const rest: Citation & WebCitationExtras = {
+describe('normalizes handle-based citation wires', () => {
+  it('preserves corpus handles from REST and live WS citations', () => {
+    const rest: Citation = {
       id: 'c1',
-      document_id: '',
+      handle: 'S1',
+      document_id: 'doc-1',
       document_name: 'A page',
-      chunk_id: '',
+      chunk_id: 'chunk-1',
       snippet: 'text',
       char_start: 0,
       char_end: 4,
-      url: 'https://example.com/x',
-      webTitle: 'A page',
     };
-    const ui = fromRestCitation(rest);
-    expect(ui.url).toBe('https://example.com/x');
-    expect(ui.webTitle).toBe('A page');
-    expect(kindOfCitation(ui)).toBe('web');
+    expect(fromRestCitation(rest)).toMatchObject({ kind: 'document', handle: 'S1' });
+
+    const live: ChatCitation = {
+      id: 'c2',
+      handle: 'S2',
+      documentId: 'doc-1',
+      documentName: 'A page',
+      chunkId: 'chunk-1',
+      snippet: 'text',
+      charStart: 0,
+      charEnd: 4,
+    };
+    expect(fromWsCitation(live)).toMatchObject({ kind: 'document', handle: 'S2' });
   });
 
-  it('fromWsCitation keeps url when present, omits it for a plain document', () => {
-    const web: ChatCitation & WebCitationExtras = {
+  it('normalizes separate REST and WS web citations without corpus identifiers', () => {
+    const rest: WebCitation = {
       id: 'w1',
-      documentId: '',
-      documentName: 'A page',
-      chunkId: '',
-      snippet: 'text',
-      charStart: 0,
-      charEnd: 4,
+      handle: 'W1',
       url: 'https://example.com/x',
-    };
-    expect(fromWsCitation(web).url).toBe('https://example.com/x');
-
-    const doc: ChatCitation & WebCitationExtras = {
-      id: 'd1',
-      documentId: 'doc-1',
-      documentName: 'Doc.pdf',
-      chunkId: 'k',
+      title: 'A page',
       snippet: 'text',
-      charStart: 0,
-      charEnd: 4,
     };
-    const ui = fromWsCitation(doc);
-    expect(ui.url).toBeUndefined();
-    expect(kindOfCitation(ui)).toBe('document');
+    expect(fromRestWebCitation(rest)).toEqual({
+      kind: 'web',
+      id: 'w1',
+      handle: 'W1',
+      url: 'https://example.com/x',
+      webTitle: 'A page',
+      snippet: 'text',
+    });
+
+    const live: ChatWebCitation = {
+      id: 'w2',
+      handle: 'W2',
+      url: 'https://example.com/y',
+      title: 'Another page',
+      snippet: 'text',
+    };
+    expect(fromWsWebCitation(live)).toMatchObject({ kind: 'web', id: 'w2', handle: 'W2' });
+  });
+
+  it('rejects unsafe URLs from the separate web citation shape', () => {
+    expect(
+      fromRestWebCitation({
+        id: 'w3',
+        handle: 'W3',
+        url: 'javascript:alert(1)',
+        title: 'Unsafe',
+        snippet: 'text',
+      } as unknown as WebCitation),
+    ).toBeNull();
   });
 });

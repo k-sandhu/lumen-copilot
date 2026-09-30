@@ -173,6 +173,19 @@ class _FakeRetrieval:
         self.queries.append(query)
         return list(self._passages)
 
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        """Treat configured passages as the explicit currently-permitted set."""
+        del principal, collection_ids, document_ids
+        wanted = set(chunk_ids)
+        return [passage for passage in self._passages if passage.chunk_id in wanted]
+
     async def search_documents(
         self, *, principal: object, name_or_query: str, k: int = 10
     ) -> list[DocumentMatch]:
@@ -394,7 +407,7 @@ async def test_grounded_answer_full_lifecycle(ctx: _Ctx) -> None:
             # Turn 2: the model answers using the retrieved passage.
             [
                 StreamEvent(text="The 2024 standard deduction "),
-                StreamEvent(text="is $14,600."),
+                StreamEvent(text="is $14,600 [S1]."),
                 StreamEvent(finish_reason="stop"),
             ],
         ]
@@ -448,7 +461,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="Grounded answer."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="Grounded answer. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -468,7 +481,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
         messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert len(assistant) == 1
-        assert assistant[0].content == "Grounded answer."
+        assert assistant[0].content == "Grounded answer. [S1]"
         assert assistant[0].model == "anthropic/claude-opus-4.8"
         citations = await CitationRepository(session, ctx.tenant_id).list_for_message_hydrated(
             assistant[0].id

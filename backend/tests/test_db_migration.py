@@ -87,6 +87,9 @@ _ALL_TABLES = _MVP_TABLES | {
     # was modelled wide from the start.
     "groups",
     "group_members",
+    # 0044, #436 — durable conversation evidence identities + web citations.
+    "source_handles",
+    "web_citations",
 }
 
 
@@ -127,7 +130,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0043_code_run_resolved_packages"]
+    assert list(script.get_heads()) == ["0044_evidence_handles"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -230,6 +233,41 @@ def test_migration_chain_is_linear_single_head() -> None:
     gdrive_acl = script.get_revision("0040_gdrive_acl")
     assert gdrive_acl is not None
     assert gdrive_acl.down_revision == "0039_connector_oauth"
+    evidence_handles = script.get_revision("0044_evidence_handles")
+    assert evidence_handles is not None
+    assert evidence_handles.down_revision == "0043_code_run_resolved_packages"
+
+
+def test_offline_evidence_handles_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0044 adds durable identity and selected citation storage with RLS."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0043_code_run_resolved_packages:0044_evidence_handles", sql=True)
+    up = capsys.readouterr().out.lower()
+
+    assert "alter table chat_sessions add column handle_next integer default '1' not null" in up
+    assert "alter table citations add column handle varchar(32)" in up
+    assert "create table source_handles" in up
+    assert "create table web_citations" in up
+    assert "uq_source_handles_identity" in up
+    assert "references chat_sessions (id) on delete cascade" in up
+    assert "references messages (id) on delete cascade" in up
+    assert "current_setting('app.tenant_id', true) = 'bypass'" in up
+    assert "tenant_id = current_setting('app.tenant_id', true)::uuid" in up
+    for table in ("source_handles", "web_citations"):
+        assert f"alter table {table} enable row level security" in up
+        assert f"alter table {table} force row level security" in up
+        assert f"create policy rls_{table}" in up
+
+    command.downgrade(cfg, "0044_evidence_handles:0043_code_run_resolved_packages", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table web_citations" in down
+    assert "drop table source_handles" in down
+    assert "drop column handle" in down
+    assert "drop column handle_next" in down
 
 
 def test_offline_reusable_sandbox_session_migration_round_trips(

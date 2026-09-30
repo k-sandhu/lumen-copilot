@@ -59,13 +59,12 @@ function webCitation(seq: number, id: string, url: string): EventEnvelope {
     type: 'event',
     streamId: SID,
     seq,
-    name: 'citation',
+    name: 'web_citation',
     data: {
       id,
-      documentName: 'A web page',
+      handle: 'W1',
+      title: 'A web page',
       snippet: 'a web snippet',
-      charStart: 0,
-      charEnd: 13,
       url,
     },
   };
@@ -136,7 +135,12 @@ function errorEnv(seq: number): ErrorEnvelope {
     type: 'error',
     streamId: SID,
     seq,
-    problem: { title: 'Upstream error', status: 502, detail: 'model unavailable', code: 'upstream' },
+    problem: {
+      title: 'Upstream error',
+      status: 502,
+      detail: 'model unavailable',
+      code: 'upstream',
+    },
   };
 }
 /** A `done` that opts into the post-terminal suggestions window (#489). */
@@ -219,15 +223,22 @@ describe('reduceStream', () => {
     expect(s.citations[0]).toMatchObject({ documentId: 'doc-1', charStart: 10, charEnd: 40 });
   });
 
-  it('accepts a web citation (url, no documentId) so it reaches the renderer (#221)', () => {
+  it('collects distinct web_citation events and dedupes by id (#436)', () => {
     const s = fold(
       initialStreamState,
       start(0),
       delta(1, 'answer'),
       webCitation(2, 'web-1', 'https://example.com/a'),
+      webCitation(3, 'web-1', 'https://example.com/a'),
     );
-    expect(s.citations).toHaveLength(1);
-    expect(s.citations[0]).toMatchObject({ id: 'web-1', url: 'https://example.com/a' });
+    expect(s.citations).toHaveLength(0);
+    expect(s.webCitations).toHaveLength(1);
+    expect(s.webCitations[0]).toMatchObject({
+      id: 'web-1',
+      handle: 'W1',
+      title: 'A web page',
+      url: 'https://example.com/a',
+    });
   });
 
   it('still rejects a malformed citation with neither documentId nor url (#221)', () => {
@@ -328,7 +339,12 @@ describe('reduceStream', () => {
   it('assembles a code run: creates it running on the first code_output chunk (AC-1)', () => {
     const s = fold(initialStreamState, start(0), codeOutput(1, 'run-1', 'stdout', 'Hello'));
     expect(s.codeRuns).toHaveLength(1);
-    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-1', status: 'running', stdout: 'Hello', stderr: '' });
+    expect(s.codeRuns[0]).toMatchObject({
+      runId: 'run-1',
+      status: 'running',
+      stdout: 'Hello',
+      stderr: '',
+    });
   });
 
   it('appends streamed stdout/stderr chunks in order onto the matching run (AC-1)', () => {
@@ -368,7 +384,12 @@ describe('reduceStream', () => {
     // reducer still records it so the inspector is never blank.
     const s = fold(initialStreamState, start(0), codeResult(1, 'run-x', 'denied'));
     expect(s.codeRuns).toHaveLength(1);
-    expect(s.codeRuns[0]).toMatchObject({ runId: 'run-x', status: 'denied', stdout: '', stderr: '' });
+    expect(s.codeRuns[0]).toMatchObject({
+      runId: 'run-x',
+      status: 'denied',
+      stdout: '',
+      stderr: '',
+    });
   });
 
   it('tracks two concurrent runs independently by runId', () => {
@@ -433,7 +454,10 @@ describe('spec 0006 events (#429)', () => {
     s = reduceStream(s, stepEvent(1, 'prepare', 'started'));
     s = reduceStream(s, stepEvent(2, 'prepare', 'completed'));
     s = reduceStream(s, stepEvent(3, 'think', 'started', { turn: 1 }));
-    s = reduceStream(s, stepEvent(4, 'think', 'completed', { turn: 1, detail: 'requested 1 tool' }));
+    s = reduceStream(
+      s,
+      stepEvent(4, 'think', 'completed', { turn: 1, detail: 'requested 1 tool' }),
+    );
     s = reduceStream(s, stepEvent(5, 'think', 'started', { turn: 2 }));
     expect(s.steps.map((x) => [x.key, x.state])).toEqual([
       ['prepare', 'completed'],

@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.db.evidence_handles import WebCitationRepository
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -54,6 +55,7 @@ from app.db.repositories import (
     ToolInvocationRepository,
     UserPreferenceRepository,
 )
+from app.domain.chat import WebCitation
 from app.domain.entities import (
     AssistantStatus,
     ChatSession,
@@ -119,6 +121,7 @@ class MessageView:
     message: Message
     citations: list[CitationView]
     tool_invocations: list[ToolInvocation] = field(default_factory=list)
+    web_citations: list[WebCitation] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,11 +570,15 @@ class ChatService:
         # The governed tool trace per assistant message (#377) — batched like
         # citations (no N+1); user messages simply have no rows.
         tools_by_message = await self._tool_invocations.list_for_messages([m.id for m in page])
+        web_by_message = await WebCitationRepository(
+            self._session, self._tenant_id
+        ).list_for_messages([m.id for m in page])
         items = [
             MessageView(
                 message=m,
                 citations=citations_by_message.get(m.id, []),
                 tool_invocations=tools_by_message.get(m.id, []),
+                web_citations=web_by_message.get(m.id, []),
             )
             for m in page
         ]

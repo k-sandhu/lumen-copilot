@@ -156,10 +156,23 @@ class CitationResponse(BaseModel):
     char_start: int
     char_end: int
     score: float | None = None
+    handle: str | None = None
     #: True when the caller may no longer retrieve the cited document (#536), in
     #: which case `snippet` and `document_name` are empty. The row is kept so a
     #: settled claim's provenance stays visible instead of silently disappearing.
     redacted: bool = False
+
+
+class WebCitationResponse(BaseModel):
+    """A model-visible web excerpt, without invented corpus identifiers."""
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    handle: str
+    url: str
+    title: str
+    snippet: str
 
 
 class MessageToolInvocationResponse(BaseModel):
@@ -215,6 +228,7 @@ class MessageResponse(BaseModel):
     content: str
     model: str | None = None
     citations: list[CitationResponse]
+    web_citations: list[WebCitationResponse] = Field(default_factory=list)
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
     created_at: datetime
@@ -327,6 +341,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         char_start=view.char_start,
         char_end=view.char_end,
         score=view.score,
+        handle=view.handle,
         redacted=view.redacted,
     )
 
@@ -367,6 +382,12 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         content=m.content,
         model=m.model,
         citations=[_citation_to_response(c) for c in view.citations],
+        web_citations=[
+            WebCitationResponse(
+                id=c.id, handle=c.handle, url=c.url, title=c.title, snippet=c.snippet
+            )
+            for c in view.web_citations
+        ],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
         created_at=m.created_at,

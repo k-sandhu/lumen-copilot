@@ -25,12 +25,14 @@ import type {
   ChatSuggestions,
   ChatToolCall,
   ChatToolResult,
+  ChatWebCitation,
   CodeOutput,
   CodeResult,
   CodeRunStatus,
   WsEnvelope,
   WsProblem,
 } from '@/api';
+import { isSafeHttpUrl } from './citation';
 
 export type StreamPhase = 'idle' | 'streaming' | 'done' | 'error';
 
@@ -90,6 +92,7 @@ export interface StreamState {
   text: string;
   /** Passage-level citations collected from event:citation (INV-3). */
   citations: ChatCitation[];
+  webCitations: ChatWebCitation[];
   /** Retrieval-tool activity, in arrival order (for "searching…" UX). */
   tools: ToolActivity[];
   /** Sandbox code runs on this stream, in first-seen order (the inspector, #232). */
@@ -124,6 +127,7 @@ export const initialStreamState: StreamState = {
   phase: 'idle',
   text: '',
   citations: [],
+  webCitations: [],
   tools: [],
   codeRuns: [],
   steps: [],
@@ -156,12 +160,20 @@ function asCitation(data: unknown): ChatCitation | null {
   // carries a `url` instead (and no document_id — INV-3). Accept EITHER shape so
   // web citations survive the reducer; the renderer classifies by URL presence
   // (see model/citation.ts). Everything else stays required.
-  const hasDoc = typeof c.documentId === 'string';
-  const hasUrl = typeof c.url === 'string' && (c.url as string).trim().length > 0;
-  if (!hasDoc && !hasUrl) return null;
+  if (typeof c.documentId !== 'string') return null;
   // Preserve any additive web fields (url/webTitle) verbatim — they ride through
   // the reducer to fromWsCitation. The cast is honest: the shape is a superset.
   return data as ChatCitation;
+}
+
+function asWebCitation(data: unknown): ChatWebCitation | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const c = data as Record<string, unknown>;
+  if (typeof c.id !== 'string' || typeof c.handle !== 'string' || !/^W[1-9][0-9]*$/.test(c.handle))
+    return null;
+  if (typeof c.url !== 'string' || !isSafeHttpUrl(c.url)) return null;
+  if (typeof c.title !== 'string' || typeof c.snippet !== 'string') return null;
+  return data as ChatWebCitation;
 }
 
 function asToolCall(data: unknown): ChatToolCall | null {
@@ -357,6 +369,12 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
         // Dedupe citations by id (a reconnect may resend).
         if (base.citations.some((c) => c.id === citation.id)) return base;
         return { ...base, citations: [...base.citations, citation] };
+      }
+      if (envelope.name === 'web_citation') {
+        const citation = asWebCitation(envelope.data);
+        if (!citation) return base;
+        if (base.webCitations.some((c) => c.id === citation.id)) return base;
+        return { ...base, webCitations: [...base.webCitations, citation] };
       }
       if (envelope.name === 'narration') {
         const d = envelope.data as { text?: unknown; turn?: unknown } | undefined;

@@ -2870,6 +2870,7 @@ class CitationView:
     #: case ``snippet`` and ``document_name`` have been emptied. The row itself is
     #: kept so a claim's provenance stays visible rather than silently vanishing.
     redacted: bool = False
+    handle: str | None = None
 
     def redact(self) -> CitationView:
         """This citation with everything disclosing removed, shell intact."""
@@ -2887,6 +2888,7 @@ class CitationRepository(_TenantScopedRepository):
         char_start: int,
         char_end: int,
         score: float | None = None,
+        handle: str | None = None,
     ) -> Citation:
         row = models.Citation(
             tenant_id=self._tenant_id,
@@ -2895,6 +2897,7 @@ class CitationRepository(_TenantScopedRepository):
             char_start=char_start,
             char_end=char_end,
             score=score,
+            handle=handle,
         )
         self._session.add(row)
         await self._session.flush()
@@ -2932,6 +2935,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -2955,6 +2959,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[6],
                 document_id=row[7],
                 document_name=row[8],
+                handle=row[9],
             )
             for row in rows
         ]
@@ -2978,6 +2983,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -3001,6 +3007,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[6],
                 document_id=row[7],
                 document_name=row[8],
+                handle=row[9],
             )
             for row in rows
         ]
@@ -3027,6 +3034,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -3052,6 +3060,7 @@ class CitationRepository(_TenantScopedRepository):
                     snippet=row[6],
                     document_id=row[7],
                     document_name=row[8],
+                    handle=row[9],
                 )
             )
         return grouped

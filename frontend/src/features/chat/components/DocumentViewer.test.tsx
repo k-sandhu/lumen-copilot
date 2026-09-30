@@ -12,9 +12,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { setAccessToken, clearAccessToken } from '@/api';
 import { DocumentViewer } from './DocumentViewer';
-import type { UiCitation } from '../model/citation';
+import type { UiDocumentCitation } from '../model/citation';
 
-const CITATION: UiCitation = {
+const CITATION: UiDocumentCitation = {
+  kind: 'document',
   id: 'c1',
   documentId: 'doc-9',
   documentName: 'Q4 strategy.pdf',
@@ -50,9 +51,7 @@ afterEach(() => {
 
 describe('DocumentViewer (authenticated content load — INV-4)', () => {
   it('loads the cited document through an authenticated request (bearer attached)', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(bytesResponse());
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(bytesResponse());
 
     render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
 
@@ -83,9 +82,7 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
   });
 
   it('renders "no longer available" with no retry on 404 (not-permitted / cross-tenant, INV-2)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      problemResponse(404, 'Not Found'),
-    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(problemResponse(404, 'Not Found'));
 
     render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
 
@@ -136,8 +133,12 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
       render(<DocumentViewer citation={CITATION} onClose={() => {}} />);
       const grid = screen.getByRole('group', { name: /source metadata/i });
       // The "Last indexed" label maps to a "Not available" value, not a recency.
-      const labels = within(grid).getAllByRole('term').map((el) => el.textContent);
-      const values = within(grid).getAllByRole('definition').map((el) => el.textContent);
+      const labels = within(grid)
+        .getAllByRole('term')
+        .map((el) => el.textContent);
+      const values = within(grid)
+        .getAllByRole('definition')
+        .map((el) => el.textContent);
       const indexedIdx = labels.indexOf('Last indexed');
       expect(indexedIdx).toBeGreaterThanOrEqual(0);
       expect(values[indexedIdx]).toMatch(/not available/i);

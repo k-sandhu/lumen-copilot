@@ -35,7 +35,13 @@ import { ScrollArea } from '@/components/ScrollArea';
 import type { TraceStep } from '@/ui';
 import { MessageBubble, type SourceMeta } from './MessageBubble';
 import { SuggestionChips } from './SuggestionChips';
-import { fromRestCitation, fromWsCitation, type UiCitation } from '../model/citation';
+import {
+  fromRestCitation,
+  fromRestWebCitation,
+  fromWsCitation,
+  fromWsWebCitation,
+  type UiCitation,
+} from '../model/citation';
 import {
   buildRetrievalSummary,
   isStale,
@@ -45,12 +51,13 @@ import {
   usedWebSearch,
 } from '../model/presentation';
 import type { StreamPhase, ToolActivity, CodeRunActivity } from '../model/streamReducer';
-import type { ChatCitation } from '@/api';
+import type { ChatCitation, ChatWebCitation } from '@/api';
 
 export interface LiveAnswer {
   phase: StreamPhase;
   text: string;
   citations: ChatCitation[];
+  webCitations?: ChatWebCitation[];
   tools: ToolActivity[];
   /** Sandbox code runs on the in-flight turn (#232), with live stdout/stderr. */
   codeRuns: CodeRunActivity[];
@@ -123,7 +130,7 @@ function sourceMetaFor(
   if (!freshness) return {};
   const stale = isStale(iso);
   const meta: Record<string, SourceMeta> = {};
-  for (const c of citations) meta[c.documentId] = { freshness, stale };
+  for (const c of citations) if (c.kind === 'document') meta[c.documentId] = { freshness, stale };
   return meta;
 }
 
@@ -181,7 +188,10 @@ const PersistedMessages = memo(function PersistedMessages({
   const rows = useMemo<DerivedRow[]>(() => {
     return messages.map((message, index) => {
       const isAssistant = message.role === 'assistant';
-      const citations = (message.citations ?? []).map(fromRestCitation);
+      const citations: UiCitation[] = [
+        ...(message.citations ?? []).map(fromRestCitation),
+        ...(message.web_citations ?? []).map(fromRestWebCitation).filter((c) => c !== null),
+      ];
       // The persisted governed tool trace (#377), rendered through the SAME
       // ToolActivity badges as a live turn — an answer's tool activity stays
       // visible after reload, not only in the audit log.
@@ -273,7 +283,10 @@ const LiveTurn = memo(function LiveTurn({
   onSendText,
   onRetryStream,
 }: LiveTurnProps) {
-  const liveCitations = live.citations.map(fromWsCitation);
+  const liveCitations: UiCitation[] = [
+    ...live.citations.map(fromWsCitation),
+    ...(live.webCitations ?? []).map(fromWsWebCitation).filter((c) => c !== null),
+  ];
   const trace = buildRetrievalSummary(liveCitations, live.tools);
   // Once the runtime reports the answer settled (finalize/suggest phases, spec
   // 0006), the text is final: drop the caret + live region even though suggestion
@@ -318,9 +331,7 @@ const LiveTurn = memo(function LiveTurn({
         streaming={live.phase === 'streaming' && !answerSettled}
         // A just-settled live answer was produced now → "answered Just now".
         answeredAt={live.phase === 'done' ? 'Just now' : undefined}
-        showNoCitationsNotice={
-          live.phase === 'done' && live.citations.length === 0 && !live.askUser
-        }
+        showNoCitationsNotice={live.phase === 'done' && liveCitations.length === 0 && !live.askUser}
         // The disclosure only shows on a settled turn (E3-12) — while streaming, a
         // web lookup may still be in flight.
         webUsed={live.phase === 'done' && usedWebSearch(liveCitations, live.tools)}

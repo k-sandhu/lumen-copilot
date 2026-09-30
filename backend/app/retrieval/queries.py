@@ -401,6 +401,8 @@ async def load_passages(
     *,
     allow_set: AllowSet,
     chunk_ids: Sequence[UUID],
+    collection_ids: Sequence[UUID] | None = None,
+    document_ids: Sequence[UUID] | None = None,
 ) -> dict[UUID, PassageRow]:
     """Hydrate fused chunk ids into citation-bearing rows (permission re-checked).
 
@@ -414,6 +416,10 @@ async def load_passages(
     if not chunk_ids:
         return {}
     stmt = _base_chunk_select().where(models.Chunk.id.in_(chunk_ids))
+    if collection_ids is not None:
+        stmt = stmt.where(models.Document.collection_id.in_(collection_ids))
+    if document_ids is not None:
+        stmt = stmt.where(models.Document.id.in_(document_ids))
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
