@@ -23,6 +23,9 @@ work with no network and no I/O beyond the in-memory bytes it is handed.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
+
+from app.domain.ingestion import LocationKind, ParsedDocument, SourceLocation
 
 # Upload-allowlist MIME types (kept in lockstep with #22's
 # ``Settings.upload_allowed_content_types`` default; the task validates against
@@ -35,6 +38,30 @@ _TXT = "text/plain"
 _MD = "text/markdown"
 
 SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({_PDF, _DOCX, _PPTX, _XLSX, _TXT, _MD})
+
+
+def _render_parts(
+    parts: list[tuple[str, str]],
+    *,
+    kind: LocationKind,
+    separator: str,
+    keep_empty: bool,
+    locations: list[SourceLocation] | None,
+) -> str:
+    rendered: list[str] = []
+    offset = 0
+    for number, (name, text) in enumerate(parts, start=1):
+        if text or keep_empty:
+            if rendered:
+                offset += len(separator)
+            start = offset
+            rendered.append(text)
+            offset += len(text)
+        else:
+            start = offset
+        if locations is not None:
+            locations.append(SourceLocation(kind, name, number, start, offset))
+    return separator.join(rendered)
 
 
 class DocumentParseError(Exception):
@@ -67,16 +94,22 @@ def _parse_text(data: bytes) -> str:
 # (BaseException) are deliberately not caught.
 
 
-def _parse_pdf(data: bytes) -> str:
+def _parse_pdf(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Extract text from a PDF, page by page (``pypdf``, imported lazily)."""
     from pypdf import PdfReader
 
     try:
         reader = PdfReader(io.BytesIO(data))
         pages = [page.extract_text() or "" for page in reader.pages]
+        return _render_parts(
+            [(f"Page {number}", text) for number, text in enumerate(pages, start=1)],
+            kind="page",
+            separator="\n\n",
+            keep_empty=True,
+            locations=locations,
+        )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PDF: {type(exc).__name__}") from exc
-    return "\n\n".join(pages)
 
 
 def _parse_docx(data: bytes) -> str:
@@ -91,26 +124,33 @@ def _parse_docx(data: bytes) -> str:
     return "\n".join(paragraphs)
 
 
-def _parse_pptx(data: bytes) -> str:
+def _parse_pptx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Extract text-frame text from a PPTX (``python-pptx``, imported lazily)."""
     from pptx import Presentation
 
     try:
         presentation = Presentation(io.BytesIO(data))
-        lines: list[str] = []
-        for slide in presentation.slides:
+        parts: list[tuple[str, str]] = []
+        for number, slide in enumerate(presentation.slides, start=1):
+            lines: list[str] = []
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     for paragraph in shape.text_frame.paragraphs:
                         text = "".join(run.text for run in paragraph.runs)
                         if text:
                             lines.append(text)
+            title_shape = slide.shapes.title
+            title = title_shape.text if title_shape is not None else ""
+            name = f"Slide {number}" + (f": {title}" if title.strip() else "")
+            parts.append((name, "\n".join(lines)))
+        return _render_parts(
+            parts, kind="slide", separator="\n", keep_empty=False, locations=locations
+        )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PPTX: {type(exc).__name__}") from exc
-    return "\n".join(lines)
 
 
-def _parse_xlsx(data: bytes) -> str:
+def _parse_xlsx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Extract cell text from an XLSX (``openpyxl``, imported lazily).
 
     Reads values only (``data_only=True``) and renders each non-empty row as a
@@ -121,23 +161,26 @@ def _parse_xlsx(data: bytes) -> str:
 
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        sheets: list[str] = []
-        for worksheet in workbook.worksheets:
-            rows: list[str] = []
-            for row in worksheet.iter_rows(values_only=True):
-                cells = [str(cell) for cell in row if cell is not None]
-                if cells:
-                    rows.append("\t".join(cells))
-            if rows:
-                sheets.append("\n".join(rows))
-        workbook.close()
+        try:
+            parts: list[tuple[str, str]] = []
+            for worksheet in workbook.worksheets:
+                rows: list[str] = []
+                for row in worksheet.iter_rows(values_only=True):
+                    cells = [str(cell) for cell in row if cell is not None]
+                    if cells:
+                        rows.append("\t".join(cells))
+                parts.append((worksheet.title, "\n".join(rows)))
+            return _render_parts(
+                parts, kind="sheet", separator="\n\n", keep_empty=False, locations=locations
+            )
+        finally:
+            workbook.close()
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse XLSX: {type(exc).__name__}") from exc
-    return "\n\n".join(sheets)
 
 
 # MIME type -> parser. Each value localizes its library import to its own body.
-_PARSERS = {
+_PARSERS: dict[str, Callable[[bytes], str]] = {
     _PDF: _parse_pdf,
     _DOCX: _parse_docx,
     _PPTX: _parse_pptx,
@@ -163,3 +206,18 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
     if parser is None:
         raise UnsupportedMimeTypeError(f"unsupported MIME type for ingestion: {normalized!r}")
     return parser(data)
+
+
+def parse_document_with_locations(data: bytes, *, mime_type: str) -> ParsedDocument:
+    """Extract once, retaining native source-part locations (spec 0013)."""
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    locations: list[SourceLocation] = []
+    if normalized == _PDF:
+        text = _parse_pdf(data, locations=locations)
+    elif normalized == _PPTX:
+        text = _parse_pptx(data, locations=locations)
+    elif normalized == _XLSX:
+        text = _parse_xlsx(data, locations=locations)
+    else:
+        text = parse_document(data, mime_type=mime_type)
+    return ParsedDocument(text, tuple(locations))

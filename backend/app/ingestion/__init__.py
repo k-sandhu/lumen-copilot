@@ -20,6 +20,7 @@ from app.ingestion.parsers import (
     DocumentParseError,
     UnsupportedMimeTypeError,
     parse_document,
+    parse_document_with_locations,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "UnsupportedMimeTypeError",
     "chunk_text",
     "parse_document",
+    "parse_document_with_locations",
 ]

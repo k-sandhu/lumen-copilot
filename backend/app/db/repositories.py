@@ -107,6 +107,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
+from app.domain.ingestion import SourceLocation
 from app.domain.scheduling import Cadence, StructuredCadence
 
 
@@ -216,6 +217,9 @@ def to_document(row: models.Document) -> Document:
     one permitted-document point read and must return the same domain type this
     repository does — a second mapper would be a second source of truth.
     """
+    locations = (row.ingestion_metadata or {}).get("source_locations", [])
+    if not isinstance(locations, list):
+        raise ValueError("invalid persisted source locations")
     return Document(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -234,6 +238,9 @@ def to_document(row: models.Document) -> Document:
         acl_synced_at=row.acl_synced_at,
         acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
         external_id=row.external_id,
+        source_text=row.source_text,
+        source_locations=tuple(SourceLocation.from_dict(value) for value in locations),
+        ingestion_metadata=row.ingestion_metadata,
     )
 
 
@@ -267,6 +274,9 @@ def _to_chunk(row: models.Chunk) -> Chunk:
         char_start=row.char_start,
         char_end=row.char_end,
         created_at=row.created_at,
+        source_locations=tuple(
+            SourceLocation.from_dict(value) for value in row.source_locations or []
+        ),
     )
 
 
@@ -2070,6 +2080,25 @@ class DocumentRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return to_document(row)
 
+    async def set_extraction(
+        self, document_id: UUID, *, text: str, locations: Sequence[SourceLocation]
+    ) -> Document | None:
+        """Replace retained extraction metadata, scoped like the owning document."""
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.source_text = text
+        row.ingestion_metadata = {
+            "source_locations": [location.to_dict() for location in locations]
+        }
+        await self._session.flush()
+        await self._session.refresh(row)
+        return to_document(row)
+
 
 class ArtifactRepository(_TenantScopedRepository):
     """Agent/run-produced artifacts within one tenant (issue #208).
@@ -2235,6 +2264,7 @@ class ChunkInput:
     char_start: int
     char_end: int
     embedding: Sequence[float] | None = None
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 class ChunkRepository(_TenantScopedRepository):
@@ -2249,6 +2279,7 @@ class ChunkRepository(_TenantScopedRepository):
         char_start: int,
         char_end: int,
         embedding: Sequence[float] | None = None,
+        source_locations: Sequence[SourceLocation] = (),
     ) -> Chunk:
         row = models.Chunk(
             tenant_id=self._tenant_id,
@@ -2258,6 +2289,7 @@ class ChunkRepository(_TenantScopedRepository):
             char_start=char_start,
             char_end=char_end,
             embedding=list(embedding) if embedding is not None else None,
+            source_locations=[location.to_dict() for location in source_locations],
         )
         self._session.add(row)
         await self._session.flush()
@@ -2305,6 +2337,7 @@ class ChunkRepository(_TenantScopedRepository):
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 embedding=list(chunk.embedding) if chunk.embedding is not None else None,
+                source_locations=[location.to_dict() for location in chunk.source_locations],
             )
             for ordinal, chunk in enumerate(chunks)
         ]

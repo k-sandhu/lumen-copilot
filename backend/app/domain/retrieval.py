@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.domain.ingestion import SourceLocation
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievedPassage:
@@ -45,6 +47,7 @@ class RetrievedPassage:
     char_start: int
     char_end: int
     score: float
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
