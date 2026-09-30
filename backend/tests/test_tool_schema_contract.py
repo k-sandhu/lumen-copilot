@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -28,7 +29,12 @@ from app.services.audit import AuditSink
 from app.services.tools import runner as runner_module
 from app.services.tools.registry import UnknownToolError, get_tool, tool_specs
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import ToolContext, ToolDefinition
+from app.services.tools.types import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ToolContext,
+    ToolDefinition,
+)
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -457,3 +463,68 @@ async def test_runner_strips_optional_nulls_before_legacy_handler(
 
     assert result.ok is True
     assert calls == [{"query": "x", "required_nullable": None, "nested": {}}]
+
+
+async def test_optional_nulls_use_same_canonical_hash_for_approval_audit_and_trace(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handler_calls: list[dict[str, Any]] = []
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+        handler_calls.append(dict(args))
+        return ToolHandlerResult(content="must not run")
+
+    definition = ToolDefinition(
+        name="schema_probe",
+        description="schema check",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "optional": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+        handler=handler,
+        risk_tier=RiskTier.T1,
+        read_only=False,
+        requires_approval=True,
+    )
+    runner = _schema_runner(world, definition, monkeypatch)
+    runner._session_id = uuid4()
+    requests: list[ApprovalRequest] = []
+
+    class DenyingGate:
+        async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+            requests.append(request)
+            return ApprovalDecision.deny("test_denied", "Denied for test.")
+
+    runner._gate = DenyingGate()  # type: ignore[assignment]
+    raw_arguments: dict[str, Any] = {"query": "x", "optional": None}
+    normalized_arguments = {"query": "x"}
+    result = await runner.run(
+        call=ToolCall(
+            id="null-optional-hash",
+            name=definition.name,
+            arguments=raw_arguments,
+        ),
+        context=ToolContext(principal=world.principal, retrieval=_FakeRetrieval()),  # type: ignore[arg-type]
+    )
+
+    expected_hash = runner_module.hash_args(normalized_arguments)
+    assert result.ok is False
+    assert handler_calls == []
+    assert len(requests) == 1
+    assert requests[0].arguments == normalized_arguments
+    assert requests[0].arguments_hash == expected_hash
+
+    assert runner._session_id is not None
+    invocation_rows = await ToolInvocationRepository(
+        world.session, world.principal.tenant_id
+    ).list_for_session(runner._session_id)
+    assert len(invocation_rows) == 1
+    assert invocation_rows[0].args_hash == expected_hash
+
+    events = await AuditEventRepository(world.session, world.principal.tenant_id).list_recent()
+    invoked_event = next(event for event in events if event.action == "tool.invoked")
+    assert invoked_event.metadata["args_hash"] == expected_hash

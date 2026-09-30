@@ -52,7 +52,13 @@ from app.domain.tools import (
 from app.services.audit import AuditSink
 from app.services.tools import runner as runner_module
 from app.services.tools.runner import ToolRunner, hash_args
-from app.services.tools.types import ApprovalRequest, ToolContext, ToolDefinition
+from app.services.tools.types import (
+    ApprovalDecision,
+    ApprovalRecord,
+    ApprovalRequest,
+    ToolContext,
+    ToolDefinition,
+)
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -182,7 +188,17 @@ def _gated_tool(name: str = "send_email") -> ToolDefinition:
     return ToolDefinition(
         name=name,
         description="d",
-        json_schema={"type": "object", "properties": {"to": {"type": "string"}}},
+        json_schema={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "z": {"type": "string"},
+                "a": {
+                    "type": "object",
+                    "properties": {"to": {"type": "string"}},
+                },
+            },
+        },
         handler=handler,
         risk_tier=RiskTier.T2,
         requires_approval=True,
@@ -311,6 +327,93 @@ async def test_on_allowlist_tool_runs(world: _World, monkeypatch: pytest.MonkeyP
 # --- AC-3 / INV-7: approval seam --------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    ["bool", "no_record", "no_policy", "no_hash", "wrong_hash", "wrong_scope", "t3"],
+)
+async def test_t2_invalid_approval_evidence_never_executes(
+    world: _World, monkeypatch: pytest.MonkeyPatch, evidence: str
+) -> None:
+    """R1-001: an allow is insufficient without an applicable, call-bound record."""
+    calls: list[str] = []
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+        calls.append("ran")
+        return ToolHandlerResult(content="sent")
+
+    definition = ToolDefinition(
+        name="send_email",
+        description="d",
+        json_schema={},
+        handler=handler,
+        risk_tier=RiskTier.T3 if evidence == "t3" else RiskTier.T2,
+        requires_approval=True,
+        read_only=False,
+    )
+    _patch_tool(monkeypatch, definition)
+
+    class Gate:
+        async def request(self, request: ApprovalRequest) -> bool | ApprovalDecision:
+            if evidence == "bool":
+                return True
+            if evidence == "no_record":
+                return ApprovalDecision.allow()
+            return ApprovalDecision.allow(
+                ApprovalRecord(
+                    scope="per_invocation" if evidence == "wrong_scope" else "tenant_preapproval",
+                    policy_id=None if evidence == "no_policy" else uuid.uuid4(),
+                    approved_by=None,  # a deprovisioned authoriser remains supported
+                    arguments_hash=(
+                        None
+                        if evidence == "no_hash"
+                        else hash_args({"different": True})
+                        if evidence == "wrong_hash"
+                        else request.arguments_hash
+                    ),
+                )
+            )
+
+    runner, audit_repo, _ = _make_runner(world, allowed=frozenset({"send_email"}), gate=Gate())
+    result = await runner.run(
+        call=ToolCall(id="c1", name="send_email", arguments={"to": "a@test.invalid"}),
+        context=_context(world),
+    )
+    assert result.error == ERROR_APPROVAL_DENIED
+    assert calls == []
+    events = await audit_repo.list_recent(limit=10)
+    assert all(e.outcome is AuditOutcome.DENIED for e in events)
+    assert all("approval_policy_id" not in e.metadata for e in events)
+
+
+async def test_runner_passes_canonical_hash_to_gate(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-001: removing the request hash handoff must fail this assertion."""
+    seen: list[ApprovalRequest] = []
+
+    class Gate:
+        async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+            seen.append(request)
+            return ApprovalDecision.allow(
+                ApprovalRecord(
+                    scope="tenant_preapproval",
+                    policy_id=uuid.uuid4(),
+                    approved_by=None,
+                    arguments_hash=request.arguments_hash,
+                )
+            )
+
+    _patch_tool(monkeypatch, _gated_tool())
+    runner, _, _ = _make_runner(world, allowed=frozenset({"send_email"}), gate=Gate())
+    arguments = {"z": "é", "a": {"to": "a@test.invalid"}}
+    result = await runner.run(
+        call=ToolCall(id="canonical", name="send_email", arguments=arguments),
+        context=_context(world),
+    )
+    assert seen[0].arguments_hash == hash_args(arguments)
+    assert result.ok is True
+
+
 async def test_requires_approval_tool_blocks_when_unapproved(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,8 +437,15 @@ async def test_requires_approval_tool_runs_when_approved(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _ApproveAll:
-        async def request(self, request: ApprovalRequest) -> bool:
-            return True
+        async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+            return ApprovalDecision.allow(
+                ApprovalRecord(
+                    scope="tenant_preapproval",
+                    policy_id=uuid.uuid4(),
+                    approved_by=world.user_id,
+                    arguments_hash=request.arguments_hash,
+                )
+            )
 
     _patch_tool(monkeypatch, _gated_tool("send_email"))
     r, _, _ = _make_runner(world, allowed=frozenset({"send_email"}), gate=_ApproveAll())

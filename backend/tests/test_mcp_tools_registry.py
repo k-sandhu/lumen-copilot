@@ -69,7 +69,7 @@ from app.services.tools.mcp_bridge import (
     tools_for_servers,
 )
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import ApprovalRequest, ToolContext
+from app.services.tools.types import ApprovalDecision, ApprovalRecord, ApprovalRequest, ToolContext
 from tests._mcp_fixture_server import fixture_mcp
 
 # --- world ------------------------------------------------------------------
@@ -329,8 +329,15 @@ async def test_write_tier_mcp_tool_blocks_unapproved(world: _World) -> None:
 
 async def test_write_tier_mcp_tool_runs_when_approved(world: _World) -> None:
     class _ApproveAll:
-        async def request(self, request: ApprovalRequest) -> bool:
-            return True
+        async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+            return ApprovalDecision.allow(
+                ApprovalRecord(
+                    scope="tenant_preapproval",
+                    policy_id=uuid.uuid4(),
+                    approved_by=world.user_id,
+                    arguments_hash=request.arguments_hash,
+                )
+            )
 
     server = _server(tenant_id=world.tenant_id, owner_id=world.user_id)
     invoker = _RecordingInvoker(result=McpToolResult(ok=True, content="sent"))
@@ -630,8 +637,15 @@ async def test_end_to_end_discovered_tool_invokes_through_the_real_adapter(
         assert tools[echo_name].requires_approval is True
 
         class _ApproveAll:
-            async def request(self, request: ApprovalRequest) -> bool:
-                return True
+            async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+                return ApprovalDecision.allow(
+                    ApprovalRecord(
+                        scope="tenant_preapproval",
+                        policy_id=uuid.uuid4(),
+                        approved_by=world.user_id,
+                        arguments_hash=request.arguments_hash,
+                    )
+                )
 
         # Invoke through the governed runner while the fixture transport is live.
         r, _ = _make_runner(

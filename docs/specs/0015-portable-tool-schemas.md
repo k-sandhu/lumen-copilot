@@ -17,6 +17,9 @@ objects; required nullable values remain present. Unknown null properties are
 still rejected. Declared types, enums, bounds and nested constraints use the
 same recursive validator for built-ins and MCP tools. MCP direct invocation
 retains its validation boundary as defense in depth.
+After successful normalization, approval records, handler arguments and
+invocation/audit hashes identify the same canonical argument object. Invalid
+calls retain the rejected input's hash and never reach approval or execution.
 
 Invalid input returns tool_bad_args with a field path, the violated constraint
 and a corrective next step. Configuration errors return a safe repair message;
